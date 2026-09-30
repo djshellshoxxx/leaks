@@ -350,3 +350,89 @@ Each ADR: CONTEXT / OPTIONS / DECISION / SECURITY EFFECT / PRIVACY EFFECT / USAB
 3. **Erasure Key vault (ADR-025).** Each case key is additionally wrapped under a per-case **Erasure Key** held in an Erasure Key Vault (C-12 separate schema/host-local file, excluded from routine backups; own backup with ≤14-day retention). Member-key wraps stored in the DB are themselves encrypted under the Erasure Key. Destroying the Erasure Key renders all backed-up copies of that case unreadable after ≤14 days. Documented as the upper bound of "delete" for backups.
 4. **Import time coarsening (ADR-010).** Case records store only `received_date` (UTC day). Relay pull times are not persisted beyond day granularity; the automatic import audit event records the date only.
 5. **Viewer decryption scope (ADR-012).** Attachment content is decrypted only inside the viewer sandbox (C-17), with a single-use per-job key handed in; Candor Desk main process never holds attachment plaintext.
+
+---
+
+## 7. Revision ADRs from adversarial review (process/REVIEW-A.md, REVIEW-B.md, REVIEW-C.md)
+
+These ADRs are binding and supersede conflicting text in earlier ADRs and documents. Disposition of every reviewer finding is recorded in `REVIEW-REPORT.md`.
+
+### ADR-034 Tier W session and draft state (resolves RVW-A-02, A-07, B-12, B-13; supersedes 11 §5.6 on-disk drafts)
+- DECISION: Tier W drafts (text and identity block) live **only in Intake Sealer RAM** (mlocked, no swap), keyed by an opaque session handle; attachment parts uploaded during a session are encrypted under a per-session key that exists only in sealer RAM and are written to a tmpfs staging area; the final HPKE seal of the content key happens **only after** the recipient set is fixed at Submit. Single timer set: 20 min idle, 2 h absolute; expiry zeroizes. The passphrase is **never stored** anywhere; it is displayed on the Recovery Credential screen and the source must confirm it (re-type 3 randomly chosen words) before the submission is finalized; if the response is lost, the submission is not finalized and the source restarts. Restart of the sealer loses drafts (accepted; UI states this). PRD text "typed text is never stored server-side" is amended to "never persisted to disk".
+- EFFECT: removes on-disk passphrase/identity/timer residue; bounded RAM exposure only.
+
+### ADR-035 Intake integrity evidence against compelled or compromised operators (resolves RVW-A-01, A-03, A-13, A-17; RVW-C-04)
+- DECISION:
+  1. **External Watchers**: the public reproducible release publishes digests of all static source-UI assets and templates; ≥2 independent watcher organisations (at least one outside the operator's jurisdiction for EE/GOV/MANAGED) periodically fetch the onion service over Tor and compare served static assets, CSP headers and the Sealer's signed **running manifest** (release digest) to the transparency log; mismatches are published.
+  2. **Operator Statement**: a quorum-signed (k-of-n, including ≥1 independent role) operator statement ("no compelled modification, no instrumentation of intake memory, no targeted update") is published in the Key Directory every 30 days; absence or failure to renew is shown to sources as a warning banner. (Honest limit: canaries are legally uncertain and can be coerced; they are a signal, not a guarantee.)
+  3. **Confidential-VM profile (optional, HIGH/GOV)**: the Sealer may run in an AMD SEV-SNP or Intel TDX confidential VM; its attestation report binds the sealer measurement to a logged release; Desk and watchers verify it. TEEs have a record of side-channel breaks; this is defense in depth, recorded as an assumption in 40, never presented to sources as a guarantee.
+  4. **Intake memory/packet capture during incident response** requires approval by an independent role (channel OVERSIGHT or external ombudsman) in addition to the organisation's IR lead, captures are encrypted to independent custodians, and a source-visible INCIDENT_NOTICE directory entry is published.
+  5. Source-facing honesty text (11, 05) SHALL state: "If the intake server is compromised or legally compelled while you use the website (no-JavaScript) version, what you type, and your passphrase when you log in, can be captured. For the highest risk, use the Candor Source App."
+  6. 02/03 SHALL only credit controls actually specified; threat ratings are re-derived.
+
+### ADR-036 Key Directory change governance (resolves RVW-A-04, A-05, A-06, A-08, A-29; RVW-C-05)
+- DECISION:
+  1. Channel Identity Key (CIK) held only by the channel's **Triage Set** (ADR-037) and OVERSIGHT, never by every member.
+  2. Roster additions, role-label changes and COI-policy loosening are **time-locked 72 h** (GOV/HIGH: 7 days), notified content-free to all current members and OVERSIGHT, and require dual approval with ≥1 approver from an independent role; the `person_ref` for enrolment is verified out of band by the second approver. Removals and tightening take effect immediately.
+  3. Role labels are certified (signed) by OVERSIGHT; Tier V clients warn when a member key is <7 days old.
+  4. **Follow-up sealing rule**: follow-up messages from a source are sealed only to members who were in the eligible set of the original report AND are still members; access for later members comes only via case-key wrapping by the Triage Set (audited).
+  5. Key Directory checkpoints require ≥2 external witness cosignatures (≥1 outside the operating organisation) in EE/GOV/MANAGED; recommended in CE. Tier V clients pin the last seen tree head (persistent pin in the Source App; for the web bundle, the pin is shown as a short fingerprint the source may note).
+  6. The intake enforces a **snapshot high-water mark** (monotonic tree size and time; rollback rejected) and derives time from an independent source (signed Tor consensus valid-after as floor, plus Roughtime), not from Z-CORE alone.
+  7. Directory publications (epoch keys, roster changes) are batched to a fixed weekly publication slot to avoid revealing staff activity timing.
+- Tier W limit (honest): Tier W sources cannot verify the directory themselves; verification for them is performed by Desk at import (recipient-list check) and by External Watchers; the Tier W UI SHALL NOT present verification affordances it cannot deliver.
+
+### ADR-037 Triage-first routing and blinded COI state (amends ADR-030; resolves RVW-B-01, B-02, B-03, B-04, A-18; RVW-C-05)
+- DECISION:
+  1. Each channel defines a **Triage Set** of ≥2 members holding independent-body role labels (ombudsman, audit committee, external counsel, IG, ethics officer; or channel owner + OVERSIGHT where none exist). Envelopes are wrapped **only** to eligible Triage Set Member Epoch Keys after the source's COI ticks remove any flagged roles. If fewer than 1 eligible triage member remains, the source is directed to an alternative independent channel (fail closed).
+  2. After triage assesses COI (including direct-manager/manager-chain checks using HR data held outside Candor or by the triage member), the Triage Set wraps the Case Key to further investigators. Non-triage members never list, receive notifications for, or trial-decrypt intake envelopes; channel dashboards for non-triage roles show no intake counts.
+  3. COI exclusions are stored only as blinded tags `HMAC(K_case_excl, user_id)` with `K_case_excl = HKDF(case_key, "candor/coi-excl/v1")`, padded to 8 tags per case; the server checks membership blindly; Desks verify on sync that no wrap exists for an excluded user. Audit reason codes SHALL NOT distinguish COI removals from other removals; no event, table or export associates a user identity with a COI exclusion for a specific case.
+  4. The COI checklist screen states: "Your answers are encrypted and seen only by the independent triage team, who use them to keep the people involved away from your report. They may still suggest what your report is about."
+
+### ADR-038 Arrival/import decoupling and constant-schedule signals (amends ADR-010, ADR-017, ADR-033(4); resolves RVW-A-09, A-19, A-20, A-22, A-27; RVW-B-06, B-11; RVW-C-02)
+- DECISION:
+  1. Relay imports run on a **fixed schedule** (default 4×/day at fixed times; HIGH/GOV: 1×/day at a fixed time), never event-driven; therefore case DB WAL/commit times, blob mtimes and backups reveal only the schedule slot. Blob object metadata times are normalized to the slot time; import audit events carry date only.
+  2. Staff notifications are **constant-schedule**: a content-free daily digest is sent at a fixed time every day to each subscribed member whether or not anything is pending (or notifications are disabled, the HIGH default). No event-driven email.
+  3. Message/submission dates are displayed to staff at day granularity (standard) or ISO week (HIGH); per-case lists of source activity days are not stored — each follow-up record stores only the import slot date; quota history is not retained (current counters only, reset daily).
+  4. Optional source **delayed delivery**: the source may choose "deliver after a random delay of 1–3 days"; the sealed envelope is held in the intake with a release date.
+  5. Tier W uploads are padded (ADR-011 buckets) before staging; global rate-limit/queue states are not exposed in any response or dashboard beyond a coarse daily health band.
+  6. Undecryptable/unimportable envelopes: after 14 days pending and dual-approved rejection they are deleted so epoch keys can retire; escalation per ADR-033(2) is rate-limited per channel.
+
+### ADR-039 Metadata-private reply retrieval (resolves RVW-A-10, A-26)
+- DECISION: Tier V clients retrieve replies by **fetch-all dead-drop**: the intake publishes all reply ciphertexts of the last 30 days in fixed-size pages; the client downloads the full set and trial-decrypts locally, so the server cannot tell which mailbox was checked. Tier W necessarily performs server-side lookup after passphrase derivation (documented residual). No per-mailbox access time, count or history is stored; `tier` column and own-message history are removed from the intake schema; header digests retained ≤24 h for dedup only.
+
+### ADR-040 Platform package supply chain and security floors (resolves RVW-A-12, A-13, A-16; RVW-C-17)
+- DECISION: OS, tor and PostgreSQL packages for Z-INTAKE and Z-CORE come from a pinned, snapshot-based mirror; each Candor release includes a TUF-signed **Platform Manifest** (package names, versions, hashes) that the self-test verifies; tor packages from the Tor Project repository pinned by key and version. Trust-path components refuse to start below a signed **security floor** version; Fleet Manager ring policies cannot hold an instance below the floor. Emergency releases keep a minimum 2-hour cooling period with ≥2 signers from ≥2 organisations; release signers and builders span ≥2 organisations and ≥2 jurisdictions (amends ADR-022). Secure boot uses the distribution-signed shim/kernels; no per-kernel offline signing ceremony is required.
+
+### ADR-041 Client acquisition as a metadata flow (resolves RVW-A-14)
+- DECISION: The Candor Source App is downloadable from the Candor project's onion service and independent mirrors (reproducible, signed); the operating organisation's clearnet information site SHALL NOT host the App or log downloads; it links to the project distribution and explains that downloading over Tor is safest. App-store distribution is optional and documented as leaving account-linked records.
+
+### ADR-042 Desk containment per platform and hostile-string rendering (resolves RVW-A-15, A-24, A-30; RVW-C Section 508 viewer finding)
+- DECISION: Supported Desk platforms are tiered. **Tier 1**: Linux with KVM microVM viewer, and Qubes OS. **Tier 2**: Windows (Hyper-V isolated VM viewer) and macOS (Virtualization.framework VM viewer). Where no hardware-isolated viewer is available, only CL-0 (metadata-free text preview of sanitized text) is permitted and originals cannot be opened. Source-supplied strings are rendered as plain text only (no HTML/Markdown rendering) in the webview with a strict CSP and Trusted Types. Pixel-rendered copies are labelled "rendering — not evidence"; converter output hash and converter release digest are recorded; sanitized copies include an OCR text layer produced inside the sandbox for accessibility.
+
+### ADR-043 Recipient device custody for independent channels (resolves RVW-C-01, RVW-A-24)
+- DECISION: Channels whose adversary may be the operating organisation (type INDEPENDENT: IG, audit committee, ombudsman, external counsel, ethics) SHALL require **independent-custody devices** for Triage Set members: Desk devices not enrolled in the organisation's MDM/EDR/DLP/VDI, with hardware authenticators whose attestation is recorded; Desk verifies its own binary against the transparency log and reports its release digest (non-authoritative, detects accidental divergence only). The Admin UI shows the custody status; enabling an INDEPENDENT channel without it is DANGEROUS. Honest residual: an organisation that controls a member's endpoint can defeat Desk protections; the spec cannot prevent this technically.
+
+### ADR-044 Key-access continuity, records obligations and recovery (resolves RVW-C-03, C-06, C-07, C-14)
+- DECISION:
+  1. SCIM/HR/IdP changes can only **suspend** server-side authorization; deleting a member's key wraps requires dual control, a 7-day cooling-off and OVERSIGHT notice (except source-requested erasure or retention expiry).
+  2. `min_recipients` per case default **2**; each member SHALL enrol ≥2 hardware authenticators (primary + stored backup).
+  3. GOV profile default: Organization Recovery Quorum **enabled** (ADR-013) with custodians from independent roles, disclosed to sources on the landing page, because records law may prohibit unrecoverable loss; CE/EE default remains disabled.
+  4. Erasure Key Vault is replicated to the DR site within HA RPO; vault backups retained ≤14 days; restore applies the signed **erasure log** (append-only list of erased case IDs) before serving. Infrastructure-level backups (hypervisor/SAN) of core hosts MUST exclude the vault volume; the config checker asks for attestation and the documentation states that otherwise the 14-day deletion bound does not hold. HIGH/GOV: vault on physical host TPM, not vTPM.
+  5. Records/FOIA/ATIP/GDPR/eDiscovery searches are performed in the Desk of an authorized member (local index over cases they can decrypt); a Records Custodian role receives explicit, audited, time-bounded case grants from the Triage Set; there is no server-side global search.
+
+### ADR-045 Organisation-as-adversary controls (resolves remaining RVW-C governance findings)
+- DECISION: Break-glass requires one approver from an independent role outside the legal/management chain; Fleet Manager cannot disable intake, lower security floors, or change routing (tighten-only for logging/retention; availability-affecting actions require the customer's independent role); small-organisation mode requires at least one external party (e.g., external counsel or board member) as OVERSIGHT and displays "reduced separation of duties" to admins and in the published operator statement.
+
+### ADR-046 Consistency resolutions and parameter fixes (resolves RVW-C-08 and author open issues)
+1. **Intake DB replication**: none in any profile (`wal_level=minimal`, no archiving, `track_commit_timestamp=off`). EE-HA intake failover is active/passive on shared-nothing hosts; envelopes pending on a failed node are recovered when its disk is recovered; the source sees "received" only after local fsync. HA-002 amended.
+2. **HSM failure**: no fallback signing keys (FAIL-013 prevails over HA-013).
+3. **Update paths**: Z-INTAKE fetches updates via the project's onion mirror over Tor; Z-CORE via an egress-restricted HTTPS mirror; both verify TUF.
+4. **Uploads**: 08's resumable-upload protocol is canonical (per-upload tokens, no cross-session resume, 8 MiB chunks, 24 h max resume within one session only in Tier V; Tier W no resume). Per-file cap 4 GiB (standard), 16 GiB only in EE profiles with 08 chunk count raised accordingly.
+5. **Metrics regime** (single source of truth: 24 §TEL): k = 10, minimum period one calendar month, complementary suppression, no medians/ratios/percentiles for cells < k, no per-channel metrics for channels with < 3 cases/month, SOC sees only global daily health bands.
+6. **Config labels**: only SAFE / ADVANCED / DANGEROUS ("WEAKENING" → DANGEROUS). CE-SINGLE default isolation = VMs; container-only = ADVANCED.
+7. **Source passphrase KDF**: Argon2id m=64 MiB, t=3, p=1 (security rests on ≈129-bit entropy; stretching is defense in depth), per-deployment salt acceptable for that reason; Tier W derivations limited by a concurrency semaphore (default 4) plus PoW. FIPS profile: PBKDF2-HMAC-SHA-512, 210,000 iterations. Sources may rotate their passphrase from the inbox.
+8. **Post-quantum transport residual**: Tor onion circuits currently use classical key exchange; recorded Tier W sessions are exposed to harvest-now-decrypt-later. Documented; HIGH-risk guidance recommends Tier V (end-to-end hybrid PQ HPKE); adopt PQ onion handshakes when Tor ships them.
+9. **Vanguards**: full vanguards add-on for HIGH; if unmaintained, rely on built-in vanguards-lite and Arti's vanguards (documented fallback).
+10. **Recipient key IDs** never read from cleartext headers anywhere (RUI-055 amended).
+11. **Staff exact timestamps**: permitted only in the enumerated SECURITY/SYSTEM tables listed in 09 (sessions, job leases, config cool-off, break-glass expiry) and audit events for staff actions; never for source-originated events.
+12. **Two additional keys** are recognized in 04: Intake Routing Key (reply routing without case DB holding source account IDs) and Connector Key (export package encryption to integrations).
