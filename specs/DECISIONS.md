@@ -42,7 +42,7 @@ Every requirement is a row in a Markdown table with EXACTLY these columns:
 |---|---|
 | 00-RESEARCH | F- (findings) |
 | 01-PRODUCT-REQUIREMENTS | PRD- |
-| 02-THREAT-MODEL | THR- (threats), ADV- (adversaries) |
+| 02-THREAT-MODEL | THR- (threats), ADV- (adversaries), TM- (threat-model obligations) |
 | 03-PRIVACY-ANONYMITY | ANON-, META-, PRIV- |
 | 04-CRYPTOGRAPHY | CRYPTO-, KEY- |
 | 05-SOURCE-OPSEC | SOPS- |

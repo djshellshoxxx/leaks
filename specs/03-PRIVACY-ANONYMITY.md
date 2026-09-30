@@ -570,7 +570,7 @@ What an adversary learns by **combining** layers (single-layer compromise is in 
 | Combination | What becomes linkable | Bound | Residual |
 |---|---|---|---|
 | C-08 + C-12 + Intake Routing Key (both DBs and intake host) | Pseudonymous mailbox ↔ case; received day; padded sizes; channel | Nothing identifying: no IP, no exact time, no device data | Volume/topic inference from coarse category (THR-015) |
-| C-08 + C-24 + C-09 host logs | Batch sequence ↔ pull time | META-005: no persistent join of `batch_seq` with exact pull time; relay logs record pulls without sequence numbers | ≤ one pull interval (15±10 min) only for a *live* observer; HIGH profile daily import (`02` THR-912) |
+| C-08 + C-24 + C-09 host logs | Batch sequence ↔ pull time | META-005: no persistent join of `batch_seq` with exact pull time; relay logs record pulls without sequence numbers | ≤ one pull interval (15±10 min) only for a *live* observer; HIGH profile daily import (`02` TM-013) |
 | Live C-05/C-06 + Tor guard of the source | Source IP ↔ submission | Requires both a live intake compromise and control/observation of the source's guard (THR-003) | Out of design envelope for GPA |
 | Live C-06/C-07 (Tier W) | Plaintext + passphrase ↔ circuit | Circuit IDs are HMAC-keyed per boot; no IP | Tier W honesty statement |
 | Case content + employer logs | Report ↔ employee (content, access logs, Tor use) | Candor contributes only the received **day** | Content/behavior (R-01, `02` §14) |
@@ -639,7 +639,7 @@ In MANAGED, the vendor operates Z-INTAKE (dedicated per customer) and Z-CORE; th
 |---|---|---|---|---|---|---|
 | Source IP | **No** | — | — | — | — | **No** |
 | Report/attachments/replies/sealed identity | Yes (ciphertext) | Vendor-hosted C-08/C-12/C-13/C-27 | **Yes, E2E** | Customer staff / custodians only | Per customer policy | **Ciphertext only** |
-| Tier W plaintext in transit | Transient | Vendor-hosted C-06/C-07 | — | — | Seconds | **Prospectively only** — the vendor is subject to the same compelled-modification risk as an operator; customers with high-risk channels SHOULD require Tier V (`02` THR-911) |
+| Tier W plaintext in transit | Transient | Vendor-hosted C-06/C-07 | — | — | Seconds | **Prospectively only** — the vendor is subject to the same compelled-modification risk as an operator; customers with high-risk channels SHOULD require Tier V (`02` TM-012) |
 | Case metadata, received days, padded sizes | Yes | Vendor-hosted C-12 | At rest (vendor keys) | Vendor | Per customer policy | **Yes** |
 | Customer identity ↔ onion address | Yes | Vendor contracts/ops | — | Vendor | Contract | **Yes** (unavoidable for a managed service; disclosed to customers) |
 | Staff accounts, audit logs | Yes | Vendor-hosted | At rest | Vendor | As 10.1 | **Yes** |
@@ -817,7 +817,7 @@ In MANAGED, the vendor operates Z-INTAKE (dedicated per customer) and Z-CORE; th
 
 | # | Issue | Proposed resolution |
 |---|---|---|
-| OI-01 | Import-time coarsening was raised here and has been adopted as ADR-033(4). META-005/006 implement it; a live intake observer can still bound arrival to one pull interval. | Resolved (ADR-033); HIGH-profile daily import in `02` THR-912 addresses the live-observer residual. |
+| OI-01 | Import-time coarsening was raised here and has been adopted as ADR-033(4). META-005/006 implement it; a live intake observer can still bound arrival to one pull interval. | Resolved (ADR-033); HIGH-profile daily import in `02` TM-013 addresses the live-observer residual. |
 | OI-02 | ASM IDs for `[A:…]` tags pending in `40-SECURITY-ASSUMPTIONS.md`. | Map in v1.1. |
 | OI-03 | `__Host-`/`Secure` cookie behaviour on `.onion` origins in current Tor Browser needs confirmation. | Knowledge (unverified); verify in `30-ANONYMITY-TESTING.md`; ANON-005 already conditions on secure-context treatment. |
 | OI-04 | Whether padding every Tier W page to 64/128 KiB is sufficient against onion-specific WF (Tik-Tok 64.7 % on onion sites, B-AN-16) is unmeasured. | Anonymity test campaign in `30`; may require uniform page weight across all routes. |

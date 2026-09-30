@@ -129,7 +129,7 @@ Research lessons applied:
 |---|---|
 | THREAT MODEL | Recipient-side malware and exfiltration (THR-023, THR-041), remote compromise of networked recipient workstations (THR-022), and network-borne exfiltration of decrypted content. **Not designed against:** malicious media transfer (USB is bidirectional; the SVS lesson, [B-SD-04]); a malicious insider at the station; a document exploit that persists on the station (mitigated by C-17 disposables on the station) |
 | ADVANTAGES | Private keys and plaintext never exist on a networked machine; strongest option for high-risk investigations |
-| DISADVANTAGES | Latency (manual transfers); human error at the transfer step; the **epoch window constraint**: envelopes MUST be imported within the 14-day decrypt window of the member epoch keys (ADR-008, ADR-030), and each member's WS-VIEW must publish new member epoch keys (pre-published 4 epochs ahead, ADR-030) via WS-SYNC. A sync at least every 7 days is therefore REQUIRED; the self-test warns at 5 days |
+| DISADVANTAGES | Latency (manual transfers); human error at the transfer step; the **epoch window constraint**: envelopes MUST be imported within the 14-day decrypt window of the member epoch keys (ADR-008, ADR-030), and each member's WS-VIEW must publish new member epoch keys (pre-published 4 epochs ahead, ADR-030) via WS-SYNC. Epoch keys are retired only after import (ADR-033(2)), so a late sync delays access rather than losing data, but envelopes un-imported for more than 7 days escalate to the independent channel. A sync at least every 7 days is therefore REQUIRED; the self-test warns at 5 days |
 | MINIMUM HARDWARE | WS-SYNC: a networked workstation running Candor Desk in **sync-only mode** (holds the RCP-ONION client credential or RCP-LAN certificate and a sync-role token; no decryption keys). WS-VIEW: an air-gapped laptop per team (TPM2, 16 GiB+, radios removed) running Candor Desk full mode + C-17 disposable viewer. Transfer media: dedicated, labelled IN/OUT USB drives (`17-INFRASTRUCTURE.md` §6.6). Hardware keys per recipient |
 | NETWORK DESIGN | WS-SYNC → Desk API only (RCP-ONION or RCP-LAN). WS-VIEW: no network interfaces enabled. Transfer bundles: signed by the originating device's staff key, content-addressed names (ADR-027) |
 | FAILOVER | A spare WS-VIEW enrolled with the same staff keys requires key re-provisioning per `04-CRYPTOGRAPHY.md`. Otherwise staff keys are wrapped per device |
@@ -586,6 +586,7 @@ forbidden_everywhere:
 | Relay mTLS server / client key | server | client | — | — | — | — | re-pair |
 | C-25 agent mTLS client keys / collector server key | agent | agent | collector | agent | — | — | re-pair |
 | Intake-replication TLS key (EE-HA/GOV) | ✔ | — | — | — | — | — | re-pair |
+| Erasure Key Vault (ADR-033(3)) | — | ✔ (separate schema/host-local file) | — | — | — | — | BS-ERASURE only (≤ 14 days) |
 | Audit / key-directory signing key | — | ✔ (TPM/HSM) | — | — | — | — | HSM backup / BS-SECRETS |
 | Backup-agent signing key | intake set signer | ✔ | — | — | — | — | re-generate |
 | Backup KEK public keys (BK-DATA, BK-SECRETS) | public | public | — | — | — | — | — |
@@ -642,7 +643,7 @@ forbidden_everywhere:
 3. EE-HA adds seizure targets and observers (a second onion-key host, the intake replica, the K8s control plane). Availability is traded against metadata exposure (`34-PERFORMANCE-SCALABILITY.md` §7).
 4. Offline installs accept metadata up to 30 days old. A key compromise inside that window may not be revoked on offline sites in time.
 5. The simple installer's U2 option (TPM-only) weakens seizure resistance for organizations without on-site staff.
-6. AIRGAP-RCP relies on human transfer discipline. The weekly-sync requirement can be missed, and missing it causes data loss once epoch keys are destroyed.
+6. AIRGAP-RCP relies on human transfer discipline. A missed weekly sync delays handling and triggers the ADR-033(2) escalation. It does not lose data, because epoch keys are retired only after import.
 7. Active/passive failover leaves sources with cached descriptors failing for several minutes after promotion (`21-ENTERPRISE.md` §5.2).
 
 ## 18. Open issues

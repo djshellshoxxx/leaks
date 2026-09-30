@@ -34,7 +34,7 @@ def parse():
     reqs = []
     catalog = collections.defaultdict(set)  # ids defined as catalog rows (THR, ST, AT, ...)
     for path in sorted(SPECS.glob("*.md")):
-        if path.name == OUT.name:
+        if path.name in (OUT.name, "DECISIONS.md"):
             continue
         for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             if not line.startswith("|"):
