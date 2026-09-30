@@ -171,7 +171,7 @@ For CONFIDENTIAL or IDENTIFIED reporters whose identity sits in the Sealed Ident
 
 | Party | When | Content limits |
 |---|---|---|
-| Supervisory authority (GDPR Art 33) | Personal-data breach likely to result in risk: ≤ 72 h after awareness [B-CO-09] | Use the compelled-disclosure inventory (REQ-H-06) and §17-8 seizure tables to describe categories. Never include source identities or report content |
+| Supervisory authority (GDPR Art 33) | Personal-data breach likely to result in risk: ≤ 72 h after awareness [B-CO-09] | Use the compelled-disclosure inventory (REQ-H-06) and `17-INFRASTRUCTURE.md` §8 seizure tables to describe categories. Never include source identities or report content |
 | Data subjects (GDPR Art 34) | High risk. Whistleblower identity exposure is treated as high risk (R6, B-CO-09) | Via SSN channels only for anonymous sources. A public communication (SSN-GLOBAL / SSN-CLEARNET) where individual contact is impossible |
 | NIS2 authority / CSIRT | Entities in NIS2 scope: 24 h early warning, 72 h notification, 1-month report [B-CO-47] | As above |
 | ENISA CRA Single Reporting Platform (vendor) | Actively exploited vulnerability or severe incident in Candor as a product, from 11 Sep 2026 [B-CR-50, B-CR-51] | Product-level technical details only |
@@ -270,7 +270,7 @@ PRESERVE: how the key left its boundary (manifest scan, attestation, device fore
 | PRESERVE | E-HOST images, E-MEM-CORE, ransom note, RT-0 history; determine T0 |
 | NOTIFY | DPO (availability breach + possible exfiltration of metadata); regulators as required; SSN-GLOBAL if the intake outage exceeds 24 h or data loss affects sources (for example, source accounts created after the last restorable set) |
 | ROTATE | All online secrets (as PB-02). The source onion key only if the intake was touched |
-| RECOVER | DR-P4 (rebuild from clean media; restore chain-verified pre-T0 sets). Exfiltration is metadata-only by design (17 §8); payment is an organizational decision outside this spec |
+| RECOVER | DR-P4 (rebuild from clean media; restore chain-verified pre-T0 sets). Exfiltration is metadata-only by design (`17-INFRASTRUCTURE.md` §8); payment is an organizational decision outside this spec |
 | LESSONS | Entry vector; backup coverage; admin workstation hygiene |
 
 ### PB-08 Supply-chain compromise (dependency, build, CI, repository)
@@ -328,7 +328,7 @@ PRESERVE: how the key left its boundary (manifest scan, attestation, device fore
 | DETECT | Physical event; loss of host heartbeats at H-MON; chassis-intrusion or seal discrepancy; notification by counsel |
 | CONTAIN | **Lawful seizure:** comply as advised by counsel; do not destroy evidence or obstruct; request the scope in writing. **In all cases:** treat every key on the seized assets as compromised (per `17-INFRASTRUCTURE.md` §8 state analysis); stop remote intake operations that depend on seized hosts; revoke seized workstations' device keys (PB-05) and admin credentials (FIDO2 registrations of seized tokens) |
 | PRESERVE | Inventory of seized assets with serials and seal status; last-known state (powered or off, unlock mode) → determines S-OFF vs S-LIVE exposure |
-| NOTIFY | Legal first (gag orders may restrict notification, cf. INC-07). Where allowed: SSN-GLOBAL/SSN-CLEARNET describing what the seized assets could contain, derived from §17-8, and advising sources. Where not allowed: the design relies on transparency mechanisms (key-directory monitors, Tier V pinning) that do not depend on the operator speaking |
+| NOTIFY | Legal first (gag orders may restrict notification, cf. INC-07). Where allowed: SSN-GLOBAL/SSN-CLEARNET describing what the seized assets could contain, derived from `17-INFRASTRUCTURE.md` §8, and advising sources. Where not allowed: the design relies on transparency mechanisms (key-directory monitors, Tier V pinning) that do not depend on the operator speaking |
 | ROTATE | Source onion (PB-10) if intake hosts were seized (**new address**, not restored: DR-004); relay/monitor keys, RCP-ONION keys or RCP-LAN certificates; SSH; Tang keys (if the Tang host was seized); IRK re-split if shares were seized; epoch keys for channels whose members' devices were seized |
 | RECOVER | DR-P3 on new hardware at a different location where appropriate |
 | LESSONS | Was the FDE unlock mode appropriate? Tang placement? Retention minimization? |

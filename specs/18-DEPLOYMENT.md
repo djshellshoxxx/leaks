@@ -40,7 +40,7 @@ Research lessons applied:
 
 ## 3. Profile overview
 
-| Profile | Edition | Hosts (minimum) | Z-INTAKE isolation | Z-CORE platform | K8s allowed | HSM | Default FDE unlock (17 §6.3) | Staff path |
+| Profile | Edition | Hosts (minimum) | Z-INTAKE isolation | Z-CORE platform | K8s allowed | HSM | Default FDE unlock (`17-INFRASTRUCTURE.md` §6.3) | Staff path |
 |---|---|---|---|---|---|---|---|---|
 | CE-SINGLE | CE | 1 physical (3 VMs) | Separate VM (container split = ADVANCED) | VM | No | No (TPM2) | U3 (or U2 ADVANCED) | RCP-ONION |
 | CE-HARDENED | CE | 3 physical + off-site Tang | Dedicated host | Dedicated host | No | Optional | U4 | RCP-ONION |
@@ -71,7 +71,7 @@ Research lessons applied:
 
 | Attribute | Specification |
 |---|---|
-| THREAT MODEL | Everything in CE-SINGLE, plus: kernel/hypervisor escape from intake to core (separate hardware); seizure of the server room without the Tang site (U4); independent monitoring by H-MON (attestation, 17 §5.6); higher-risk organizations (newsrooms, NGOs) similar to SecureDrop's app/monitor split [B-SD-04]. **Not designed against:** live seizure of H-INTAKE; provider-level network observation of the uplink; coerced admin with FIDO2 |
+| THREAT MODEL | Everything in CE-SINGLE, plus: kernel/hypervisor escape from intake to core (separate hardware); seizure of the server room without the Tang site (U4); independent monitoring by H-MON (attestation, `17-INFRASTRUCTURE.md` §5.6); higher-risk organizations (newsrooms, NGOs) similar to SecureDrop's app/monitor split [B-SD-04]. **Not designed against:** live seizure of H-INTAKE; provider-level network observation of the uplink; coerced admin with FIDO2 |
 | ADVANTAGES | Physical zone separation (ADR-009); unattended reboot with FDE (U4), which closes the gap left open in SecureDrop [B-SD-13]; independent monitor; optional air-gapped viewing (AIRGAP-RCP) |
 | DISADVANTAGES | 3 hosts + off-site Tang to maintain; more hardware cost; still no automatic failover |
 | MINIMUM HARDWARE | H-INTAKE: 4 cores, 8 GiB ECC, 2 × 512 GB NVMe RAID1, TPM2, 2 NICs (ext0, relay0) + mgmt0. H-CORE: 8 cores, 32 GiB ECC, 2 × 2 TB NVMe RAID1, TPM2, NICs relay0, mgmt0, bak0, egress0. H-MON: 2 cores, 4 GiB, 128 GB SSD, TPM2 (a mini-PC is acceptable). Off-site Tang: a small fanless device in a different building. H-BAK: 4 TB NAS/server running an S3-compatible store with Object Lock (compliance mode), plus 2 offline rotation disks. Optional managed switch with VLANs, or direct cables for relay0/bak0. Optional C-18 air-gapped station |
@@ -89,7 +89,7 @@ Research lessons applied:
 | ADVANTAGES | Uses existing enterprise virtualization for Z-CORE; SSO/SCIM (EE); SIEM export (C-26); HSM integration; enterprise backup targets |
 | DISADVANTAGES | Enterprise infrastructure teams become observers; change-management friction; temptation to integrate with general logging, backup or EDR tooling, which the config checker flags |
 | MINIMUM HARDWARE | H-INTAKE: dedicated physical host as in CE-HARDENED (NOT on the shared virtualization cluster). Z-CORE: dedicated VMs on hosts **not shared with general IT workloads**: `core-app` 8 vCPU/16 GiB; `core-db` 8 vCPU/32 GiB/1 TB+ (per 34); `core-blob` 4 vCPU/8 GiB/size per 34. H-MON VM (separate host from core). H-BAK: enterprise WORM target (S3 Object Lock / immutable NAS snapshots) in a separate security domain. Optional network HSM pair (FIPS 140-3 L3). Off-site Tang |
-| NETWORK DESIGN | H-INTAKE on an independent uplink (17 §4.10). N-RELAY: dedicated VLAN with firewall rule core→intake:7443 only. Z-CORE VLAN(s) with no route to user networks except the recipient VLAN for RCP-LAN (Desk API TCP 8443 mTLS, default per `06-SYSTEM-ARCHITECTURE.md` §8.3) or RCP-ONION. The recipient VLAN is excluded from per-flow logging by general network monitoring (INFRA-009). SIEM export from C-26 only |
+| NETWORK DESIGN | H-INTAKE on an independent uplink (`17-INFRASTRUCTURE.md` §4.10). N-RELAY: dedicated VLAN with firewall rule core→intake:7443 only. Z-CORE VLAN(s) with no route to user networks except the recipient VLAN for RCP-LAN (Desk API TCP 8443 mTLS, default per `06-SYSTEM-ARCHITECTURE.md` §8.3) or RCP-ONION. The recipient VLAN is excluded from per-flow logging by general network monitoring (INFRA-009). SIEM export from C-26 only |
 | FAILOVER | H-INTAKE cold spare (as CE-HARDENED). Z-CORE: virtualization HA restart (VM-level). DB with a streaming replica VM on a different host (RPO ≈ 0 within a site) |
 | BACKUPS | As CE-HARDENED, plus a second WORM copy at a secondary site. Enterprise backup agents SHALL NOT image Z-INTAKE/Z-CORE VMs (hypervisor-level backup copies bypass BS-* encryption and retention; config checker + procedure) |
 | KEY MANAGEMENT | HSM: audit checkpoint, key-directory log, DB TDE (optional), SSH CA with two-person issuance for H-INTAKE. IRK for the backup KEK held by 3 of 5 custodians (security officer, DPO, ombudsman, …). Recovery Quorum optional (ADR-013, DANGEROUS config) |
@@ -194,8 +194,8 @@ Design rules:
 ### 7.1 Pre-install checklist (recorded by `candorctl site record-checklist`)
 
 1. Hardware matches §4.2. TPM2 is present and cleared. Secure Boot is in setup mode or has the Debian keys. The firmware password is set. BMC is disabled or on N-OOB.
-2. Uplink decision for H-INTAKE is recorded (17 §4.10).
-3. Tamper seals applied and photographed (17 §6.4).
+2. Uplink decision for H-INTAKE is recorded (`17-INFRASTRUCTURE.md` §4.10).
+3. Tamper seals applied and photographed (`17-INFRASTRUCTURE.md` §6.4).
 4. Two admins present; FIDO2 keys (2 per admin) available.
 5. Offline media for BS-SECRETS (2×) and IRK tokens/paper (n shares) prepared.
 
@@ -439,7 +439,7 @@ In-place `dist-upgrade` of Candor hosts is **not supported**. Lesson: SecureDrop
 2. Restore the role from BS-* sets (§13).
 3. Verify.
 4. Switch the relay pairing.
-5. Crypto-erase the old host (17 §6.7).
+5. Crypto-erase the old host (`17-INFRASTRUCTURE.md` §6.7).
 
 For H-INTAKE this keeps the onion address, because the key is restored from BS-SECRETS.
 
@@ -600,7 +600,7 @@ forbidden_everywhere:
 |---|---|---|---|---|---|
 | DEP-001 | Candor SHALL support exactly the eight deployment profiles of ADR-024, each documented with the nine attributes of §4. | ADR-024 | THR-035 | C-19 | INSP: docs completeness check in CI (`profile-doc-lint`) |
 | DEP-002 | Z-INTAKE SHALL run on dedicated hosts or dedicated VMs in every profile, and SHALL NOT run on Kubernetes or on hosts shared with non-Candor workloads. | ADR-024; REQ-H-34 | THR-045, THR-014 | C-05..C-08 | TST: `candorctl check` rule `intake.dedicated`; INSP: IaC plan |
-| DEP-003 | Kubernetes SHALL be permitted only for Z-CORE in EE-HA, PRIVATE-CLOUD and MANAGED, as a dedicated cluster with NetworkPolicy default-deny, Pod Security `restricted`, no mesh access logs, API audit without request bodies, and etcd encryption via a customer-controlled KMS/HSM. | ADR-024; INC-60; §5 | THR-016, THR-045, THR-030 | C-10, C-12, C-39 | TST: rendered-manifest policy tests (conftest); INSP: cluster audit |
+| DEP-003 | Kubernetes SHALL be permitted only for Z-CORE in EE-HA, PRIVATE-CLOUD and MANAGED, as a dedicated cluster with NetworkPolicy default-deny, Pod Security `restricted`, no mesh access logs, API audit without request bodies, and etcd encryption via a customer-controlled KMS/HSM. | ADR-024; INC-60 | THR-016, THR-045, THR-030 | C-10, C-12, C-39 | TST: rendered-manifest policy tests (conftest); INSP: cluster audit |
 | DEP-004 | OCI images SHALL be referenced only by digest, built reproducibly from the same sources as the .debs, signed and transparency-logged. `:latest` tags SHALL be rejected. | B-GL-41; ADR-022 | THR-024, THR-025 | C-31, C-33 | TST: admission-policy test rejects tag-only and unsigned images |
 | DEP-005 | Debian maintainer scripts in Candor packages SHALL NOT perform network access or copy directories into secret-bearing paths. | B-SD-22 | THR-013, THR-024 | C-33 | TST: CI lint `installer-no-dir-copy`; piuparts run in netns without network |
 | DEP-006 | The installer SHALL generate each secret on the host that owns it. Secrets SHALL NOT transit the admin workstation except as IRK-encrypted BS-SECRETS exports. | B-SD-22; ADR-028 | THR-013, THR-044 | C-19 | TST: install trace shows no secret material in WS-ADM filesystem snapshots (canary scan) |
@@ -608,11 +608,11 @@ forbidden_everywhere:
 | DEP-008 | Candor packages SHALL be installed only from a local repository populated by `candor-update` after TUF threshold and transparency-inclusion verification. | ADR-022; B-CR-45 | THR-025 | C-33 | TST: TUF test vectors (rollback, freeze, mix-and-match, threshold); inclusion-proof failure blocks import |
 | DEP-009 | Automatic update fetches SHALL use a uniformly random delay of 0–72 h (0–6 h for urgent) and SHALL NOT send instance identifiers or onion addresses. | ADR-022; ADR-023 | THR-025, THR-036 | C-33 | TST: request capture shows no instance-identifying fields; delay-distribution test |
 | DEP-010 | The simple installer (`candor-setup`) SHALL apply the secure defaults of §8 and SHALL NOT offer any DANGEROUS setting. | R1 do-not-copy #4; B-SD-08 | THR-035 | C-19 | DEMO: usability test with non-specialist admins (completion ≤ 90 min, 0 unsafe configs); TST: wizard option inventory vs CFG table |
-| DEP-011 | The simple installer SHALL refuse to proceed with fewer than two admin FIDO2 keys, fewer than two backup media, or fewer than two recipients. | ADR-013; §8 | THR-042, THR-022 | C-19 | TST: wizard negative tests |
+| DEP-011 | The simple installer SHALL refuse to proceed with fewer than two admin FIDO2 keys, fewer than two backup media, or fewer than two recipients. | ADR-013; B-SD-08 | THR-042, THR-022 | C-19 | TST: wizard negative tests |
 | DEP-012 | The installer SHALL refuse installation when a cloud metadata service is detected under a non-cloud profile, or when unrelated listening services exist on the target. | INC-59; REQ-H-34 | THR-030, THR-035 | C-19 | TST: installer in a cloud VM without PRIVATE-CLOUD profile → refusal |
-| DEP-013 | Every profile SHALL enforce FDE with the default unlock mode of §3. Selecting another mode SHALL require the CFG class acknowledgement defined in `32-OPERATIONS.md`. | B-SD-13; 17 §6.3 | THR-031 | C-39 | TST: `candorctl check` rule `fde.unlock_mode` |
+| DEP-013 | Every profile SHALL enforce FDE with the default unlock mode of §3. Selecting another mode SHALL require the CFG class acknowledgement defined in `32-OPERATIONS.md`. | B-SD-13; ADR-024 | THR-031 | C-39 | TST: `candorctl check` rule `fde.unlock_mode` |
 | DEP-014 | The site file and IaC state SHALL contain no secrets. `candorctl plan` SHALL refuse input with secret-like content. | INC-59; B-SD-22 | THR-013 | C-19 | TST: planted high-entropy key in the site file → refusal |
-| DEP-015 | PRIVATE-CLOUD IaC SHALL create: a dedicated account/project, SCPs denying snapshots of intake volumes, public ACLs and IMDSv1; an Object Lock bucket in a separate account; and no IAM role on intake VMs. | INC-59; 17 §7 | THR-030, THR-017 | C-39, C-27 | TST: IaC unit tests (plan JSON assertions); `candorctl cloud audit` |
+| DEP-015 | PRIVATE-CLOUD IaC SHALL create: a dedicated account/project, SCPs denying snapshots of intake volumes, public ACLs and IMDSv1; an Object Lock bucket in a separate account; and no IAM role on intake VMs. | INC-59; ADR-024 | THR-030, THR-017 | C-39, C-27 | TST: IaC unit tests (plan JSON assertions); `candorctl cloud audit` |
 | DEP-016 | GitOps changes to Z-CORE on K8s SHALL require approval by a second person, and secrets SHALL NOT be stored in Git. | B-GL-30 | THR-018, THR-024 | C-10 | INSP: repository protection rules; TST: secret scanner on the GitOps repo |
 | DEP-017 | Offline bundles SHALL carry TUF metadata, targets, inclusion proofs and a signed log checkpoint, and SHALL be accepted only within `update.offline.max_age_days` (default 30). | ADR-022; INC-52 | THR-025 | C-33 | TST: bundle aged 31 days rejected; tampered target rejected |
 | DEP-018 | Upgrades SHALL require a successful pre-upgrade backup and configuration check, and SHALL roll back automatically if the post-upgrade self-test fails within 15 min. | B-SD-02 (phased upgrade lesson) | THR-042, THR-025 | C-19, C-25 | TST: induced self-test failure → automatic rollback in the upgrade test suite |
@@ -629,8 +629,8 @@ forbidden_everywhere:
 | DEP-029 | MANAGED customers SHALL be able to export BS-SECRETS and data to self-host with the same onion address. | Design; THR-026 | THR-026 | C-19 | DEMO: export/import exercise |
 | DEP-030 | AIRGAP-RCP SHALL enforce that WS-SYNC holds no decryption keys, and the self-test SHALL warn when no import has occurred for 5 days and alert at 7 days (epoch window and member epoch key pre-publication, ADR-030). | ADR-008; ADR-030; B-SD-04 | THR-013, THR-023 | C-15, C-18, C-25 | TST: manifest check on WS-SYNC; timer test |
 | DEP-031 | Enterprise hypervisor-level or agent-based backup tools SHALL NOT image Z-INTAKE or Z-CORE volumes. The procedure and config checker SHALL detect installed backup agents. | INC-55; THR-017 | THR-017, THR-015 | C-27 | TST: agent-detection rule; INSP: customer attestation |
-| DEP-032 | The staff access path SHALL default to RCP-ONION in CE-SINGLE, CE-HARDENED and MANAGED, and to RCP-LAN in EE-ONPREM, EE-HA, GOV-ONPREM and PRIVATE-CLOUD (`06-SYSTEM-ARCHITECTURE.md` §8.3). RCP-LAN deployments SHALL isolate the recipient VLAN from per-flow logging by general network monitoring. | 17 §4.6; ADR-007 | THR-018, THR-022, THR-020 | C-10, C-15 | TST: config checker rule `rcp.path`; INSP: network monitoring configuration |
-| DEP-033 | In EE-HA and GOV-ONPREM, the source onion key SHALL exist on at most the two intake hosts of the active/passive pair (plus BS-SECRETS offline). Only the active host's tor SHALL publish descriptors, and promotion SHALL require successful fencing of the old active. | ADR-032; `21-ENTERPRISE.md` §5.2 | THR-044, THR-032 | C-05, C-25 | TST: manifest verification per role; failover test asserts that the old active is fenced before the passive publishes |
+| DEP-032 | The staff access path SHALL default to RCP-ONION in CE-SINGLE, CE-HARDENED and MANAGED, and to RCP-LAN in EE-ONPREM, EE-HA, GOV-ONPREM and PRIVATE-CLOUD (`06-SYSTEM-ARCHITECTURE.md` §8.3). RCP-LAN deployments SHALL isolate the recipient VLAN from per-flow logging by general network monitoring. | ADR-007; ADR-024 | THR-018, THR-022, THR-020 | C-10, C-15 | TST: config checker rule `rcp.path`; INSP: network monitoring configuration |
+| DEP-033 | In EE-HA and GOV-ONPREM, the source onion key SHALL exist on at most the two intake hosts of the active/passive pair (plus BS-SECRETS offline). Only the active host's tor SHALL publish descriptors, and promotion SHALL require successful fencing of the old active. | ADR-032 | THR-044, THR-032 | C-05, C-25 | TST: manifest verification per role; failover test asserts that the old active is fenced before the passive publishes |
 | DEP-034 | Physical appliances SHALL ship with tamper-evident packaging and serial records, and SHALL attest first boot against published golden PCR values. | INC-50; Knowledge (unverified) | THR-024, THR-031 | C-39 | DEMO: first-boot attestation; INSP: shipping record |
 | DEP-035 | The install record (versions, golden PCRs, manifest hashes, checklist) SHALL be signed by two admins and stored in Z-ADM. | B-SD-04 | THR-018, THR-035 | C-19 | INSP: record present and verifiable (`candorctl site verify-record`) |
 | DEP-036 | Operational documentation SHALL provide copy-pasteable, `set -euo pipefail` command blocks for install, upgrade, rollback, backup and restore, tested in CI against a reference lab. | B-SD-08 (burden lesson) | THR-035 | C-19 | TST: docs-as-tests job executes every command block in the lab |

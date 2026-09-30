@@ -821,7 +821,7 @@ Schedule: FM-1..FM-4 complete and externally reviewed before 1.0 (ADR-006; INC-6
 | Argon2id | RFC 9106 §5.3 | `crypto-kat` |
 | PBKDF2-HMAC-SHA-512 | NIST CAVP | `crypto-kat-fips` |
 | STREAM behaviour | age/C2SP test vectors adapted (B-CR-14) | `crypto-kat` |
-| Candor formats | `test-vectors/v1/{sealed_object,stanza,stream,submission,reply,passphrase,kd_entry,checkpoint}.json` incl. negative vectors: truncated stream, reordered chunks, missing final flag, trailing data, header tamper, stanza bound to another object, wrong suite, non-canonical CBOR, duplicate keys, oversized manifest, salamander attempt | `crypto-vectors` (native, WASM, FIPS builds must agree) |
+| Candor formats | `test-vectors/v1/{sealed_object,stanza,stream,submission,reply,passphrase,kd_entry,checkpoint}.json` incl. negative vectors: truncated stream, reordered chunks, missing final flag, trailing data, header tamper, stanza bound to another object, wrong suite, non-canonical CBOR, duplicate keys, oversized manifest, salamander attempt, slot block with an unlisted non-dummy slot, forged Recipient List, tampered slot_block_hash | `crypto-vectors` (native, WASM, FIPS builds must agree) |
 | Startup self-tests | C-11 runs KATs for every primitive at process start (C-03, C-06, C-07, C-14, C-15); failure = refuse to start | `crypto-selftest` |
 
 ### 22.3 Fuzzing and external review
