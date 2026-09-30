@@ -1,5 +1,5 @@
 # 10 — File & Evidence Pipeline
-Status: Draft v1.0 · Edition applicability: both (CE and EE identical protections; EE adds L2/L3 fleet tooling only) · Owner: Evidence & Containment team
+Status: Draft v1.1 (revision round 2: ADR-034..ADR-046) · Edition applicability: both (CE and EE identical protections; EE adds L2/L3 fleet tooling only) · Owner: Evidence & Containment team
 
 ## 1. Purpose and scope
 
@@ -20,6 +20,7 @@ Out of scope: file encryption format (see `04-CRYPTOGRAPHY.md`: age-style STREAM
 | Depends on | For |
 |---|---|
 | `DECISIONS.md` ADR-004, 007, 008, 010, 011, 012, 018, 025, 027 | binding decisions |
+| `DECISIONS.md` revision ADRs | ADR-034 (Tier W attachment staging under a per-session RAM key; final seal at Submit), ADR-038 (import slots; padded Tier W uploads; day/week display), ADR-042 (Desk platform tiers; hostile-string rendering; "rendering — not evidence"; OCR text layer), ADR-043 (independent-custody devices), ADR-045 (independent approver principle), ADR-046 §4 (upload protocol canonical in 08; per-file cap 4 GiB standard, 16 GiB EE) |
 | `04-CRYPTOGRAPHY.md` | STREAM format, per-object DEKs, case-key wrapping, signatures |
 | `06-SYSTEM-ARCHITECTURE.md` | zone model Z-VIEW, C-15/C-17/C-18 placement |
 | `11-FRONTEND-SOURCE.md` | source upload UX, Tier V scrubbing UI (§11 here specifies behaviour) |
@@ -73,10 +74,11 @@ Rule: nothing ever overwrites an evidence object. "Edit", "redact", "OCR", "extr
 | `declared_mime` | string ≤ 255 | source-supplied, advisory |
 | `detected_type` | enum (§8) + `confidence` | from Stage 0 |
 | `flags` | set: POLYGLOT, TYPE_MISMATCH, ENCRYPTED_CONTAINER, ACTIVE_CONTENT, EXTERNAL_REFS, OVERSIZE, LIMIT_HIT, PARSE_ERROR, SUSPECT_EXPLOIT | from Stage 0/1 |
+| `external_refs` | list of ≤ 256 entries `{kind, value ≤ 2,048 bytes}` | hosts/URLs/UNC paths found by Stage 0/1 (§12 H3); display as inert plain text only; carried into Export Package manifests (§15 E9) |
 | `source_manifest_hash` | 32 bytes or null | SHA-256 the source client/sealer computed before encryption (§5.2) |
 | `manifest_match` | enum MATCH, MISMATCH, ABSENT | MISMATCH → case alert + evidence flagged `INTEGRITY_FAIL` |
-| `received_day` | date (UTC) | ADR-010; no finer time |
-| `import_batch` | u64 | batch number (ADR-010) |
+| `received_day` | date (UTC) | The **import slot date** (ADR-038 §1, §3), not a source-action time; for follow-up attachments, only the slot date of that import. Displayed to staff at day granularity (standard) or ISO week (HIGH) (ADR-038 §3) |
+| `import_batch` | u64 | import slot number (ADR-010, ADR-038 §1) |
 | `derived_from` | list of `evid_id` | empty for ORIGINAL |
 | `xform_id` | string or null | null for ORIGINAL |
 | `object_key_wrap` | bytes | per-object DEK wrapped under case key |
@@ -95,7 +97,10 @@ Rule: nothing ever overwrites an evidence object. "Edit", "redact", "OCR", "extr
 | `operation` | enum: STAGE0_INGEST, PIXEL_RECONSTRUCT, OCR, METADATA_STRIP, PDF_NORMALIZE, IMAGE_REENCODE, AV_TRANSCODE, OFFICE_TO_PDF, ARCHIVE_EXTRACT, EMAIL_SPLIT, TEXT_NORMALIZE, REDACT, DEDA_ANONYMIZE, CROP, EXPORT_RENDER |
 | `tool_chain[]` | per stage: tool name, version, sandbox image digest (sha256 of OCI/rootfs image), TUF target name |
 | `params` | canonical CBOR of all options (e.g., DPI, OCR language, mat2 mode, codec) |
-| `containment` | L1..L4 + substrate (FIRECRACKER, GVISOR, QUBES_DISPVM, AIRGAP, SACRIFICIAL) |
+| `containment` | L1..L4 + substrate (FIRECRACKER, QUBES_DISPVM, HYPERV_ISOLATED, APPLE_VZ, AIRGAP, SACRIFICIAL) + Desk platform tier (§6.1) |
+| `converter_release_digest` | SHA-256 of the signed sandbox image (TUF target) that produced any pixel rendering (ADR-042) |
+| `output_hashes` | SHA-256 of every output (rendering, OCR text layer), recorded at production time (ADR-042) |
+| `render_check` | for pixel renderings: `SINGLE` or `DUAL_MATCH` / `DUAL_MISMATCH{pages}` (§5.4) |
 | `limits_applied` | the limit profile ID and any limit hit |
 | `warnings[]` | enumerated codes (e.g., `TEXT_LAYER_LOST`, `HYPERLINKS_LOST`, `DOTS_DETECTED`, `WATERMARK_NOT_REMOVED`) |
 | `operator` | staff user ID |
@@ -134,9 +139,9 @@ sequenceDiagram
   participant V1 as Convert disposable (C-17)
   participant V2 as Reconstruct disposable (C-17)
   S->>S: Tier V: optional scrub (§11), compute SHA-256, encrypt STREAM
-  S->>I: ciphertext + sealed manifest (hash, declared name/MIME)
-  Note over I: Never parses; stores opaque ciphertext; pads (ADR-011)
-  I->>R: pulled by C-09 (ADR-009)
+  S->>I: Tier V: padded ciphertext + sealed manifest. Tier W: plaintext upload stream (no-JS)
+  Note over I: Tier W: C-07 hashes, pads (ADR-011), encrypts under per-part DEK wrapped by the per-session RAM key, stages on tmpfs; final HPKE seal only at Submit (ADR-034). Never parses.
+  I->>R: pulled by C-09 at the fixed import slot (ADR-009, ADR-038 §1)
   D->>R: fetch ciphertext
   D->>D: unwrap per-object DEK (never plaintext to disk)
   D->>V0: ciphertext + object DEK only (vsock)
@@ -146,15 +151,15 @@ sequenceDiagram
   D->>V1: ciphertext + DEK (fresh VM)
   V1->>V1: convert to PDF (if needed) then rasterize to RGB pixels
   V1-->>V2: raw pixel frames only (bounded, framed)
-  V2->>V2: rebuild PDF from pixels, optional OCR
-  V2-->>D: sanitized PDF (+ OCR text)
-  D->>D: encrypt with new DEK, record DERIVED + XF record
+  V2->>V2: rebuild PDF from pixels, OCR inside the sandbox (text layer + accessible text rendition)
+  V2-->>D: sanitized PDF with OCR text layer, accessible text rendition, output hashes
+  D->>D: schema-validate + length-bound results, encrypt with new DEK, record DERIVED + XF record (converter release digest, output hashes)
 ```
 
 ### 5.2 Source manifest hash
 
 - Tier V (C-03): client computes SHA-256 of each attachment plaintext (after optional scrubbing) and includes it in the manifest signed with the source Ed25519 key (ADR-005) inside the ciphertext.
-- Tier W: C-07 computes SHA-256 while streaming the upload into the sealer, in RAM, and seals it inside the envelope. It never persists or logs it.
+- Tier W: C-07 computes SHA-256 while streaming the upload into the sealer, in RAM, keeps it in the RAM session record until Submit, and seals it inside the envelope. It never persists or logs it (ADR-034).
 - The Stage 0 hash is compared with the manifest hash. MISMATCH indicates corruption or tampering between sealing and import (THR-037).
 
 ### 5.3 Stages
@@ -163,9 +168,18 @@ sequenceDiagram
 |---|---|---|---|---|
 | 0 Ingest | fresh L1 VM, image `candor-stage0` (no format parsers except magic-byte tables and our Rust container walker) | ciphertext + one DEK | fixed-schema CBOR: hashes, size, detected_type, flags, limit results (max 64 KiB) | each object |
 | 1 Convert | fresh L1 VM (or L2), image `candor-convert` (LibreOffice headless, poppler/mupdf, libheif, ffmpeg, mat2, qpdf, Ghostscript only if needed) | ciphertext + DEK | raw pixel frames (RGB8, header: page no, width, height) or decoded PCM/YUV for AV | each object |
-| 2 Reconstruct | fresh L1 VM, image `candor-rebuild` (Rust-only PDF writer `candor-pdfgen`, image encoders, Tesseract OCR) | pixel frames only | PDF/A-2b, PNG, FLAC/Opus, AV1/VP9 WebM; OCR text UTF-8 | each job |
+| 2 Reconstruct | fresh L1 VM, image `candor-rebuild` (Rust-only PDF writer `candor-pdfgen`, image encoders, Tesseract OCR) | pixel frames only | PDF/A-2b **with an invisible OCR text layer** (ADR-042), PNG, FLAC/Opus, AV1/VP9 WebM; an **accessible text rendition** (UTF-8, reading order, headings/lists/tables inferred from layout, page markers) as a separate OCR_TEXT object; SHA-256 of each output | each job |
 | 3 Structural sanitize (optional) | fresh L1 VM, `candor-convert` | original | qpdf-normalized PDF, mat2-cleaned file (kept as WORKING_COPY with `ACTIVE_CONTENT` re-check) | each object |
 | 4 Redact | Desk UI over pixel viewer; burn-in performed in Stage 2 VM | viewing copy + redaction boxes | new rasterized PDF + verifier report | each job |
+
+**Stage 2 output validation by the Desk (ADR-042; RVW-A-15 item 4).** Every result crossing from C-17 to C-15 (Stage 0 CBOR, metadata report, OCR text, accessible text rendition, `external_refs`, warnings) is validated against a fixed schema with per-field length bounds (e.g., each string ≤ 2,048 bytes, OCR text ≤ 4 MiB per page-set, ≤ 256 `external_refs`), rejected as a whole on violation (`PARSE_ERROR`, no partial display), and handed to the Desk UI only as plain-text data for text-node rendering (`12-FRONTEND-RECIPIENT.md` §7 SI-17). Nothing from C-17 is ever interpreted as HTML, Markdown, a path or a command.
+
+### 5.4 Rendering integrity (ADR-042; RVW-A-30)
+
+- Every pixel rendering and its OCR layer are **renderings, not evidence**. Their evidence records carry the label `RENDERING_NOT_EVIDENCE`, and every Desk surface that shows them displays "Rendering — not evidence. Verify details against the original before relying on them." (`12` §6).
+- The transformation record binds `converter_release_digest` (signed sandbox image) and `output_hashes`, so a rendering can later be reproduced from the ORIGINAL with the same release and compared byte-for-byte where the toolchain is deterministic, or perceptually otherwise.
+- **Dual-render check** (`evidence.dual_render`; default ON in the HIGH profile, OFF otherwise, SAFE): Stage 1 is run twice in separate fresh VMs with independent rasterizers (poppler and MuPDF for PDF; LibreOffice→PDF then each rasterizer for Office), and a per-page perceptual hash (pHash, Hamming distance threshold 10/64) is compared. Mismatching pages are flagged `DUAL_MISMATCH` and shown with a warning; the investigator is directed to CL-3 for those pages.
+- Residual: a common-mode bug in both renderers, or a malicious original that renders differently by design in all engines, is not detected.
 
 Frame limits at Stage 1→2 boundary: width and height each ≤ 12,000 px; ≤ 100 megapixels per frame; ≤ 5,000 frames per job; total ≤ 16 GiB; any violation aborts the job with `LIMIT_HIT`. The Stage 2 parser for frames is a fixed-header reader of ≤ 200 lines of Rust, fuzzed in CI.
 

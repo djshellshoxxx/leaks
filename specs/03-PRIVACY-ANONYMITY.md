@@ -1,6 +1,6 @@
 # 03 — Privacy and Anonymity
 
-Status: Draft v1.0 · Edition applicability: both (CE and EE; MANAGED service covered in §10.3) · Owner: Privacy Engineering + Security Architecture
+Status: Draft v1.1 (revision round 2: ADR-034..046, REVIEW-A/B/C; disposition in `process/DISP-G1.md`) · Edition applicability: both (CE and EE; MANAGED service covered in §10.3) · Owner: Privacy Engineering + Security Architecture
 
 ## 1. Purpose and scope
 
@@ -14,7 +14,8 @@ The inventory is **normative**: any datum not listed for a layer SHALL NOT be co
 
 | Document | Relation |
 |---|---|
-| `DECISIONS.md` | ADR-001 (onion only), ADR-002 (three modes, no fallback), ADR-003 (Tor required, no fingerprinting), ADR-004 (Tier W/V), ADR-005 (passphrase), ADR-008 (keys), ADR-009 (intake/core, pull), ADR-010 (timing), ADR-011 (padding), ADR-014 (sealed identity), ADR-016 (audit classes), ADR-017 (notifications), ADR-021 (tenancy), ADR-023 (telemetry), ADR-025 (deletion). |
+| `DECISIONS.md` | ADR-001 (onion only), ADR-002 (three modes, no fallback), ADR-003 (Tor required, no fingerprinting), ADR-004 (Tier W/V), ADR-005 (passphrase), ADR-008 (keys), ADR-009 (intake/core, pull), ADR-010 (timing), ADR-011 (padding), ADR-014 (sealed identity), ADR-016 (audit classes), ADR-017 (notifications), ADR-021 (tenancy), ADR-023 (telemetry), ADR-025 (deletion), ADR-030/033 (per-member keys, anonymous slots, Erasure Key Vault, import coarsening), and the binding revision ADRs ADR-034 (Tier W drafts), ADR-035 (intake integrity evidence), ADR-036 (directory governance), ADR-037 (triage-first, blinded COI), ADR-038 (arrival/import decoupling, constant-schedule signals), ADR-039 (metadata-private replies), ADR-041 (client acquisition), ADR-043 (device custody), ADR-044 (key continuity, vault backups), ADR-045 (organisation-as-adversary), ADR-046 (consistency parameters). |
+| Canonical owners (ADR-046 and revision brief) | `08-API.md` upload protocol; `24-LICENSING-BUSINESS-MODEL.md` §TEL (§8–§9) metrics regime; `09-DATABASE.md` exact-timestamp tables and column classification; `04-CRYPTOGRAPHY.md` keys and formats; `11-FRONTEND-SOURCE.md` page size classes, CSP and cookie. Where this document previously restated these values it now references the owner. |
 | `02-THREAT-MODEL.md` | Adversaries ADV-01..30, threats THR-*, component compromise analysis; this document is the ground truth for "observable information" in `02` §6. |
 | `01-PRODUCT-REQUIREMENTS.md` | Modes, metrics (SM-*), prohibited claims. |
 | `05-SOURCE-OPSEC.md` | Source guidance implementing the behavioral assumptions in §4. |
@@ -42,7 +43,7 @@ The inventory is **normative**: any datum not listed for a layer SHALL NOT be co
 - **Content confidentiality:** report content readable only by holders of case keys (authorized case members, and the Recovery Quorum if enabled — ADR-013).
 - **Unlinkability:** absence of platform data that links two actions (two visits, two reports, a visit and a report) to the same person, beyond the mailbox relation the source creates by logging in with the same passphrase.
 - **Pseudonymity:** the `source_account_id` and source public key are pseudonyms: stable within one mailbox, random, and not derived from any identifier.
-- **Tier W / Tier V** (ADR-004): Tier W = no-JS web; plaintext passes transiently through C-06/C-07 RAM. Tier V = verified client (Source App or WEBCAT-verified bundle); plaintext never reaches servers.
+- **Tier W / Tier V** (ADR-004): Tier W = no-JS web; plaintext, drafts and the passphrase pass transiently through C-06/C-07 RAM (drafts only in sealer RAM, never persisted to disk, ADR-034). Tier V = verified client (Source App or WEBCAT-verified bundle); plaintext never reaches servers; replies retrieved by fetch-all (ADR-039).
 
 ### 3.3 Terms used in the inventory
 
@@ -57,16 +58,20 @@ The inventory is **normative**: any datum not listed for a layer SHALL NOT be co
 
 Protection statements in this document hold only under these assumptions (tags as in `02-THREAT-MODEL.md` §3; ASM IDs assigned in `40-SECURITY-ASSUMPTIONS.md`).
 
-| Tag | Assumption | If violated |
-|---|---|---|
-| [A:TOR] | Tor provides sender anonymity against adversaries not observing both ends/controlling guards. | Network identity exposed to that adversary (THR-003). |
-| [A:DEV] | Source device, OS, browser/app not compromised. | Everything the source does is exposed (ADV-08). |
-| [A:OPSEC] | Source follows risk-appropriate guidance (personal device and network; no immediate submission after unique document access; no printing; minimal identifying content). | Identification by behavior/content (THR-002, THR-010). |
-| [A:RCP] | ≥ 1 uncompromised recipient endpoint per case; tokens not coerced. | Content of that member's cases exposed. |
-| [A:SEAL] | Intake host kernel/hypervisor isolates C-07. | Tier W plaintext exposure. |
-| [A:MON] | Independent transparency monitors exist. | Tier V verification weakens (THR-118). |
-| [A:CRYPTO] | Primitives and candor-core implementation secure. | Content exposure (THR-012). |
-| [A:LAW] | Operators and custodians comply with the published legal-response procedure (two-person, inventory-only). | Over-disclosure of the limited metadata that exists. |
+| Tag | Assumption | If violated | ASM (40) |
+|---|---|---|---|
+| [A:TOR] | Tor provides sender anonymity against adversaries not observing both ends/controlling guards. | Network identity exposed to that adversary (THR-003). | ASM-001..003, ASM-005 |
+| [A:DEV] | Source device, OS, browser/app not compromised. | Everything the source does is exposed (ADV-08). | ASM-004, ASM-008 |
+| [A:OPSEC] | Source follows risk-appropriate guidance (personal device and network; no immediate submission after unique document access; no printing; minimal identifying content; few, batched return visits). | Identification by behavior/content/visit days (THR-002, THR-010, THR-134). | ASM-007, ASM-009, ASM-011 |
+| [A:RCP] | ≥ 1 uncompromised recipient endpoint per case; tokens not coerced. | Content of that member's cases exposed. | ASM-019 |
+| [A:CUSTODY] | Triage Set devices on INDEPENDENT channels are not administered by the organisation (ADR-043). | The organisation reads what those members read (THR-126). | ASM-053 |
+| [A:SEAL] | Intake host kernel/hypervisor isolates C-07. | Tier W plaintext exposure. | ASM-014, ASM-015 |
+| [A:MON] | Independent transparency monitors and ≥ 2 external directory witnesses exist (mandatory EE/GOV/MANAGED, ADR-036(5)). | Tier V verification weakens (THR-118). | ASM-036, ASM-051 |
+| [A:WATCH] | ≥ 2 independent External Watchers publish mismatches (ADR-035(1)). | Untargeted intake modification unsignalled. | ASM-050 |
+| [A:KEMPRIV] | Slot KEMs are key-private (ADR-033(1)). | Server/DB thieves learn which members were excluded before import. | ASM-049 |
+| [A:BAKEXCL] | Infrastructure-level backups exclude the Erasure Key Vault (ADR-044(4)). | "Deleted" cases stay recoverable for the life of those backups (THR-130). | ASM-054 |
+| [A:CRYPTO] | Primitives and candor-core implementation secure. | Content exposure (THR-012). | ASM-024..026 |
+| [A:LAW] | Operators and custodians comply with the published legal-response procedure (two-person, inventory-only). | Over-disclosure of the limited metadata that exists. | ASM-042 |
 
 ## 5. Protected-from-whom matrix
 
@@ -75,12 +80,15 @@ Legend: **P** = protected by design under §4 assumptions (Candor holds nothing 
 | Protected item ↓ / From → | Org mgmt | Admin (curious/malicious) | Case recipients | Other staff | Accused | Hosting/cloud | Employer network/endpoint monitoring | ISP/local network | Global network adversary | LE compelling operator | Vendor (EE/MANAGED) | Forensic exam of source device |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | Source IP / network location | P | P | P | P | P | P | PA¹ | PA¹ | NP² | P | P | NP |
-| Source identity (ANONYMOUS) | PA³ | W: PA⁴ / V: PA³ | PA³ | P | PA³ | W: PA⁴ / V: P | PA¹ | PA¹ | NP² | W: PA⁵ / V: P | P | NP⁶ |
+| Source identity (ANONYMOUS) | PA³ | W: PA⁴ / V: PA³ | PA³ | P | PA³ | W: PA⁴ / V: P | PA¹ | PA¹ | NP² | W: PA⁵ / V: P | EE: P / MANAGED: W: PA⁴, V: PA²⁰ | NP⁶ |
 | Source identity (CONFIDENTIAL C1, sealed) | P⁷ | P | P⁷ | P | P⁷ | P | n/a | n/a | n/a | PA⁸ | P | NP |
-| Report content | P⁹ | W: PA⁴ / V: P | NP (authorized) | P | P¹⁰ | W: PA⁴ / V: P | P | P | P | W: PA⁵ / V: PA¹¹ | P | NP⁶ |
+| Report content | PA⁹ ²² | W: PA⁴ / V: P | NP (authorized) | P | P¹⁰ | W: PA⁴ / V: P | P | P | P | W: PA⁵ / V: PA¹¹ | P | NP⁶ |
 | Embedded file metadata (EXIF, author) | P | W: PA⁴ / V: P | PA¹² | P | P | W: PA⁴ / V: P | P | P | P | PA¹¹ | P | NP |
 | Existence of a report / that it concerns X | PA¹³ | PA¹⁴ | NP | P | PA¹⁵ | PA¹⁶ | P | P | P | PA¹⁴ | MANAGED: PA¹⁶ / EE: P | NP |
-| Submission timing finer than one day | P | PA¹⁷ | P | P | P | PA¹⁷ | NP¹ | NP¹ | NP | PA¹⁷ | P | NP |
+| Submission timing finer than one day | PA²¹ | PA¹⁷ | PA¹⁷ | P | P | PA¹⁷ | NP¹ | NP¹ | NP | PA¹⁷ | EE: P / MANAGED: PA¹⁷ | NP |
+| Which members were excluded (who the report concerns) | PA²³ | P²⁴ | NP (Triage Set; case team after import) | P | PA¹⁵ | P²⁴ | P | P | P | P²⁴ | P²⁴ | NP |
+| Sequence of a source's follow-up days | PA²⁵ | NP²⁵ | NP²⁵ | P | P | PA²⁵ | NP¹ | NP¹ | NP | NP²⁵ | EE: P / MANAGED: NP²⁵ | NP |
+| Times a mailbox is checked | P | W: PA⁴ / V: P²⁶ | P | P | P | W: PA⁴ / V: P²⁶ | NP¹ | NP¹ | NP | W: PA⁵ / V: P²⁶ | EE: P / MANAGED: W: PA⁴, V: P²⁶ | NP |
 | Channel chosen | PA¹³ | NP | NP | P | PA¹⁵ | P¹⁸ | P | P | P | NP¹⁴ | P | NP |
 | Mailbox replies | P⁹ | W: PA⁴ / V: P | NP | P | P | W: PA⁴ / V: P | P | P | P | W: PA⁵ / V: PA¹¹ | P | NP⁶ |
 | Linkage between two reports of one source | P¹⁹ | P¹⁹ | PA³ | P | PA³ | P | PA¹ | PA¹ | NP | P¹⁹ | P | NP |
@@ -90,22 +98,29 @@ Notes:
 1. Observers of the source's own network/device see Tor (or bridge) use and timing, not the onion destination (modulo website fingerprinting, THR-004). Protection depends on [A:OPSEC] (personal network/device, bridges).
 2. Not in the design envelope (NG-03, `02` ADV-21).
 3. Inference from content, style, knowledge, investigation actions remains possible (THR-010, THR-125).
-4. A live-compromised intake (or its host) can read Tier W plaintext and passphrases in transit through C-06/C-07 (ADR-004). Stored data is ciphertext.
+4. A live-compromised intake (or its host) can read Tier W plaintext and passphrases in transit through C-06/C-07 (ADR-004). A captured passphrase yields all replies stored for that mailbox, every `mailbox_id` derived from it (linking the source's reports), the source's COI preferences in `prefs_ct`, the ability to write as the source, and — for any later login — the exact time of that visit (RVW-A-03, RVW-A-10; ADR-035(5)). Stored data is ciphertext. No specified control detects a careful targeted modification; External Watchers detect only untargeted changes to static assets, CSP headers and the running manifest (ADR-035(1)).
 5. Operator can be compelled prospectively to modify Tier W intake; retrospective data contains no plaintext.
 6. Only what the source's device retains (guidance: Tails, no downloads; Candor stores nothing on the device beyond a memory-only session cookie).
 7. Unless the person is an Identity Custodian (≥ 2 custodians required to unseal).
 8. Lawful unsealing by custodians under ADR-014 procedure; source notified where law requires.
 9. Unless the person is a case member.
-10. COI filter before per-member key wrapping (ADR-015, ADR-030) and anonymous recipient slots (ADR-033); protection fails if the accused is legitimately a recipient not flagged by the source or COI map.
+10. Triage-first routing: envelopes are wrapped only to the eligible Triage Set after the source's COI ticks (ADR-037); anonymous recipient slots (ADR-033). Protection fails if the accused is a Triage Set member not flagged by the source, or is added later by the Triage Set (audited).
 11. Only via compelled case members or quorum holders; the operator itself holds no content keys.
 12. Recipients see sanitized derivatives by default; originals (with metadata) available under access controls (ADR-012).
 13. Program statistics are k-thresholded and period-aggregated (§12); management learns volumes, not individual reports.
-14. Server-visible case metadata (channel, coarse category, state, received day) exists and can be disclosed (§10).
-15. Side channels minimized (THR-110), not eliminated.
+14. Server-visible case metadata (channel, coarse category, state, received day, import-slot dates of follow-ups) exists and can be disclosed (§10). COI exclusions are stored only as blinded tags (ADR-037(3)).
+15. Side channels minimized (THR-110), not eliminated: non-triage members see no intake envelopes, notifications or counts (ADR-037(2)); an excluded Triage Set member still sees an envelope it cannot open; workload of colleagues remains observable.
 16. Provider sees traffic volume and storage growth, not report subjects.
-17. Exact timing exists only in RAM of C-05/C-06/C-07 during the request; a live-compromised intake sees it.
+17. No record stores source action time finer than a day. Residues: (a) import happens only at fixed schedule slots (default 4×/day; HIGH/GOV 1×/day, ADR-038(1)), so core DB commit/WAL times, blob times, backups and case records reveal the slot, which bounds arrival to the preceding slot interval unless the source chose delayed delivery (ADR-038(4)); (b) until the envelope is relayed, C-08 database pages, WAL and filesystem metadata on the intake host can bound the arrival time (not a record; overwritten after relay); (c) a live-compromised intake sees exact times in RAM.
 18. Channel ID stored on encrypted-at-rest volumes; a provider with memory access could read it.
 19. Default: one passphrase per report (ADR-005); if the source reuses a passphrase, reports are linked in the mailbox by design.
+20. In MANAGED the vendor holds every server-side datum of §10.1 for all customers, plus the live Tier W capture capability (RVW-B-19); Tier V content is protected, metadata is not.
+21. The organisation does not receive submission times from Candor, but staff reactions (logins after the daily digest, Desk activity, network flows) reach its IdP/SIEM/network logs (THR-129); notifications are constant-schedule (ADR-038(2)).
+22. P holds only if recipient endpoints are not administered by the organisation (ADR-043 independent custody on INDEPENDENT channels); an organisation controlling a member's endpoint can read what that member reads (THR-126).
+23. Program statistics and dashboards reveal nothing about exclusions (non-triage roles see no intake counts, ADR-037(2)); a management member who is excluded may still infer it from workload side channels.
+24. Exclusions are held only as blinded tags `HMAC(K_case_excl, user_id)` padded to 8 per case; no event, table or export associates a user identity with a COI exclusion (ADR-037(3)). Before import, anonymous slots hide the excluded set subject to [A:KEMPRIV]. A live Z-CORE attacker who also holds a member Desk can compute tags.
+25. Each follow-up record stores only its import-slot date (ADR-038(3)); absent delayed delivery that date equals the arrival day, so the list of follow-up dates of one case remains visible to case members (UTC day, or ISO week in HIGH) and to anyone holding C-12 or its backups. Intersected with employer Tor-use logs this narrows candidates (THR-134); guidance: batch visits, use delayed delivery.
+26. Tier V retrieves replies by fetch-all dead-drop; the server cannot tell which mailbox was checked; no per-mailbox access time, count or history is stored (ADR-039). Tier W requires server-side lookup after passphrase derivation (documented residual).
 
 ## 6. Mode lifecycle
 
@@ -120,20 +135,26 @@ stateDiagram-v2
   CONFIDENTIAL_C1 --> CONFIDENTIAL_WITHDRAWN: source withdraws sealed identity (no unsealing occurred)
   CONFIDENTIAL_C1 --> CONFIDENTIAL_C1: lawful unsealing (dual custodian, legal basis, notice)
   CONFIDENTIAL_WITHDRAWN --> CONFIDENTIAL_C1: source adds identity again
+  ANONYMOUS --> CONFIDENTIAL_SEEN: staff record self-identification in a message (excerpt sealed immediately)
 ```
 
-Rules: no transition to ANONYMOUS from any other state; staff cannot change the mode of a report except to record that a source identified themselves in a message (which requires a confirmation stored as a CASE event and a mailbox notice to the source: "You wrote your name in a message; your report is now treated as CONFIDENTIAL").
+Rules: no transition to ANONYMOUS from any other state; staff cannot change the mode of a report except to record that a source identified themselves in a message (which requires a confirmation stored as a CASE event and a mailbox notice to the source). Because the identifying passage has already been readable by case members, the Desk SHALL immediately seal the passage to the Identity Custodian key set, replace it in the case copy with "[identity sealed]", exclude it from Export Packages, and label the report **CONFIDENTIAL (identity seen by case team)**; the mailbox notice states which roles had already been able to read it: "You wrote something that identifies you. The people in these roles could read it before it was locked: {roles}. Your report is now CONFIDENTIAL, not anonymous." (RVW-B-15; ANON-010 as amended).
 
 ## 7. Mode indicator requirements
 
 | Surface | Requirement |
 |---|---|
-| Onion source pages (Tier W) | Top-of-page banner on every page, rendered server-side as the first focusable landmark (`role="status"`, not color-only): icon + mode word + one-line meaning + link "What this protects". ANONYMOUS text: "ANONYMOUS — Candor does not collect who you are. Your writing and files can still identify you." Tier line: "Web mode: encrypted on arrival. For stronger protection use the verified app." |
+| Onion source pages (Tier W) | Top-of-page banner on every page, rendered server-side as the first focusable landmark (`role="status"`, not color-only): icon + mode word + one-line meaning + link "What this protects". ANONYMOUS text (normative; `11` SHALL generate `sui.mode.*` strings from this cell, ANON-027): "ANONYMOUS — Candor does not collect who you are. Your writing and files can still identify you." Tier line (platform-neutral, RVW-B-16): "Web mode: encrypted on arrival. [What are my options?]" The options page, the step before final Submit and the login page SHALL show the ADR-035(5) statement verbatim: "If the intake server is compromised or legally compelled while you use the website (no-JavaScript) version, what you type, and your passphrase when you log in, can be captured. For the highest risk, use the Candor Source App." plus: "Anyone with your passphrase can read your replies and write as you. Each time you sign in, a compromised server could note the exact time." (ANON-022). |
 | Source App (Tier V) | Same banner plus "Verified client — end-to-end encrypted" and the verified roster digest; if verification fails the app blocks submission (no fallback, ANON-012). |
-| Confidential flows | Before the source adds identity: full-page confirmation "You are about to share who you are. After this your report is CONFIDENTIAL, NOT ANONYMOUS. Your identity will be locked so that only designated Identity Custodians can open it, and only with a legal reason." Buttons: "Keep anonymous" (default focus) / "Share my identity". |
+| Confidential flows | Before the source adds identity: full-page confirmation "You are about to share who you are. After this your report is CONFIDENTIAL, NOT ANONYMOUS. Your identity will be locked so that only designated Identity Custodians can open it, and only with a legal reason. The custodians work for {organization}. A court or regulator can require them to reveal your name. If they do, you will normally be told, but this can be delayed. The people handling your report can still read what you write." Buttons: "Keep anonymous" (default focus) / "Share my identity" (RVW-B-14(d)(f); ANON-026). |
 | C-38 clearnet pages | Header on every page, all locales: "CONFIDENTIAL — NOT ANONYMOUS. Your internet address is visible to our hosting provider and network operators." No ANONYMOUS word anywhere on C-38 except in "not anonymous" and a link to the onion instructions. Distinct visual theme (not reusing onion colors). |
-| Escrow status | Every channel page: "Recovery escrow: DISABLED" or "Recovery escrow: ENABLED — keys held jointly by: <roles>" (ADR-013). |
-| Configuration digest | Landing footer: "Configuration: <8-char digest> · profile <name> · last changed <UTC day>" linking to a page listing all non-default privacy-relevant settings (DANGEROUS/SENSITIVE CFG classes). |
+| Escrow status | Every channel page: "Recovery escrow: DISABLED" or "Recovery escrow: ENABLED — keys held jointly by: <roles>" (ADR-013). GOV profile default is ENABLED with custodians from independent roles and SHALL be stated on the landing page (ADR-044(3)). |
+| Who can unlock reports | Every channel page, generated from live configuration (ANON-028, RVW-B-14(b)): "Your report is first read by: {triage role labels}. It may later be shared with: {investigator roles}. {oversight_statement} {break_glass_statement} {escrow_statement}". |
+| COI checklist (S04b-equivalent) | Verbatim (ADR-037(4)): "Your answers are encrypted and seen only by the independent triage team, who use them to keep the people involved away from your report. They may still suggest what your report is about." Plus (RVW-B-03): "Ticking your own manager tells the triage team which team you work in." |
+| Recipient device custody (INDEPENDENT channels) | "Devices of the people who first read reports here are: independently managed / managed by {organization}" from the ADR-043 custody status (ANON-031). |
+| Operator Statement | If the quorum-signed Operator Statement (ADR-035(2)) is absent or older than 30 days, every page shows a warning banner: "This site's operators have not renewed their statement that the service has not been secretly modified. This can be a warning sign." (ANON-025). |
+| Tier W verification affordances | Tier W pages SHALL NOT present key-fingerprint or witness checks as a protection; where shown, the fixed sentence applies: "Checking these values does not protect a report sent from this website; only the Candor app checks them before encrypting." (ADR-036 Tier W limit; ANON-023). |
+| Configuration digest | Landing footer: "Configuration: <8-char digest> · profile <name> · last changed <ISO week>" (week, not day: RVW-B-33(a)) linking to a page listing all non-default privacy-relevant settings (DANGEROUS/ADVANCED CFG classes, ADR-046(6)), whether a legal hold suspends deletion, whether the deployment attests infrastructure-backup exclusion of the Erasure Key Vault (ADR-044(4)), and — in small-organisation mode — "Separation of duties: reduced" (ADR-045). |
 | Candor Desk | Mode chip on every case header and case list row; exports carry the mode in the Export Package manifest; IDENTIFIED/CONFIDENTIAL cases show whether sealed identity exists (never the identity). |
 | Staff-to-source replies | Replies never assert a mode; Desk warns when a reply makes claims about the source's protection (ANON-014). |
 
@@ -158,13 +179,25 @@ Rules: no transition to ANONYMOUS from any other state; staff cannot change the 
 
 **Layers:** Dev = source device (C-01/C-02/C-03) · Tor = Tor network (C-04) · GW = Intake Gateway tor daemon (C-05) · SWS = Source Web Service (C-06) · Seal = Intake Sealer (C-07) · IST = Intake Store (C-08) · Rel = Intake Relay (C-09) · Case = Case Service incl. AuthZ/Auth (C-10/C-21/C-22) · DB = Case Database (C-12) · Blob = Case Blob Store (C-13) · Logs = Audit Log Service (C-24) + host logs · Bak = Backups (C-27) · Notif = Notification Service (C-23).
 
-**Request types:** R-01 landing GET (incl. static CSS) · R-02 new submission (POST) · R-03 attachment upload from mailbox · R-04 source login · R-05 fetch replies (mailbox GET) · R-06 send follow-up message · R-07 delete (close mailbox) · R-08 recipient API calls (Desk → Case Service, incl. reply-push sub-flow) · R-09 admin calls · R-10 key-directory fetch · R-11 health checks.
+**Request types:** R-00 client acquisition (outside Candor's servers; §8.2a) · R-01 landing GET (incl. static CSS) · R-02 new submission (POST) · R-03 attachment upload from mailbox · R-04 source login · R-05 fetch replies (mailbox GET) · R-06 send follow-up message · R-07 delete (close mailbox) · R-08 recipient API calls (Desk → Case Service, incl. reply-push sub-flow) · R-09 admin calls · R-10 key-directory fetch · R-11 health checks.
 
-**Counters:** instance-wide SOURCE-SENSITIVE daily counters (`CTR:` in `08-API.md`, e.g. `logins`, `followups`) may be incremented by R-02..R-07. They carry none of the fields below, are never kept per account, and are displayed or exported only per M4 (§12.4).
+**Counters:** instance-wide SOURCE-SENSITIVE counters (`CTR:` in `08-API.md`, e.g. `logins`, `followups`) may be incremented by R-02..R-07. They carry none of the fields below, are never kept per account, and leave C-24/C-25 only as a coarse **global daily health band** (ADR-038(5), ADR-046(5); §12.4). Per-account quota uses a current-day counter only, reset daily; no quota history (ADR-038(3)).
 
 **Field semantics:** for source requests (R-01..R-07, R-10) the fields describe the **source**; for R-08/R-09 they describe the **staff user**; for R-11 the monitor. F25 (content) is added to the mandated field list because the inventory is incomplete without it.
 
-Tables §8.2 describe **Tier W** (default). Tier V and C-38 deltas are in §8.3.
+Tables §8.2 describe **Tier W** (default). Tier V and C-38 deltas are in §8.3. Server-side items that are not keyed to one request are listed in §8.6 (normative).
+
+### 8.2a R-00 Client acquisition and first contact (ADR-041; RVW-A-14, RVW-B-16, RVW-B-17)
+
+Candor's servers are not on this path; the rows state what third parties can record and what Candor requires so that it does not add to it.
+
+| Path | Who can record what | Candor requirement |
+|---|---|---|
+| Source App from the Candor project's onion service or independent mirrors, over Tor | Mirror operator: nothing identifying (onion); local network: Tor use | Primary distribution (ADR-041); reproducible, signed; no per-tenant builds; branding is runtime data |
+| Source App from an app store (optional) | Store operator: account, device, install time — account-linked, compellable (ADV-26) | Documented as leaving account-linked records; UI and `05` guidance state it (ANON-024) |
+| Download from the organisation's clearnet information site | Organisation proxy/EDR: user, time, file | **Prohibited**: the organisation's clearnet site SHALL NOT host the App or log downloads; it links to the project distribution (ADR-041) |
+| Visit to C-37 from a work device or network | Organisation proxy/EDR: user, time — before any guidance is displayed | C-37 has no logs/CDN (META-024); onion address published offline and as non-hyperlinked intranet text; first viewport warns about work devices (ANON-029) |
+| Tor Browser download | Local network/ISP: download of Tor | Guidance only (`05`) |
 
 ### 8.2 Per-request inventory (Tier W)
 
@@ -199,13 +232,13 @@ Tables §8.2 describe **Tier W** (default). Tier V and C-38 deltas are in §8.3.
 
 ¹ Rendezvous circuit ID delivered to C-06 (tor `HiddenServiceExportCircuitID`), used only for per-circuit rate limiting, keyed with a per-boot HMAC key, TTL ≤ 10 min (META-004). ² Padded to the route's size class (META-008). ³ No client hints, no media-query- or font-conditional resource loads (META-013). ⁴ Locale comes from the URL path; `Accept-Language` is read only on the root path to suggest a language, never stored (META-002). ⁵ If the source's browser subsequently fetches the optional WEBCAT bundle, C-06 learns in RAM that JS is enabled for that circuit (T); never stored.
 
-#### R-02 New submission (SW-03..SW-08 in `08-API.md`: start → passphrase → message/file parts → send; draft parts held only in C-07 RAM, ≤ 2 h)
+#### R-02 New submission (SW-03..SW-08 in `08-API.md`: start → message/file parts → Recovery Credential confirmation → send). Drafts (text and identity block) live only in C-07 mlocked RAM keyed by an opaque session handle; attachment parts are encrypted under a per-session key that exists only in sealer RAM and are written to a tmpfs staging area; the final HPKE seal of the content key happens only after the recipient set is fixed at Submit; 20 min idle / 2 h absolute; expiry or sealer restart zeroizes (ADR-034).
 | # | Field | Dev | Tor | GW | SWS | Seal | IST | Rel | Case | DB | Blob | Logs | Bak | Notif |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | F01 | Source IP | S | O | N | N | N | N | N | N | N | N | N | N | N |
 | F02 | Network route | S | O | T | T | N | N | N | N | N | N | N | N | N |
-| F03 | Timestamp exact | S | O | T | T | T¹ | N | N | N | N | N | N | N | N |
-| F04 | Timestamp rounded | S | N | N | N | T | C↓² | T | T | C↓ | N | N | C↓ | N |
+| F03 | Timestamp exact | S | O | T | T | T¹ | N¹² | N | N | N¹³ | N¹³ | N | N | N |
+| F04 | Timestamp rounded | S | N | N | N | T | C↓² | T | T | C↓¹³ | N | N | C↓ | N |
 | F05 | Request length | S | O | T | T | T | N | N | N | N | N | N | N | N |
 | F06 | Response length | S | O | T | T | N | N | N | N | N | N | N | N | N |
 | F07 | Upload size | S | O³ | T | T | T | C↓ | T | T | C↓ | C↓ | N | C↓ | N |
@@ -228,7 +261,7 @@ Tables §8.2 describe **Tier W** (default). Tier V and C-38 deltas are in §8.3.
 | F24 | Auth data | S | N | R | T⁷ | T⁸ | C⁹ | N | N | E¹⁰ | N | N | C | N |
 | F25 | Content (text, answers, files) | S | N | R | R | T | E | E | E | E | E | N | E | N |
 
-¹ Used to compute `received_epoch_day` and select current Member Epoch Keys (ADR-030); discarded. ² `received_epoch_day` + monotonic `batch_seq`; no record anywhere joins `batch_seq` to an exact time (META-005). ³ Tier W cannot pad before upload; Tor relays see approximate unpadded volume (cell counts). ⁴ UI language code sealed inside the manifest (visible only to recipients, who see the report's language anyway) and inside the source's own `prefs_ct`; never in cleartext (ANON-018). ⁵ `source_account_id`, passphrase-derived `lookup_tag` and `auth_pk`, and per-report `mailbox_id` (`04-CRYPTOGRAPHY.md`); `source_account_id` never leaves Z-INTAKE in cleartext — Z-CORE holds only `routing_ct` sealed to the Intake Routing Key and `mailbox_id` inside encrypted case records (`06-SYSTEM-ARCHITECTURE.md`). ⁶ Random object ID, not derived from content hash or envelope ID. ⁷ Session cookie, CSRF token and optional PoW token; RAM only. ⁸ Passphrase generated by C-07 at the start step, displayed once, held in C-07 RAM for the draft session (≤ 2 h absolute); Argon2id derivation; zeroized after key derivation. ⁹ `lookup_tag`, `auth_pk` and `prefs_ct` (sealed to the source's own key); never the passphrase. ¹⁰ Source public key travels inside the envelope; Z-CORE stores it only encrypted in the case record (Desk uses it to seal replies). ¹¹ C in Z-INTAKE backups; E (`routing_ct`, encrypted case fields) in Z-CORE backups.
+¹ Used to compute `received_epoch_day`, a delayed-delivery release date if chosen (ADR-038(4)), and to select current Triage Set Member Epoch Keys (ADR-030, ADR-037); discarded. ² `received_epoch_day` + monotonic `batch_seq` (+ release date for delayed delivery); no record anywhere joins `batch_seq` to an exact time (META-005). ³ Tier W cannot pad on the wire: Tor relays and the intake uplink see approximate unpadded volume and time per upload (RVW-A-22); parts are padded to ADR-011 buckets before tmpfs staging (ADR-038(5)); guidance recommends Tier V for size-sensitive material. ⁴ UI language code sealed inside the manifest (visible only to recipients, who see the report's language anyway) and inside the source's own `prefs_ct`; never in cleartext (ANON-018). ⁵ `source_account_id`, passphrase-derived `lookup_tag` and `auth_pk`, and per-report `mailbox_id` (`04-CRYPTOGRAPHY.md`); `source_account_id` never leaves Z-INTAKE in cleartext — Z-CORE holds only `routing_ct` sealed to the Intake Routing Key and `mailbox_id` inside encrypted case records (`06-SYSTEM-ARCHITECTURE.md`). ⁶ Random object ID, not derived from content hash or envelope ID. ⁷ Session cookie, CSRF token and optional PoW token; RAM only. ⁸ Passphrase generated by C-07, **never stored** anywhere (not in C-08, not on disk, not for re-display); displayed on the Recovery Credential screen and the source must re-type 3 randomly chosen words before the submission is finalized; if the response is lost the submission is not finalized and the source restarts (ADR-034); held only in C-07 RAM until confirmation or session expiry; KDF per R-04 note ⁴; zeroized after key derivation. The v1.0/`11` re-display of a persisted passphrase (T_SAVED_CRED) is superseded (RVW-B-13). ⁹ `lookup_tag`, `auth_pk` and `prefs_ct` (sealed to the source's own key); never the passphrase. ¹⁰ Source public key travels inside the envelope; Z-CORE stores it only encrypted in the case record (Desk uses it to seal replies). ¹¹ C in Z-INTAKE backups; E (`routing_ct`, encrypted case fields) in Z-CORE backups. ¹² No record; but until the envelope is relayed at the next import slot, C-08 heap pages, WAL (`wal_level=minimal`, no archiving or replication, ADR-046(1)) and filesystem metadata can bound the arrival time for a forensic examiner of the intake host (PR-09). ¹³ Imports run only at fixed schedule slots (default 4×/day; HIGH/GOV 1×/day, ADR-038(1)); C-12 stores `received_date` (UTC day) and C-12/C-13 commit, WAL and object-metadata times equal the slot time, never the arrival time. Staff see the day (standard) or ISO week (HIGH) (ADR-038(3)).
 
 #### R-03 Attachment upload from mailbox (logged-in session)
 | # | Field | Dev | Tor | GW | SWS | Seal | IST | Rel | Case | DB | Blob | Logs | Bak | Notif |
@@ -259,7 +292,7 @@ Tables §8.2 describe **Tier W** (default). Tier V and C-38 deltas are in §8.3.
 | F24 | Auth data (session) | T | N | R | T | T³ | N | N | N | N | N | N | N | N |
 | F25 | Content (file) | S | N | R | R | T | E | E | E | E | E | N | E | N |
 
-¹ Plus per-account quota counter: padded bytes per UTC day, 30-day rolling, deleted after 30 days (META-021). ² Memory-only session cookie (no Expires/Max-Age); Tor Browser discards it on close. ³ Session handle → derived source keys held in C-07 RAM for the session (idle 20 min, absolute 2 h).
+¹ Plus per-account quota: current-day counter only, reset daily; no history (ADR-038(3); META-027; META-021 withdrawn). ² Memory-only session cookie (no Expires/Max-Age; name and attributes per `11`); Tor Browser discards it on close. ³ Session handle → derived source keys in C-07 RAM, zeroized as specified in `04-CRYPTOGRAPHY.md` and in any case at logout, 20 min idle or 2 h absolute.
 
 #### R-04 Source login (POST passphrase)
 | # | Field | Dev | Tor | GW | SWS | Seal | IST | Rel | Case | DB | Blob | Logs | Bak | Notif |
@@ -290,7 +323,7 @@ Tables §8.2 describe **Tier W** (default). Tier V and C-38 deltas are in §8.3.
 | F24 | Auth data (passphrase) | S | N | R | R | T⁴ | C⁵ | — | — | — | — | N | C⁵ | — |
 | F25 | Content | — | — | — | — | — | — | — | — | — | — | — | — | — |
 
-¹ Per-circuit and global failed-login rate limiting in RAM (META-004). ² No per-account last-login, login day or login count is stored (ADR-010); only the instance-wide SOURCE-SENSITIVE counter `logins` is incremented (M4, §12.4). ³ Existing record read via `lookup_tag`; not modified by login. ⁴ Argon2id (m=256 MiB, t=3, p=1) → seed → keys; passphrase and seed zeroized at end of request; derived keys kept for session. ⁵ `lookup_tag`/`auth_pk` (read-only).
+¹ Per-circuit and global failed-login rate limiting in RAM (META-004); saturation states are not exposed beyond a daily health band (ADR-038(5)). ² No per-account last-login, login day or login count is stored (ADR-010, ADR-039); only the instance-wide SOURCE-SENSITIVE counter `logins` is incremented (§12.4). ³ Existing record read via `lookup_tag`; not modified by login. ⁴ Argon2id m=64 MiB, t=3, p=1 (FIPS profile: PBKDF2-HMAC-SHA-512, 210,000 iterations), limited by a concurrency semaphore (default 4) plus PoW (ADR-046(7)) → seed → keys; passphrase and seed zeroized at end of request; derived keys per `04`. A live or compelled intake captures the passphrase here (note 4 of §5). ⁵ `lookup_tag`/`auth_pk` (read-only).
 
 #### R-05 Fetch replies (mailbox GET, session)
 | # | Field | Dev | Tor | GW | SWS | Seal | IST | Rel | Case | DB | Blob | Logs | Bak | Notif |
@@ -321,7 +354,7 @@ Tables §8.2 describe **Tier W** (default). Tier V and C-38 deltas are in §8.3.
 | F24 | Auth data (session; derived source private key) | T | N | R | T | T⁴ | N | — | — | — | — | N | N | — |
 | F25 | Content (replies) | T⁵ | N | R | T | T | E | — | — | — | — | N | E | — |
 
-¹ No "read"/"seen" marker or fetch counter is stored. ² Day on which the staff reply was pushed (staff-action metadata). ³ Mailbox paginated so each page fits one padding class. ⁴ Derived keys decrypt replies in C-07; C-06 receives rendered plaintext fragments. ⁵ Rendered page in Tor Browser memory; `Cache-Control: no-store`.
+¹ No "read"/"seen" marker, fetch counter, per-mailbox access time or history is stored (ADR-039). Tier W necessarily looks up the mailbox server-side after passphrase derivation, so a live or compelled intake can log when a given mailbox is checked (THR-135); Tier V uses fetch-all (§8.3). ² Day on which the staff reply was pushed (staff-action metadata). ³ Mailbox paginated so each page fits one size class (`11`). ⁴ Derived keys decrypt replies in C-07; C-06 receives rendered plaintext fragments. ⁵ Rendered page in Tor Browser memory; `Cache-Control: no-store`. Own-message history ("sent on YYYY-MM-DD") is not stored in any cleartext table (ADR-039); if shown it comes from ciphertext encrypted to the source key.
 
 #### R-06 Send follow-up message (POST, session; text only)
 | # | Field | Dev | Tor | GW | SWS | Seal | IST | Rel | Case | DB | Blob | Logs | Bak | Notif |
@@ -352,7 +385,7 @@ Tables §8.2 describe **Tier W** (default). Tier V and C-38 deltas are in §8.3.
 | F24 | Auth data (session) | T | N | R | T | T | N | N | N | N | N | N | N | N |
 | F25 | Content (message) | S | N | R | R | T | E | E | E | E | N | N | E | N |
 
-¹ 4 KiB bucket (ADR-011).
+¹ 4 KiB bucket (ADR-011). Each follow-up record in C-12 stores only its import-slot date; no per-case list of source activity days is kept elsewhere (ADR-038(3)). The follow-up dates of one case nevertheless remain visible to case members and to holders of C-12 and its backups (§5 note 25). Optional delayed delivery (1–3 days random, ADR-038(4)) decouples them from visit days.
 
 #### R-07 Delete / close mailbox (SW-15: POST with passphrase re-entry)
 | # | Field | Dev | Tor | GW | SWS | Seal | IST | Rel | Case | DB | Blob | Logs | Bak | Notif |
@@ -380,7 +413,7 @@ Tables §8.2 describe **Tier W** (default). Tier V and C-38 deltas are in §8.3.
 | F24 | Auth data (passphrase re-entry; `lookup_tag`, `auth_pk`) | S | N | R | R | T | C→del² | N | N | N | N | N | C⁴ | N |
 | F25 | Content (pending replies) | — | — | — | — | N | E→del² | N | N | N | N | N | E⁴ | N |
 
-² Source account record (`lookup_tag`, `auth_pk`, `prefs_ct`, mailbox ids) and pending replies deleted from C-08 immediately (PRD-028); no closure envelope is created. ³ Z-CORE holds only `routing_ct`; at the next reply push the intake rejects the unknown mailbox and Z-CORE marks the case `mailbox_closed` (day granularity). ⁴ Persists in Z-INTAKE backups until their expiry (14-day rolling, §8.4).
+² Source account record (`lookup_tag`, `auth_pk`, `prefs_ct`, mailbox ids) and pending replies deleted from C-08 immediately (PRD-028); no closure envelope is created; a deletion tombstone (hash of `lookup_tag`) is kept for the backup window so that a restore does not resurrect the mailbox (META-016, RVW-A-28; owned by `19`). ³ Z-CORE holds only `routing_ct`; the intake reports the closure to Z-CORE only after a uniformly random delay of 3–21 days and at ISO-week granularity (META-033, RVW-B-26), so the closure date cannot be matched to workplace events. ⁴ Persists in Z-INTAKE backups until their expiry (14-day rolling, §8.4).
 
 #### R-08 Recipient API calls (Candor Desk → Case Service), incl. reply-push sub-flow
 Fields describe the **staff user**. Source device and intake source-facing layers are not on the path; the reply-push sub-flow reaches IST via the relay.
@@ -389,7 +422,7 @@ Fields describe the **staff user**. Source device and intake source-facing layer
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | F01 | Staff IP | — | —¹ | — | — | — | N | N | T | N | N | C² | C² | N |
 | F02 | Network route | — | —¹ | — | — | — | N | N | N | N | N | N | N | N |
-| F03 | Timestamp exact | — | —¹ | — | — | — | N | T | T | C³ | N | C³ | C | T⁴ |
+| F03 | Timestamp exact | — | —¹ | — | — | — | N | T | T | C³ | N | C³ | C | N⁴ |
 | F04 | Timestamp rounded | — | — | — | — | — | C↓⁵ | T | T | C↓ | N | N | C↓ | N |
 | F05 | Request length | — | —¹ | — | — | — | N | T | T | N | N | N | N | N |
 | F06 | Response length | — | —¹ | — | — | — | N | N | T | N | N | N | N | N |
@@ -413,7 +446,7 @@ Fields describe the **staff user**. Source device and intake source-facing layer
 | F24 | Auth data (token; WebAuthn assertion) | — | — | — | — | — | N | N | T | C¹¹ | N | N¹² | C¹¹ | N |
 | F25 | Content (case objects; replies) | — | — | — | — | — | E | E | E | E | E | N | E | N |
 
-¹ `O` if the staff path uses a restricted-discovery onion instead of the internal network (`16-TOR-I2P.md`). ² SECURITY audit, authentication and step-up events only; IP field nulled after 90 days. ³ Staff action timestamps (exact) — permitted by ADR-010. ⁴ Notification digest hour only. ⁵ Reply day. ⁶ On login events. ⁷ Desk uses audience-bound bearer tokens, no cookies (ADR-029). ⁸ Reply push: intake decrypts `routing_ct` with the Intake Routing Key to find the mailbox and stores the sealed reply under it; replier role/fingerprint are sealed inside the reply. ⁹ Staff notification address (configuration). ¹⁰ Pseudonymous case id in CASE audit. ¹¹ WebAuthn credential public keys and token-signing metadata (C-21 tables); never private keys. ¹² Secrets never logged.
+¹ `O` if the staff path uses a restricted-discovery onion instead of the internal network (`16-TOR-I2P.md`). ² SECURITY audit, authentication and step-up events only; IP field nulled after 90 days. ³ Staff action timestamps (exact) — only in the SECURITY/SYSTEM tables enumerated in `09` (sessions, job leases, config cool-off, break-glass expiry) and audit events for staff actions; never for source-originated events or events triggered by them, e.g. import (ADR-046(11), ADR-038(1)). ⁴ Notifications are sent on a constant daily schedule whether or not anything is pending (ADR-038(2)); no event time reaches C-23. ⁵ Reply day. ⁶ On login events. ⁷ Desk uses audience-bound bearer tokens, no cookies (ADR-029). ⁸ Reply push: intake decrypts `routing_ct` with the Intake Routing Key to find the mailbox and stores the sealed reply under it; replier role/fingerprint are sealed inside the reply. ⁹ Staff notification address (configuration). ¹⁰ Pseudonymous case id in CASE audit. ¹¹ WebAuthn credential public keys and token-signing metadata (C-21 tables); never private keys. ¹² Secrets never logged.
 
 #### R-09 Admin calls (Admin Console / `candorctl` → admin-api; SSH to hosts)
 | # | Field | Dev | Tor | GW | SWS | Seal | IST | Rel | Case | DB | Blob | Logs | Bak | Notif |
@@ -469,7 +502,7 @@ Fields describe the **staff user**. Source device and intake source-facing layer
 | F24 | Auth data | N | N | N | N | — | N | N | T² | — | — | N | — | — |
 | F25 | Content (public key-directory snapshot) | T | N | R | T | — | C¹ | T¹ | C¹ | — | — | N | — | — |
 
-¹ Snapshot pushed by C-09 to C-08 and served by C-06; published data, not source data. ² Desk-side fetch (authenticated staff call). ³ Snapshot served as one fixed object per epoch; clients always fetch the **entire** directory, never a per-channel subset, so the fetch does not reveal channel choice (META-011). ⁴ Served identically with or without a session; the session cookie is not required and not read on this route. ⁵ Not selected by the source.
+¹ Snapshot pushed by C-09 to C-08 and served by C-06; published data, not source data. Directory publications (epoch keys, roster changes) are batched to a fixed weekly publication slot (ADR-036(7), META-034); the intake enforces a snapshot high-water mark (ADR-036(6)). ² Desk-side fetch (authenticated staff call). ³ Snapshot served as one fixed object per publication; clients always fetch the **entire** directory, never a per-channel subset, so the fetch does not reveal channel choice (META-011). ⁴ Served identically with or without a session; the session cookie is not required and not read on this route. ⁵ Not selected by the source.
 
 #### R-11 Health checks (C-25 metrics pull; onion reachability probe)
 | # | Field | Dev | Tor | GW | SWS | Seal | IST | Rel | Case | DB | Blob | Logs | Bak | Notif |
@@ -491,7 +524,7 @@ Fields describe the **staff user**. Source device and intake source-facing layer
 | F24 | Auth data (probe HMAC; metrics mTLS) | — | N | R | T⁴ | T | T | T | T | N | N | N | N | N |
 | F25 | Content (health status, bucketed counters) | — | N | R | T | T | T | T | T | T | T | C⁵ | N | T³ |
 
-¹ The monitor's own Tor traffic (its guard sees the monitor host). ² SYSTEM events, 90 days. ³ Alert notifications to operators (content-free about sources). ⁴ Probes carry an HMAC header so C-06 excludes them from counters; the HMAC key is per-deployment. ⁵ SOURCE-SENSITIVE counters only as bucketed values (§12.4).
+¹ The monitor's own Tor traffic (its guard sees the monitor host). ² SYSTEM events, 90 days; SYSTEM events triggered by source actions (e.g., relay pulls with arrivals) carry no time finer than the import slot and no arrival-count bucket (META-029). ³ Alert notifications to operators (content-free about sources). ⁴ Probes carry an HMAC header so C-06 excludes them from counters; the HMAC key is per-deployment. ⁵ SOURCE-SENSITIVE counters leave only as a global daily health band (§12.4). External Watcher probes (ADR-035(1)) are ordinary anonymous onion GETs of static assets and the running manifest, like R-01.
 
 ### 8.3 Deltas: Tier V and Confidential Clearnet (C-38)
 
@@ -500,12 +533,12 @@ Fields describe the **staff user**. Source device and intake source-facing layer
 | R-02/R-03/R-06 | F09 Filename, F10 MIME, F25 Content at GW/SWS/Seal | R / R / T | **E** at every server layer (client-encrypted before upload; C-07 not involved except envelope passthrough) |
 | R-02/R-03/R-06 | F07 Upload size at Tor/GW/SWS/Seal | O (exact) / T (exact) | **Padded client-side**; exact size exists only on device and inside the ciphertext |
 | R-02/R-04 | F24 Auth data | Passphrase T in C-07 | Passphrase **never leaves device**; server sees signature over a server challenge (T) and stores public keys (C) |
-| R-03 | Upload mechanism | Single POST | Chunked: fixed 1 MiB chunks, random `upload_token` (T at SWS, C at IST, TTL 24 h), **not linked to `source_account_id` until finalization**, chunks deleted on finalize or expiry (META-020, THR-047) |
-| R-05 | F25 replies at Seal/SWS | T (decrypted in C-07) | **E**; decrypted on device only |
+| R-03 | Upload mechanism | Single POST per part, no resume (ADR-046(4)) | Resumable upload per the canonical protocol of `08-API.md` (ADR-046(4)): per-upload random tokens, 8 MiB chunks, no cross-session resume, resume ≤ 24 h only within one session; tokens **not linked to `source_account_id` until finalization**; chunks deleted on finalize or expiry (META-020, THR-047). Per-file cap 4 GiB (standard), 16 GiB only in EE profiles. |
+| R-05 | Reply retrieval | Server-side lookup after passphrase derivation; T (decrypted in C-07) | **Fetch-all dead-drop** (ADR-039): the client downloads all reply ciphertexts of the last 30 days in fixed-size pages and trial-decrypts locally; no authentication, no mailbox selector, so F19/F24 are **N** at SWS/Seal/IST for this request; replies **E**, decrypted on device only |
 | all | F11 Client type | UA dropped | Source App sends fixed `User-Agent: Candor-Source` with no version/platform; protocol major version in a request header (T) |
 | all | F14 Locale | URL path | Not sent |
-| R-10 | Verification | None (Tier W cannot verify) | Full snapshot + signed tree head + consistency proof verified; tree head gossiped (THR-118) |
-| Dev | Local state | TB memory only | Source App keeps **no persistent state by default**; optional encrypted local state (passphrase-derived key) only if the source opts in, with forensic-residue warning |
+| R-10 | Verification | None: Tier W sources cannot verify the directory; verification for them is Desk's recipient-list check at import and External Watchers (ADR-036 Tier W limit) | Full snapshot + signed tree head + consistency proof + ≥ 2 external witness cosignatures (EE/GOV/MANAGED) verified; tree head pinned and gossiped (ADR-036(5), THR-118) |
+| Dev | Local state | TB memory only | Source App keeps a **persistent Key Directory tree-head pin** (ADR-036(5); public data, but its presence and tenant are forensic evidence — PR-13, ANON-019 as amended); no other persistent state by default; optional encrypted local state (passphrase-derived key) only if the source opts in, with forensic-residue warning. Web bundle: pin shown as a short fingerprint the source may note. |
 
 | Request | Field | Onion (Tier W) | **C-38 Confidential Clearnet** |
 |---|---|---|---|
@@ -522,8 +555,8 @@ Fields describe the **staff user**. Source device and intake source-facing layer
 |---|---|---|---|---|---|---|
 | F01 | IP address | **NEVER COLLECT** (onion). Staff/admin: COLLECT in SECURITY audit | Staff: C-24 SECURITY stream; host sshd logs | Staff IP nulled after 90 days | Security reviewers, auditors | Detect staff credential misuse |
 | F02 | Network route / circuit | **TRANSIENT MEMORY ONLY** | C-05/C-06 RAM (HMAC-keyed circuit ID) | ≤ 10 min | Nobody (automated rate limiter) | Per-circuit rate limiting (ADR-026) |
-| F03 | Exact timestamp | Sources: **TRANSIENT MEMORY ONLY**. Staff actions: COLLECT | Staff: C-24, C-12 | SECURITY 400 days; CASE: case life + 12 months; SYSTEM 90 days | Auditors; case members for their cases | Accountability of staff actions (ADR-010) |
-| F04 | Rounded timestamp (UTC day) | **COLLECT (coarsened)** | C-08 (`received_epoch_day`), C-12 (`received_date`), backups | C-08 until relayed (typically ≤ 25 min); C-12 case retention | Case members; admins (metadata) | SLA computation (EU Art 9), display |
+| F03 | Exact timestamp | Sources: **TRANSIENT MEMORY ONLY** (no record; import-slot times and pre-relay C-08 residue per §5 note 17). Staff actions: COLLECT only in the tables enumerated by `09` and staff-action audit events, never for source-originated or source-triggered events (ADR-046(11)) | Staff: C-24, C-12 | SECURITY 400 days; CASE: case life + 12 months; SYSTEM 90 days | Auditors; case members for their cases | Accountability of staff actions (ADR-010) |
+| F04 | Rounded timestamp (UTC day) | **COLLECT (coarsened)** | C-08 (`received_epoch_day`, delayed-delivery release date), C-12 (`received_date`; import-slot date per follow-up), backups | C-08 until relayed at the next import slot (≤ 6 h default; ≤ 24 h HIGH/GOV; plus the delayed-delivery hold of 1–3 days if chosen); C-12 case retention | Case members (day; ISO week in HIGH); admins (metadata) | SLA computation (EU Art 9), display |
 | F05 | Request length | **TRANSIENT MEMORY ONLY** | RAM | Request | Nobody | HTTP processing, limits |
 | F06 | Response length | **TRANSIENT MEMORY ONLY** (padded) | RAM | Request | Nobody | — |
 | F07 | Upload size | Exact: **TRANSIENT** (Tier W) / never (Tier V); padded: **COLLECT (coarsened)**; exact: **ENCRYPT** inside envelope | C-08, C-12, C-13 (padded) | With object | Case members (exact, after decryption); admins (padded) | Quotas, storage |
@@ -543,10 +576,10 @@ Fields describe the **staff user**. Source device and intake source-facing layer
 | F21 | Recipient / channel id | **COLLECT** (channel id); recipient user ids COLLECT in Z-CORE | C-08, C-12, C-14 | Config life / case retention | Admins (metadata), case members | Routing, key selection |
 | F22 | Geographic data | **NEVER COLLECT** (no GeoIP anywhere, including staff) | — | — | — | — |
 | F23 | Device id | **NEVER COLLECT** (sources). Staff: Desk device key fingerprint COLLECT | C-14, C-12, C-24 | Device registration life + 400 days | Admins, auditors | Device binding, revocation |
-| F24 | Auth data | Passphrase: **TRANSIENT MEMORY ONLY** (C-07, Tier W; ≤ request, or ≤ 2 h draft session for a new passphrase); `lookup_tag` + `auth_pk`: **COLLECT**; staff: WebAuthn public keys COLLECT | C-08 (source), C-21/C-12 (staff) | Mailbox life / credential life | Automated verification only | Authentication |
+| F24 | Auth data | Passphrase: **TRANSIENT MEMORY ONLY**, never stored or re-displayed from storage (C-07, Tier W; ≤ request at login, or until Recovery Credential confirmation within the ≤ 2 h draft session for a new passphrase, ADR-034); `lookup_tag` + `auth_pk`: **COLLECT**; staff: WebAuthn public keys COLLECT | C-08 (source), C-21/C-12 (staff) | Mailbox life / credential life | Automated verification only | Authentication |
 | F25 | Content | **ENCRYPT** (Tier W plaintext TRANSIENT in C-06/C-07; tor daemon raw buffers) | C-08, C-12, C-13, backups (ciphertext) | Case retention; crypto-erasure on disposition | Case key holders | The purpose of the platform |
 
-Backups (`19-BACKUPS-DR.md`): Z-INTAKE backup = C-08 account records + pending replies only (no envelopes older than one relay cycle), 14-day rolling; Z-CORE backups 35-day rolling; content keys never in backups (ADR-025).
+Backups (`19-BACKUPS-DR.md` owns the schedule): Z-INTAKE backup = C-08 account records + pending replies only (no envelopes older than one relay cycle) + deletion tombstones, 14-day rolling; Z-CORE backups 35-day rolling and contain all server-visible metadata of cases (including cases disposed after the backup was taken) until they expire (RVW-B-21); content keys never in backups (ADR-025); Erasure Key Vault excluded from routine backups, own backups ≤ 14 days, replicated to the DR site within HA RPO, signed erasure log applied before serving after restore; infrastructure-level backups (hypervisor/SAN) of core hosts MUST exclude the vault volume — otherwise the 14-day deletion bound does not hold (ADR-044(4)). Conflicting statements in `35` ("intake backups: none"; 12-month monthly core sets) are listed as cross-document requests.
 
 ### 8.5 Data-minimization principles
 
@@ -562,6 +595,42 @@ Backups (`19-BACKUPS-DR.md`): Z-INTAKE backup = C-08 account records + pending r
 | DM-08 | **Staff data is minimized too:** staff IPs expire from audit at 90 days; no keystroke/screen monitoring features. |
 | DM-09 | **Aggregates are data:** statistics are subject to §12 before leaving the case team. |
 | DM-10 | **Inventory changes are privacy changes:** any change to §8 requires privacy review and a version bump of this document (PRIV-001). |
+
+### 8.6 Server-side items not keyed to a single request (normative; added in revision round 2)
+
+The v1.0 inventory omitted items that implementing specs re-introduced (RVW-B general finding; RVW-B-01, -06, -11, -12, -13, -21, -22; RVW-A-02, -09, -10, -26). This table is part of the normative inventory (META-001). Any SS/WF-class column of `09` that does not map to a row of §8.2–§8.6 is an inventory violation (PRIV-018).
+
+| Item | Where | Form | Retention | Visible to | Decision / finding |
+|---|---|---|---|---|---|
+| Tier W draft text and identity block | C-07 mlocked RAM, keyed by opaque session handle | Plaintext in RAM only; never persisted, including on error paths | ≤ 20 min idle / 2 h absolute; zeroized on expiry, submit, discard or sealer restart | Nobody (live intake compromise: PR-01) | ADR-034; RVW-A-02, RVW-B-12 |
+| Tier W draft attachment parts | tmpfs staging on H-INTAKE | Padded, encrypted under a per-session key held only in sealer RAM; no wraps to any member until Submit | As draft session | Nobody | ADR-034, ADR-038(5); RVW-A-07 |
+| Per-draft timers / expiry values | — | **Not stored** (in-RAM index only) | — | — | ADR-034; RVW-A-02 |
+| Source passphrase | — | **Not stored** | — | — | ADR-034; RVW-B-13 |
+| Sealed envelopes awaiting import | C-08 | Ciphertext + `received_epoch_day` + `batch_seq` (+ release date if delayed delivery) | Until acknowledged after the next import slot / release date | Operator (metadata) | ADR-038(1)/(4) |
+| Unimportable envelopes | C-08 | As above | Deleted after 14 days pending with dual-approved rejection | Operator | ADR-038(6) |
+| Envelope `tier` column | — | **Removed** | — | — | ADR-039; RVW-A-26 |
+| Header digest (dedup) | C-08 / C-12 | Hash | ≤ 24 h | Operator | ADR-039; RVW-A-26, RVW-B-33(e) |
+| Per-mailbox access time, count, own-message history | — | **Not stored** | — | — | ADR-039; RVW-A-10, RVW-A-26 |
+| Per-account upload quota | C-08 (or C-06/C-07 RAM) | Current-day counter only, reset daily | 1 day | Automated | ADR-038(3); RVW-A-26, RVW-B-11 |
+| Account `activity_day` (for inactive-mailbox purge) | C-08 | Day of last envelope commit (see note) | Mailbox life | Operator | Retained by `09`; RVW-B-11 proposes month granularity — cross-document request |
+| Mailbox-closed signal to Z-CORE | C-08 → C-12 | Flag, ISO week, released after random 3–21 days | Case life | Case members, admins | META-033; RVW-B-26 |
+| Deletion tombstones | C-08, BS-INTAKE | Hash of deleted `lookup_tag`/reply ref | Backup window (14 d) | Operator (reveals that a deletion occurred, not whose) | RVW-A-28 (owned by `19`) |
+| Import-slot date of each follow-up | C-12 | UTC day (display ISO week in HIGH) | Case life | Case members; DB/backup holders | ADR-038(3); residual RVW-B-11 (§5 note 25) |
+| Import audit event | C-24 CASE | Date only; no exact `ts` for source-triggered events | CASE retention | Auditors | ADR-038(1), ADR-033(4); RVW-B-06 |
+| Core DB commit/WAL, blob object metadata times | C-12, C-13, backups | Equal to the import slot time | Backup retention | Operator | ADR-038(1); RVW-A-09 |
+| COI exclusions | C-12 | Blinded tags `HMAC(K_case_excl, user_id)`, `K_case_excl = HKDF(case_key, "candor/coi-excl/v1")`, padded to 8 per case; no `source` enum in cleartext | Case life | Nobody can read identities without the case key | ADR-037(3); RVW-B-01 |
+| COI removal reason codes in audit | C-24 | Not distinguishable from other removals | — | — | ADR-037(3); RVW-B-01 |
+| Source's COI answers ("report concerns…") | Inside the sealed envelope (Triage Set only) | Encrypted | Case life | Triage Set; later case members if shared | ADR-037(4) |
+| Recipient key IDs in cleartext headers | — | **Never** (16 anonymous slots) | — | — | ADR-033(1), ADR-046(10); RVW-B-30 |
+| Staff notifications | C-23 → mail/chat | Fixed text, constant daily schedule to each subscribed member, or disabled | Transport's retention | Transport operator (learns subscriber list) | ADR-038(2); RVW-A-19, RVW-B-05 |
+| Global rate-limit / queue states | RAM; dashboards | Only a coarse daily health band | — | Admins, SOC | ADR-038(5), ADR-046(5); RVW-A-27 |
+| Key Directory publications | C-14 | Epoch keys and roster changes batched to a fixed weekly slot; OVERSIGHT-certified role labels | Log life | Public | ADR-036(3)/(7); RVW-A-29, RVW-B-32 |
+| Operator Statement, INCIDENT_NOTICE, platform manifest, running manifest | C-14, TUF | Signed public statements | Log life | Public | ADR-035(1)/(2)/(4), ADR-040 |
+| External Watcher reports | Watchers' publications | Comparison results | Watchers' policy | Public | ADR-035(1) |
+| IR captures of intake memory/traffic | Encrypted to independent custodians | Ciphertext | Per `31` | Custodians jointly | ADR-035(4); RVW-C-04 |
+| Recipient device custody status | C-12 / Admin UI; channel descriptor | Enum + authenticator attestation | Device life | Admins, sources (INDEPENDENT channels) | ADR-043 |
+| Erasure Key Vault + signed erasure log | Vault volume on H-CORE (physical TPM for HIGH/GOV); DR replica; vault backups | Per-case Erasure Keys; list of erased case IDs | Keys until disposition; vault backups ≤ 14 d | Operator (keys alone decrypt nothing) | ADR-033(3), ADR-044(4); RVW-C-06, C-07 |
+| Records-search indices | Desk of an authorized member only | Local encrypted index | Per Desk retention | That member | ADR-044(5); no server-side global search |
 
 ## 9. Cross-layer correlation analysis
 

@@ -1,5 +1,5 @@
 # 27 — Secure Development Lifecycle (SDL)
-Status: Draft v1.0 · Edition applicability: both (CE and EE; EE commercial modules covered at reduced tier, never in the trust path) · Owner: Security Engineering (Product Security WG)
+Status: Draft v1.1 (revision round 2: ADR-034..046) · Edition applicability: both (CE and EE; EE commercial modules covered at reduced tier, never in the trust path) · Owner: Security Engineering (Product Security WG)
 
 ## 1. Purpose and scope
 
@@ -8,7 +8,7 @@ This document defines how Candor software is specified, designed, written, revie
 - the SDL phases and artefacts, mapped task by task to **NIST SSDF SP 800-218 v1.1** (with a watch on the **v1.2 / SP 800-218 Rev. 1 initial public draft**, 17 Dec 2025);
 - verification targets under **OWASP ASVS 5.0.0** (L3 for trust-path components, L2 for the rest), a yearly **OWASP SAMM v2** self-assessment, and the **CISA Secure by Design** pledge goals;
 - the memory-safety policy, feature-level threat modelling, code review rules (two-person review on the trust path, specialist crypto review), and coding standards (Rust `unsafe` policy, no panics on hostile input, zeroization, constant-time code);
-- the mandatory **security release gates** (§13), each with pass criteria.
+- the mandatory **security release gates** (§13), each with pass criteria, including the spec-constant consistency lint and inferential anonymity tests added in revision round 2 (SG-25, SG-26).
 
 The document does **not** cover supply-chain integrity controls (dependencies, builds, signing, CI hardening), which are in `28-SUPPLY-CHAIN.md`, or the test catalogues, which are in `29-SECURITY-TESTING.md` (ST-) and `30-ANONYMITY-TESTING.md` (AT-). Audits are in `37-SECURITY-AUDIT-PLAN.md`.
 
@@ -29,6 +29,9 @@ Honest-language note: following the SDL reduces the rate and severity of defects
 | `36-OPEN-SOURCE-GOVERNANCE.md` | Maintainer roles, contributor model (DCO), who may become a reviewer |
 | `37-SECURITY-AUDIT-PLAN.md` | External audits that feed findings back into §12 and the gates |
 | `40-SECURITY-ASSUMPTIONS.md` | ASM-* assumptions on developer endpoints and reviewer honesty |
+| `39-REQUIREMENTS-TRACEABILITY.md` | Owns the machine-readable **constants registry** (`specs/constants.yaml`) and the superseded-phrase list consumed by SG-25 |
+| `03-PRIVACY-ANONYMITY.md` §10 | Single-source compelled-disclosure inventory from which SG-11 drill oracles are generated |
+| `DECISIONS.md` ADR-035, ADR-040, ADR-046 | Watcher digests (SG-28), Platform Manifest and security floor (SG-27), consistency resolutions (SG-25) |
 
 Research basis: R5 §C (SSDF, ASVS, SAMM, Scorecard, S2C2F, CISA Secure by Design, CRA) [B-CR-47..B-CR-51]; R1 audit lessons (fixes must cover bug classes, not single instances) [B-SD-28, B-SD-33..B-SD-36]; R2 lessons (mature projects still ship authorization, tenant and mass-assignment bugs) [B-GL-19, B-GL-37, B-GL-39]; R3 INC-50/51 (review of crypto and RNG code).
 
@@ -45,7 +48,7 @@ flowchart LR
   G --> H[Human review §11 - 2-person on trust path]
   H --> I[Merge to protected branch - signed, see 28]
   I --> J[Nightly/weekly: fuzzing, canary, harness - 29/30]
-  J --> K[Release security gates SG-01..SG-24 §13]
+  J --> K[Release security gates SG-01..SG-28 §13]
   K --> L[Threshold-signed release - 28/33]
   L --> M[Operate: VDP, bounty, advisories - 37]
   M --> N[Root-cause analysis -> regression rule §14]
@@ -92,7 +95,7 @@ SSDF v1.1 groups practices as PO (Prepare the Organization), PS (Protect the Sof
 | **PO.3.1** Specify toolchains | Pinned Rust toolchain (`rust-toolchain.toml`, exact version), pinned Node, pinned linters | Toolchain manifest | SDL-040; SCM (28) |
 | **PO.3.2** Follow recommended practices for deploying toolchains | Toolchains fetched through the internal mirror and hash-verified (28) | Mirror logs | 28 |
 | **PO.3.3** Configure tools to generate artefacts | CI emits SARIF (SAST), SBOM, provenance, test reports and gate evidence bundle per release | `gate-evidence/<version>/` | SDL-046 |
-| **PO.4.1** Define criteria for software security checks | Gates SG-01..SG-24 (§13) with numeric pass criteria | This document | SDL-046 |
+| **PO.4.1** Define criteria for software security checks | Gates SG-01..SG-28 (§13) with numeric pass criteria | This document | SDL-046 |
 | **PO.4.2** Implement processes to gather/safeguard information for criteria | Gate evidence bundle signed and archived with the release | Signed bundle | SDL-047 |
 | **PO.5.1** Separate and protect development environments | Release-signing and build infra reachable only from managed hardware-key workstations (28) | Access policy | 28 (INC-41) |
 | **PO.5.2** Secure and harden development endpoints | Managed dev endpoints for maintainers with merge rights: FDE, auto-update, hardware keys, no personal-profile sync | MDM compliance report | SDL-007 |
@@ -224,6 +227,8 @@ The Secure by Design principles (2023) and the pledge goals (May 2024) are summa
 - It adds a network listener, an outbound connection, a new host role, or a new secret.
 - It adds a config option (any CFG class, see 32).
 - It changes logging, metrics, notifications, timestamps, identifiers, padding or export.
+- It changes any schedule or cadence (relay import slots, notification schedule, Key Directory publication slot, fleet check-in, backup cadence, update checks) or any staff-side event that is exported (SIEM, IdP-visible logins, support bundles, telemetry, fleet fields), because staff reactions are a proxy for source actions (RVW-B-31, RVW-C-02).
+- It introduces or changes a spec constant (k, windows, timers, retention, sizes) registered in `specs/constants.yaml`.
 - It adds a dependency with network, filesystem or parsing capability in T0/T1.
 
 ### 10.2 Template (`threat-model/features/<feature-id>.md`)
@@ -233,6 +238,7 @@ Mandatory sections:
 3. **LINDDUN** (privacy: Linkability, Identifiability, Non-repudiation, Detectability, Disclosure, Unawareness, Non-compliance) per data flow (Knowledge (unverified) taxonomy).
 4. Mapping to THR-001..THR-048 (new threats are proposed to 02).
 5. "What does this feature add to the compromise-drill answers?": for each drill AT-020..AT-032 in 30, the new data an adversary would learn. Answering "nothing" requires justification.
+5a. **Inferential analysis** (RVW-B-29): for every new time-bearing, count-bearing or membership-bearing value, state whether it enables (i) timing correlation with submissions (including staff-reaction proxies), (ii) intersection over multiple source visits, (iii) differencing across windows, bucket boundaries or regime switches, (iv) inference of COI exclusions by excluded members. Name the 30 test that covers each "yes".
 6. New canary markers and sinks to add to AT-001.
 7. Abuse cases, including a malicious insider (THR-018/019/020) and a malicious server against clients (ADR-027).
 8. Tests added (ST/AT IDs).
@@ -260,7 +266,7 @@ The master threat model (02) is versioned with every minor release. A release wh
 
 - Approvals are dismissed on any new push (stale-review dismissal).
 - Administrators cannot bypass branch protection (28).
-- Emergency fixes follow the same rule. The embargoed-fix process (37) uses a private fork with the same review requirements.
+- Emergency fixes follow the same rule. The embargoed-fix process (37) uses a private fork with the same review requirements. Emergency releases pass every non-waivable gate, keep the ADR-040 minimum 2-hour cooling period with ≥ 2 signers from ≥ 2 organisations, and publish the source diff and gate evidence at signing time so External Watchers and monitors can review before instances apply them (RVW-A-16).
 
 ### 11.2 Review checklist (T0/T1, excerpt; full list in `security/review-checklist.md`)
 - Hostile input: every externally influenced length, count, index and name is bounded and validated before use or allocation.
@@ -290,7 +296,7 @@ Checklist, which the reviewer signs in the PR:
 A downstream patch to a vendored crypto dependency is prohibited unless an upstream maintainer has reviewed it (INC-51 lesson).
 
 ### 11.4 Anonymity review triggers
-Changes to: logging/metrics/tracing schema; timestamps; ID generation (e.g. a switch from random UUIDv4 to time-ordered IDs); padding; notification templates or scheduling; telemetry; source UI resources (fonts, scripts, images, links); HTTP headers and cookies; error pages; backup manifests; support-bundle contents. The reviewer must update or confirm the AT- canary sink list.
+Changes to: logging/metrics/tracing schema; timestamps; ID generation (e.g. a switch from random UUIDv4 to time-ordered IDs); padding; notification templates or scheduling; import-slot, directory-publication or other schedules; telemetry; fleet report fields; SIEM export schema; source UI resources (fonts, scripts, images, links); HTTP headers and cookies; error pages; backup manifests; support-bundle contents; aggregate/statistics definitions; COI or roster data handling. The reviewer must update or confirm the AT- canary sink list **and** the inferential analysis (§10.2 item 5a).
 
 ### 11.5 AI-assisted development
 - Code produced with AI assistants is reviewed as if the committer wrote it. The committer is accountable.
@@ -363,7 +369,7 @@ Every release candidate of any trust-path artefact passes all applicable gates. 
 | SG-08 | Authorization & tenancy | ST-060..ST-070, ST-077, ST-078 = 100% pass; route registry has 0 routes without declarations | all | test report |
 | SG-09 | Malicious-server harness | ST-090..ST-097 = 100% pass on all client builds (C-15 Linux/macOS/Windows, C-03, C-17 bridge) | all | harness report |
 | SG-10 | Anonymity canary | AT-001..AT-019: 0 hits in any sink (any hit = release blocker, see 30) | all | canary report |
-| SG-11 | Compromise-drill regression | AT-020..AT-032 answers ⊆ documented expected answers (30); any new datum requires an approved update to 03's compelled-disclosure inventory | minor, major | drill report |
+| SG-11 | Compromise-drill regression | AT-020..AT-032 answers ⊆ expected answers **generated** from the single-source compelled-disclosure inventory in 03 §10 (itself generated from 09 column classifications), never hand-written in 30; any SS-class column absent from the inventory fails; any new datum requires an approved update to 03's inventory (RVW-B-29) | minor, major | drill report; oracle-generation log |
 | SG-12 | Timing/size/fingerprint | AT-040..AT-058 pass | all | test report |
 | SG-13 | Reproducibility | ≥2 independent builders produce bit-identical artefacts; diffoscope report empty (28) | all | builder attestations |
 | SG-14 | Provenance & SBOM | SLSA Build L3 provenance and CycloneDX + SPDX SBOM for every artefact, signed, logged (28) | all | attestations |
@@ -377,10 +383,14 @@ Every release candidate of any trust-path artefact passes all applicable gates. 
 | SG-22 | Pentest | For major: independent pentest completed on the RC with 0 open Critical/High and all Medium either fixed or accepted with Security Lead + one external reviewer sign-off; for minor with new attack surface: scoped pentest (37) | minor (conditional), major | report |
 | SG-23 | Advisory readiness | For releases fixing vulnerabilities: advisories, CVE IDs and CE/EE simultaneous publication scheduled (37) | as applicable | advisory drafts |
 | SG-24 | Usability-security | For releases changing source flow, mode display or recipient export flow: AT-060 and the relevant AT-070..AT-075 study thresholds met | conditional | study report |
+| SG-25 | Spec-constant consistency lint | Every constant registered in `specs/constants.yaml` (k-thresholds, metric periods, timers, time-locks, epoch/decrypt windows, import slots, retention bounds, size classes, chunk sizes, KDF parameters, CFG labels) is declared once with its owning document; CI finds **0** divergent literals across `specs/*.md`, code defaults, config schemas, installer profiles and test oracles; **0** occurrences of superseded phrases listed per ADR amendment (e.g., cleartext recipient key IDs, "WEAKENING", intake replication); CFG keys, DB parameters and flow tables cross-checked (RVW-B-07, RVW-B-30, RVW-C-08; ADR-046) | all | `spec-lint` report |
+| SG-26 | Inferential anonymity tests | The 30 inferential suite passes: timing-correlation audit over **all** persisted/exported time-bearing values (DB, WAL, blob metadata, audit, notifications, SIEM, support bundles, telemetry, fleet) with no predictor beating the day-granular (HIGH: week-granular) baseline by the 30-defined margin; visit-day intersection; excluded-member (COI) inference; notification addressee/send-time independence; staff-reaction correlation; differencing across windows and regime switches (RVW-B-29, RVW-B-04, RVW-B-05, RVW-B-09, RVW-C-02). Test IDs are assigned by 30 | minor, major; patch if §11.4 triggered | inferential test report |
+| SG-27 | Platform Manifest and security floor | TUF-signed Platform Manifest (package names, versions, hashes from the pinned snapshot mirror) produced for the release and verified by the self-test on every profile in the matrix; security-floor metadata raised for every release fixing a trust-path vulnerability; below-floor start refused (ADR-040) | all | manifest; floor metadata; test report |
+| SG-28 | Watcher reference set | Signed digests of all static source-UI assets, templates and CSP headers, and the Sealer running-manifest value, are published with the release and logged; a reference External Watcher fetch against a staging onion matches them (ADR-035(1)) | all | digest list; watcher run log |
 
 ### 13.2 Exceptions
 - An exception is only possible for SG-03, SG-04, SG-05, SG-07 coverage, SG-18 and SG-22 Medium items. It needs: a written risk statement in honest language, compensating controls, an expiry of ≤ 90 days, and approval by Security Lead **plus** one Trust-Path Maintainer who is not the Release Manager.
-- Gates SG-02, SG-06, SG-09, SG-10, SG-11 (new datum), SG-13, SG-15 and SG-16 are **non-waivable**.
+- Gates SG-02, SG-06, SG-09, SG-10, SG-11 (new datum), SG-13, SG-15, SG-16, SG-25, SG-26 (any regression versus the previous release), SG-27 and SG-28 are **non-waivable**. An SG-26 failure against a newly introduced threshold (not a regression) may be excepted under the rules above only with additional sign-off by an Anonymity Reviewer and publication of the measured leakage in the release notes.
 - Exceptions are listed in the public release notes (title and expiry, without exploit detail until fixed).
 
 ## 14. Vulnerability response inside the SDL
@@ -443,7 +453,7 @@ Every fix PR includes a regression test (SDL-051) and a variant analysis (SDL-05
 | SDL-043 | The memory-unsafe component inventory (§9) SHALL be maintained with isolation measures and exit plans and reviewed every 6 months. | ADR-019; INC-54 | THR-014; THR-023 | C-05; C-08; C-12; C-17; C-15 | INSP: inventory review record |
 | SDL-044 | New trust-path code SHALL be written in Rust; new C/C++ code SHALL NOT be added to the trust path. | ADR-019 | THR-014; THR-023 | C-11; C-06; C-07; C-10; C-15 | TST: language-policy lint (file extensions in T0/T1 paths) |
 | SDL-045 | FFI boundaries SHALL be classified T0 and SHALL have dedicated fuzz targets. | ADR-019 | THR-012; THR-014 | C-11 | TST: ST-040 family coverage of FFI shims; INSP |
-| SDL-046 | Releases SHALL pass gates SG-01..SG-24 (as applicable) with the numeric criteria in §13.1, evaluated by automation where possible. | B-CR-47; B-CR-46 | THR-024; THR-025 | C-31; C-32 | TST: release pipeline `gate-evaluator`; INSP: gate evidence bundle |
+| SDL-046 | Releases SHALL pass gates SG-01..SG-28 (as applicable) with the numeric criteria in §13.1, evaluated by automation where possible. | B-CR-47; B-CR-46; ADR-040; ADR-046 | THR-024; THR-025 | C-31; C-32 | TST: release pipeline `gate-evaluator`; INSP: gate evidence bundle |
 | SDL-047 | A signed gate-evidence bundle SHALL be archived with every release, and a public summary (gate status, exceptions with expiry) SHALL be published with release notes. | B-CR-47; B-CO-54 | THR-024; THR-025 | C-32 | INSP: release page; TST: bundle signature verification |
 | SDL-048 | Every release SHALL be archived immutably (source from signed tag, artefacts, SBOM, provenance, gate evidence) for ≥10 years. | B-CR-47; B-CR-50 | THR-037; THR-024 | C-32; C-33 | INSP: archive index audit |
 | SDL-049 | Vulnerability reports from all channels SHALL be triaged with CVSS 4.0 plus the Candor anonymity-impact rating defined in 37. | B-CR-47; B-SD-41 | THR-001; THR-015; THR-016; THR-021; THR-024 | C-30 | INSP: triage records; AUD (37) |
@@ -455,6 +465,11 @@ Every fix PR includes a regression test (SDL-051) and a variant analysis (SDL-05
 | SDL-055 | A yearly OWASP SAMM v2 self-assessment SHALL be performed and published with evidence, meeting the §7 targets at 1.0 GA. | R5 §C (B-CR-47) | THR-024 | C-30 | INSP: published SAMM report; AUD: supply-chain review re-scores |
 | SDL-056 | Within 90 days of final publication of SSDF v1.2 (SP 800-218 Rev. 1), the §5 mapping SHALL be updated including practice PO.6. | B-CR-47 | THR-024 | C-30 | INSP: mapping version |
 | SDL-057 | The CRA technical-file elements (SBOM, vulnerability handling process, support period, secure-by-default configuration) SHALL be produced from SDL artefacts for each release. | B-CR-50; B-CR-51 | THR-024 | C-32 | INSP: technical file per release; AUD (37) |
+| SDL-058 | The project SHALL maintain a machine-readable constants registry (`specs/constants.yaml`, owned via 39) in which every normative parameter is declared once with its owning document; specs SHALL reference constants rather than restate divergent values; CI (`spec-lint`, SG-25) SHALL fail on any divergent literal in specs, code defaults, config schemas, installer profiles or test oracles, and on unreconciled CFG keys, DB parameters or flow tables. | RVW-B-07; RVW-B-08; RVW-B-29; RVW-C-08; ADR-046 | THR-035, THR-039, THR-011 | C-30, C-31 | TST: `spec-lint` with seeded divergent-literal fixtures; INSP: registry ownership review each minor |
+| SDL-059 | For every ADR that amends or supersedes earlier text, a superseded-phrase entry SHALL be added to the lint list; SG-25 SHALL fail on any occurrence outside history/strike-through sections. | RVW-B-30; ADR-033(1); ADR-046(10) | THR-020, THR-046, THR-035 | C-30 | TST: `spec-lint` superseded-phrase fixtures |
+| SDL-060 | Releases SHALL pass the inferential anonymity suite of 30 (SG-26); every feature threat model meeting §10.1 SHALL include the §10.2 item 5a inferential analysis naming the covering test. | RVW-B-29; RVW-B-04; RVW-B-05; RVW-C-02; ADR-038 | THR-011, THR-038, THR-039, THR-020 | C-30, C-31 | TST: SG-26 gate; INSP: threat-model sample audit |
+| SDL-061 | Compromise-drill expected answers SHALL be generated from the 03 §10 inventory and 09 column classifications; hand-edited oracles SHALL fail CI. | RVW-B-29 | THR-015, THR-016, THR-038 | C-30 | TST: oracle-generation check (SG-11) |
+| SDL-062 | Each release SHALL publish the Platform Manifest, updated security-floor metadata and the External Watcher reference digest set (SG-27, SG-28); emergency releases SHALL additionally publish the source diff and gate evidence at signing and observe the ADR-040 minimum 2-hour cooling period with ≥ 2 signers from ≥ 2 organisations. | ADR-035(1); ADR-040; RVW-A-01; RVW-A-12; RVW-A-16 | THR-007, THR-024, THR-025 | C-31, C-32 | TST: release pipeline refuses to sign without artefacts; INSP: emergency release record |
 
 ## 16. Residual risks and limitations
 
@@ -465,6 +480,8 @@ Every fix PR includes a regression test (SDL-051) and a variant analysis (SDL-05
 - **ASVS/SAMM/SSDF conformance is self-assessed** except where audits sample it. Where it is not externally verified, conformance is an assertion, not proof.
 - **ASVS chapter titles, SAMM structure and CISA pledge wording in this document come from knowledge and are unverified.** They need to be verified before external claims are made.
 - Gate thresholds (for example fuzzing CPU-hours) are engineering judgements, not evidence-derived optima.
+- **Inferential tests are model-based** (SG-26). They detect leaks the adversary model anticipates; unknown inference paths and richer side knowledge (HR data, content) remain. Passing SG-26 is evidence of absence of the modelled leaks only.
+- **The constants lint (SG-25) checks textual consistency**, not correctness of the chosen values; a wrong value declared once propagates everywhere.
 
 ## 17. Open issues
 

@@ -1,6 +1,6 @@
 # 19 — Backups and Disaster Recovery
 
-Status: Draft v1.0 · Edition applicability: both (geographic WORM and online restore-test options EE) · Owner: Platform Engineering (Backup/DR) with Security Team
+Status: Draft v1.1 (revision round 2: ADR-034..046) · Edition applicability: both (geographic WORM and online restore-test options EE) · Owner: Platform Engineering (Backup/DR) with Security Team
 
 ## 1. Purpose and scope
 
@@ -23,6 +23,7 @@ Core principle, from the LastPass lesson (INC-55): **backups are production**. A
 | Source | Use |
 |---|---|
 | ADR-008, 010, 011, 013, 016, 025, 028 | Key hierarchy (no server master key), timing minimization, padding, no escrow default, audit classes, crypto-erasure, secret manifest |
+| ADR-033(3), 034, 038, 039, 044, 046 (revision round 2) | Erasure Key Vault; Tier W drafts never on disk; fixed import slots and delayed delivery; fetch-all reply pages; vault DR replication, erasure log on restore, infrastructure-backup exclusion, GOV Recovery Quorum default, `min_recipients` 2; no intake replication, no HSM fallback |
 | `17-INFRASTRUCTURE.md` §3, §4 (F7), §8.7 | Host roles; write-only backup flow; backup seizure analysis |
 | `18-DEPLOYMENT.md` §4, §13, §15 | Per-profile backup topology; commands; secret placement |
 | `20-LOGGING-AUDITING.md` | Audit checkpoints anchoring backup manifests |
@@ -42,13 +43,14 @@ Research:
 
 | Set | Contents | Produced on | Transport to store | Encrypted to | Schedule |
 |---|---|---|---|---|---|
-| BS-CORE | Logical dump of C-12 (`pg_dump -Fc`, all tables incl. Erasure-Key-encrypted member wraps, **excluding the Erasure Key Vault**, ADR-033(3)), C-13 blob store (ciphertext objects), C-14 key directory + transparency log, C-24 audit store | H-CORE | F7 → H-BAK (write-only) | BK-DATA public key | Nightly full (02:15 local ± 30 min jitter) |
+| BS-CORE | Logical dump of C-12 (`pg_dump -Fc`, all tables incl. Erasure-Key-encrypted member wraps and the production erasure log, **excluding the Erasure Key Vault**, ADR-033(3)), C-13 blob store (ciphertext objects), C-14 key directory + transparency log, C-24 audit store | H-CORE | F7 → H-BAK (write-only) | BK-DATA public key | Nightly full (02:15 local ± 30 min jitter) |
 | BS-CORE-WAL | PostgreSQL WAL segments bundled into fixed 15-min bundles (§5.3) | H-CORE | F7 | BK-DATA | Every 15 min (EE, CE-HARDENED) |
-| BS-INTAKE | Logical dump of C-08: source accounts (public keys, verifiers), pending replies, not-yet-pulled envelopes (ciphertext), upload-session records | H-INTAKE, encrypted **on intake** | **Pulled** by C-09 over F3 (intake never initiates, ADR-009), then forwarded by H-CORE over F7 | BK-DATA public key (only the public key is present on H-INTAKE) | Nightly |
-| BS-ERASURE | The Erasure Key Vault (per-case Erasure Keys; separate schema / host-local file on H-CORE, ADR-033(3)) | H-CORE | F7 (T1/T3) and a dedicated T2 partition (§8) | BK-DATA | Nightly, in the same run as BS-CORE (so every BS-CORE has a matching vault set) |
-| BS-SECRETS | Onion service keys (source, offline standby onion key, RCP-ONION onions, SSH-onions), Intake Routing Key, Argon2 deployment salt, Tang key backup, internal CA **public** material, HSM backup blobs where the vendor supports wrapped export | Each host (per manifest entries with `backup_set: BS-SECRETS`) | Offline media only (never to the online store) | BK-SECRETS public key | At install and after every rotation of an included secret |
+| BS-INTAKE | Logical dump of C-08, minimized (RVW-B-22, RVW-A-03): source account records (lookup tag, auth verifier, public keys; no activity history, ADR-039), not-yet-imported envelopes including delayed-delivery envelopes with their release day (ciphertext, ADR-038(4)), and the mailbox **tombstone list** (§11, RVW-A-28). **Excluded:** reply ciphertexts (Z-CORE is the source of truth and C-09 republishes the 30-day reply pages, ADR-039), Tier V upload sessions, and Tier W drafts/staging (never on disk, ADR-034) | H-INTAKE, encrypted **on intake** | **Pulled** by C-09 over F3 (intake never initiates, ADR-009), then forwarded by H-CORE over F7 | BK-DATA public key (only the public key is present on H-INTAKE) | Nightly |
+| BS-ERASURE | The Erasure Key Vault (per-case Erasure Keys; host-local file on a dedicated volume of H-CORE, never a DB schema, so it is never in Patroni replicas or WAL archives; RVW-C-08) | H-CORE | F7 (T1/T3) and a dedicated T2 partition (§8) | BK-DATA | Nightly, in the same run as BS-CORE (so every BS-CORE has a matching vault set) |
+| BS-SECRETS | Onion service keys (source, offline standby onion key, RCP-ONION onions, SSH-onions), Intake Routing Key, Argon2 deployment salt, Tang key backup, internal CA **public** material, HSM backup blobs where the vendor supports wrapped export, and an **escrow copy of the Erasure Key Vault volume key (VMK)** exported from the TPM/HSM re-encrypted to BK-SECRETS, so that the vault is restorable on replacement hardware (RVW-C-07). Vault exports (`EXPORT_BACKUP`) are Erasure Keys re-encrypted to BK-DATA, never records sealed under a TPM that may be lost | Each host (per manifest entries with `backup_set: BS-SECRETS`) | Offline media only (never to the online store) | BK-SECRETS public key | At install and after every rotation of an included secret |
 | BS-CONFIG | `candor-site.toml`, effective non-secret config, manifests, install record, golden PCR values | WS-ADM | Online store + offline | BK-DATA | On change |
 | BS-ANCHOR | Signed audit checkpoints and backup-manifest chain heads | H-CORE | Online store + offline + optional external witness | Not encrypted (signed; contains hashes only) | Daily |
+| BS-ERASELOG | The signed, append-only **erasure log** (ADR-044(4)): one entry per crypto-erased case `{SHA-256(case_id), erasure_epoch_day, reason_class ∈ {retention, source_request, disposition, other}, audit-key signature}`; hash-chained | H-CORE | F7 (T1/T3) and T2 | BK-DATA | Daily at a fixed time, independent of erasure events; retention = longest BS-CORE retention + 7 days, entries older than the oldest retained BS-CORE set pruned |
 
 **Not backed up**, by design:
 - Recipient/staff private keys: no escrow; ADR-007, ADR-013. The optional Recovery Quorum is the only recovery path, and it is not a backup.
@@ -58,13 +60,15 @@ Research:
 - journald/system logs (retention per `20-LOGGING-AUDITING.md`).
 - Tor state other than keys.
 - Swap (none).
-- Hypervisor snapshots (forbidden for Z-INTAKE; `17-INFRASTRUCTURE.md` INFRA-021).
+- Hypervisor snapshots and image-level/SAN copies: forbidden for Z-INTAKE and for the core Erasure Key Vault volume and vTPM state (`17-INFRASTRUCTURE.md` INFRA-021, INFRA-037). An enterprise image backup of Z-CORE that includes the vault is not a Candor backup and defeats the 14-day deletion bound (RVW-C-06).
+- Tier W drafts and staged attachment parts (sealer RAM/tmpfs only, ADR-034).
+- Reply ciphertexts on the intake (re-published from Z-CORE after restore).
 
 ## 4. Keys and key separation
 
 | Key | Type | Private part held by | Public part held by | Purpose | Rotation |
 |---|---|---|---|---|---|
-| BK-DATA | HPKE X-Wing (CANDOR-STD-1) or MLKEM1024-P384 hybrid (CANDOR-FIPS-1), ADR-006 | Offline only: Infrastructure Recovery Key (IRK) Shamir k-of-n shares (default 2-of-3 CE, 3-of-5 EE) on hardware tokens or paper; GOV: offline HSM | H-CORE, H-INTAKE (public) | Wraps per-set DEKs of BS-CORE, BS-CORE-WAL, BS-INTAKE, BS-CONFIG | Yearly ("backup key epoch"); also after any suspected share compromise |
+| BK-DATA | HPKE X-Wing (CANDOR-STD-1) or MLKEM1024-P384 hybrid (CANDOR-FIPS-1), ADR-006 | Offline only: Infrastructure Recovery Key (IRK) Shamir k-of-n shares (default 2-of-3 CE, 3-of-5 EE) on hardware tokens or paper; GOV: offline HSM | H-CORE, H-INTAKE (public) | Wraps per-set DEKs of BS-CORE, BS-CORE-WAL, BS-INTAKE, BS-ERASURE, BS-ERASELOG, BS-CONFIG | Yearly ("backup key epoch"); also after any suspected share compromise |
 | BK-SECRETS | Same suite, **distinct keypair** | Offline IRK-S shares, whose custodian set SHOULD differ from BK-DATA's by at least one person | Each host (public) | Wraps BS-SECRETS DEKs | On any custodian change; yearly |
 | Per-set DEK | 256-bit random (OS CSPRNG) | Exists only in RAM during set creation and restore | — | STREAM encryption of segments | Per set |
 | Backup-agent signing key | Ed25519 (FIPS: ECDSA P-384) | H-CORE (TPM/HSM if available) | H-MON, restore tool (pinned in BS-CONFIG / install record) | Signs set manifests | Yearly or on compromise |
@@ -119,6 +123,7 @@ Consequence: an observer of the store learns only the size bucket per set. With 
 - PostgreSQL: `archive_mode=on`, `archive_timeout=900`, `wal_compression=off` (compression would make sizes activity-dependent), `archive_command='candor-backup wal-stage %p'`.
 - Every 15 min (fixed, clock-aligned) the agent emits one bundle containing all staged segments, padded to the next geometric bucket (ratio 1.25, minimum 1 segment of 64 MiB). If no segment was staged, it still emits the minimum bundle.
 - Rationale: fixed cadence plus padding hides activity bursts (THR-011) at the cost of storage (about 6 GiB/day minimum; 34 sizing).
+- **Commit times in WAL** (RVW-A-09, ADR-038(1)). Relay imports run only at fixed import slots (default 4×/day at fixed times; HIGH/GOV 1×/day), never event-driven. WAL commit records of `import_envelope` inserts therefore carry the slot time, not an arrival-derived time; blob object metadata (`Last-Modified`, mtime) is normalized to the slot time (`09-DATABASE.md`); `track_commit_timestamp=off`. Backups thus reveal at most which slot an envelope was imported in. v1.0's ±25 min bound (15 ± 10 min pulls) no longer applies.
 
 ### 5.4 Source-metadata protection rules
 
@@ -129,9 +134,11 @@ Consequence: an observer of the store learns only the size bucket per set. With 
 | Names reveal content | Random `set_id`, numeric segment names, no hostnames, case IDs or dates in object keys |
 | Store access logs | Object-store server access logs disabled, or retained ≤ 7 days, readable only by the security team (REQ-H-60) |
 | Backups add new metadata | Backup tooling SHALL NOT add fields beyond §5.1. Row-level data is copied as-is from stores already minimized by ADR-010 (day granularity) |
-| Deleted data persists | Retention ≤ 35 days default (§8). Deleted cases become unreadable in **all** backups once their Erasure Key is destroyed and the last BS-ERASURE set containing it expires (≤ 14 days, ADR-033(3)) |
-| Intake data in backups | BS-INTAKE retention 14 days (shorter than BS-CORE), because source-account records exist only to preserve source login ability |
-| Pending-reply presence in BS-INTAKE reveals "which sources were answered" | Accepted. Retention bounded to 14 days, encrypted to BK-DATA |
+| Deleted data persists | Retention ≤ 35 days default (§8). Deleted case **content** becomes unreadable in **all** backups once its Erasure Key is destroyed and the last BS-ERASURE set containing it expires (≤ 14 days, ADR-033(3)), provided no infrastructure-level copy of the vault exists (INFRA-037). Deleted case **metadata** (server-readable workflow rows, blinded COI tags, audit events) persists in BS-CORE until the set expires (≤ 35 days default; up to 12 months only with ADVANCED monthly sets) (RVW-B-21) |
+| Intake data in backups | BS-INTAKE retention 14 days (shorter than BS-CORE), because source-account records exist only to preserve source login ability. Reply ciphertexts, upload sessions and drafts are excluded (§3) |
+| Pending-reply presence in BS-INTAKE reveals "which sources were answered" | Resolved: replies are no longer in BS-INTAKE (RVW-A-03, RVW-B-22) |
+| Source deletions undone by restore (RVW-A-28) | Tombstone list in BS-INTAKE and production, applied after every restore (§11) |
+| Erasures undone by restore (ADR-044(4)) | BS-ERASELOG applied before any restored core serves (§11) |
 | Restore tests leak data | Restores run in an isolated, network-less sandbox that is crypto-erased afterwards (§7) |
 
 ## 6. Storage tiers, immutability and geography
@@ -146,6 +153,18 @@ Rule: at least 3 copies, on 2 media types, 1 off-site, 1 offline or immutable, a
 
 Transport of offline media: sealed tamper-evident bag with a logged serial, two-person handover, and no checked luggage (`17-INFRASTRUCTURE.md` §6).
 
+### 6.1 Erasure Key Vault replication to the DR site (ADR-044(4); RVW-C-07)
+
+The vault is a hard dependency for **all** case access (member wraps are encrypted under Erasure Keys), so its DR must match the core's, not only its deletion role.
+
+| Profile | Vault copies | Vault RPO | Deletion propagation |
+|---|---|---|---|
+| EE-HA, GOV on HA | Live replica on the standby core host (synchronous) and on the DR-site core host: vault deltas are encrypted to the DR host's vault key and shipped over the existing encrypted core replication tunnel inside the fixed-cadence padded 15-min bundles (`34-PERFORMANCE-SCALABILITY.md` O7). Never to object storage | ≤ 15 min (equal to core cross-site RPO) | An erasure is applied on the primary and replicated as an erasure record; the DR replica destroys the key on receipt. A replica is not a backup: no replica history is kept |
+| EE-ONPREM, CE-HARDENED, PRIVATE-CLOUD, MANAGED | Production + nightly BS-ERASURE (T1, T2, T3 where present) | 24 h | Via BS-ERASURE expiry (≤ 14 days) and the erasure log |
+| CE-SINGLE | Production + nightly BS-ERASURE on T2 | 24 h | As above |
+
+Cases created or re-wrapped between the last vault copy and a core loss need their member wraps re-created from members' Desks (Open issue 6); the RPO table (§10) states the vault RPO separately.
+
 ## 7. Restoration testing
 
 | Test | Frequency | Who | Decrypts? | Checks |
@@ -154,7 +173,10 @@ Transport of offline media: sealed tamper-evident bag with a logged serial, two-
 | RT-1 sandbox restore | Quarterly (all profiles); monthly (EE-HA, GOV) | 2 admins + IRK custodians (k) | Yes (outer layer only) | Restore BS-CORE + the matching BS-ERASURE + latest WAL + BS-INTAKE into an isolated network-less sandbox VM (`candorctl dr drill`); `pg_amcheck`; row and blob counts match the manifest; every blob referenced by C-12 exists and its ciphertext hash matches; audit hash-chain and key-directory log verify; measured RPO (latest restorable point) and RTO (elapsed time) recorded |
 | RT-2 end-to-end canary decrypt | Quarterly with RT-1 | 1 recipient (canary channel member) | Canary only | A **synthetic canary case** created at install on a dedicated canary channel (no real data) is opened in Candor Desk against the sandbox. This proves case-key unwrapping and blob decryption work after restore, **without anyone decrypting real reports** |
 | RT-3 secrets restore | Yearly, and after each BS-SECRETS change | 2 admins + IRK-S custodians | BS-SECRETS | Restore onion keys on a sandbox intake with tor in a netns **without** Internet (so the restored service is never published); verify the derived onion address equals the production address |
-| RT-4 full DR exercise | Yearly (EE-HA, GOV: twice yearly) | Ops + security + management | Yes | Execute DR-P3 (site loss) on spare hardware; measure RTO against §10 |
+| RT-4 full DR exercise | Yearly (EE-HA, GOV: twice yearly) | Ops + security + management | Yes | Execute DR-P3 (site loss) on spare hardware; measure RTO against §10, **including the time to assemble k custodians at the DR site** (§11.1) |
+| RT-5 vault-loss drill (RVW-C-07) | Yearly | 2 admins + IRK custodians + canary recipient | Yes | Restore BS-CORE with a vault set ≥ 15 days older than it (or none) in the sandbox; verify that the canary case is recovered by the Desk re-wrap path and that cases erased in the erasure log stay unreadable |
+| RT-6 quorum reachability (RVW-C-19) | Quarterly | SECURITY_OFFICER | No | Each IRK/IRK-S custodian and deputy confirms possession and states the time needed to reach the DR site; the elapsed time to reach k is recorded as a SYSTEM event and compared with the DR RTO |
+| RT-7 backup-exclusion probe (RVW-C-06) | Yearly, where INFRA-037 attestation applies | Backup owner + SECURITY_OFFICER | No | A canary vault file written at install with a known random key is searched for in the enterprise backup/snapshot catalogue and a restore is attempted through the backup owner's restore-test interface; finding it is a DANGEROUS finding and invalidates the attestation |
 
 After each RT-1/RT-3, the sandbox is crypto-erased (LUKS erase) and destruction is recorded. Results are recorded as signed SYSTEM audit events: pass/fail, RPO/RTO, and **no row data**.
 
@@ -164,9 +186,10 @@ Optional (EE, ADVANCED): `backup.online_restore_test_key`. Sets are additionally
 
 | Set | T1 retention (Object Lock) | T2 offline | T3 | Notes |
 |---|---|---|---|---|
-| BS-CORE nightly | 35 days (dailies 14 + weeklies 3) | Latest weekly on each of 2 disks | 35 days | EE MAY configure monthly sets retained ≤ 12 months (ADVANCED: extends THR-017 exposure) |
+| BS-CORE nightly | 35 days (dailies 14 + weeklies 3) | Latest weekly on each of 2 disks | 35 days | EE MAY configure monthly sets retained ≤ 12 months (ADVANCED, consequence text: "server-readable metadata of disposed cases, including audit events, persists for the retention of monthly sets"; extends THR-017 exposure). `35-DATA-RETENTION-DELETION.md` D-15 is to be aligned with this row (cross-document request) |
 | BS-CORE-WAL | 14 days | — | 14 days | Enables point-in-time recovery within 14 days |
 | BS-INTAKE | 14 days | Latest weekly | 14 days | Source-account data minimized |
+| BS-ERASELOG | Longest BS-CORE retention + 7 days | Latest on each disk | Same | Needed to re-apply erasures after restoring any retained BS-CORE set |
 | BS-ERASURE | 14 days (Object Lock 14 days, then deleted) | Written to a dedicated fixed-size partition that is **overwritten in place** at each weekly rotation, so no T2 copy is older than 14 days | 14 days | ADR-033(3) upper bound of "delete" for backups. A lost T2 disk (theft) can hold a vault copy past 14 days, which is handled as PB-13 |
 | BS-SECRETS | n/a (not online) | Current + previous generation | Offline copy at second site | Previous generation destroyed 30 days after rotation |
 | BS-CONFIG | 90 days | Latest | 90 days | No sensitive data |
@@ -174,10 +197,14 @@ Optional (EE, ADVANCED): `backup.online_restore_test_key`. Sets are additionally
 
 Legal hold (`35-DATA-RETENTION-DELETION.md`): a hold on a case SHALL be implemented in production (the case key is retained). It SHALL NOT be implemented by extending backup retention, because extending retention would retain every other deleted item too.
 
+Urgent purges under compliance-mode locks (RVW-B-21(d)): an urgent purge (e.g., an Art 17 "manifestly irrelevant" purge or accidentally captured identity data, `14-CASE-MANAGEMENT.md` CASE-028) is implemented by destroying the case's Erasure Key and recording it in the erasure log. Content in locked sets becomes unreadable after ≤ 14 days; **metadata in locked sets remains until their expiry** (≤ 35 days default) and this is stated in the purge confirmation.
+
 Deletion propagation (ADR-025, ADR-033(3)):
 - Member-key wraps of every case key are stored in C-12 encrypted under that case's **Erasure Key**. The Erasure Key is kept in the Erasure Key Vault, which is excluded from BS-CORE and backed up only in BS-ERASURE (≤ 14 days).
 - Deleting a case destroys its Erasure Key and all its wrappings in production. Old BS-CORE sets still contain the Erasure-Key-encrypted wraps, but once the last BS-ERASURE set holding that Erasure Key expires (≤ 14 days), no copy of the case key is recoverable by anyone, including holders of former member devices.
 - Until then, residual exposure (≤ 14 days) exists only for an adversary holding **all of**: the backup KEK (IRK quorum), a BS-CORE set, a BS-ERASURE set, and a former member's device and credentials. This is documented in `35-DATA-RETENTION-DELETION.md`.
+- Every erasure is appended to the signed erasure log (BS-ERASELOG). Any restore of BS-CORE applies the newest verifiable erasure log **before** any service serves data, destroying vault keys (and wrap rows) of every listed case, so a restore cannot resurrect an erased case (ADR-044(4)).
+- The 14-day bound holds only if no infrastructure-level copy of the vault exists (hypervisor, SAN, enterprise backup). Where Z-CORE runs on infrastructure Candor cannot inspect, this is established only by signed attestation (`17-INFRASTRUCTURE.md` INFRA-037), and the source-facing deletion statement is conditional on it (`35-DATA-RETENTION-DELETION.md`).
 - The Erasure Key never decrypts content by itself. It only unlocks member-key wraps, which still require a member's private key (ADR-008 "no server master key" holds). See Open issue 5.
 - Backup key epochs: BK-DATA is rotated yearly. When the last set encrypted under BK-DATA(n) expires, the BK-DATA(n) IRK shares are destroyed under two-person witness. Any lost or stray copy of those sets then becomes permanently undecryptable (crypto-erasure of backups).
 
@@ -198,26 +225,29 @@ Destruction:
 | Detection | RT-0 anomalies (a missing set, a size bucket jump ≥ 2 buckets day over day, chain breaks, PUT failures); DB integrity failures; attestation mismatch (`17-INFRASTRUCTURE.md` §5.6); canary files in `/var/lib/candor` whose modification or encryption triggers a SECURITY alert |
 | Decoupled admin domains | The WORM store is administered by credentials not usable from WS-ADM's everyday session (separate hardware key, safe) |
 | No backup decryption online | An attacker cannot "hold backups hostage" by encrypting them (immutable). Attacker **exfiltration** of backups yields outer ciphertext only |
-| Recovery path | DR-P4 (§10) |
+| Long dwell times (RVW-C-07) | Ransomware dwell can exceed the 14-day vault retention. DR-P4 therefore does not require the vault set to predate T0 (vault contents are keys, not code; their integrity is checked by AEAD against the restored DB rows) |
+| Recovery path | DR-P4 (§11) |
 
-Content-level resilience: ransomware on a recipient workstation cannot destroy server-held ciphertext. Ransomware on H-CORE can destroy production but not T1/T2. Loss of the **last** recipient devices for a case is not recoverable from backups without the Recovery Quorum (ADR-013). This is warned at case creation (≥ 2 members).
+Content-level resilience: ransomware on a recipient workstation cannot destroy server-held ciphertext. Ransomware on H-CORE can destroy production but not T1/T2. Loss of the **last** recipient devices for a case is not recoverable from backups without the Recovery Quorum (ADR-013). ADR-044 reduces the likelihood: `min_recipients` default 2, ≥ 2 hardware authenticators per member (primary + stored backup), HR/IdP changes only suspend (never delete wraps), GOV Recovery Quorum on by default, and key-holder geographic diversity (§11.1).
 
 ## 10. RPO/RTO per profile
 
 RPO = maximum data loss; RTO = time to restore service. "Intake" = sources can reach the onion and submit. "Core" = recipients can work.
 
-| Profile | Intake RPO | Intake RTO | Core RPO | Core RTO | Secrets RPO | Notes |
-|---|---|---|---|---|---|---|
-| CE-SINGLE | 24 h (source accounts); ≤ 25 min for unpulled envelopes | 72 h (replacement hardware + restore) | 24 h | 72 h | 0 (BS-SECRETS at each change) | No WAL; T2 only |
-| CE-HARDENED | 24 h / ≤ 25 min | 8 h (cold spare) | 15 min (WAL) | 24 h | 0 | |
-| EE-ONPREM | 24 h / ≤ 25 min | 4 h (cold spare) | 15 min | 4 h (VM HA restart: minutes) | 0 | |
-| EE-HA | ≈ 0 (sync standby) | ≤ 15 min (automatic; descriptor refresh) | ≈ 0 in-site; 15 min cross-site | ≤ 1 h | 0 | |
-| GOV-ONPREM | per base (EE-ONPREM / EE-HA) | 8 h (default policy) | 15 min | 8 h | 0 | Offline media in second accredited facility |
-| AIRGAP-RCP | inherits | inherits | inherits | WS-VIEW replacement 24 h (spare + key re-provision) | — | Weekly sync constraint (DEP-030) |
-| PRIVATE-CLOUD | 24 h / ≤ 25 min | 4 h (warm standby VM) | 15 min | 4 h | 0 | |
-| MANAGED | contract (default as EE-ONPREM) | 4 h | 15 min | 4 h | 0 | Vendor SLA |
+| Profile | Intake RPO | Intake RTO | Core RPO | Vault RPO (§6.1) | Core RTO | Secrets RPO | Notes |
+|---|---|---|---|---|---|---|---|
+| CE-SINGLE | 24 h (source accounts); ≤ one import-slot interval (default 6 h) for not-yet-imported envelopes | 72 h (replacement hardware + restore) | 24 h | 24 h | 72 h | 0 (BS-SECRETS at each change) | No WAL; T2 only |
+| CE-HARDENED | 24 h / ≤ slot interval | 8 h (cold spare) | 15 min (WAL) | 24 h | 24 h | 0 | |
+| EE-ONPREM | 24 h / ≤ slot interval | 4 h (cold spare) | 15 min | 24 h | 4 h (VM HA restart: minutes) | 0 | |
+| EE-HA | Host failure: 0 for data on a recoverable disk (unavailable until recovered); host destroyed: 24 h accounts / ≤ slot interval envelopes (no intake replication, ADR-046(1)) | ≤ 10 min (automatic; descriptor refresh; single value across 18, 19, 21) | ≈ 0 in-site; 15 min cross-site | ≤ 15 min (live replica) | ≤ 1 h | 0 | |
+| GOV-ONPREM | per base (EE-ONPREM / EE-HA) | 8 h (default policy) | 15 min | per base | 8 h | 0 | Offline media in second accredited facility |
+| AIRGAP-RCP | inherits | inherits | inherits | inherits | WS-VIEW replacement 24 h (spare + key re-provision) | — | Weekly sync constraint (DEP-030) |
+| PRIVATE-CLOUD | 24 h / ≤ slot interval | 4 h (warm standby VM) | 15 min | 24 h | 4 h | 0 | |
+| MANAGED | contract (default as EE-ONPREM) | 4 h | 15 min | per base | 4 h | 0 | Vendor SLA |
 
-Unpulled-envelope RPO equals the maximum relay pull interval (15 ± 10 min, ADR-009). Envelopes on a destroyed intake host that were not yet pulled are lost. Sources are informed through the source security notice (`31-INCIDENT-RESPONSE.md`) that submissions made in the affected window may need to be re-sent.
+Not-yet-imported envelopes wait on the intake until the next fixed import slot (ADR-038(1): default 4×/day, HIGH/GOV 1×/day; delayed-delivery envelopes until their release day, ADR-038(4)). v1.0's "≤ 25 min" unpulled-envelope RPO no longer applies. Envelopes on a destroyed intake host that were neither imported nor contained in the last BS-INTAKE are lost. Sources are informed through the source security notice (`31-INCIDENT-RESPONSE.md`) that submissions made in the affected window may need to be re-sent.
+
+**Source-account RPO (RVW-C-18).** Accounts created after the last BS-INTAKE are lost when an intake host is destroyed; the affected sources cannot receive feedback until they re-register, and the organisation cannot tell them why except through an SSN-GLOBAL notice. An hourly BS-INTAKE or an intake replica (reviewer proposal) is **rejected**: ADR-046(1) forbids intake replication, and more frequent intake backups multiply backup-resident source-account records (RVW-B-22). The residual is documented and the source UI tells new Tier W sources to check back within 7 days and, if the mailbox is gone, to submit again with a new passphrase and mention the earlier report.
 
 ## 11. Disaster-recovery procedures
 

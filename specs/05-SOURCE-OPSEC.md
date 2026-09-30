@@ -1,5 +1,5 @@
 # 05 — Source Operational Security Specification
-Status: Draft v1.0 · Edition applicability: both (CE and EE identical — source protections are never edition-gated, ADR-020) · Owner: Source Safety & Content Design team (with Security Architecture review)
+Status: Draft v1.1 (revision round 2: ADR-034..ADR-046) · Edition applicability: both (CE and EE identical — source protections are never edition-gated, ADR-020) · Owner: Source Safety & Content Design team (with Security Architecture review)
 
 ## 1. Purpose and scope
 
@@ -27,7 +27,8 @@ Residual risk remains high where the candidate set is small, whatever the guidan
 | Document | Relationship |
 |---|---|
 | `DECISIONS.md` | ADR-002 (modes), ADR-003 (no fingerprinting; exit-list check on C-37), ADR-004 (Tier W / Tier V; honest statement), ADR-005 (10-word passphrase), ADR-010 (day-granularity timing), ADR-012 (no server-side parsing), ADR-013 (escrow disclosure), ADR-014 (Sealed Identity Store), ADR-023 (no source telemetry), ADR-026 (no CAPTCHA) |
-| `11-FRONTEND-SOURCE.md` | Implements the screens that carry this guidance (Landing, Safety Check, Anonymity Status, Metadata Warning, Review, Recovery Credential, Return Inbox, Delete/Abandon) |
+| `DECISIONS.md` §7 (revision ADRs) | ADR-034 (RAM-only drafts; passphrase confirmed before sending), ADR-035 (§5 honesty text; operator statement; incident notice), ADR-036 (Tier W cannot verify the directory), ADR-037 (triage-first routing; COI checklist wording), ADR-038 (fixed import schedule; day/week display; optional 1–3 day delayed delivery), ADR-039 (fetch-all replies in the app), ADR-041 (app acquisition), ADR-044 §3 (GOV recovery disclosure), ADR-045 (reduced separation of duties), ADR-046 §7–§8 (passphrase rotation; post-quantum transport residual) |
+| `11-FRONTEND-SOURCE.md` | Implements the screens that carry this guidance (Landing, Safety Check, Anonymity Status, Metadata Warning, Review, Recovery Credential, Confirm and send, Return Inbox, Change passphrase, Delete/Abandon) |
 | `03-PRIVACY-ANONYMITY.md` | Owns the compelled-disclosure inventory, which GC-01 must match |
 | `10-FILE-EVIDENCE-PIPELINE.md` | What recipients see (sanitized derivative by default; sealed original). The guidance in GC-22 to GC-29 must match it |
 | `12-FRONTEND-RECIPIENT.md` | Shows recipients the source's answer to "how many people know" (§8.7) and bans authorship-similarity tools |
@@ -82,20 +83,24 @@ Residual risk remains high where the candidate set is small, whatever the guidan
 | Files | Retype or describe; rename; no cloud | Assume unique copies and watermarks; send only what many people had |
 | Words | Short, factual | Plain neutral style; minimize facts known to fewer than 5 people |
 | Passphrase | Paper hidden or non-synced password manager | Memorize, then destroy paper; Tails Persistent Storage |
-| Return visits | Every few days at most | Rarely; different networks; never after a linked event |
+| Return visits | Every few days at most; put everything in one message | Rarely; different networks; never after a linked event; remember each visit day can be compared with who used Tor that day |
+| Sending | "Deliver at next pickup" is fine | Choose "deliver after a random delay of 1–3 days" (ADR-038 §4) |
+| Website or app | Website in Tor Browser at Safest | Candor app (Tier V), ideally the desktop app on Tails, downloaded over Tor (ADR-041; ADR-046 §8) |
 
 ## 5. Observation model: who can see what
 
 | Observer | Can observe | Cannot observe (under stated assumptions) | Guidance cards |
 |---|---|---|---|
-| Employer network (proxy, DNS, firewall, Wi-Fi) | That Tor is used, when, and by which device (THR-002); possible website-fingerprinting leads for our portal (THR-004; B-AN-15, B-AN-16) | Destination onion or content (Tor intact) | GC-05, GC-09, GC-10, GC-34 |
+| Employer network (proxy, DNS, firewall, Wi-Fi) | That Tor is used, when, and by which device (THR-002); possible website-fingerprinting leads for our portal (THR-004; B-AN-15, B-AN-16); visits to the organisation's clearnet information site C-37 (RVW-B-17); app-store downloads | Destination onion or content (Tor intact) | GC-05, GC-09, GC-10, GC-33, GC-34, GC-43 |
 | Employer endpoint (MDM, EDR, DLP, screen recording) | Everything on that device: files, clipboard, screen, keystrokes, USB (THR-048) | Nothing is safe on it | GC-04, GC-05, GC-19, GC-21 |
 | Employer document systems | Who opened, downloaded, printed or emailed each document and when (INC-16) | — | GC-15, GC-19, GC-20, GC-25 |
 | The document itself | Metadata, canary variants, watermarks, printer dots (THR-009, THR-010) | — | GC-22 to GC-29 |
-| Recipient organization's case team (for internal channels, the same organization) | The report content and any metadata left in originals; for CONFIDENTIAL mode, identity only via custodians (ADR-014) | Source IP (ADR-001); exact submission time (ADR-010) | GC-01, GC-23, GC-30, GC-31 |
+| Recipient organization's case team (for internal channels, the same organization) | The report content and any metadata left in originals; which roles the source ticked (Triage Set only, ADR-037); the day (standard) or ISO week (HIGH) of each import slot (ADR-038 §3); for CONFIDENTIAL mode, identity only via custodians (ADR-014) | Source IP (ADR-001); exact submission time (fixed import schedule, ADR-038 §1) | GC-01, GC-23, GC-30, GC-31, GC-40 |
 | ISP / national observer | Tor use; timing; with a bridge, less (B-AN-30, B-AN-31) | Destination (Tor intact); content | GC-09, GC-10, GC-11, GC-33 |
 | Household / physical | Screens, notes, devices, phone location history | — | GC-12, GC-32, GC-35 |
-| Platform operator (compelled or compromised) | See `03-PRIVACY-ANONYMITY.md` inventory. Tier W: plaintext during sealing (ADR-004) | IP, exact times, device fingerprint | GC-01, GC-38 |
+| Platform operator (compelled or compromised) | See `03-PRIVACY-ANONYMITY.md` inventory. Tier W, while compromised: everything typed, and the passphrase and sign-in times at each login (ADR-004, ADR-035 §5, ADR-039) | IP, device fingerprint; exact times only if compromised live | GC-01, GC-38, GC-42 |
+| App stores and download sites | That an account downloaded the Candor app, and when (ADR-041) | Anything sent with the app | GC-38 |
+| Future quantum-capable adversary with recorded traffic | Possibly Tier W content and passphrases from recorded onion sessions (ADR-046 §8) | Tier V content (hybrid post-quantum encryption on device) | GC-38 |
 | Third-party services (cloud, AI, translators) | Everything pasted or synced (THR-029-like exposure outside Candor; THR-036) | — | GC-15, GC-16 |
 
 ## 6. Guidance content (normative English master text)
@@ -105,15 +110,23 @@ Residual risk remains high where the candidate set is small, whatever the guidan
 ### A. Before you start
 
 **GC-01 What this site can and cannot do** — `sops.limits` — Landing, Safety Check, Anonymity Status
-> **What this site does.** This site hides your internet address from us and from the people who read reports. We don't ask for your name. We only record the date a report arrives, not the time.
+> **What this site does.** This site hides your internet address from us and from the people who read reports. We don't ask for your name. Our systems keep only the day your report is picked up for the team, not the time. The team sees {date_granularity_text}.
 >
-> **What this site can't do.** It can't see or clean your computer or phone. It can't stop your employer from seeing that you used Tor on a work network. It can't remove every clue from your files or your words. The steps on this page help with those risks.
+> **What this site can't do.** It can't see or clean your computer or phone. It can't stop your employer or internet provider from seeing that you used Tor, and when. It can't remove every clue from your files or your words. The steps on this page help with those risks.
 >
-> **When you use this website** *(Tier W only)*: your report is locked (encrypted) on our server as soon as it arrives. If someone had secretly taken control of the server at that moment, they could read it. The Candor app locks your report on your own device before sending, which avoids this.
+> **When you use this website** *(Tier W only)*: your report is locked (encrypted) on our server as soon as it arrives. If the intake server is compromised or legally compelled while you use the website (no-JavaScript) version, what you type, and your passphrase when you log in, can be captured. For the highest risk, use the Candor Source App.
 >
-> **Who reads reports:** {channel_recipient_description}. You can tick people your report is about, and they will not get a key to open it. {recovery_escrow_statement}
+> **Who reads reports:** Your report is first read by {triage_role_labels}. They may ask {other_role_labels} to help. You can tick people your report is about, and they will not get a key to open it. {oversight_statement} {break_glass_statement} {recovery_escrow_statement} {reduced_sod_statement}
 
-`{recovery_escrow_statement}` is either "No one outside the listed team can unlock reports." or "A backup key is split between {quorum_holders}. {k} of them together could unlock reports." (ADR-013).
+All placeholders are **generated from live, signed configuration** (Key Directory snapshot and CFG; RVW-B-14 b), never typed by the operator:
+- `{date_granularity_text}`: "only that day" (standard) or "only the week" (HIGH profile) (ADR-038 §3).
+- `{triage_role_labels}`, `{other_role_labels}`: the channel's Triage Set and other role labels (ADR-037).
+- `{oversight_statement}`: empty, or "{oversight_label} can also read reports in this channel." when an OVERSIGHT silent member is configured (`14-CASE-MANAGEMENT.md` §9.4).
+- `{break_glass_statement}`: "In an emergency, {approver_roles}, including someone independent of management, can together give one more person access to a report for up to 8 hours. This is recorded and reviewed." (ADR-015, ADR-045).
+- `{recovery_escrow_statement}`: "There is no backup key." or "A backup key is split between {quorum_holders}. {k} of them together could unlock reports." (ADR-013; enabled by default in the GOV profile, ADR-044 §3).
+- `{reduced_sod_statement}`: empty, or "This organization has few staff for this service, so fewer people check each other than usual. {external_oversight_label} oversees it." (small-organisation mode, ADR-045).
+
+The v1.0 sentence "No one outside the listed team can unlock reports" is withdrawn: it ignored oversight members, break-glass and custodians (RVW-B-14 b).
 
 **GC-02 Choose how careful you need to be** — `sops.track` — Safety Check
 > Most people only need the **basic steps** below. Some people need more. *(The §4.2 self-selection list follows.)* If you are not sure, follow the higher-risk steps too. They take more time but give more protection.
@@ -161,7 +174,15 @@ Residual risk remains high where the candidate set is small, whatever the guidan
 > *Higher risk:* **Tails** is a free system you start from a USB stick. It sends all internet traffic through Tor and forgets everything when you shut down, so it leaves almost no traces on the computer. Get it from tails.net on a device you trust, and follow its install and check steps. If you can, use a new USB stick you bought with cash. Tails includes a screen reader (Orca) and a screen magnifier.
 
 **GC-38 Website or app?** — `sops.tier`
-> You can use this **website** in Tor Browser, or the **Candor app**. The app locks your report on your own device before sending it, checks that it is talking to the right team, and can clean hidden data from photos and documents. But an installed app is a sign that you used it if someone searches your device. If your device could be searched, use the website in Tor Browser, ideally on Tails.
+> You can use this **website** in Tor Browser, or the **Candor app**.
+> - **The website** needs nothing installed. But our server encrypts your report after it arrives. If the intake server is compromised or legally compelled while you use the website (no-JavaScript) version, what you type, and your passphrase when you log in, can be captured.
+> - **The app** encrypts your report on your own device before sending, checks that it is talking to the right team, checks for replies without telling the server which mailbox is yours, and can clean hidden data from photos and documents. But an installed app is a sign that you used it if someone searches your device.
+>
+> **Getting the app.** Download it in Tor Browser from the Candor project's address: {project_onion_address_text}. {org} does not offer the app on its own website. App stores (such as Google Play or the Apple App Store) keep a record that your account downloaded it. On iPhone and iPad the app is only in the App Store. **Never install it on a phone or computer your employer manages**, including a phone with a work profile.
+>
+> *Higher risk:* Use the app, ideally the desktop app on Tails, downloaded over Tor. Tor's connection encryption does not yet resist future quantum computers, so someone who records internet traffic today might later read what was typed into the website. The app adds encryption designed to resist this. If your device could be searched and you can't use Tails, use the website in Tor Browser and accept the risk above.
+
+`{project_onion_address_text}` is the Candor project's distribution onion address as plain, non-clickable text (GP-7). C-37 may hyperlink the project's instructions page (ADR-041).
 
 ### C. Networks and places
 
@@ -320,29 +341,37 @@ Residual risk remains high where the candidate set is small, whatever the guidan
 ### I. After you send your report
 
 **GC-32 Keep your passphrase safe** — `sops.passphrase`
-> After you send your report, you get a **passphrase of 10 words**. It is the only way to read replies and add information. **No one can reset it or send it to you again**, not us and not the team.
+> Before your report is sent, you get a **passphrase of 10 words**, and you type 3 of them to show you kept it. It is the only way to read replies and add information. **No one can reset it or send it to you again**, not us and not the team.
 > - Write it on paper and keep it somewhere private, away from work things. Or save it in a password manager on a personal device that doesn't sync to a work account.
 > - Don't keep it in email, notes apps, photos, chats or cloud documents.
 > - Don't share it. Anyone who has it can read replies and write as you.
+> - You can change it later in your mailbox ("Change my passphrase").
 >
-> *Higher risk:* Try to learn it by heart. Practice it over the next few days, then destroy the paper. If you use Tails, you can keep it in Tails' encrypted Persistent Storage.
+> *Higher risk:* Try to learn it by heart. Practice it over the next few days, then destroy the paper. If you use Tails, you can keep it in Tails' encrypted Persistent Storage. Change your passphrase now and then, and whenever you think someone may have seen it.
 
 **GC-33 Checking for replies** — `sops.return`
 > Replies can take days or weeks. The team aims to confirm they received your report within {ack_days} days. **Come back after a few days, not every hour.** Follow the same steps each time: personal device, Tor Browser, not a work network. Replies show the date only.
 >
-> *Higher risk:* Each visit is another chance for someone watching a network to link you to this site. Visit rarely, at times that fit your usual routine, and from different networks when you can. Don't visit right after an event others know about, such as the day after a meeting where the issue came up.
+> **Each day you visit can be compared with a list of who used Tor that day.** Over several visits, comparing those lists can narrow them down to you. Visit only when you need to, and put everything you want to say into one message instead of several visits.
+>
+> *Higher risk:* Visit rarely, at times that fit your usual routine, and from different networks when you can. Don't visit right after an event others know about, such as the day after a meeting where the issue came up. A reply may be sent to prompt you to come back; you don't have to come back quickly. On the website, a compromised server could note each time you sign in. The Candor app checks for replies without telling the server which mailbox is yours.
 
 **GC-34 Timing** — `sops.timing`
 > *When* you do things can point to you. Don't send your report from work or during your work hours. Avoid sending it right after you opened or copied documents at work.
 >
-> *Higher risk:* If someone knows when a report arrived, they may compare that with who was off work, who used Tor, or who opened files. **This site stores only the date a report arrives, not the time.** But your own network or device may record the exact time. Consider waiting some days after gathering information before you send it.
+> When you send, you can choose **"deliver after a random delay of 1 to 3 days"**. Then the day the team receives your report is less likely to match what you did at work.
+>
+> *Higher risk:* If someone knows roughly when a report arrived, they may compare that with who was off work, who used Tor, or who opened files. **Our systems keep only the day your report is picked up, not the time, and the team sees only {date_granularity_short}.** But your own network, your device, and anyone watching this site's network can record the exact time. Choose the delay. Consider also waiting some days after gathering information before you send.
+
+`{date_granularity_short}` is "the day" or "the week" (ADR-038 §3).
 
 **GC-35 If your device is taken or searched** — `sops.seizure`
 > If your device is taken or searched, or you are asked to hand it over:
 > - Get legal advice before you answer questions, if you can.
 > - **Don't destroy or hide anything that may be evidence.** That can be a crime.
-> - This site does not store your name. What can be found depends on your device: files you saved, your passphrase if you wrote it down, and browser traces.
-> - If someone may have seen your passphrase, they can read replies. When it is safe and legal to do so, you can **close your mailbox** so the passphrase no longer opens it, or send a message telling the team the passphrase may be known. Closing your mailbox does not delete your report.
+> - This site does not store your name. What can be found depends on your device: files you saved, your passphrase if you wrote it down, browser traces, and the Candor app if you installed it.
+> - If someone may have seen your passphrase, they can read replies. When it is safe and legal to do so, you can **change your passphrase** so the old one stops working, **close your mailbox**, or send a message telling the team the passphrase may be known. Closing your mailbox does not delete your report.
+> - The team will learn that the mailbox was closed. If you close it right after something happens at work, such as interviews, that timing could point to you.
 >
 > *Higher risk:* Plan ahead. If your device could be searched, use Tails and don't keep files or notes. In some places you can more easily be forced to unlock a phone with your face or fingerprint than with a passcode.
 
@@ -354,24 +383,45 @@ Residual risk remains high where the candidate set is small, whatever the guidan
 **GC-37 If you are treated unfairly** — `sops.retaliation`
 > If you think you are being treated badly because someone suspects you reported, you can tell the team through your mailbox. Keep a private record of what happens, not on a work device. {jurisdiction_retaliation_text}
 
+### J. Added in revision round 2
+
+**GC-39 If you lose your passphrase** — `sops.lostphrase` (RVW-B-27)
+> No one can reset or resend your passphrase. If you lose it, you can send a new report. If you want the team to connect it with your earlier report, mention something only the first report contained. This links the two reports, so do it only if you are comfortable with that. Don't contact the team by email or phone to explain.
+
+**GC-40 Who you report about can point to you** — `sops.selfhint` (RVW-B-03)
+> Ticking people your report is about keeps them from getting a key. But your ticks are seen by the independent team that reads reports first, and they can say something about you. If you tick your own manager, that team can tell which team you work in. Tick what you need to keep the right people out, and no more.
+
+**GC-41 If you only have a phone** — `sops.phoneonly` (RVW-B-28)
+> If a phone is your only device, use Tor Browser for Android on a phone your employer has never managed and that has no work profile. On iPhone, only Onion Browser is available, and it protects you less (GC-06). Phones keep location history and often back up photos and notes to the cloud; turn that off for anything about your report. Don't use keyboard apps with online prediction or voice typing (GC-16). If you can borrow or buy a cheap computer and use Tails (GC-08), that is safer.
+>
+> *Higher risk:* Leave the phone you normally carry at home when you report, and never use a phone that your employer pays for or manages.
+
+**GC-42 Warnings on this site** — `sops.warnings` (ADR-035)
+> The people who run this service publish a signed statement every month saying the service has not been secretly changed or ordered to watch users. If this site shows a warning that the statement is missing or out of date, or shows an incident notice, stop and think before you continue. A missing statement can be harmless, and people can be forced to publish false statements, so it is a signal, not a guarantee. On the website, the warning is shown by the same server it is about, so a server under someone else's control could hide it. The Candor app checks the statement by itself.
+
+**GC-43 Finding this site safely** — `sops.firstcontact` (RVW-B-17)
+> Find this site's address without using a work device or work network. If you saw the address on a poster, card or intranet page, write it down and type it into Tor Browser later, at home. Don't click a "speak up" or "report a concern" link on a work computer: visiting that page from work can be recorded, and that record can be compared with when a report arrives.
+
 ## 7. Placement map (just-in-time)
 
 | Screen (`11-FRONTEND-SOURCE.md`) | Always visible (short form) | Linked full cards |
 |---|---|---|
-| S01 Landing | GC-01 summary; "Don't use a work device or work network" (from GC-04/GC-09) in the first viewport; JS-on warning (§8.2) | GC-01..GC-07 |
+| S01 Landing | GC-01 summary including the ADR-035 §5 sentence; "Don't use a work device or work network" (from GC-04/GC-09) in the first viewport; JS-on warning (§8.2); WB-1..WB-3 warning banners when present (`11` §5.2.1) | GC-01..GC-07, GC-38, GC-41, GC-42 |
 | S02 Safety Check | Checklist of NORMAL essentials (8 items, §7.1); track self-selection (§4.2) | All cards, grouped A–I; HIGH in `<details>` |
-| S03 Anonymity Status | Mode, tier, escrow, recipient role labels (GC-01 dynamic parts); ASM-112 "What protects you and what does not" list | GC-38 |
-| S04b "Is your report about any of these people?" (ADR-030) | Plain explanation that ticked roles get no key; empty by default | GC-30 |
+| S03 Anonymity Status | Mode, tier, first readers (Triage Set) and other roles, escrow, oversight/break-glass/reduced-SoD statements (GC-01 dynamic parts); ASM-112 "What protects you and what does not" list; the fixed "Checking these values does not protect a report sent from this website" sentence (ADR-036) | GC-38, GC-42 |
+| S04b "Is your report about any of these people?" (ADR-030, ADR-037) | "First read by"; plain explanation that ticked roles get no key; the ADR-037 §4 statement; reporting-line caution; empty by default | GC-30, GC-40 |
 | S05 Questionnaire | Beside long-text fields: "Keep it factual; don't paste into AI tools" | GC-16, GC-30, GC-31 |
-| S06 Attach Evidence | "File names are replaced by default"; "Describe or retype when you can" | GC-22..GC-29 |
+| S06 Attach Evidence | "File names are replaced by default"; "Describe or retype when you can"; large uploads recognisable by size (RVW-A-22) | GC-22..GC-29, GC-38 |
 | S07 Metadata Warning | Per-file-type risk list (§7.2) | GC-22..GC-29 |
-| S08 Review | Identity-hint results (§8.5); style checklist (§8.6) | GC-30, GC-31, GC-34 |
-| S10 Recovery Credential | GC-32 normal text in full | GC-33, GC-35 |
-| S11 Return Inbox (login) | "Tor Browser at Safest, not a work network"; visit-cadence reminder | GC-33 |
-| S12 Conversation | "Keep the conversation here" (GC-36 short) | GC-30, GC-36, GC-37 |
-| S13 Delete/Abandon | GC-35 short; GC-03 | GC-35 |
+| S08 Review | Identity-hint results (§8.5); invisible-character notice (§8.5a); style checklist (§8.6); delivery-timing choice with GC-34 short (§8.13) | GC-30, GC-31, GC-34 |
+| S10 Recovery Credential (before sending) | GC-32 normal text in full; "you will type 3 words next" | GC-33, GC-35, GC-39 |
+| S10c Confirm and send | "If you don't see 'Your report was sent', open your mailbox" | GC-39 |
+| S11 Return Inbox (login) | "Tor Browser at Safest, not a work network"; visit-day intersection reminder (GC-33 short); Tier W sign-in honesty line | GC-33, GC-38 |
+| S11r Change passphrase | Rotation explanation incl. Tier W limit | GC-32, GC-35 |
+| S12 Conversation | "Keep the conversation here" (GC-36 short); delivery-timing choice | GC-30, GC-33, GC-34, GC-36, GC-37 |
+| S13 Delete/Abandon | GC-35 short incl. closure-timing sentence; GC-03 | GC-35, GC-39 |
 | Logout / Leave page | "Choose New Identity in Tor Browser, then close it." | GC-07, GC-33 |
-| C-37 Info site | GC-01, GC-04..GC-11, with hyperlinks to official Tor Project/Tails pages and signature-check instructions | all |
+| C-37 Info site | **First viewport:** GC-43 and "If you are on a work device or work network, stop here" (GC-04/GC-05 short), above everything else (RVW-B-17). Then GC-01, GC-04..GC-11, GC-38 (with a hyperlink to the Candor project's app distribution instructions; C-37 never hosts the app, ADR-041), GC-41, with hyperlinks to official Tor Project/Tails pages and signature-check instructions | all |
 
 ### 7.1 Safety Check essentials (normative list, NORMAL track)
 1. I am on a personal device, not a work device. (GC-04, GC-05)
@@ -424,11 +474,13 @@ Tier V (C-03) replaces extension-based guesses with **actual local findings** (�
 
 Matches are shown as a **non-blocking** notice: "Your text may contain details that point to you: an email address in 'What happened', line 3. [Edit] [Keep as is]." Tier W runs the check in C-07 RAM. Results exist only in the rendered response. They are never stored, logged, counted, or sent to recipients. Tier V runs it locally.
 
+**8.5a Invisible-character and look-alike check (RVW-B-24).** In the same pass as §8.5, the Review renderer (C-07 RAM for Tier W; locally for Tier V) detects in source-typed text: Unicode format characters (category Cf, including ZWSP U+200B, ZWNJ U+200C, ZWJ U+200D, BOM U+FEFF, bidi controls U+202A–U+202E and U+2066–U+2069), variation selectors (U+FE00–U+FE0F, U+E0100–U+E01EF), tag characters (U+E0000–U+E007F), non-standard spaces (Zs other than U+0020) and mixed-script homoglyphs within a word (Unicode TR39 mixed-script detection). It shows: "Your text contains {n} invisible or look-alike characters. They can act as a hidden signature from the document you copied. [Remove them] [Keep them]". "Remove them" is the first button: it deletes Cf/tag/variation characters, maps non-standard spaces to U+0020, and replaces flagged homoglyphs with the word's dominant-script equivalents. As with §8.5, results are never stored, logged, counted or sent. Tier V's file cleaner additionally offers "send as plain text only" for documents. Semantic canaries (different words or numbers per copy) are not detected (GC-25).
+
 **8.6 Writing-style checklist.** S08 shows a static checklist (GC-31). Tier V MAY add deterministic local highlights: emoji, greeting/sign-off lines, repeated distinctive punctuation (for example "!!", "..."), and the text's top 5 rare words relative to a bundled frequency list. No ML model and no network are used. It is labelled "a reminder, not a protection" [B-AN-35, B-AN-39].
 
-**8.7 "How many people know" question.** The default questionnaire includes an optional question: "About how many people could know the facts in your report? ○ 1–5 ○ 6–20 ○ more than 20 ○ not sure". Its help text is: "This helps the team avoid actions that could point to you." `12-FRONTEND-RECIPIENT.md` surfaces the answer in the case risk panel.
+**8.7 "How many people know" question.** The default questionnaire includes an optional question: "About how many people could know the facts in your report? ○ 1–5 ○ 6–20 ○ more than 20 ○ not sure". Its help text is: "This helps the team avoid actions that could point to you." `12-FRONTEND-RECIPIENT.md` surfaces the answer in the case risk panel, visible only to the Triage Set and the case lead, not in the inbox list shown to other members (RVW-B-33 f).
 
-**8.8 Passphrase handling.** S10 shows the passphrase once. It offers no download, no print button, no email, and no QR code. Text is selectable, so copying is allowed. There is no persistent storage (cookies are session-only; no Web Storage) [ADR-005; INC-05, INC-23].
+**8.8 Passphrase handling.** S10 shows the passphrase once, **before** the report is sent, and S10c requires 3 randomly chosen words to be re-typed before the report is finalized (ADR-034). The passphrase is never stored anywhere on the server; if it is lost before confirmation, the source gets a new one and nothing has been sent. It offers no download, no print button, no email, and no QR code. Text is selectable, so copying is allowed. There is no persistent storage (cookies are session-only; no Web Storage) [ADR-005; INC-05, INC-23]. Sources can change the passphrase from the inbox (ADR-046 §7; `11` S11r).
 
 **8.9 No persistence.** No "remember me", no persistent cookies, no `localStorage`/IndexedDB/Service Worker, `Cache-Control: no-store`. Logout and "Leave" send `Clear-Site-Data: "cache", "cookies", "storage"` [B-SD-02 2.13.0].
 
@@ -436,7 +488,11 @@ Matches are shown as a **non-blocking** notice: "Your text may contain details t
 
 **8.11 Leave and clear.** Every source page has a "Leave" control (a form POST) that ends the session, sends `Clear-Site-Data`, and shows a neutral page with the GC-07 "New Identity" instruction. The neutral page has no external redirect (GP-7).
 
-**8.12 Close mailbox.** After submission, the source can close the mailbox (S13). The passphrase then no longer authenticates, and replies are no longer served. The report stays with the case team, and the case team is told "the source closed the mailbox". This supports GC-35 and does not delete evidence.
+**8.12 Close mailbox.** After submission, the source can close the mailbox (S13). The passphrase then no longer authenticates, and replies are no longer served. The report stays with the case team, and the case team is told "the source closed the mailbox". This supports GC-35 and does not delete evidence. Because the closure is itself a signal whose timing can point to the source (RVW-B-26), S13 and GC-35 say so; the delayed, week-granular propagation of the signal to Z-CORE is requested of `03`/`35` (cross-document request).
+
+**8.13 Delayed delivery (ADR-038 §4).** S08 and S12 offer "At the next scheduled pickup" or "After a random delay of 1 to 3 days" with equal weight; HIGH-risk guidance (GC-34, §4.3) recommends the delay. The sealed envelope carries a release date; the intake holds it until then. Tier V also offers local "Send later" (12–72 h). Delay does not hide that the source used Tor on the day they sent (GC-09, GC-33).
+
+**8.14 First-contact deployment guidance for operators (RVW-B-17).** The operator deployment guide (`18-DEPLOYMENT.md` publication checklist) SHALL advise organisations to publish the onion address offline (posters, printed cards, payslip inserts, QR codes on printed material) and, on intranets, only as non-hyperlinked text with "Don't open this at work. Copy it into Tor Browser at home." C-37 SHALL show GC-43 and the GC-04/GC-05 stop line in its first viewport. Hosting C-37 on a neutral, multi-organisation directory domain run by the project is recommended as an option (`03` §11).
 
 ## 9. Validation
 
@@ -445,22 +501,22 @@ Matches are shown as a **non-blocking** notice: "Your text may contain details t
 | Readability | CI job `sops-readability` computes Flesch-Kincaid grade on the EN master for each `sops.*.normal` and `sops.*.high` string | normal ≤ 8.0; high ≤ 10.0 (placeholders substituted with typical values) |
 | Comprehension | Moderated study (`26-ACCESSIBILITY.md` §Testing). n ≥ 20 per major copy release, including ≥ 5 AT users, with scenario questions for key messages K1–K8 | ≥ 80 % correct per key message (REQ-H-16b) |
 | Legal | Counsel review per jurisdiction pack | No advice that could constitute obstruction, unauthorized access, or evidence destruction |
-| Accuracy | Security review per release: statements match actual behavior (03, 10, 11, 12) | Zero mismatches |
+| Accuracy | Security review per release: statements match actual behavior (03, 10, 11, 12) and DECISIONS §7; plus CI: every GC placeholder is bound to a configuration or Key Directory source (no free-text operator input), and GC-01/GC-34 timing sentences are checked against the `24` §TEL / `09` constants lint (RVW-B-14, RVW-B-06) | Zero mismatches |
 | Translation | `26-ACCESSIBILITY.md` critical-string review (2 reviewers + back-translation) | All `sec:critical` strings reviewed before the locale is enabled |
 
-Key messages: **K1** don't use work devices or networks; **K2** use Tor Browser at Safest; **K3** Tor use is visible on a network; bridges help; **K4** files carry hidden data, so describe or retype; **K5** don't paste into AI, translators or grammar tools; **K6** the passphrase can't be recovered and must be kept safely; **K7** return rarely, the same careful way; **K8** the website cannot protect against a compromised device.
+Key messages: **K1** don't use work devices or networks; **K2** use Tor Browser at Safest; **K3** Tor use is visible on a network; bridges help; **K4** files carry hidden data, so describe or retype; **K5** don't paste into AI, translators or grammar tools; **K6** the passphrase can't be recovered and must be kept safely; **K7** return rarely, the same careful way; **K8** the website cannot protect against a compromised device; **K9** for the highest risk, the app protects what you type even if the server is compromised, and the website does not; **K10** each visit day can be compared with who used Tor that day.
 
 ## 10. Requirements
 
 | ID | Requirement | Evidence | Threats | Component | Verification |
 |---|---|---|---|---|---|
-| SOPS-001 | The Source UI SHALL include Guidance Cards GC-01..GC-38 with the §6 English master text as normative content. Wording changes SHALL pass the §9 accuracy and legal checks before release. | REQ-H-16b (INC-16); INC-31; B-SD-04 | THR-002, THR-009, THR-010, THR-048 | C-06, C-03 | INSP: content diff review per release; DEMO: §9 comprehension study |
+| SOPS-001 | The Source UI SHALL include Guidance Cards GC-01..GC-43 with the §6 English master text as normative content. Wording changes SHALL pass the §9 accuracy and legal checks before release. | REQ-H-16b (INC-16); INC-31; B-SD-04 | THR-002, THR-009, THR-010, THR-048 | C-06, C-03 | INSP: content diff review per release; DEMO: §9 comprehension study |
 | SOPS-002 | Guidance SHALL present NORMAL-RISK text by default and HIGH-RISK additions inside native `<details>` elements in the same HTML response. The track choice SHALL NOT be transmitted to or inferable by the server (no distinct URL, request, cookie or form field). | INC-03; ADR-003 | THR-001, THR-016 | C-06 | TST: e2e `sops-track-no-request` asserts identical request sequence whether or not `<details>` are opened |
 | SOPS-003 | NORMAL-RISK English strings SHALL score Flesch-Kincaid grade ≤ 8.0 and HIGH-RISK strings ≤ 10.0, enforced in CI. | B-CO-36; REQ-H-16b | THR-040 | C-06, C-03 | TST: CI job `sops-readability` |
 | SOPS-004 | The UI SHALL place guidance according to the §7 placement map, including the first-viewport "don't use a work device or work network" statement on S01. | REQ-H-31 (INC-31); REQ-H-16b | THR-002, THR-048 | C-06, C-03 | INSP: screen-by-screen checklist; TST: snapshot test for S01 first viewport at 320×568 and 1280×800 |
 | SOPS-005 | The onion-served Source UI SHALL contain no hyperlinks to non-onion or third-party origins. Tool and site names SHALL be plain, non-clickable text. Only C-37 MAY hyperlink official Tor Project and Tails pages. | REQ-H-36 (INC-36); INC-46 | THR-006, THR-008, THR-036 | C-06, C-37 | TST: HTML lint `no-external-href` over all rendered templates |
 | SOPS-006 | The UI SHALL warn when JavaScript is enabled using only the CSS `scripting` media feature (or the §8.2 fallback), with no script and no conditional resource load. | REQ-H-27 (INC-27); B-SD-15 | THR-008, THR-006 | C-06 | TST: Tor Browser e2e at Standard and Safest: warning visible or hidden; request log identical |
-| SOPS-007 | S01, S02 and S03 SHALL display GC-01, including the ADR-004 Tier W statement when served in Tier W and the ADR-013 escrow statement generated from the signed key directory state. | ADR-004; ADR-013; B-GL-09 | THR-007, THR-014, THR-040 | C-06, C-03, C-14 | TST: render tests with escrow on and off; INSP: text matches ADR-004 wording |
+| SOPS-007 | S01, S02 and S03 SHALL display GC-01, including the ADR-004/ADR-035 §5 Tier W statement when served in Tier W and the ADR-013 escrow statement generated from the signed key directory state (amended). | ADR-004; ADR-013; ADR-035 §5; B-GL-09 | THR-007, THR-014, THR-040 | C-06, C-03, C-14 | TST: render tests with escrow on and off; INSP: text matches ADR-004 wording |
 | SOPS-008 | GC-01 and GC-38 statements about what the operator can see SHALL match the compelled-disclosure inventory in `03-PRIVACY-ANONYMITY.md`. | REQ-H-06, REQ-H-12 (INC-06, INC-12) | THR-026, THR-040 | C-06 | INSP: per-release cross-check signed by the privacy lead |
 | SOPS-009 | All guidance SHALL be reachable before any session exists or any data is entered, served as static pages in the same response size classes as other source pages (`11-FRONTEND-SOURCE.md`). | B-AN-15, B-AN-16 | THR-004 | C-06 | TST: size-class test over all guidance routes |
 | SOPS-010 | The Source UI SHALL recommend bridges (GC-10) and Connection Assist (GC-11) and SHALL state that bridges do not make work devices safe. | REQ-H-31; B-AN-30, B-AN-31 | THR-002 | C-06, C-37 | INSP: copy review |
@@ -475,17 +531,17 @@ Key messages: **K1** don't use work devices or networks; **K2** use Tor Browser 
 | SOPS-019 | The Review screen SHALL show the GC-31 style checklist. Tier V local highlights (§8.6) SHALL use deterministic rules only, with no ML model and no network. | B-AN-34..40; REQ-H-73 | THR-010 | C-06, C-03 | INSP: code review; TST: network sandbox |
 | SOPS-020 | The default questionnaire template SHALL include the optional §8.7 "how many people know" question. | INC-16; INC-10 | THR-010, THR-019 | C-06, C-10 | TST: template fixture; INSP |
 | SOPS-021 | Questionnaires for ANONYMOUS mode SHALL NOT contain fields of type name, email, phone, employee number or address. The builder SHALL reject them. Identity can only be provided via the explicit identity-disclosure step (ADR-014). | REQ-H-05 (INC-05); ADR-002 | THR-040, THR-034 | C-06, C-19 | TST: builder API rejects identity field types for anonymous channels; fuzz submit email in every field → none persisted outside sealed envelope |
-| SOPS-022 | S10 SHALL present the passphrase with GC-32 text and SHALL NOT offer download, print, email, QR or any storage mechanism. | ADR-005; INC-23; INC-05 | THR-034, THR-048 | C-06, C-03 | TST: DOM contains no download/print controls; forensic diff (30) shows no passphrase on disk after flow |
+| SOPS-022 | S10 SHALL present the passphrase, before the report is sent, with GC-32 text, SHALL require the S10c 3-word confirmation before finalization (ADR-034), and SHALL NOT offer download, print, email, QR or any storage mechanism. | ADR-005; INC-23; INC-05 | THR-034, THR-048 | C-06, C-03 | TST: DOM contains no download/print controls; forensic diff (30) shows no passphrase on disk after flow |
 | SOPS-023 | The Source UI SHALL NOT use persistent cookies, Web Storage, IndexedDB, Cache API or Service Workers, and SHALL send `Clear-Site-Data: "cache", "cookies", "storage"` on logout, Leave, submit completion and mailbox close. | REQ-H-23 (INC-23); B-SD-02 | THR-048, THR-006 | C-06 | TST: header assertions; forensic-residue suite (30) in Tor Browser and Tails |
 | SOPS-024 | Every source page SHALL offer the §8.11 "Leave" control. The resulting page SHALL instruct "New Identity" and SHALL NOT redirect to any external site. | GC-07; REQ-H-36; INC-36 | THR-048 | C-06 | TST: e2e; header test |
 | SOPS-025 | C-37 MAY check the connecting IP against the Tor exit list only in memory, and SHALL NOT log, store or count that result. | ADR-003 | THR-001, THR-016 | C-37 | TST: log grep after 1,000 requests; INSP config |
-| SOPS-026 | C-37 SHALL publish the onion address, an `Onion-Location` header, a signed copy of the onion address, and GC-01..GC-11, with signature-verification instructions for Tor Browser and Tails downloads. | REQ-H-52 (INC-52); ADR-003 | THR-044, THR-002 | C-37 | INSP; TST: header check |
+| SOPS-026 | C-37 SHALL publish the onion address, an `Onion-Location` header, a signed copy of the onion address, GC-43 and the work-device stop line in its first viewport, and GC-01..GC-11, GC-38 and GC-41, with signature-verification instructions for Tor Browser and Tails downloads; it SHALL NOT host the Source App (amended, RVW-B-17, ADR-041). | REQ-H-52 (INC-52); ADR-003 | THR-044, THR-002 | C-37 | INSP; TST: header check |
 | SOPS-027 | No guidance SHALL advise destroying evidence, disabling or evading monitoring, or accessing information without authorization. Guidance SHALL include GC-03 on S01, S02 and S13. | GP-6; INC-23; B-CO-02 | THR-040 | C-06 | INSP: counsel review per jurisdiction pack (25) |
 | SOPS-028 | Deployments MAY add jurisdiction text via placeholders and MAY add cards, but SHALL NOT remove or edit GC-01..GC-38 core text. The admin UI SHALL enforce this. | ADR-020 edition charter; B-GL-09 | THR-035 | C-19, C-06 | TST: admin API rejects edits to `sops.*` core keys |
 | SOPS-029 | Guidance pages SHALL contain no feedback widgets, counters, ratings or analytics. | ADR-023; INC-53 | THR-036 | C-06 | TST: template lint; network capture |
 | SOPS-030 | Before any major release that changes K1–K8 copy, a comprehension study (§9) SHALL show ≥ 80 % correct per key message, including AT-user participants. | REQ-H-16b; INC-16 | THR-040, THR-002 | C-06 | DEMO: study report archived in release evidence |
 | SOPS-031 | GC-33 and S11 SHALL state that replies show the date only and appear only when the source logs in. The UI SHALL NOT display exact times, "last login", "unread since" or presence information. | ADR-010; INC-35; B-AN-21 | THR-011, THR-003 | C-06, C-03 | TST: render tests; DB schema check for last-seen fields = none |
-| SOPS-032 | The Source UI SHALL provide "Close mailbox" (§8.12) with GC-35 text, and SHALL state that closing does not delete the report. | GC-35; INC-23 | THR-034 | C-06, C-07, C-10 | TST: after close, login with the passphrase fails with a generic message; recipient sees the "mailbox closed" event |
+| SOPS-032 | The Source UI SHALL provide "Close mailbox" (§8.12) with GC-35 text, SHALL state that closing does not delete the report, and SHALL state that the timing of closure can point to the source (amended, RVW-B-26). | GC-35; INC-23 | THR-034 | C-06, C-07, C-10 | TST: after close, login with the passphrase fails with a generic message; recipient sees the "mailbox closed" event |
 | SOPS-033 | GC-36 SHALL be displayed on S12. Recipient-side reply composition SHALL warn on side-channel invitations (`12-FRONTEND-RECIPIENT.md`). | REQ-H-21 (INC-21); INC-24 | THR-019, THR-028 | C-06, C-15 | INSP; TST: RUI warning test |
 | SOPS-034 | GC-38 SHALL state the trade-off that an installed Source App is discoverable on a searched device, and the Tier V web bundle SHALL be presented only when a WEBCAT-capable browser verifies it. The page itself SHALL never claim to be verified. | ADR-004; B-CR-37, B-CR-38; B-SD-12 | THR-007, THR-048 | C-06, C-03 | INSP; TST: no "verified" badge string in C-06 templates |
 | SOPS-035 | Tier W pages SHALL NOT instruct or require sources to lower Tor Browser's security level for any feature. | REQ-H-27; ADR-004 | THR-008 | C-06 | INSP: copy lint for "Safer"/"Standard" instructions outside GC-07 |
@@ -493,13 +549,25 @@ Key messages: **K1** don't use work devices or networks; **K2** use Tor Browser 
 | SOPS-037 | GC-06 SHALL state that Onion Browser on iOS gives weaker protection. The UI SHALL NOT fingerprint or block any browser (ADR-003). | R4 §3.3 (Knowledge (unverified) Onion Browser status); ADR-003 | THR-006 | C-06 | INSP; TST: no UA-dependent rendering (diff responses across UAs = identical) |
 | SOPS-038 | Guidance on canary traps, watermarks and printer dots (GC-25..GC-27) SHALL appear on S07 for the relevant file classes and in S02. | B-AN-41, B-AN-42; B-CR-54; INC-16 | THR-010 | C-06, C-03 | INSP; TST: S07 rendering per class |
 | SOPS-039 | Security-critical guidance (`sops.*`) SHALL only be shown in a language whose `sec:critical` strings passed review (`26-ACCESSIBILITY.md`). Otherwise the default language version SHALL be shown with a notice. | B-SD-02 (Weblate) | THR-040 | C-06 | TST: locale gate test |
-| SOPS-040 | Timing statements (GC-34) SHALL be consistent with ADR-010. Any change to stored timing granularity SHALL trigger review of GC-34 and GC-01. | ADR-010; INC-16 | THR-011 | C-06 | INSP: release checklist item |
+| SOPS-040 | Timing statements (GC-01, GC-33, GC-34) SHALL be consistent with ADR-010 as amended by ADR-038 (fixed import schedule; day/ISO-week display) and SHALL NOT claim that no party learns the time (amended, RVW-B-06, RVW-B-14 c). Any change to stored or displayed timing granularity SHALL trigger review of GC-01, GC-33 and GC-34. | ADR-010; ADR-038; INC-16; RVW-B-06 | THR-011 | C-06 | INSP: release checklist item |
 | SOPS-041 | Recipient-facing tools SHALL NOT offer authorship attribution, stylometric similarity or metadata-based cross-report linking. This backs the GC-31 promise. | REQ-H-08; INC-73 | THR-010, THR-019 | C-15 | INSP: feature review; see `12-FRONTEND-RECIPIENT.md` |
 | SOPS-042 | The Source UI SHALL provide the Safety Check essentials (§7.1) as a non-interactive list with no data collection. | GP-1, GP-5; INC-03 | THR-016 | C-06 | TST: S02 contains no `<input>` except navigation |
 | SOPS-043 | Guidance card string keys SHALL be versioned. Each release SHALL publish a changelog of `sops.*` changes for translators and auditors. | B-SD-02 | THR-040 | C-06 | INSP: release artifact present |
 | SOPS-044 | Clearnet-intake deployments (C-38) SHALL show a reduced guidance set that begins with "This form is NOT ANONYMOUS" and links the onion option where the channel offers one. | ADR-002 | THR-040 | C-38 | TST: C-38 template check; INSP |
 | SOPS-045 | GC-01 (with S03) SHALL implement the ASM-112 page "What protects you and what does not", covering in plain language the source-facing consequences of ASM-001, ASM-004..ASM-011 and ASM-013 (Tier W), and SHALL be re-reviewed whenever those assumptions change. | ASM-112; ADR-004 | THR-040 | C-06, C-03 | INSP: per-release mapping table (assumption → sentence) signed by the privacy lead |
-| SOPS-046 | GC-01 SHALL state that sources can keep people their report concerns from receiving any key (ADR-030 checklist), and that if no one eligible is left, they will be pointed to an independent channel. | ADR-030; INC-22 | THR-020, THR-040 | C-06 | INSP: copy review |
+| SOPS-046 | GC-01 SHALL state who reads first (Triage Set, ADR-037), that sources can keep people their report concerns from receiving any key (ADR-030 checklist), and that if no eligible first reader is left, they will be pointed to an independent channel (amended). | ADR-030; ADR-037; INC-22 | THR-020, THR-040 | C-06 | INSP: copy review |
+| SOPS-047 | Every GC-01 placeholder (`{triage_role_labels}`, `{oversight_statement}`, `{break_glass_statement}`, `{recovery_escrow_statement}`, `{reduced_sod_statement}`, `{date_granularity_text}`) SHALL be generated from signed configuration or the Key Directory, never from operator free text; the v1.0 sentence "No one outside the listed team can unlock reports" SHALL NOT be shown. | RVW-B-14 b; ADR-013; ADR-015; ADR-044 §3; ADR-045 | THR-040, THR-026 | C-06, C-03, C-14 | TST: render fixtures (oversight on/off, escrow on/off, SMB mode, HIGH profile) → matching text; CI lint: placeholders bound to config keys |
+| SOPS-048 | GC-01, GC-38 and S11 SHALL include the ADR-035 §5 honesty sentence verbatim for Tier W. | ADR-035 §5; RVW-A-01; RVW-A-03 | THR-007, THR-014, THR-040 | C-06 | INSP: Tier-0 string equals ADR text; TST: presence per locale |
+| SOPS-049 | HIGH-risk guidance (GC-38, §4.3) SHALL recommend Tier V (ideally the desktop app on Tails, downloaded over Tor) and SHALL state the post-quantum transport residual of Tier W. | ADR-046 §8; RVW-A-11; ADR-004 | THR-003, THR-014 | C-06, C-37 | INSP: copy review against ADR-046 §8 |
+| SOPS-050 | GC-33 and GC-34 SHALL explain visit-day intersection ("each day you visit can be compared with who used Tor that day") and SHALL describe the 1–3 day delayed-delivery option; §4.3 SHALL recommend the delay for HIGH risk. | RVW-B-11; ADR-038 §4; B-AN-21 | THR-011, THR-002 | C-06, C-03 | INSP; DEMO: K10 comprehension ≥ 80 % (§9) |
+| SOPS-051 | GC-38 SHALL give app-acquisition guidance per ADR-041: project onion distribution as plain text, no app on the organisation's site, app stores leave account-linked records, iOS is App-Store-only, never install on employer-managed devices. | ADR-041; RVW-A-14; RVW-B-16 | THR-002, THR-048 | C-06, C-37 | INSP: copy review; TST: no external href on onion pages (SOPS-005) |
+| SOPS-052 | The Review screen SHALL run the §8.5a invisible-character and homoglyph check with "Remove them" as the first choice, and SHALL NOT store, log, count or transmit the result. | RVW-B-24; B-CR-44 | THR-010 | C-07, C-03 | TST: fixture text with 14 Cf/bidi/tag/homoglyph characters → notice shows 14; after Remove, sealed text contains none; log grep = 0 |
+| SOPS-053 | GC-39 (lost passphrase) SHALL be linked from S10, S10c and S13 and SHALL explain the new-report path and its linkage consequence. | RVW-B-27; ANON-006 | THR-034, THR-040 | C-06, C-03 | INSP; DEMO: comprehension item |
+| SOPS-054 | GC-40 SHALL be linked from S04b and SHALL state that ticks are seen by the Triage Set and that ticking one's own manager reveals the team. | RVW-B-03; ADR-037 §4 | THR-010, THR-019 | C-06, C-03 | INSP |
+| SOPS-055 | The operator deployment guide SHALL include the §8.14 first-contact advice (offline publication; non-hyperlinked intranet text; C-37 first viewport). | RVW-B-17 | THR-002, THR-036 | C-37 | INSP: `18-DEPLOYMENT.md` checklist item present; TST: C-37 first-viewport snapshot at 320×568 shows GC-43 |
+| SOPS-056 | GC-41 (phone-only) SHALL be reachable from S01, S02 and C-37, with the iOS caveat. | RVW-B-28; R4 §3.3 | THR-002, THR-048 | C-06, C-37 | INSP |
+| SOPS-057 | GC-42 SHALL explain operator-statement and incident-notice warnings, including that a Tier W server can hide them and that they are signals, not guarantees. | ADR-035 §2, §4 | THR-025, THR-040 | C-06, C-03 | INSP |
+| SOPS-058 | The GC-32 and GC-35 texts SHALL describe passphrase change (ADR-046 §7) and its Tier W limit (both passphrases pass through the server). | ADR-046 §7; RVW-A-03 | THR-034 | C-06, C-03 | INSP |
 
 ## 11. Residual risks and limitations
 
@@ -512,7 +580,13 @@ Key messages: **K1** don't use work devices or networks; **K2** use Tor Browser 
 7. **Comprehension varies** with language, stress and literacy. The 80 % target means some readers still misunderstand.
 8. **The `scripting` media query** may be unsupported or spoofed in some browser versions (§8.2 fallback).
 9. **Tails, bridges and Onion Browser** status and UI labels change over time. Card text that names UI elements ("shield icon", "Connection Assist") needs per-release verification (Knowledge (unverified) for current Tor Browser menu labels).
-10. **Close mailbox after seizure** may have legal implications in some jurisdictions. The copy defers to legal advice.
+10. **Close mailbox after seizure** may have legal implications in some jurisdictions. The copy defers to legal advice. Closing is itself a timing signal to the team (GC-35).
+11. **Tier W against a compromised or compelled operator:** guidance can only state the risk (ADR-035 §5) and recommend Tier V; it cannot protect website users against live capture of content and passphrases.
+12. **Visit-day intersection** (RVW-B-11): the ADR-038 fixed import schedule and day/week display limit what the case team sees, but the source's own network still sees each day Tor was used; advice to batch visits reduces, not removes, this.
+13. **Delayed delivery** hides the send day only from parties who see the arrival; it does not hide the day the source used Tor.
+14. **App acquisition** (ADR-041): on iOS there is no store-independent option; app-store records are compellable.
+15. **Harvest-now-decrypt-later** (ADR-046 §8): recorded Tier W sessions may be decrypted in future; mitigated only by Tier V.
+16. **Warning banners in Tier W** are rendered by the server they describe and can be suppressed by a compromised server (GC-42).
 
 ## 12. Open issues
 
@@ -520,7 +594,8 @@ Key messages: **K1** don't use work devices or networks; **K2** use Tor Browser 
 - **OI-05-2:** Validate the Flesch-Kincaid thresholds against real translated text. Grade metrics do not transfer across languages (see `26-ACCESSIBILITY.md` I18N rules).
 - **OI-05-3:** Decide whether Tier V should offer **optional local LLM paraphrasing** (an on-device model, no network). The evidence is bimodal [B-AN-39]. Model size and trust issues apply. Currently excluded (SOPS-019).
 - **OI-05-4:** Research whether a CoverDrop-style cover-traffic channel (R4 §6; B-GL-22) could remove "Tor use is a signal" for employer networks in EE deployments (R-COVER-01, R2 §10).
-- **OI-05-5:** Localized passphrase wordlists (see `26-ACCESSIBILITY.md` Open issues; ADR-005 fixes the EFF English list). GC-32 usability for non-English speakers is a concern.
+- **OI-05-5:** Localized passphrase wordlists (see `26-ACCESSIBILITY.md` Open issues; ADR-005 fixes the EFF English list). GC-32 usability for non-English speakers is a concern (also RVW-C-16).
+- **OI-05-6:** Passphrase length. RVW-B-27 proposes 7 words by default (10 for HIGH). ADR-046 §7 keeps ≈129 bits (10 words) and adds rotation; this document conforms. Rejected here for conflict with ADR-005/ADR-046.
 
 ### Open Issues for ADR revision
 - **ADR-012 vs REQ-H-17 (Tier W cleaning):** REQ-H-17 asks that sources be *offered* automatic metadata removal. ADR-012 forbids server-side parsing, so Tier W sources cannot be offered cleaning before encryption. This document conforms (SOPS-017 honest statement; Tier V cleaning in SOPS-016). A possible ADR amendment: an **optional, source-initiated, sandboxed cleaning step inside C-07** (a microVM with no network, output re-sealed, original discarded at the source's choice). Cost: server-side parser attack surface in Z-INTAKE, and Tier W plaintext exposure widens from "sealing" to "parsing". Recommendation: keep ADR-012 as is and invest in Tier V adoption.

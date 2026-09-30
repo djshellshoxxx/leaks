@@ -1,6 +1,6 @@
 # 08 — API Specification
 
-Status: Draft v1.0 · Edition applicability: both (EE-only APIs marked **EE**) · Owner: Backend + Client teams
+Status: Draft v1.1 (revision round 2: ADR-034..046) · Edition applicability: both (EE-only APIs marked **EE**) · Owner: Backend + Client teams
 
 ## 1. Purpose and scope
 
@@ -35,7 +35,9 @@ Common rules (§3) apply to every endpoint unless a row overrides them. Internal
 
 | Document | Relationship |
 |---|---|
-| DECISIONS.md ADR-004/005/010/011/015/017/018/026/029 | Binding decisions |
+| DECISIONS.md ADR-004/005/010/011/015/017/018/026/029, and ADR-034..046 (revision ADRs; supersede conflicting earlier text) | Binding decisions. This document is the **canonical owner of the upload protocol** (ADR-046(4)). |
+| 11-FRONTEND-SOURCE.md §5.3–§5.6 | **Canonical** for the Source Web page contract: response headers and CSP, page size classes (P1/P2), cookie and session timers. §4 here specifies the API behaviour of those routes and does not restate the contract. |
+| 24-LICENSING-BUSINESS-MODEL.md §TEL | Canonical metrics/k-anonymity regime used by AP-22, RL-09 and SI-* (ADR-046(5)) |
 | 06-SYSTEM-ARCHITECTURE.md | Listeners, trust boundaries, flows |
 | 07-BACKEND.md | Implementation of routers, limits, error mapping, logging |
 | 09-DATABASE.md | Persistence for each endpoint |
@@ -50,8 +52,8 @@ Common rules (§3) apply to every endpoint unless a row overrides them. Internal
 
 | Family | Listener | Audience (ADR-029) | Credential | Transport |
 |---|---|---|---|---|
-| Source Web | `/run/candor/web/http.sock` behind the source onion | `source-web` | `__Host-cs` session cookie (RAM session in C-06) | Tor onion, HTTP/1.1 |
-| Source App | same socket, prefix `/app/v1/` | `source-app` | `Authorization: CandorSource <token>` (RAM session in C-06, distinct map and type from web sessions) | Tor onion (Arti), HTTP/1.1 |
+| Source Web | `/run/candor/web/http.sock` behind the source onion | `source-web` | `__Host-s` session cookie (11 §5.6; RAM session in C-06 and C-07) | Tor onion, HTTP/1.1 |
+| Source App | same socket, prefix `/app/v1/` | `source-app` | none for reply retrieval and submission (ADR-039); per-upload capabilities for uploads (§5.1) | Tor onion (Arti), HTTP/1.1 |
 | Relay | intake TCP 7443 | machine: `relay` (mTLS SAN) | pinned mTLS + `Candor-Relay-Sig` | TLS 1.3 |
 | Key Directory | served through the Source App (`/app/v1/directory/*`), Source Web (`/keys`) and Desk API (`/desk/v1/kd/*`) | inherits host family | inherits | inherits |
 | Desk API | desk.sock (RCP-ONION) or TCP 8443 (RCP-LAN) | `desk-api` | `Authorization: CandorDesk <access_token>` + `Candor-PoP` device signature + onion client-auth or mTLS client certificate | TLS 1.3 or onion |
@@ -64,7 +66,7 @@ Common rules (§3) apply to every endpoint unless a row overrides them. Internal
 **Token binding (ADR-029):**
 - Every user token is a 256-bit random opaque value. It is stored server-side as `SHA-256(token)` with `{audience, tenant_id, principal_id, device_id, issued_at, expires_at, auth_strength}`.
 - A token presented to a listener of another audience is rejected as if unknown (401, uniform).
-- Web and app source sessions live in separate RAM maps with distinct Rust types. The cookie is never accepted on `/app/v1/*`, and the bearer token is never accepted on HTML routes (INC-105).
+- Web source sessions live in a RAM map. The Source App has no sessions (ADR-039). The cookie is never accepted on `/app/v1/*`, and no `/app/v1/*` credential is accepted on HTML routes (INC-105).
 - Machine identities are mTLS SANs of the form `urn:candor:<role>:<tenant_id>:<instance_id>`. They are never accepted on user-audience listeners.
 
 **Desk/Admin token lifetimes:**
@@ -130,9 +132,10 @@ No error message contains stack traces, SQL, file paths, IDs from the request, o
 
 | Family | Rule |
 |---|---|
-| Source Web | Every HTML response is padded to its route's class (16/32/64/128 KiB) with an HTML comment of random printable bytes (not compressible, since compression is off). Wrong-passphrase and inbox responses share class 64 KiB. |
+| Source Web | Size classes, padding bytes and budgets are defined **only** in 11 §5.4 (P1 = 65,536 bytes, P2 = 131,072 bytes; no other class). Wrong-passphrase and inbox responses are both P1 unless the inbox paginates to P2 (11 §5.4). Supersedes the earlier 16/32/64/128 KiB classes here (RVW-A-21). |
 | Source App | JSON/CBOR responses padded to the next multiple of 4 KiB (≥ 4 KiB), with a `pad` field of random bytes. Blob downloads are already bucketed. |
-| Mailbox lists | Always return exactly `N_fixed = 32` entries; the real ones plus dummies indistinguishable at the ciphertext level (dummy reply ciphertexts under a random key) |
+| Tier W mailbox | The inbox always renders exactly `N_fixed = 32` entries; the real ones plus dummies indistinguishable at the ciphertext level (dummy reply ciphertexts under a random key) |
+| Tier V reply pages (SA-20) | Every page holds exactly 64 entries, each a ciphertext padded to 70,000 bytes; the page count is padded to the next power of two (minimum 1) with dummy pages (ADR-039) |
 | Desk/Admin | Not padded (authenticated staff; 06 §13) |
 
 ### 3.9 Legend for tables
@@ -144,64 +147,55 @@ No error message contains stack traces, SQL, file paths, IDs from the request, o
 
 ### 3.10 Security headers
 
-**Source Web (all responses):**
-```
-Content-Security-Policy: default-src 'none'; style-src 'self'; img-src 'self'; font-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; script-src 'none'; connect-src 'none'; object-src 'none'; manifest-src 'none'; worker-src 'none'; media-src 'none'
-Referrer-Policy: no-referrer
-X-Content-Type-Options: nosniff
-X-Frame-Options: DENY
-Cross-Origin-Opener-Policy: same-origin
-Cross-Origin-Embedder-Policy: require-corp
-Cross-Origin-Resource-Policy: same-origin
-Origin-Agent-Cluster: ?1
-Permissions-Policy: accelerometer=(), ambient-light-sensor=(), autoplay=(), battery=(), camera=(), display-capture=(), document-domain=(), encrypted-media=(), fullscreen=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), publickey-credentials-get=(), screen-wake-lock=(), serial=(), usb=(), web-share=(), xr-spatial-tracking=(), clipboard-read=(), clipboard-write=(), interest-cohort=()
-Cache-Control: no-store, max-age=0
-Pragma: no-cache
-X-Robots-Tag: noindex, nofollow, noarchive
-Content-Type: text/html; charset=utf-8
-```
-
-Rules:
-- No `Server`, `Date`, `ETag`, `Last-Modified`, `Set-Cookie` except the session cookie, or `Alt-Svc`.
-- Omitting `Date` deviates from RFC 9110 §6.6.1 on purpose, to avoid exposing server clock skew. [Knowledge (unverified): clock-skew-based onion-service fingerprinting.]
-- **WEBCAT-verified bundle (optional, `intake.tier_v.webcat_bundle.enabled`):** served only under `/v/` with `script-src 'self' 'wasm-unsafe-eval'; connect-src 'self'` and the enrollment manifest required by WEBCAT (B-CR-37, B-CR-40). The no-JS routes keep `script-src 'none'`.
-- Logout additionally sends `Clear-Site-Data: "cache", "cookies", "storage"`.
+**Source Web (all responses):** the header set, including the single CSP string, is defined **only** in 11-FRONTEND-SOURCE.md §5.3 (inline CSS pinned by hash, `script-src` absent under `default-src 'none'`, `sandbox allow-forms allow-same-origin`, Trusted Types, no sub-resources). This document previously carried a second CSP with `style-src 'self'; font-src 'self'` and a static-asset route; both are withdrawn (RVW-A-21, API-048). API-level invariants that the route handlers enforce:
+- No `Server`, `Date`, `ETag`, `Last-Modified`, `Content-Encoding`, `Alt-Svc`, or `Set-Cookie` other than the single session cookie `__Host-s`.
+- Omitting `Date` deviates from RFC 9110 §6.6.1 on purpose, to avoid exposing server clock skew (16-TOR-I2P.md owns the decision).
+- Exactly one HTTP request per page view; no sub-resources, no redirects (11 §5.4).
+- **WEBCAT-verified bundle (optional, `intake.tier_v.webcat_bundle.enabled`):** served only under `/v/` with the CSP given in 11 §5.3 and the enrollment manifest required by WEBCAT (B-CR-37, B-CR-40). The no-JS routes never allow scripts.
+- Logout (`/leave`) additionally sends `Clear-Site-Data: "cache", "cookies", "storage"`.
 
 **Desk/Admin/Export APIs:** `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `Content-Type` exact. No CORS headers: requests with an `Origin` header are rejected, because the Desk uses a native HTTP client, not a browser origin.
 
 ## 4. Source Web (Tier W, HTML forms, audience `source-web`)
 
 Family defaults:
+- Paths are relative to `/{lang}/` and follow the route list of 11 §5.5, which is canonical for route names and screens (S-numbers). This table specifies the API contract of each route. Rows keep their historical IDs; `SW-19` is withdrawn.
 - Rate: 60 req/min/circuit, burst 20, plus G: 600 req/s.
-- Errors: static padded pages (§3.4).
+- Errors: static padded pages (§3.4) in class P1.
 - Sensitive: all request bodies are SS or content.
 - Log: `none` unless stated.
-- Security: headers §3.10, padding §3.8, no JS required, no external resources, no redirects to other origins, no URL changes that record state (no IDs in URLs).
+- Security: headers per 11 §5.3, padding per 11 §5.4, no JS required, no external resources, no redirects, no IDs in URLs.
+- Session: single cookie `__Host-s`; one timer set, idle 20 min and absolute 2 h (ADR-034); expiry zeroizes the RAM draft and deletes staged parts.
+- **Draft state (ADR-034):** draft text and the identity block live only in C-07 mlocked RAM keyed by the session handle; attachment parts are encrypted under a per-session key held only in C-07 RAM and staged as ciphertext in tmpfs. Nothing is sealed to any recipient until the submission is finalized (SW-04). A sealer restart loses drafts, and the UI says so (11 S04/S06).
+- **Tier W uploads (ADR-046(4)):** one file per request, no resume. A broken upload is re-sent from the start.
 
 | ID | Method Path | AuthZ | Input | Output | Rate | Errors | Sensitive | Log | Security |
 |---|---|---|---|---|---|---|---|---|---|
-| SW-01 | GET `/` | pub | — | Landing: mode statement (ANONYMOUS/CONFIDENTIAL/IDENTIFIED per channel), protection statement (06 ARCH-036), Tier W honesty statement, links to channels and `/verify` | default | 500 page | none | none | Pad 32 KiB; `lang` via `?l=xx` only from the allow-list |
-| SW-02 | GET `/c/{channel_id}` | pub | `channel_id` | Channel description; protection statement; **optional COI checklist** "Is your report about any of these people or roles?" listing the channel's role labels (and names only if `roster_names_visible`) plus COI categories, all rendered from the verified directory snapshot (ADR-030), default none selected; "Start" form | default | 404 page (unknown or disabled channel); busy page if no member has a valid Member Epoch Key | none | none | Channel IDs are published values; disabled channels 404; the checklist is a plain HTML form (no JS) |
-| SW-03 | POST `/new` | pub + CSRF (pre-session token issued by SW-02 in a session-less signed hidden field, 10-min validity) | `csrf`, `channel_id`, `coi_label[]` (≤ 16 u16 role-label indices), `coi_category[]` (≤ 8 u16) | Sets `__Host-cs`; page shows the 10-word passphrase once, with the confirmation form. If the selection leaves fewer than `min_recipients` eligible members: fail-closed page "This channel cannot accept this report right now" with no alternative path (ADR-030). | 6/10 min/circuit; G: 600/h new accounts | busy page | SS (passphrase, COI selection) | CTR:`accounts_started` | Passphrase never in URL or title; `autocomplete=off`; page pad 32 KiB; the COI selection is held in sealer RAM and persisted only in `prefs_ct` (encrypted to the source's key) |
-| SW-04 | POST `/new/confirm` | session(PENDING_NEW) + CSRF | `csrf`, `w3`, `w7` (two words re-typed) | Redirect-free render of the submit form | default | same page with generic error | SS | none | Constant-time compare |
-| SW-05 | POST `/submit/message` | session + CSRF | `csrf`, `text` ≤ 64 KiB UTF-8 | Draft page listing parts as "Message (n KB bucket)" | default | 413 page | content | none | Streamed to sealer (07 §5.2); no disk |
-| SW-06 | POST `/submit/file` | session + CSRF | multipart: `csrf`, `file` (1 part) ≤ `intake.max_file_bytes` | Draft page | 30/h/circuit | 413 or 400 page; draft keeps prior parts | content; filename SS | none | Parser enforces the part allow-list before forwarding (INC-107); filename sealed in manifest |
-| SW-07 | POST `/submit/remove` | session + CSRF | `csrf`, `part_index` (u8) | Draft page | default | 400 page | none | none | Part index local to session |
-| SW-08 | POST `/submit/send` | session + CSRF | `csrf`, `identity_disclosure` (optional text ≤ 4 KiB for CONFIDENTIAL/IDENTIFIED; sealed to Identity Custodian keys, ADR-014) | Confirmation page (no IDs, no time) | 10/h/circuit | busy/500 page; draft retained ≤ 2 h | content; SS | CTR:`submissions_tier_w` | `NO_EPOCH_KEY` → busy page (no fallback) |
-| SW-09 | GET `/login` | pub | — | Login form | default | — | none | none | Pad 16 KiB |
-| SW-10 | POST `/login` | pub + CSRF | `csrf`, `passphrase` ≤ 256 B | Inbox (SW-11 render) or wrong-passphrase page, both in pad class 64 KiB | 5/10 min/circuit; G: Argon2id 4 concurrent | busy page | SS | CTR:`logins` | 2 s floor timing; uniform challenge (07 BE-010); new session ID issued (fixation-proof); on success the web passes `prefs_ct` to the sealer (`LOAD_PREFS`) |
-| SW-11 | GET `/inbox` | session(AUTHENTICATED) | — | Replies decrypted in sealer and rendered as escaped text; day-granular dates; own messages as "sent on YYYY-MM-DD" | default | 404 page if not authenticated | content | none | No read receipts sent anywhere (ADR-010) |
-| SW-12 | POST `/inbox/message` | session + CSRF | `csrf`, `text` ≤ 64 KiB | Inbox | 20/h/circuit | 413 page | content | CTR:`followups` | Follow-up envelope `kind=followup` with the same `thread_tag` |
-| SW-13 | POST `/inbox/file` | session + CSRF | multipart `csrf`, `file` | Inbox with draft part | 30/h/circuit | 413 page | content | none | as SW-06 |
-| SW-14 | POST `/inbox/reply-delete` | session + CSRF | `csrf`, `reply_index` (u8, index in the padded list) | Inbox | default | 400 page | none | none | Deletion local to intake; not reported to core |
-| SW-15 | POST `/account/delete` | session + CSRF + re-entry of passphrase | `csrf`, `passphrase` | "Account deleted" page | 3/h/circuit | wrong-passphrase page | SS | CTR:`account_deletions` | Deletes the account record and mailbox in C-08. Already relayed submissions are unaffected (explained on the page). |
-| SW-16 | POST `/logout` | session + CSRF | `csrf` | Landing | default | — | none | none | `Clear-Site-Data`; sealer `ZEROIZE` |
-| SW-17 | GET `/keys` | pub | — | Human-readable channel key fingerprints, directory checkpoint, witness status, current client release hashes | default | — | none | none | Renders from the verified snapshot only |
-| SW-18 | GET `/verify` | pub | — | Instructions for verifying the Source App and the onion address | default | — | none | none | Static |
-| SW-19 | GET `/static/{sha256}.{css\|woff2\|svg}` | pub | hash | Asset | G only | 404 | none | none | Immutable; `Cache-Control: no-store` still sent (no disk cache on source device) |
+| SW-01 | GET `/` | pub | — | S01 Landing: mode statement per channel, protection statement (06 ARCH-036), Tier W honesty statement (ADR-035(5)), operator-statement status (banner if older than 30 days), links to channels | default | 500 page | none | none | `lang` only from the allow-list |
+| SW-02 | GET `/new`, GET/POST `/concerns` | pub (GET); session + CSRF (POST) | `channel_id` (form body), `coi_label[]` (≤ 16 u16 role-label indices), `coi_category[]` (≤ 8 u16) | S04 channel description and protection statement; S04b **optional COI checklist** listing the channel's role labels (names only if `roster_names_visible`), rendered from the verified directory snapshot (ADR-030), default none selected, with the ADR-037(4) statement "Your answers are encrypted and seen only by the independent triage team…"; the page names the Triage Set role labels who read first | default | 404 page (unknown or disabled channel); busy page if no Triage Set member has a valid Member Epoch Key | SS (COI selection) | none | The selection is held only in C-07 RAM until finalization. If the ticks exclude every Triage Set member, the page names the channel's `alternative_channel_id` (ADR-037(1); RVW-C-18) and offers no other path |
+| SW-03 | POST `/new` (start) | pub + CSRF (pre-session token issued by SW-02 in a session-less signed hidden field, 10-min validity) | `csrf`, `channel_id` | Sets `__Host-s`; renders S05. **No passphrase is generated here** (ADR-034). | 6/10 min/circuit; G: 600/h new sessions | busy page | none | none | Creates only a RAM session in C-06/C-07; nothing is written to C-08 |
+| SW-04 | POST `/saved` | session(PENDING_CONFIRM) + CSRF | `csrf`, `w_a`, `w_b`, `w_c` (the 3 words at the positions the sealer chose at random in SW-08) | On a match: finalizes (SEAL_FINISH + COMMIT_ENVELOPE with `fsync`, 07 §5.2) and renders the "received" page (no ID, no time). On a mismatch: S10 again with the same passphrase and new positions (≤ 5 attempts, then the draft is discarded) | 10/h/circuit | busy/500 page | SS | CTR:`submissions` (monthly, 24 §TEL) | Constant-time compare. **This is the passphrase confirmation step** (ADR-034): the submission is not finalized before it, so a lost S10 response means nothing was submitted and the source restarts |
+| SW-05 | POST `/q`, POST `/identity` | session + CSRF | `csrf`, questionnaire fields (total ≤ 96 KiB UTF-8, 11 §5.7); `identity_disclosure` (≤ 4 KiB, CONFIDENTIAL/IDENTIFIED only) | Next step page | default | 413 page | content; SS | none | Streamed to C-07 `DRAFT_SET` (RAM only, never disk, including on error paths); identity block zeroized if the source reverts to ANONYMOUS |
+| SW-06 | POST `/files` | session + CSRF | multipart: `csrf`, `file` (1 part) ≤ `intake.max_file_bytes` | S06 draft page listing parts as "File (size bucket)" | 30/h/circuit; G: staging capacity | 413 or 400 page; busy page when the tmpfs staging area is full; draft keeps prior parts | content; filename SS | none | Parser enforces the part allow-list before forwarding (INC-107); ciphertext under the per-session key is staged in tmpfs (ADR-034); padded to the ADR-011 bucket before staging (ADR-038(5)); filename kept in C-07 RAM and sealed into the manifest at finalization |
+| SW-07 | POST `/files` (action `remove`) | session + CSRF | `csrf`, `part_index` (u8) | S06 draft page | default | 400 page | none | none | Deletes the staged ciphertext immediately |
+| SW-08 | POST `/submit` | session + CSRF | `csrf`, `delayed_delivery` (bool, optional, ADR-038(4)) | S10 Recovery Credential: the 10-word passphrase (generated now by C-07 `GEN_ACCOUNT`, held only in RAM) and a form asking for 3 randomly chosen words (SW-04) | 10/h/circuit | busy/500 page | SS (passphrase) | none | Passphrase never in URL or title; `autocomplete=off`. Follow-ups by a logged-in source skip S10 and finalize here directly |
+| SW-09 | GET `/login` | pub | — | Login form | default | — | none | none | — |
+| SW-10 | POST `/login` | pub + CSRF | `csrf`, `passphrase` ≤ 256 B | Inbox (SW-11 render) or wrong-passphrase page, same size class | 5/10 min/circuit; G: Argon2id 4 concurrent | busy page | SS | none | 2 s floor timing; uniform challenge (07 BE-010); new session ID issued (fixation-proof); on success the web passes `prefs_ct` to the sealer (`LOAD_PREFS`). Server-side mailbox lookup is inherent to Tier W (ADR-039 residual) |
+| SW-11 | GET `/inbox` | session(AUTHENTICATED) | — | Replies decrypted in the sealer and rendered as escaped text with day-granular dates. **No own-message history** is shown or stored (ADR-039). | default | 404 page if not authenticated | content | none | No read receipts sent anywhere (ADR-010) |
+| SW-12 | POST `/conversation` | session + CSRF | `csrf`, `text` ≤ 64 KiB, `delayed_delivery` (bool, optional) | S12 | 20/h/circuit | 413 page | content | CTR:`submissions` | Follow-up sealed only to members of the original eligible set who are still members (ADR-036(4)); no `kind` field is stored |
+| SW-13 | POST `/conversation` (multipart) | session + CSRF | multipart `csrf`, `file` | S12 with a staged part | 30/h/circuit | 413 page | content | none | as SW-06 |
+| SW-14 | POST `/conversation` (action `reply-delete`) | session + CSRF | `csrf`, `reply_index` (u8, index in the padded list) | S12 | default | 400 page | none | none | Deletion local to intake; not reported to core |
+| SW-15 | POST `/end` (action `delete-account`) | session + CSRF + re-entry of passphrase | `csrf`, `passphrase` | "Account deleted" page | 3/h/circuit | wrong-passphrase page | SS | CTR:`account_deletions` | Deletes the account record and mailbox in C-08 and writes a `deletion_tombstone` (RVW-A-28). Already relayed submissions are unaffected (explained on the page). |
+| SW-16 | POST `/leave` | session + CSRF | `csrf` | Leave page | default | — | none | none | `Clear-Site-Data`; sealer `ZEROIZE`; staged parts deleted |
+| SW-17 | GET `/status` | pub | — | S03: channel role labels, protection statement, operator-statement status, and for Tier W the fixed sentence "Checking these values does not protect a report sent from this website; only the Candor app checks them before encrypting." Fingerprints, checkpoint and witness details are moved to the Tier V-oriented `/verify` content (RVW-A-17; ADR-036 Tier W limit) | default | — | none | none | Renders from the verified snapshot only |
+| SW-18 | GET `/safety` | pub | — | S02 guidance, including how to obtain and verify the Source App from the project's onion service (ADR-041) | default | — | none | none | Static |
+| SW-19 | WITHDRAWN (RVW-A-21; 11 §5.4 rule 4): GET `/static/{sha256}.{css\|woff2\|svg}`. No sub-resources exist; CSS is inline and hash-pinned. | — | — | — | — | — | — | — | — |
 | SW-20 | GET `/robots.txt` | pub | — | `Disallow: /` | G | — | none | none | — |
+| SW-21 | POST `/extend` | session + CSRF | `csrf` | Current page re-rendered | 12/h/circuit | — | none | none | Resets the idle timer only; the 2-h absolute limit is unchanged (ADR-034) |
+| SW-22 | POST `/inbox` (action `rotate-passphrase`) | session(AUTHENTICATED) + CSRF + re-entry of the current passphrase | `csrf`, `passphrase` | S10-style page with the new passphrase and the 3-word confirmation (same flow as SW-04); after confirmation the old passphrase stops working | 3/day/circuit | wrong-passphrase page | SS | none | ADR-046(7): C-07 re-derives keys, re-encrypts pending replies to the new key in RAM, replaces the account's public record, and seals a key-update follow-up to the original eligible set so the case learns the new reply key |
+| SW-23 | GET `/.well-known/candor/manifest` | pub | — | The signed **running manifest** (§7.1): byte-exact CBOR, identical for all requesters until the next release or platform update | G only | — | none | none | ADR-035(1), ADR-040. Exempt from P1/P2 padding (it is a static public document); no session, no cookie |
 
-There are no other paths. Any unlisted path returns the SW 404 page (same bytes as SW-02 unknown).
+There are no other paths. Any unlisted path returns the SW 404 page (same bytes as SW-02 unknown). Routes SW-22 and SW-23 are requested for addition to 11 §5.5 (cross-document request).
 
 ## 5. Source App API (Tier V, audience `source-app`)
 
@@ -211,30 +205,46 @@ Family defaults:
 - Errors per §3.4.
 - Log: `none` unless stated.
 - All objects are deterministic CBOR.
-- The app uses a **fresh Tor circuit (new SOCKS isolation token) per logical operation group** (one for directory fetch, one per upload session, one for mailbox), so that operations are not trivially linkable at the circuit level (THR-047; 11-FRONTEND-SOURCE.md).
+- The app uses a **fresh Tor circuit (new SOCKS isolation token) per logical operation group** (one for directory fetch, one per upload, one for reply retrieval), so that operations are not trivially linkable at the circuit level (THR-047; 11-FRONTEND-SOURCE.md).
+- **No source sessions (ADR-039):** replies are retrieved by fetch-all (SA-19/SA-20); submissions and follow-ups are unauthenticated at the HTTP layer and authenticated inside the ciphertext by the source signing key (`sign_sk`, 04-CRYPTOGRAPHY.md). The intake therefore holds no Tier V account and cannot tell which source checked for replies or when.
 
 | ID | Method Path | AuthZ | Input | Output | Rate | Errors | Sensitive | Log | Security |
 |---|---|---|---|---|---|---|---|---|---|
-| SA-01 | GET `/app/v1/directory/checkpoint` | pub | — | Signed checkpoint + witness cosignatures + snapshot version | default | `busy` | none | none | Client verifies against pinned directory root and witnesses (§7) |
-| SA-02 | GET `/app/v1/directory/channel/{channel_id}` | pub | `channel_id` | `{channel_identity, channel_roster (role labels, member identity key IDs), coi_map (category → excluded labels), member_epoch_keys (per member: current + next 4 epochs, each signed by the member identity key), min_recipients, recipient_slots, inclusion proofs, protection_statement}` | default | 404 uniform | none | none | Same response for unknown and disabled channels. The app shows the COI checklist, applies the filter locally, and fails closed below `min_recipients` (ADR-030). |
-| SA-03 | GET `/app/v1/directory/consistency?from={size}` | pub | tree size | Consistency proof to the current checkpoint | default | 400 | none | none | Detects forks between app visits |
+| SA-01 | GET `/app/v1/directory/checkpoint` | pub | — | Signed checkpoint + witness cosignatures (≥ 2, ≥ 1 external in EE/GOV/MANAGED; ADR-036(5)) + snapshot version | default | `busy` | none | none | Client verifies against the pinned directory root, the witness key set embedded in the app, and the last pinned tree head (§7) |
+| SA-02 | GET `/app/v1/directory/channel/{channel_id}` | pub | `channel_id` | `{channel_identity, channel_roster (role labels, member identity key IDs, `triage` flag, `member_since_day`, `effective_day`), role_label_certs (OVERSIGHT-signed, ADR-036(3)), coi_map (category → excluded labels), member_epoch_keys (Triage Set members only: current + next 4 epochs, each signed by the member identity key), alternative_channel_id, recipient_slots, inclusion proofs, protection_statement, operator_statement}` | default | 404 uniform | none | none | Same response for unknown and disabled channels. The app shows the COI checklist, applies the filter locally to the **Triage Set** (ADR-037(1)), warns when a member key is < 7 days old (ADR-036(3)), and directs the source to `alternative_channel_id` when no eligible triage member remains. Entries before their `effective_day` are not used for sealing. |
+| SA-03 | GET `/app/v1/directory/consistency?from={size}` | pub | tree size | Consistency proof to the current checkpoint | default | 400 | none | none | Detects forks between app visits (persistent pin, ADR-036(5)) |
 | SA-04 | GET `/app/v1/releases` | pub | — | Latest `CLIENT_RELEASE` entries with inclusion proofs | default | — | none | none | App refuses to run if its own hash is not logged or is below minimum |
-| SA-05 | POST `/app/v1/auth/challenge` | pub | `{locator_hash: bytes32}` | `{challenge: bytes32, ch_id: bytes16}` (valid 60 s, single use) | 10/10 min/circuit | `busy` | SS | none | Uniform for unknown locators (07 BE-010) |
-| SA-06 | POST `/app/v1/auth/session` | pub | `{ch_id, locator_hash, sig: bytes64}` | `{token: bytes32, expires_in: 1800}` | 5/10 min/circuit | `unauthorized` (uniform, 2 s floor) | SS | CTR:`logins` | Token audience `source-app`, RAM only, idle 20 min, absolute 2 h |
-| SA-07 | POST `/app/v1/accounts` | pub + `pow` (optional app-level PoW when `intake.pow.app_level.enabled`: Equi-X solution over server-provided seed) | `{locator_hash, auth_pk: bytes32, xwing_pk: bytes1216, prefs_ct ≤ 4 KiB, pow?}` | `201 {}` | 3/h/circuit; G: 600/h | `conflict` (locator exists; same body size as success, 409) | SS | CTR:`accounts_started` | Account is "pending" until the first envelope commit references it (SA-12). Pending accounts are purged after 1 epoch day. `prefs_ct` is opaque to the server. |
-| SA-08 | POST `/app/v1/uploads` | pub (no session required; §5.1) | `{upload_id: bytes32, k_u: bytes32, chunk_count: u16 ≤ 1024, padded_size_bucket: u8}` | `201 {chunk_size: 4194304}` | 20/h/circuit; G: 2,000 pending | `busy`, `too_large` | none | none | No link to any account or session |
-| SA-09 | PUT `/app/v1/uploads/{upload_id}/chunks/{n}` | capability: `Candor-Chunk-Mac: HMAC-SHA256(K_U, upload_id ‖ n ‖ sha256(body))` with `K_U` as registered in SA-08 | body = ciphertext chunk ≤ 4 MiB | `204` | 600/h/circuit | `not_found` (unknown upload), `conflict` (chunk already stored with a different digest), `too_large` | CT | none | Idempotent for identical chunk re-sends; MAC verified before storing |
-| SA-10 | GET `/app/v1/uploads/{upload_id}` | capability MAC over `upload_id ‖ "status"` | — | `{received: bitmap}` | 60/h/circuit | `not_found` | none | none | Resumption from any circuit/session with no account linkage |
+| SA-05 | WITHDRAWN (ADR-039): POST `/app/v1/auth/challenge` | — | — | — | — | — | — | — | — |
+| SA-06 | WITHDRAWN (ADR-039): POST `/app/v1/auth/session` | — | — | — | — | — | — | — | — |
+| SA-07 | WITHDRAWN (ADR-039): POST `/app/v1/accounts`. The reply public key and `thread_tag` travel inside the envelope ciphertext; the intake stores no Tier V account. | — | — | — | — | — | — | — | — |
+| SA-08 | POST `/app/v1/uploads` | pub (no session; §5.1) + optional app-level PoW (`intake.pow.app_level.enabled`) | `{upload_id: bytes32, k_u: bytes32, chunk_count: u16 ≤ 512 (≤ 2,048 in EE profiles), padded_size_bucket: u8, pow?}` | `201 {chunk_size: 8388608}` | 20/h/circuit; G: 2,000 pending | `busy`, `too_large` | none | none | No link to any account or session; upload expires 24 h after creation (§5.1) |
+| SA-09 | PUT `/app/v1/uploads/{upload_id}/chunks/{n}` | capability: `Candor-Chunk-Mac: HMAC-SHA256(K_U, upload_id ‖ n ‖ sha256(body))` with `K_U` as registered in SA-08 | body = ciphertext chunk, exactly 8 MiB except the last (≤ 8 MiB) | `204` | 600/h/circuit | `not_found` (unknown or expired upload), `conflict` (chunk already stored with a different digest), `too_large` | CT | none | Idempotent for identical chunk re-sends; MAC verified before storing |
+| SA-10 | GET `/app/v1/uploads/{upload_id}` | capability MAC over `upload_id ‖ "status"` | — | `{received: bitmap}` | 60/h/circuit | `not_found` | none | none | Resumption **within one app session only** (the app keeps `U` in RAM, never on disk) and ≤ 24 h after creation (ADR-046(4)) |
 | SA-11 | DELETE `/app/v1/uploads/{upload_id}` | capability MAC | — | `204` | default | `not_found` | none | none | Abandon |
-| SA-12 | POST `/app/v1/envelopes` | session token OR pub for one-shot mode (no reply capability) | `{kind, channel_id, header_ct ≤ 8 KiB (16 fixed-size anonymous HPKE slots, random order, no key IDs), manifest_ct ≤ 64 KiB (contains the signed recipient list), parts: [{upload_id, mac_proof}] ≤ 32, account_locator_hash?}` | `201 {}` (no ID, no time) | 10/h/circuit | `bad_request` (non-canonical, slot count or size ≠ spec), `not_found` (upload incomplete) | CT; SS (linkage) | CTR:`submissions_tier_v` | Canonical validation (07 BE-049); upload proofs verified; binds uploads to the envelope, and only now to the account. The server cannot see recipients (ADR-033 §1). |
-| SA-13 | GET `/app/v1/mailbox` | session | — | `{items: [{slot: u8, ct_len_bucket}] × 32}` (fixed 32; dummies included) | 30/h/token | `unauthorized` | SS | none | Fixed-count list (§3.8) |
-| SA-14 | GET `/app/v1/mailbox/{slot}` | session | slot 0–31 | `reply_ct` (bucketed; dummy slots return random ciphertext of a bucketed size) | 120/h/token | `not_found` for out-of-range only | CT | none | No fetch state recorded or propagated (ADR-010) |
-| SA-15 | DELETE `/app/v1/mailbox/{slot}` | session | slot | `204` | default | as SA-14 | none | none | Dummy slots accept delete silently |
-| SA-16 | POST `/app/v1/logout` | session | — | `204` | default | — | none | none | Token removed from the RAM map synchronously |
-| SA-17 | DELETE `/app/v1/account` | session + fresh signature over `"delete" ‖ challenge` | `{ch_id, sig}` | `204` | 3/h/circuit | `unauthorized` | SS | CTR:`account_deletions` | As SW-15 |
-| SA-18 | GET `/app/v1/pow/seed` | pub | — | `{seed: bytes32, effort: u32}` | default | — | none | none | Only when app-level PoW is enabled |
+| SA-12 | POST `/app/v1/envelopes` | pub (+ optional app-level PoW) | `{channel_id, header_ct ≤ 8 KiB (16 fixed-size anonymous HPKE slots, random order, no key IDs), manifest_ct ≤ 64 KiB (contains the signed recipient list, `thread_tag`, reply public key; follow-ups also carry a signature by `sign_sk`), parts: [{upload_id, mac_proof}] ≤ 32, delayed_delivery: bool}` | `201 {}` (no ID, no time), returned only after the envelope and its blobs are `fsync`ed (ADR-046(1)) | 10/h/circuit | `bad_request` (non-canonical, slot count or size ≠ spec), `not_found` (upload incomplete) | CT | CTR:`submissions` (monthly) | Canonical validation (07 BE-049); upload proofs verified; no `kind`, tier or account field exists (ADR-039; RVW-B-11). The server cannot see recipients (ADR-033(1)). |
+| SA-13 | WITHDRAWN (ADR-039): GET `/app/v1/mailbox`. Replaced by SA-19. | — | — | — | — | — | — | — | — |
+| SA-14 | WITHDRAWN (ADR-039): GET `/app/v1/mailbox/{slot}`. Replaced by SA-20. | — | — | — | — | — | — | — | — |
+| SA-15 | WITHDRAWN (ADR-039): DELETE `/app/v1/mailbox/{slot}`. Tier V replies leave the published set after ≤ 30 days. | — | — | — | — | — | — | — | — |
+| SA-16 | WITHDRAWN (ADR-039): POST `/app/v1/logout` (no sessions). | — | — | — | — | — | — | — | — |
+| SA-17 | WITHDRAWN (ADR-039): DELETE `/app/v1/account` (no Tier V account exists at the intake). | — | — | — | — | — | — | — | — |
+| SA-18 | GET `/app/v1/pow/seed` | pub | — | `{seed: bytes32, effort: u32}` | default | — | none | none | Only when app-level PoW is enabled. `effort` is a fixed configured value, not load-dependent (ADR-038(5)) |
+| SA-19 | GET `/app/v1/replies/index` | pub | — | `{set_version: u64, page_count: u16 (padded to a power of two), page_size: 64, window_days: 30}` | default | `busy` | none | none | Same response for every requester (ADR-039) |
+| SA-20 | GET `/app/v1/replies/pages/{n}` | pub | page number | 64 reply ciphertexts, each padded to 70,000 bytes (dummies included), for all replies of the last 30 days across the tenant | 600/h/circuit | `not_found` for out-of-range only | CT | none | The client **must** fetch every page of the current `set_version` and trial-decrypt locally; fetching a subset is a client defect (API-040). No fetch state is recorded (ADR-010, ADR-039) |
+| SA-21 | GET `/app/v1/manifest` | pub | — | Same signed running manifest as SW-23 | default | — | none | none | ADR-035(1), ADR-040 |
 
-### 5.1 Resumable upload protocol and THR-047 analysis
+### 5.1 Resumable upload protocol and THR-047 analysis (canonical, ADR-046(4))
+
+This section is the single normative definition of the upload protocol; 03, 07, 11 and 34 reference it.
+
+**Parameters:**
+
+| Parameter | Value |
+|---|---|
+| Chunk size | 8 MiB ciphertext (128 STREAM chunks of 64 KiB); last chunk ≤ 8 MiB |
+| Chunk count | derived from the ADR-011 padded bucket; ≤ 512 (per-file cap 4 GiB) in standard profiles; ≤ 2,048 (16 GiB) only in EE profiles (EE-ONPREM, EE-HA, GOV-ONPREM, PRIVATE-CLOUD, MANAGED) where `intake.max_file_bytes` > 4 GiB is configured |
+| Resume | Tier V only; within one app session (the app never persists `U`); ≤ 24 h after creation |
+| Tier W | No resumable uploads; one file per request (SW-06); a failed upload is re-sent in full |
+| Expiry | 24 h after creation (tracked in `candor-intake-store` RAM with a monotonic clock; no time stored), or intake-store restart; backstop `upload_gc` deletes uploads with `created_day` < today − 1 |
 
 **Design:**
 1. The client generates a 256-bit secret `U` per upload and computes:
@@ -242,23 +252,25 @@ Family defaults:
    - `K_U = HKDF-SHA256(U, info="candor-upload-mac")`.
 2. SA-08 registers `upload_id` and `K_U`. The server keeps `K_U` only until the upload is committed or expires.
 3. Every chunk, status or delete request carries an HMAC under `K_U`. A party that learns only `upload_id` (e.g., from a log or backup) cannot add, probe or delete chunks. `K_U` never leaves the intake store.
-4. `U` and `upload_id` are **per upload**. They are never derived from the source passphrase, account keys or other uploads.
-5. Uploads carry no session token. The server cannot link an upload to an account until SA-12 commits the envelope.
-6. Chunk records store no time. Only `created_day` exists per upload, and uploads expire after 3 epoch days (07 §6.3).
+4. `U` and `upload_id` are **per upload** (per-upload tokens). They are never derived from the source passphrase, account keys or other uploads.
+5. Uploads carry no session token. The server cannot link an upload to an envelope until SA-12 commits it, and never to an account (ADR-039).
+6. Chunk records store no time. Only `created_day` exists per upload.
+7. There is no cross-session resume: after the app exits, the upload is abandoned and restarted with a new `U`.
 
 | Linkage question | Answer | Residual |
 |---|---|---|
-| Can the server link two chunk requests to the same upload? | Yes, by `upload_id`. This is inherent to resumption. | The circuits used for one upload are linkable to each other. Mitigation: the app finishes uploads in as few sessions as possible. |
+| Can the server link two chunk requests to the same upload? | Yes, by `upload_id`. This is inherent to resumption. | The circuits used for one upload are linkable to each other. Mitigation: resume only within one session, ≤ 24 h. |
 | Can it link two uploads to each other before commit? | No. They have independent `U` and no shared token. Circuit tokens are not persisted. | A network observer may correlate by timing (THR-003). |
-| Can it link an upload to a source account? | Only at SA-12 commit, which is the same moment the envelope is linked to the account anyway. | none beyond the envelope↔account link that already exists (09 §9) |
+| Can it link an upload to a source account? | No. Tier V has no intake account (ADR-039). Uploads are linked to an envelope at SA-12 commit. | none beyond envelope ↔ parts |
 | Can it link uploads across different envelopes? | No shared identifiers. `thread_tag` is inside the ciphertext. | Size buckets and the same day can correlate weakly |
 | Does resumption state reveal time? | Only `created_day` | Day-level |
-| Could a malicious server tag or track the client via upload responses? | Responses are fixed-shape. The app ignores unknown fields and never stores server-provided identifiers on disk (11-FRONTEND-SOURCE.md). | App-side storage of `U` for resumption is encrypted in the app's vault and deleted after commit |
+| Could a malicious server tag or track the client via upload responses? | Responses are fixed-shape. The app ignores unknown fields and never stores server-provided identifiers on disk (11-FRONTEND-SOURCE.md). | `U` is held only in app RAM and discarded after commit or exit |
 
 ## 6. Relay pull protocol (intake export endpoint, machine audience `relay`)
 
 Family defaults:
 - AuthZ: mTLS SAN = pinned relay identity for this intake instance, plus a valid `Candor-Relay-Sig` with strictly increasing `req_counter` (07 §5.4).
+- Schedule: envelope import (RL-02..RL-04), reply push (RL-05) and counters/backup pulls run **only in fixed import slots** (default 4×/day at fixed tenant-configured times; HIGH/GOV 1×/day), never on arrival (ADR-038(1); 07 §5.4). Directory snapshots and config bundles (RL-06/RL-07) may additionally be pushed in the hourly fixed-minute **control cycle**, which performs no claims.
 - Rate: 1 cycle in flight; 20 req/s.
 - Errors: uniform JSON; 401 on signature failure (connection closed).
 - Log: `SYS:relay_request{op, outcome}` (no IDs).
@@ -267,15 +279,15 @@ Family defaults:
 | ID | Method Path | AuthZ | Input | Output | Rate | Errors | Sensitive | Log | Security |
 |---|---|---|---|---|---|---|---|---|---|
 | RL-01 | GET `/relay/v1/health` | relay | — | `{status: ok\|degraded, store_free_bucket, pending_bucket}` | default | — | SYS | SYS | — |
-| RL-02 | POST `/relay/v1/batches/claim` | relay | `{max_objects ≤ 500, max_bytes ≤ 2 GiB}` | `{batch_no, objects: [{ref: bytes16, kind, channel_id, received_date, header_len, manifest_len, parts: [{padded_size}], sha256}]}` | 1 in flight | `conflict` if a batch is unacked (returns the same batch) | CT; SS (date) | SYS | `ref` is intake-local, valid only for this batch. |
+| RL-02 | POST `/relay/v1/batches/claim` | relay (import slot only) | `{max_objects ≤ 500, max_bytes ≤ 2 GiB}` | `{batch_no, objects: [{ref: bytes16, channel_id, epoch_index, header_len, manifest_len, parts: [{padded_size}], sha256}]}` | 1 in flight | `conflict` if a batch is unacked (returns the same batch) | CT; SS (epoch) | SYS | `ref` is intake-local, valid only for this batch. Only envelopes with `release_day` ≤ today are offered (delayed delivery, ADR-038(4)). No `kind` and no `received_date` cross to Z-CORE (ADR-038(3); RVW-B-11): the core records the slot date only. |
 | RL-03 | GET `/relay/v1/batches/{batch_no}/objects/{ref}/{part}` | relay | `part` = `header`, `manifest` or index | ciphertext stream | default | `not_found` | CT | none | Streaming; relay verifies digest |
 | RL-04 | POST `/relay/v1/batches/{batch_no}/ack` | relay | `{committed: [sha256]}` | `{deleted: u32}` | default | `bad_request` if a digest is not in the batch | none | SYS | Intake deletes only matching digests (BE-014) |
-| RL-05 | POST `/relay/v1/replies` | relay | `{replies: [{routing_ct ≤ 2 KiB, reply_ct ≤ 70,000 B}] ≤ 500}` | `{accepted: u32, rejected: [index]}` | default | `bad_request` | CT; routing SS-sealed | SYS | Intake decrypts `routing_ct` with the routing key; `available_day = today` |
-| RL-06 | POST `/relay/v1/directory-snapshot` | relay | signed snapshot (CBOR) | `204` | default | `bad_request` (invalid signature or consistency) | none | SEC:`kd_snapshot_rejected` on failure | Intake verifies the signature chain and consistency from the previous snapshot |
+| RL-05 | POST `/relay/v1/replies` | relay (import slot only) | `{replies: [{routing_ct ≤ 2 KiB, reply_ct ≤ 70,000 B}] ≤ 500}` | `{accepted: u32, rejected: [index]}` (tombstoned mailboxes count as accepted and are dropped silently) | default | `bad_request` | CT; routing SS-sealed | SYS | Intake decrypts `routing_ct` with the routing key; files Tier W replies under the account and adds every reply to the published set (ADR-039); `available_day = today` |
+| RL-06 | POST `/relay/v1/directory-snapshot` | relay (slot or control cycle) | signed snapshot (CBOR) | `204` | default | `bad_request` (invalid signature, consistency, witness quorum, or below the high-water mark) | none | SEC:`kd_snapshot_rejected` on failure | Intake verifies the signature chain, witness cosignatures (ADR-036(5)) and consistency from its **high-water mark** (09 `intake_meta.kd_tree_size_hwm`); older or smaller snapshots are rejected (ADR-036(6); RVW-A-04). The snapshot carries no time that the intake trusts; freshness is judged against the intake's independent clock (07 §12) |
 | RL-07 | POST `/relay/v1/config` | relay | signed config bundle | `204` | default | `bad_request` | SEC | SEC:`config_applied`/`config_rejected` | Verification per 07 §7.1 at intake |
-| RL-08 | POST `/relay/v1/deletions` | relay | `{reply_purge_before_day}` (retention) | `{purged: u32}` | daily | — | none | SYS | Only retention-driven; no targeted source deletion API exists from core |
-| RL-09 | GET `/relay/v1/counters?day={d}` | relay | day | `{day, counters: {name: value_or_"<5"}}` | daily | `not_found` | SS aggregate | none | k-suppression at source (BE-030) |
-| RL-10 | GET `/relay/v1/backup-snapshot` | relay | — | opaque ciphertext (encrypted to the Backup Key) + `{sha256, size}` | daily | `not_found` if not ready | CT | SYS | Core cannot read it |
+| RL-08 | POST `/relay/v1/deletions` | relay | `{reply_purge_before_day}` (retention, ≤ 30 days) | `{purged: u32}` | daily | — | none | SYS | Only retention-driven; no targeted source deletion API exists from core |
+| RL-09 | GET `/relay/v1/counters?month={m}` | relay | a closed calendar month | `{month, counters: {name: value_or_suppressed}}` per 24 §TEL (k = 10; channels with < 3 cases/month folded into their channel group) | monthly | `not_found` (month not closed) | SS aggregate | none | ADR-046(5); replaces the daily export (RVW-B-07) |
+| RL-10 | GET `/relay/v1/backup-snapshot` | relay | — | opaque ciphertext (encrypted to the Backup Key) + `{sha256, size}`: `source_account`, `deletion_tombstone`, `intake_meta` only (no envelopes, no replies) | daily | `not_found` if not ready | CT | SYS | Core cannot read it |
 
 There is intentionally **no** endpoint to query a source account, look up a mailbox, or list replies by account. Core never addresses sources directly (06 §14).
 
@@ -295,13 +307,20 @@ The formats below are shared.
 | KD-03 | GET `/desk/v1/kd/proof/inclusion?leaf={hash}&size={n}` | desk session | leaf hash, tree size | Audit path | 600/min | `not_found` | none | none | — |
 | KD-04 | GET `/desk/v1/kd/proof/consistency?old={m}&new={n}` | desk session | sizes | Proof | 600/min | `bad_request` | none | none | Desk stores the last verified checkpoint and requires consistency on every sync |
 | KD-05 | GET `/desk/v1/kd/lookup/user/{user_id}` | desk session + `directory.read` | user_id | Current `USER_KEY` entries + inclusion proofs | 600/min | 404 uniform | none | none | Tenant-scoped; cross-tenant 404 |
-| KD-06 | GET `/desk/v1/kd/lookup/channel/{channel_id}` | desk session | channel_id | Channel identity, `CHANNEL_ROSTER`, `COI_MAP`, `MEMBER_EPOCH_KEY` entries + proofs | 600/min | 404 uniform | none | none | Desk verifies envelope slot key IDs against this (THR-046) |
+| KD-06 | GET `/desk/v1/kd/lookup/channel/{channel_id}` | desk session | channel_id | Channel identity, `CHANNEL_ROSTER`, `ROLE_LABEL_CERT`, `COI_MAP`, `MEMBER_EPOCH_KEY` entries + proofs | 600/min | 404 uniform | none | none | Desk verifies the **signed recipient list inside the decrypted payload** against these entries, including that the list was valid for the envelope's epoch and respects `effective_day` time locks (THR-046). Key IDs are never read from cleartext headers (ADR-046(10)) |
 | KD-07 | POST (internal Unix only) `APPEND(entry, approvals)` | `candor-case` peer only | entry + approval records | `{leaf_index}` | n/a | codes | SEC | SEC:`kd_append` | Not network-exposed; approvals verified per entry type (07 §5.10) |
-| KD-08 | Outbound: POST `{witness_url}/add-checkpoint` | directory key | checkpoint + consistency proof | cosignature | per checkpoint | retry | none | SYS | Witness protocol per 04-CRYPTOGRAPHY.md. [Knowledge (unverified): C2SP tlog-witness.] |
+| KD-08 | Outbound: POST `{witness_url}/add-checkpoint` | directory key | checkpoint + consistency proof | cosignature | per checkpoint | retry | none | SYS | Witness protocol per 04-CRYPTOGRAPHY.md. [Knowledge (unverified): C2SP tlog-witness.] EE/GOV/MANAGED: ≥ 2 witnesses, ≥ 1 outside the operating organisation (ADR-036(5)) |
+| KD-09 | GET `/desk/v1/kd/manifest` and SW-23/SA-21 | desk session / pub | — | Current signed running manifest (§7.1) + its transparency-log inclusion proof | 60/min | — | none | none | ADR-040 |
 
-**Entry common fields:** `{type, tenant_id, subject_id, keys, valid_from_day, valid_until_day, prev_entry_hash (per subject), signer_key_id, sig}`. Entries carry role labels (ADR-030). They carry staff names only when the channel sets `roster_names_visible` (ADVANCED), and never email addresses or usernames. Display names for staff views are delivered separately via the Desk API to authorized users.
+**Entry common fields:** `{type, tenant_id, subject_id, keys, valid_from_day, valid_until_day, effective_day, prev_entry_hash (per subject), signer_key_id, sig}`. `effective_day` is later than the append day for time-locked entries (roster additions, role-label changes, COI-policy loosening: + 3 days, GOV/HIGH + 7 days; ADR-036(2)); sealers and clients ignore such entries until then. Entries carry role labels (ADR-030). They carry staff names only when the channel sets `roster_names_visible` (ADVANCED), and never email addresses or usernames. Display names for staff views are delivered separately via the Desk API to authorized users.
 
-**Entry types:** `USER_KEY`, `USER_KEY_REVOKE`, `CHANNEL_IDENTITY`, `CHANNEL_ROSTER`, `MEMBER_EPOCH_KEY`, `COI_MAP`, `ROUTING_KEY` (Intake Routing Key), `CONNECTOR_KEY` (EE), `RECOVERY_QUORUM_STATE`, `PROTECTION_STATEMENT`, `CLIENT_RELEASE`, `CONFIG_SIGNER` (07-BACKEND.md §5.10).
+**Entry types:** `USER_KEY`, `USER_KEY_REVOKE`, `CHANNEL_IDENTITY`, `CHANNEL_ROSTER` (includes the Triage Set flag per member), `ROLE_LABEL_CERT` (OVERSIGHT-signed, ADR-036(3)), `MEMBER_EPOCH_KEY`, `COI_MAP`, `ROUTING_KEY` (Intake Routing Key, ADR-046(12)), `CONNECTOR_KEY` (EE, ADR-046(12)), `RECOVERY_QUORUM_STATE`, `PROTECTION_STATEMENT`, `OPERATOR_STATEMENT` (quorum-signed, ≤ 30-day cadence, ADR-035(2)), `INCIDENT_NOTICE` (ADR-035(4)), `SERVER_RELEASE` (running-manifest digests of intake and core, ADR-040), `CLIENT_RELEASE`, `CONFIG_SIGNER` (07-BACKEND.md §5.10). Byte formats of new entry types are owned by 04-CRYPTOGRAPHY.md (cross-document request).
+
+**Publication schedule (ADR-036(7); RVW-A-29):** `MEMBER_EPOCH_KEY` entries and time-locked roster/label/COI entries are appended only at the tenant's fixed **weekly publication slot**; checkpoints are signed daily at a fixed time and at the weekly slot. Removals, `USER_KEY_REVOKE` and `INCIDENT_NOTICE` are appended and checkpointed immediately because ADR-036(2) requires immediate effect; their timing is therefore visible (residual).
+
+### 7.1 Running manifest (ADR-035(1), ADR-040)
+
+The **running manifest** is a deterministic-CBOR document `{tenant_id, release_version, release_digest (TUF target hash of the installed Candor release), platform_manifest_digest (TUF-signed Platform Manifest, ADR-040), security_floor, static_asset_digests: {route → SHA-256 of the byte-exact static responses SW-18/SW-20 and of the template set}, csp_sha256, attestation: optional confidential-VM report (ADR-035(3)), issued_day}`, signed by the sealer signing key (K35, 04-CRYPTOGRAPHY.md). It is served byte-identically to every requester (SW-23, SA-21, KD-09) and its digest is appended to C-14 as `SERVER_RELEASE`. External Watchers fetch it over Tor and compare it, the served static assets and the CSP header, with the public transparency log (ADR-035(1)). Honest limit: a compelled operator can serve a correct manifest while running different code; the manifest detects accidental or careless divergence and forces deliberate lying to be signed. Dynamic pages (with CSRF tokens and padding) are not covered.
 
 **Member Epoch Key ID:** `key_id = SHA-256("candor-mek-id" ‖ pk)[0..16]`. It is pseudonymous and new every epoch. It appears in `MEMBER_EPOCH_KEY` entries and inside the encrypted, signed recipient list of envelopes. It **never** appears in cleartext envelope headers (ADR-033 §1).
 
@@ -319,13 +338,13 @@ Family defaults:
 | ID | Method Path | AuthZ | Input | Output | Rate | Errors | Sensitive | Log | Security |
 |---|---|---|---|---|---|---|---|---|---|
 | DA-01 | POST `/desk/v1/auth/webauthn/begin` | transport credential only | `{username}` | WebAuthn request options (challenge 32 B, allowCredentials for the user or a **deterministic fake list** for unknown users) | 10/min/device-cert; 20/h/username | `rate_limited` | SEC | none | User enumeration resistance |
-| DA-02 | POST `/desk/v1/auth/webauthn/finish` | as DA-01 | assertion, `device_key_id`, device attestation | `{access_token, refresh_token, expires_in: 900}` | as DA-01 | `unauthorized` (uniform) | SEC | SEC:`login_ok` / `login_failed` | UV required; sign-count check; token bound to device key |
+| DA-02 | POST `/desk/v1/auth/webauthn/finish` | as DA-01 | assertion, `device_key_id`, device attestation | `{access_token, refresh_token, expires_in: 900}` | as DA-01 | `unauthorized` (uniform) | SEC | SEC:`login_ok` / `login_failed` | UV required; sign-count check; token bound to device key. Channel-member activation requires ≥ 2 enrolled authenticators (ADR-044(2); 09 DB-054) |
 | DA-03 | POST `/desk/v1/auth/refresh` | refresh token + PoP | — | new pair (rotation) | 60/h | `unauthorized` → client re-auth | SEC | SEC:`token_refresh` (sampled 1/10) | Refresh reuse detection revokes the family |
 | DA-04 | POST `/desk/v1/auth/logout` | access token | — | `204` | — | — | SEC | SEC:`logout` | Synchronous revocation of access and refresh tokens (INC-105) |
 | DA-05 | POST `/desk/v1/auth/stepup/begin` | access token | `{action}` | WebAuthn options | 20/h | — | SEC | none | — |
 | DA-06 | POST `/desk/v1/auth/stepup/finish` | access token | assertion | `{stepup_proof, expires_in: 300, action}` | 20/h | `unauthorized` | SEC | SEC:`stepup` | Single use, bound to action and resource |
-| DA-07 | GET `/desk/v1/me` | access | — | profile, roles, channel memberships (role labels), device list, epoch-key runway per channel, notification settings | default | — | WF | none | — |
-| DA-08 | PUT `/desk/v1/me/notification-settings` | access | `{mode: digest\|daily, contact_ref}` | `200` | 10/h | `bad_request` | SEC | SEC:`notif_settings_changed` | Contact addresses validated; changes notify the old contact (content-free) |
+| DA-07 | GET `/desk/v1/me` | access | — | profile, roles, channel memberships (role labels, Triage Set flag), device list, epoch-key runway per channel, notification settings | default | — | WF | none | — |
+| DA-08 | PUT `/desk/v1/me/notification-settings` | access | `{mode: daily_constant\|off, contact_ref}` | `200` | 10/h | `bad_request` | SEC | SEC:`notif_settings_changed` | ADR-038(2): `daily_constant` = one content-free digest at the tenant's fixed daily time every day, whether or not anything is pending; `off` = Desk badge only (HIGH default). No event-driven mode exists. Contact addresses validated; changes notify the old contact (content-free) |
 
 ### 8.2 Sync, keys and devices
 
@@ -335,45 +354,46 @@ Family defaults:
 | DA-11 | POST `/desk/v1/devices/enroll` | enrollment token (one-time, 24 h, from admin invite) + transport | `{device_key_pk, identity_pk, xwing_pk, attestation?}` | `{device_id, status: pending_approval}` | 5/h | `unauthorized` | SEC | SEC:`device_enroll_requested` | Keys appear in C-14 only after admin approval (AP-06) |
 | DA-12 | POST `/desk/v1/devices/{device_id}/revoke` | access + step-up (own device) | — | `204` | 5/h | 404 uniform | SEC | SEC:`device_revoked` | Appends `USER_KEY_REVOKE`; triggers the re-key reminder for the user's cases |
 | DA-13 | GET `/desk/v1/channels/{channel_id}/epoch-keys/mine` | channel member | — | `[{key_id, start_day, end_day, state: active\|decrypt_only\|destroy_due}]` for the caller's Member Epoch Keys | 60/h | 404 uniform | none | none | Private halves never leave the Desk; the server holds no private epoch keys (ADR-030) |
-| DA-14 | POST `/desk/v1/channels/{channel_id}/epoch-keys` | channel member (self only) + step-up on first publication per device | `{keys: [{key_id, start_day, end_day, pk, sig_by_member_identity_key}] ≤ 8}` | `201 {kd_leaves[]}` | 10/day | `conflict` (overlap), `bad_request` (signature or key not bound to a current `USER_KEY`) | none | SEC:`member_epoch_keys_published` | Desk pre-publishes ≥ 4 epochs ahead (ADR-030). Appends `MEMBER_EPOCH_KEY` entries listed under the member's role label. |
+| DA-14 | POST `/desk/v1/channels/{channel_id}/epoch-keys` | Triage Set member of the channel (self only) + step-up on first publication per device | `{keys: [{key_id, start_day, end_day, pk, sig_by_member_identity_key}] ≤ 8}` | `202 {publication_day}` | 10/day | `conflict` (overlap), `bad_request` (signature or key not bound to a current `USER_KEY`) | none | SEC:`member_epoch_keys_published` | Desk pre-publishes ≥ 4 epochs ahead (ADR-030). Accepted keys are appended as `MEMBER_EPOCH_KEY` entries at the next fixed weekly publication slot, not at request time (ADR-036(7)) |
 | DA-15 | POST `/desk/v1/channels/{channel_id}/epoch-keys/{key_id}/destroy-ack` | owner member | — | `204` | — | 404 | SEC | SEC:`epoch_destroy_ack` | Records that the Desk deleted the private key after its decrypt window |
 
 ### 8.3 Intake and triage
 
 | ID | Method Path | AuthZ | Input | Output | Rate | Errors | Sensitive | Log | Security |
 |---|---|---|---|---|---|---|---|---|---|
-| DA-20 | GET `/desk/v1/intake/envelopes?channel={ch}&cursor={c}` | `intake.list` + active roster member of the channel | filters | `[{import_envelope_id, channel_id, received_date, parts: [{padded_size}], state, escalated_date?}]` | 120/min | — | WF; SS (date) | CASE:`intake_list` | The Desk trial-decrypts the 16 anonymous slots and hides envelopes it cannot open. Excluded members hold no key for any slot (ADR-030, ADR-033). |
+| DA-20 | GET `/desk/v1/intake/envelopes?channel={ch}&cursor={c}` | `intake.list` + active **Triage Set** member of the channel (ADR-037(2)) | filters | `[{import_envelope_id, channel_id, import_date, parts: [{padded_size}], state, escalated_date?, rejectable: bool}]` | 120/min | — (non-triage callers receive an empty list) | WF; SS (date) | CASE:`intake_list` | The Desk trial-decrypts the 16 anonymous slots and hides envelopes it cannot open. Excluded members hold no key for any slot (ADR-030, ADR-033). `import_date` is the fixed-slot date (ADR-038); `rejectable` is true after 14 days pending (ADR-038(6)). Non-triage roles see no intake counts anywhere. |
 | DA-21 | GET `/desk/v1/intake/envelopes/{id}/header` | `intake.read` | — | `header_ct`, `manifest_ct` | 600/h | 404 uniform | CT | CASE:`intake_read` | — |
 | DA-22 | GET `/desk/v1/intake/envelopes/{id}/parts/{n}` | `intake.read` | Range header allowed | ciphertext stream | 120/min | 404 uniform | CT | CASE:`intake_part_read` | Desk writes via `candor-safefs` only (ADR-027) |
-| DA-23 | POST `/desk/v1/intake/envelopes/{id}/triage` | `intake.triage` (import); `intake.reject` for reject | `{decision: import\|reject\|duplicate, reason_code?, target_case_id?}` + `If-Match` | `200 {state}` (`reject` → `pending_second_approval`) | 120/h | 404, 409 | WF | CASE:`intake_triaged` | Rejection requires a second distinct approver (DA-25), with no auto-expiry. Pending envelopes > 7 days escalate to the independent escalation role (ADR-033 §2). `duplicate` links to a visible case only. |
-| DA-24 | POST `/desk/v1/cases/eligibility` | `case.create` in channel + active roster member | `{channel_id, import_envelope_ids[], source_excluded_labels[] (from the decrypted manifest), department_id?}` | `{eligible: [{user_id, key_ids}], excluded_count_bucket}` | 60/h | 404 | WF | CASE:`eligibility_computed` | COI applied (ADR-015, ADR-030): source selection, COI map, self-declarations, admin COI registry. Excluded identities are not returned. |
-| DA-25 | POST `/desk/v1/intake/envelopes/{id}/reject-approvals` | `intake.reject`, distinct from the first rejecter + step-up | `{approve: bool}` | `200 {state: rejected\|pending}` | 50/day | 404, 403 | WF | CASE:`intake_rejected` | Rejected envelopes no longer block epoch key retirement (ADR-033 §2) |
+| DA-23 | POST `/desk/v1/intake/envelopes/{id}/triage` | Triage Set member + `intake.triage` (import); `intake.reject` for reject | `{decision: import\|reject\|duplicate, reason_code?, target_case_id?}` + `If-Match` | `200 {state}` (`reject` → `pending_second_approval`) | 120/h | 404, 409 | WF | CASE:`intake_triaged` | Rejection requires a second distinct approver (DA-25), with no auto-expiry. Pending envelopes > 7 days escalate to the independent escalation role at most once per channel per 7 days (ADR-033(2), ADR-038(6)). `duplicate` links to a visible case only. |
+| DA-24 | POST `/desk/v1/cases/eligibility` | Triage Set member + `case.create` in channel | `{channel_id, department_id?}` | `{candidates: [{user_id, key_ids, role_label}]}`: channel investigators and department members minus standing `coi_registry` exclusions | 60/h | 404 | WF | CASE:`eligibility_computed` (no counts, no user list in the event) | ADR-037(2): the server does **not** receive the source's COI ticks. The triage Desk removes flagged roles and manager-chain conflicts (using HR data held outside Candor or by the triage member) **locally**, then submits the final wrap set and blinded tags with DA-30. WITHDRAWN: inputs `import_envelope_ids`, `source_excluded_labels`; output `excluded_count_bucket` (RVW-B-01). |
+| DA-25 | POST `/desk/v1/intake/envelopes/{id}/reject-approvals` | `intake.reject`, distinct from the first rejecter + step-up | `{approve: bool}` | `200 {state: rejected\|pending}` | 50/day | 404, 403 | WF | CASE:`intake_rejected` | A rejected envelope's row and blobs are deleted immediately so its epoch key can retire (ADR-033(2), ADR-038(6)) |
 
 ### 8.4 Cases
 
 | ID | Method Path | AuthZ | Input | Output | Rate | Errors | Sensitive | Log | Security |
 |---|---|---|---|---|---|---|---|---|---|
-| DA-30 | POST `/desk/v1/cases` | `case.create` | `{channel_id, import_envelope_ids[] ≤ 32, workflow_def_id, record_ct ≤ 256 KiB, key_epoch: 1, wraps: [{recipient_key_id, wrap_ct}], dek_rewraps: [{import_envelope_id, part, rewrap_ct}], sealed_identity_ct?}` | `201 {case_id, display_ref, version}` | 60/h | `bad_request` (wrap set ≠ eligible set: BE-018), 404 (envelope not visible) | CT; WF | CASE:`case_created` | Server validates the eligible set at commit; envelopes → `imported` |
+| DA-30 | POST `/desk/v1/cases` | Triage Set member + `case.create` | `{channel_id, import_envelope_ids[] ≤ 32, workflow_def_id, record_ct ≤ 256 KiB, key_epoch: 1, wraps: [{recipient_key_id, wrap_ct}], dek_rewraps: [{import_envelope_id, part, rewrap_ct}], coi_excl_tags: [bytes32] (multiple of 8, padded with random tags), sealed_identity_ct?}` | `201 {case_id, display_ref, version}` | 60/h | `bad_request` (wrap set ⊄ candidate set, fewer than `min_recipients` (default 2) distinct users, tag count not a multiple of 8, or a wrap for a user whose tag is present: BE-018), 404 (envelope not visible) | CT; WF | CASE:`case_created` | ADR-037(3), ADR-044(2). Server validates wraps against the DA-24 candidate set and the blinded tags at commit; envelopes → `imported` |
 | DA-31 | GET `/desk/v1/cases?filter…&cursor` | `case.list` (ACL-filtered) | filters: state, channel, due_before_day, assigned_to_me | `[{case_id, display_ref, state, priority, channel_id, received_date, sla_due_day, version, record_ct}]` | 120/min | — | WF; CT | CASE:`case_list` (count bucket only) | No existence leak for non-member cases |
 | DA-32 | GET `/desk/v1/cases/{case_id}` | member(case) + `case.read` | — | case row + my `wrap_ct` + members summary | 600/min | 404 uniform | CT; WF | CASE:`case_read` | — |
 | DA-33 | PATCH `/desk/v1/cases/{case_id}` | member + `case.update` | allow-listed fields only: `{priority?, labels_ct?, record_ct?}` + `If-Match` | `200 {version}` | 120/h | 400 (unknown field), 409, 404 | CT; WF | CASE:`case_updated{fields}` | Per-role field allow-lists (INC-112) |
 | DA-34 | POST `/desk/v1/cases/{case_id}/transitions` | member + transition-specific action | `{transition_id, reason_code?, If-Match}` | `200 {state, version}` | 60/h | 409 (invalid from state), 403, 404 | WF | CASE:`case_transition` | Workflow definition enforced server-side (14-CASE-MANAGEMENT.md) |
 | DA-35 | GET `/desk/v1/cases/{case_id}/members` | member | — | `[{user_id, access_level, via, valid_until_day}]` | 120/min | 404 | WF | none | — |
-| DA-36 | POST `/desk/v1/cases/{case_id}/members` | member(lead) + `case.share` + step-up | `{user_id, access_level, valid_until_day?, wrap: {recipient_key_id, wrap_ct}}` | `201` | 30/h | 403 (COI-excluded: returns **404** for the *user* to avoid revealing the COI list; see note), 409 | CT; WF | CASE:`member_added` | C-22 re-evaluates COI (ARCH-024); wrap key must be current |
-| DA-37 | DELETE `/desk/v1/cases/{case_id}/members/{user_id}` | member(lead) + `case.share` | — | `204` + `rekey_recommended: true` | 30/h | 404 | WF | CASE:`member_removed` | Removal revokes server-side access immediately |
+| DA-36 | POST `/desk/v1/cases/{case_id}/members` | member(lead) + `case.share` + step-up; `records` access only by a Triage Set member | `{user_id, excl_tag: bytes32 (HMAC(K_case_excl, user_id) computed by the caller's Desk), access_level: read\|contribute\|lead\|records, valid_until_day? (mandatory ≤ 90 days for `records`), wrap: {recipient_key_id, wrap_ct}}` | `201` | 30/h | **404** for the target user when its tag is in `coi_excl_tag` or it is excluded by `coi_registry` (see note), 409 | CT; WF | CASE:`member_added` | C-22 checks the tag blindly (`candor.coi_tag_present`) and the standing registry; wrap key must be current. Other member Desks recompute the tag on sync and raise `coi_wrap_violation` on mismatch (ADR-037(3)). `records` grants implement ADR-044(5); there is no server-side cross-case search. |
+| DA-37 | DELETE `/desk/v1/cases/{case_id}/members/{user_id}` | member(lead) + `case.share` | — | `202 {state: suspended, rekey_recommended: true}` | 30/h | 404 | WF | CASE:`member_removed` (generic `reason_code=REMOVED`) | ADR-044(1): server-side access is suspended immediately; the member's wrap is deleted only through DA-49. |
 | DA-38 | POST `/desk/v1/cases/{case_id}/rekey` | member(lead) | `{key_epoch: n+1, wraps[], If-Match}` | `200` | 10/day | 400 (wrap set), 409 | CT | CASE:`case_rekeyed` | New content uses the new key; old wraps kept for old content unless crypto-erasure is requested |
 | DA-39 | GET `/desk/v1/cases/{case_id}/records?cursor` | member + `case.read` | cursor | `[{record_id, kind, seq, created_day, author_user_id?, size_bucket, record_ct}]` | 600/min | 404 | CT | CASE:`records_read` | Exact staff times only inside `record_ct` (07 §12) |
 | DA-40 | POST `/desk/v1/cases/{case_id}/records` | member + `case.note` | `{kind: note\|task\|decision, record_ct ≤ 256 KiB, key_epoch}` | `201 {record_id, seq}` | 300/h | 404, 400 | CT | CASE:`record_added{kind}` | — |
 | DA-41 | POST `/desk/v1/cases/{case_id}/replies` | member + `case.reply` | `{reply_ct ≤ 70,000 B, routing_ct ≤ 2 KiB, record_ct (copy for case history)}` | `202` | 60/h | 404, 403 (channel has no reply capability), 400 | CT | CASE:`reply_queued` | Replies queued to `reply_outbox`; delivered on the next relay cycle; no delivery or read status is ever returned |
-| DA-42 | POST `/desk/v1/cases/{case_id}/coi-declarations` | member (self) | `{declaration: conflict\|no_conflict}` | `204` | 10/h | 404 | WF | CASE:`coi_declared` | A self-declared conflict removes the declarant's access immediately and triggers a re-key recommendation |
+| DA-42 | POST `/desk/v1/cases/{case_id}/coi-declarations` | member (self) | `{declaration: conflict\|no_conflict, excl_tag?: bytes32 (own tag, when conflict), replaces_padding_tag?: bytes32}` | `204` | 10/h | 404 | WF | `conflict`: CASE:`member_removed` with generic `reason_code=REMOVED`; `no_conflict`: none | A self-declared conflict suspends the declarant's access immediately, replaces one padding tag with the declarant's blinded tag, and triggers a re-key recommendation. No event, table or export records that the removal was a COI declaration (ADR-037(3); RVW-B-01). WITHDRAWN: event `CASE:coi_declared`. |
 | DA-43 | POST `/desk/v1/cases/{case_id}/legal-holds` | `legal_hold.place` + step-up | `{reason_ct}` | `201 {hold_id}` | 10/day | 404 | WF | CASE:`legal_hold_placed` | Blocks crypto-erasure |
 | DA-44 | DELETE `/desk/v1/cases/{case_id}/legal-holds/{hold_id}` | `legal_hold.release` + second approver | `{approval_proof}` | `204` | 10/day | 404, 403 | WF | CASE:`legal_hold_released` | Dual control |
 | DA-45 | POST `/desk/v1/cases/{case_id}/deletion-requests` | member(lead) + `case.delete` + step-up | `{reason_code}` | `202 {request_id}` | 10/day | 404, 409 (legal hold) | WF | CASE:`deletion_requested` | Second approver required (DA-46); then `crypto_erase_case` job |
 | DA-46 | POST `/desk/v1/deletion-requests/{request_id}/approve` | `case.delete.approve`, distinct user + step-up | — | `202` | 10/day | 404, 403 | WF | CASE:`deletion_approved` | — |
 | DA-47 | GET `/desk/v1/cases/{case_id}/audit?cursor` | `case.audit.read` (case lead, auditor role) | cursor | CASE events for the case (pseudonymous actors resolvable by the auditor role only) | 60/min | 404 | WF; SEC | CASE:`audit_viewed` | Viewing the audit is itself audited |
 | DA-48 | GET `/desk/v1/sla/summary` | access | — | `[{case_id, timer_kind, due_day, state}]` for member cases | 60/min | — | WF | none | — |
+| DA-49 | POST `/desk/v1/cases/{case_id}/wrap-deletions`; POST `/desk/v1/wrap-deletions/{request_id}/approve` | member(lead) to request; a distinct member(lead) or OVERSIGHT to approve, + step-up | `{target_user_id}` | `202 {request_id, not_before_day}` | 10/day | 404, 409 (`blocked_min_holders`) | WF; SEC | CASE:`wrap_deletion_requested` / `_approved` / `_executed` (generic, no reason) | ADR-044(1): dual control, 7-day cooling-off, content-free OVERSIGHT notice before execution; execution blocked while it would leave fewer than `min_recipients` holders. Not used for source-requested erasure or retention expiry (those use `crypto_erase_case`) |
 
-Note on DA-36: when the target user is COI-excluded, the server returns `404 not_found` for the target (as if the user did not exist in the eligible universe). A generic "cannot add this member" banner is shown. The COI registry is not exposed to case members (14-CASE-MANAGEMENT.md).
+Note on DA-36: when the target user is COI-excluded (blinded tag present or standing registry entry), the server returns `404 not_found` for the target (as if the user did not exist in the eligible universe). A generic "cannot add this member" banner is shown. Neither the tag set nor the COI registry is exposed to case members (14-CASE-MANAGEMENT.md).
 
 ### 8.5 Evidence
 
@@ -399,7 +419,7 @@ Note on DA-36: when the target user is COI-excluded, the server returns `404 not
 | ID | Method Path | AuthZ | Input | Output | Rate | Errors | Sensitive | Log | Security |
 |---|---|---|---|---|---|---|---|---|---|
 | DA-70 | POST `/desk/v1/breakglass/requests` | `breakglass.request` + step-up; not COI-excluded | `{case_id, reason_code, legal_basis_ct, duration_hours ≤ 72}` | `201 {request_id}` | 3/day | 404 (case unknown **or** excluded) | WF | SEC:`breakglass_requested` + CASE | Notifies all case members and approvers (content-free) |
-| DA-71 | POST `/desk/v1/breakglass/requests/{id}/approve` | `breakglass.approve`, distinct user and role + step-up | — | `200 {state: approved_pending_wrap}` | 10/day | 404, 403 | WF | SEC:`breakglass_approved` | — |
+| DA-71 | POST `/desk/v1/breakglass/requests/{id}/approve` | `breakglass.approve`, distinct user and role + step-up; the approver SHALL hold an independent role outside the legal/management chain (ADR-045) | — | `200 {state: approved_pending_wrap}` | 10/day | 404, 403 | WF | SEC:`breakglass_approved` | — |
 | DA-72 | POST `/desk/v1/breakglass/requests/{id}/wrap` | existing member(case) | `{wrap: {recipient_key_id, wrap_ct}}` | `200 {state: active}` | 10/day | 404, 400 | CT | CASE:`breakglass_key_wrapped` | Grant marked `via=breakglass`, visible in all member views |
 | DA-73 | GET `/desk/v1/breakglass/requests/{id}` | requester, approver, case members, reviewer | — | state machine view | 60/min | 404 | WF | none | — |
 | DA-74 | POST `/desk/v1/breakglass/requests/{id}/review` | `breakglass.review` (independent reviewer role, not requester or approver) | `{outcome: justified\|unjustified, notes_ct}` | `200` | 20/day | 404, 403 | WF | SEC:`breakglass_reviewed` | Overdue > 7 days escalates |
@@ -412,6 +432,12 @@ Note on DA-36: when the target user is COI-excluded, the server returns `404 not
 | DA-81 | GET `/desk/v1/exports/{export_id}` | creator, approvers, case lead | — | metadata, approvals, delivery status | 60/min | 404 | WF | none | — |
 | DA-82 | POST `/desk/v1/exports/{export_id}/approvals` | `export.approve`, distinct from creator + step-up | `{decision: approve\|reject, digest_confirmed}` | `200 {state}` | 50/day | 404, 403, 409 (digest mismatch) | WF | CASE:`export_approval` | Originals need 2 approvals from distinct users (ADR-012, ADR-018) |
 | DA-83 | GET `/desk/v1/exports/{export_id}/blob` | creator, only in state `approved`, destination=media | — | ciphertext | 5/day | 404 | CT | CASE:`export_downloaded` | Desk writes to LUKS media via `candor-safefs` |
+
+### 8.9 Desk update metadata (RVW-C-02, RVW-C-13)
+
+| ID | Method Path | AuthZ | Input | Output | Rate | Errors | Sensitive | Log | Security |
+|---|---|---|---|---|---|---|---|---|---|
+| DA-90 | GET `/desk/v1/updates/{tuf_path}` | access (any Desk) | TUF metadata or target path | Cached TUF metadata/targets from the core update cache (fetched by core via its egress-restricted mirror, 06 §8.7) | 30/day/device | 404 | SYS | none | The Desk refreshes at a fixed daily time independent of Desk start and verifies TUF and transparency inclusion itself (ADR-022). Direct Desk access to the vendor clearnet mirror is ADVANCED |
 
 ## 9. Admin API (audience `admin-api`)
 
@@ -428,14 +454,14 @@ Family defaults:
 | AP-02 | GET `/admin/v1/users?cursor` | `user.list` | filters | `[{user_id, display_name, status, roles, devices}]` | default | — | SEC | SEC:`user_list` | — |
 | AP-03 | POST `/admin/v1/users` | `user.invite` + step-up | `{display_name ≤ 128, username, contact_ref}` | `201 {user_id, enrollment_token (shown once)}` | 50/day | 409 (username) | SEC | SEC:`user_invited` | — |
 | AP-04 | PATCH `/admin/v1/users/{user_id}` | `user.update` | allow-list `{display_name?, contact_ref?}` + `If-Match` | `200` | default | 400 (unknown field), 404 | SEC | SEC:`user_updated{fields}` | Cannot touch keys, roles or credentials here (INC-112) |
-| AP-05 | POST `/admin/v1/users/{user_id}/disable` | `user.disable` + step-up | `{reason_code}` | `204` | default | 404 | SEC | SEC:`user_disabled` | Revokes sessions synchronously; recommends re-keys for the user's cases |
+| AP-05 | POST `/admin/v1/users/{user_id}/disable` (also the target of EE SCIM/HR/IdP deprovisioning) | `user.disable` + step-up | `{reason_code}` | `204` | default | 404 | SEC | SEC:`user_disabled` | Revokes sessions synchronously and **suspends** server-side authorization (`case_member.state = suspended`, `channel_member.state = suspended`). It never deletes key wraps (ADR-044(1); RVW-C-03); wrap deletion is DA-49 only |
 | AP-06 | POST `/admin/v1/devices/{device_id}/approve` | `device.approve` + step-up; a privileged-role user's device needs a second admin | `{fingerprint_confirmed}` | `200` | default | 404, 409 | SEC | SEC:`device_approved` | Appends `USER_KEY` to C-14 (THR-046); out-of-band fingerprint confirmation required |
 | AP-07 | GET `/admin/v1/roles` | `role.list` | — | roles + permissions | default | — | SEC | none | Built-in roles immutable |
 | AP-08 | POST `/admin/v1/role-assignments` | `role.assign` + step-up; privileged roles (breakglass.approve, identity custodian, auditor) need a second admin | `{user_id, role_id, scope_type, scope_id, valid_until_day?}` | `201 {assignment_id}` | default | 404, 409 (SoD conflict) | SEC | SEC:`role_assigned` | Separation-of-duties rules enforced (15-AUTHENTICATION-AUTHORIZATION.md); admins cannot grant themselves case access roles |
 | AP-09 | DELETE `/admin/v1/role-assignments/{id}` | `role.assign` | — | `204` | default | 404 | SEC | SEC:`role_revoked` | — |
-| AP-10 | GET/POST/PATCH `/admin/v1/channels[/{id}]` | `channel.manage`; mode change away from ANONYMOUS = DANGEROUS | `{public_label, description_i18n, mode, workflow_def_id, retention_policy_id, reply_enabled}` | channel | default | 400, 404, 409 | SEC | SEC:`channel_*` | Changes go into the signed config bundle + protection statement |
-| AP-11 | GET/POST/PATCH `/admin/v1/channels/{id}/roster[/{member_id}]` | `channel.roster.manage` + step-up; second admin for removals | `{user_id, role_label_i18n, show_name: bool}` | roster entry | default | 409 (roster would exceed `envelope.recipient_slots`; user excluded by the admin COI registry for this channel) | SEC | SEC:`channel_roster_changed` | A roster change is appended to C-14 as `CHANNEL_ROSTER`, signed by the channel identity key via a channel key-steward's Desk (13-FRONTEND-ADMIN.md). New members publish Member Epoch Keys before they can receive reports. |
-| AP-12 | PUT `/admin/v1/channels/{id}/coi-map` | `coi.manage` + step-up + second admin | `{categories: [{category_id, label_i18n, excluded_role_labels[]}] ≤ 8}` | `200 {kd_leaf}` | 10/day | 400 | SEC | SEC:`coi_map_changed` | Appended to C-14 as `COI_MAP`; source-visible in SW-02/SA-02 |
+| AP-10 | GET/POST/PATCH `/admin/v1/channels[/{id}]` | `channel.manage`; mode change away from ANONYMOUS = DANGEROUS; `min_recipients` = 1 is DANGEROUS | `{public_label, description_i18n, mode, channel_type: standard\|independent, workflow_def_id, retention_policy_id, reply_enabled, min_recipients (default 2), alternative_channel_id}` | channel | default | 400 (ANONYMOUS channel without `alternative_channel_id`; INDEPENDENT channel whose Triage Set lacks independent-custody devices, ADR-043), 404, 409 | SEC | SEC:`channel_*` | Changes go into the signed config bundle + protection statement |
+| AP-11 | GET/POST/PATCH `/admin/v1/channels/{id}/roster[/{member_id}]` | `channel.roster.manage` + step-up. **Additions, role-label changes and Triage Set changes:** proposer + a distinct approver holding an independent role (ADR-036(2)), who confirms `person_ref` out of band. **Removals:** one admin, effective immediately | `{user_id, role_label_i18n, show_name: bool, triage: bool}` | `202 {change_id, effective_day}` (time-locked) or `200` (removal) | default | 409 (Triage Set would exceed `envelope.recipient_slots` or drop below 2; user excluded by the admin COI registry for this channel; fewer than 2 authenticators, ADR-044(2)) | SEC | SEC:`channel_roster_changed` | ADR-036(1)–(3): recorded in 09 `roster_change`; content-free notice to all current members and OVERSIGHT; the change enters C-14 at the weekly publication slot with `effective_day` = approval + 3 days (GOV/HIGH + 7); any member or OVERSIGHT may object during the lock. The `CHANNEL_ROSTER` entry is signed by the Channel Identity Key held only by Triage Set members and OVERSIGHT (never by other members). Role labels require an OVERSIGHT-signed `ROLE_LABEL_CERT`. New members publish Member Epoch Keys before they can receive reports. |
+| AP-12 | PUT `/admin/v1/channels/{id}/coi-map` | `coi.manage` + step-up + second admin; loosening (removing any exclusion) additionally needs an independent-role approver | `{categories: [{category_id, label_i18n, excluded_role_labels[]}] ≤ 8}` | `200 {kd_leaf}` (tightening, immediate) or `202 {change_id, effective_day}` (loosening, time-locked as AP-11) | 10/day | 400 | SEC | SEC:`coi_map_changed` | ADR-036(2). Appended to C-14 as `COI_MAP`; source-visible in SW-02/SA-02 |
 | AP-13 | POST/PUT `/admin/v1/workflows[/{id}]`, POST `/admin/v1/workflows/{id}/publish` | `workflow.manage` | definition (states, transitions, SLA rules) | `{def_id, version}` | 20/day | 400 (invalid graph) | WF | SEC:`workflow_published` | Versioned; running cases keep their version |
 | AP-14 | GET/POST/PATCH `/admin/v1/retention-policies[/{id}]` | `retention.manage` (ADVANCED) | `{retain_days, action, legal_basis_code}` | policy | 20/day | 400 | WF | SEC:`retention_policy_*` | Shortening an in-use policy requires a second admin |
 | AP-15 | GET `/admin/v1/config` | `config.read` | — | current bundle (items + classes) | default | — | SEC | none | — |
@@ -444,8 +470,8 @@ Family defaults:
 | AP-18 | POST `/admin/v1/config/changes/{id}/cancel` | any admin or auditor | — | `200` | — | 404 | SEC | SEC:`config_cancelled` | — |
 | AP-19 | GET `/admin/v1/audit/security?cursor` | `audit.security.read` | filters | SECURITY events | 60/min | — | SEC | SEC:`audit_viewed` | — |
 | AP-20 | GET `/admin/v1/audit/checkpoints` | `audit.verify` | — | signed checkpoints | default | — | SEC | none | For external verification |
-| AP-21 | GET `/admin/v1/health/summary` | `health.read` | — | per-host check status | default | — | SYS | none | — |
-| AP-22 | GET `/admin/v1/reports/aggregates?from_day&to_day` | `reports.read` | range ≥ 7 days | counts by channel with k ≥ 5 suppression, day-bucketed ≥ week | 10/h | 400 (range < 7 d) | SS aggregate | SEC:`aggregate_viewed` | THR-039; no drill-down |
+| AP-21 | GET `/admin/v1/health/summary` | `health.read` | — | per-host check status; source-influenced states (rate limits, Argon2id queue, new-account cap, staging use, relay backlog) only as a global **daily** health band (ADR-038(5), ADR-046(5); RVW-A-27) | default | — | SYS | none | — |
+| AP-22 | GET `/admin/v1/reports/aggregates?month={m}` | `reports.read` | one or more closed calendar months | Report catalog from 24 §TEL: k = 10, complementary suppression, no medians/ratios/percentiles for cells < k, no per-channel cells for channels with < 3 cases/month | 10/h | 400 (open month) | SS aggregate | SEC:`aggregate_viewed` | ADR-046(5); THR-039; no drill-down. Supersedes the weekly k ≥ 5 buckets (RVW-B-07/-08) |
 | AP-23 | POST `/admin/v1/recovery-quorum/enable` | DANGEROUS (2 admins) | `{quorum_pk, k, n, holder_role_labels[]}` | `202` | — | 400 | SEC | SEC:`recovery_quorum_change` | Published in C-14 (ADR-013) |
 | AP-24 | POST `/admin/v1/intake/onion-rotation` | DANGEROUS | `{ceremony_id}` | `202` | — | — | SEC | SEC:`onion_rotation` | Coordinated with C-37 publication (16-TOR-I2P.md) |
 | AP-25 | POST `/admin/v1/backups/run`; GET `/admin/v1/backups` | `backup.operate` | — | job / list with age and verify status | 5/day | — | SYS | SEC:`backup_run` | No restore via API; restore is `candorctl` dual-control offline (19-BACKUPS-DR.md) |
@@ -478,7 +504,7 @@ Direction: the instance's fleet agent (in Z-CORE) → C-34 outbound only. There 
 | ID | Method Path | AuthZ | Input | Output | Rate | Errors | Sensitive | Log | Security |
 |---|---|---|---|---|---|---|---|---|---|
 | FL-01 | POST `/fleet/v1/instances/{opaque_instance_id}/heartbeat` | instance mTLS (certificate issued at enrollment; SAN carries opaque ID) | `{versions: {component: semver}, profile, health: {check_id: status}, license_id}` | `{desired_version?, notices[]}` | 1/15 min | `unauthorized` | SYS | vendor SYS | **No** onion address, hostnames, IPs, tenant names, counts or users |
-| FL-02 | GET `/fleet/v1/instances/{id}/desired-state` | as FL-01 | — | Signed (vendor fleet key) document `{target_version, safe_config_templates{}}` | 1/h | — | SYS | none | Instance applies only SAFE-class items automatically. Anything else becomes a proposal in AP-16 for local admins. Target versions must also verify via TUF (ADR-022). |
+| FL-02 | GET `/fleet/v1/instances/{id}/desired-state` | as FL-01 | — | Signed (vendor fleet key) document `{target_version, safe_config_templates{}}` | 1/h | — | SYS | none | Instance applies only SAFE-class items automatically. Anything else becomes a proposal in AP-16 for local admins. The instance ignores any item that would disable intake, lower the security floor, change routing (rosters, Triage Sets, COI maps, `min_recipients`), or hold a version below the signed security floor (ADR-040, ADR-045; RVW-C-13). Target versions must also verify via TUF (ADR-022). |
 | FL-03 | POST `/fleet/v1/instances/{id}/support-bundles` | as FL-01 + local admin approval token | bundle from AP-27 | `201 {ticket_ref}` | 5/day | — | SYS | vendor SEC | Admin reviews bundle content before upload |
 | FL-04 | Fleet console: GET `/fleet/v1/instances`, POST `/fleet/v1/rollouts` | customer or vendor fleet operators (OIDC + WebAuthn) | rollout plan (version, cohort %) | rollout | — | — | SYS | vendor SEC | Rollouts can only select among signed releases identical for all customers (ADR-022) |
 
@@ -486,7 +512,7 @@ Direction: the instance's fleet agent (in Z-CORE) → C-34 outbound only. There 
 
 | ID | Method Path | AuthZ | Input | Output | Rate | Errors | Sensitive | Log | Security |
 |---|---|---|---|---|---|---|---|---|---|
-| SI-01 | POST `https://c26:8515/siem-gw/v1/events` | mTLS `audit-exporter` (C-24 host) | `{events: [ScrubbedEvent] ≤ 1,000}` | `204` | 10/s | schema reject | SEC; SYS | SYS | Allow-list: SECURITY and SYSTEM classes only; CASE events only as counts per day; pseudonymous IDs re-keyed with a SIEM-specific pseudonym key |
+| SI-01 | POST `https://c26:8515/siem-gw/v1/events` | mTLS `audit-exporter` (C-24 host) | `{events: [ScrubbedEvent] ≤ 1,000}` | `204` | 10/s | schema reject | SEC; SYS | SYS | Allow-list: SECURITY and SYSTEM classes only; no CASE events and no source-influenced SYSTEM states finer than the global daily health band (ADR-038(5)); pseudonymous IDs re-keyed with a SIEM-specific pseudonym key. Timestamp precision per 20-LOGGING-AUDITING.md |
 | SI-02 | Outbound syslog-TLS (RFC 5425) or HTTPS webhook to customer SIEM | C-26 client certificate | RFC 5424 structured data from `ScrubbedEvent` | — | configurable | retry/buffer 24 h | SEC; SYS | none | Destination allow-listed (ADVANCED) |
 | SI-03 | GET `https://c26:8516/siem/v1/events?cursor` (pull mode) | customer SIEM mTLS | cursor | events | 60/min | — | SEC; SYS | SYS | Alternative to push |
 | SI-04 | GET `/siem/v1/schema` | as SI-03 | — | JSON Schema of `ScrubbedEvent` | — | — | none | none | Versioned |
@@ -496,8 +522,9 @@ Direction: the instance's fleet agent (in Z-CORE) → C-34 outbound only. There 
 - channel IDs of ANONYMOUS channels;
 - recipient information of any kind;
 - envelope or import IDs;
-- day-level source counts per channel below k = 5;
-- any SOURCE-SENSITIVE counter.
+- any source count (per channel or global) at any granularity;
+- any SOURCE-SENSITIVE counter;
+- any COI-related reason code (ADR-037(3)).
 
 ## 14. Requirements
 

@@ -1,5 +1,5 @@
 # 36 — Open-Source Governance
-Status: Draft v1.0 · Edition applicability: both · Owner: Candor Foundation Board / Technical Steering Committee
+Status: Draft v1.1 (revision round 2: ADR-035, ADR-036, ADR-040) · Edition applicability: both · Owner: Candor Foundation Board / Technical Steering Committee
 
 ## 1. Purpose and scope
 
@@ -16,13 +16,17 @@ This document defines how the Candor project is governed:
 - funding;
 - succession and bus factor;
 - fork-friendliness;
-- Edition Charter enforcement.
+- Edition Charter enforcement;
+- signer, builder and witness jurisdiction rules (ADR-040);
+- the External Watcher and Key Directory witness programme (ADR-035(1), ADR-036(5));
+- project transparency reports and compelled-modification statements.
 
 ## 2. Context and dependencies
 
 | Topic | Source |
 |---|---|
 | Editions and Trust Path | `DECISIONS.md` §2, ADR-020, ADR-022 |
+| Watchers, Operator Statement, directory witnesses, signer spread | ADR-035, ADR-036(5), ADR-040 |
 | Charter text | `24-LICENSING-BUSINESS-MODEL.md` §7 |
 | Secure development | `27-SECURE-DEVELOPMENT.md` |
 | Supply chain and signing | `28-SUPPLY-CHAIN.md` |
@@ -37,7 +41,7 @@ This document defines how the Candor project is governed:
 
 | Entity | Role | Holds |
 |---|---|---|
-| **Candor Foundation** (non-profit; jurisdiction to be chosen by the Board with legal review; candidates listed in §15) | Steward of CE. Owns the trademark. Hosts the repository organization, the TUF root keys ceremony and the CNA. Enforces the Charter. | Trademark; domain names; TUF root role (with individual key holders); CNA; Charter |
+| **Candor Foundation** (non-profit; jurisdiction to be chosen by the Board with legal review; candidates listed in §19) | Steward of CE. Owns the trademark. Hosts the repository organization, the TUF root keys ceremony and the CNA. Enforces the Charter. | Trademark; domain names; TUF root role (with individual key holders); CNA; Charter |
 | **Vendor company(ies)** | Develops and sells EE. Contributes to CE. May be one or several. | Copyright in its own contributions and EE modules; trademark *license* (conditional on Charter compliance) |
 | **Contributors** | Individuals and organizations | Their own copyright (DCO) |
 
@@ -52,7 +56,8 @@ Rationale:
 | **Board** | 5–7 directors. ≤ 2 affiliated with any single vendor. ≥ 2 from civil-society or press-freedom organizations. ≥ 1 from a user organization (public body or NGO). | Budget, trademark, Charter enforcement, CNA oversight | Majority. Charter amendments need a 2/3 supermajority and may only strengthen the Charter. |
 | **Technical Steering Committee (TSC)** | 5–9 maintainers. ≤ 40% from any single employer. | Architecture (ADRs), release policy, maintainer appointments | Lazy consensus. Contested decisions by 2/3 vote. ADR changes to Trust Path invariants need 2/3. |
 | **Security Team** | 4–8 members. ≥ 2 employers. ≥ 2 jurisdictions. Vetted under §6.2. | Vulnerability triage, embargo, advisory, CNA operations | Two-person rule for embargo decisions |
-| **Release Signers** | 5 key holders for the TUF targets threshold role and 5 for root (ADR-022). ≥ 3 organizations. ≥ 2 jurisdictions. | Sign releases after reproducibility verification | Threshold 2-of-3 targets, 3-of-5 root (ADR-022) |
+| **Release Signers** | 5 root key holders and 3 targets key holders (ADR-022), spread per §3.4 (ADR-040): no single organisation or jurisdiction can reach any signing threshold. ≥ 1 root key held by an unaffiliated civil-society or press-freedom organisation. | Sign releases after reproducibility verification | Threshold 2-of-3 targets, 3-of-5 root (ADR-022); emergency releases ≥ 2 signers from ≥ 2 organisations after ≥ 2 h cooling (ADR-040) |
+| **Watcher and Witness Council** | 3–5 members appointed by the Board; majority from civil-society organisations; ≤ 1 vendor-affiliated | Admits, reviews and removes External Watchers and Key Directory witnesses (§15); publishes the registry | Majority; removal of a watcher needs a published reason |
 | **Charter Ombudsperson** | 1 person, independent of all vendors, appointed by the Board for 2 years | Receives Charter complaints and publishes findings | Reports to the Board |
 
 ### 3.3 Maintainer roles
@@ -64,6 +69,19 @@ Rationale:
 | Maintainer | Merge rights on assigned areas | TSC vote | Reviewer for 6 months; hardware-key-signed commits; 2FA with FIDO2 on the forge |
 | Trust Path Maintainer | Approve Trust Path PRs | TSC 2/3 vote | Maintainer for 12 months; completed secure-coding review; identity verified by 2 existing TP maintainers |
 | Emeritus | None | Automatic after 12 months of inactivity, or on request | — |
+
+### 3.4 Signer, builder and witness spread (ADR-040; RVW-A-16)
+
+| Role | Holders | Spread rule | Rationale |
+|---|---|---|---|
+| TUF root | 5, threshold 3 | ≥ 3 organisations and ≥ 3 jurisdictions; no organisation and no jurisdiction holds more than 2 keys; ≥ 1 key with an unaffiliated civil-society organisation | A single-jurisdiction order cannot reach 3-of-5 (reconciles REL-007 and SCM-042 on ≥ 3 jurisdictions; cross-document request) |
+| TUF targets and delegated trust-path roles | 3, threshold 2 | 3 distinct organisations and 3 distinct jurisdictions (no two holders share either) | 2-of-3 cannot be met inside one organisation or one jurisdiction |
+| Reproducible builders | ≥ 2 | Builder A and Builder B operated by different organisations in different jurisdictions | Compelling both builders requires two legal systems |
+| Emergency release signing | ≥ 2 signers | ≥ 2 organisations; ≥ 2-hour cooling; source diff and gate evidence published at signing (`27-SECURE-DEVELOPMENT.md` SDL-062) | Keeps review time for watchers and monitors |
+| Advisory signing key (Security Team) | ≥ 2 holders | ≥ 2 jurisdictions | Advisory integrity |
+| Key Directory witnesses and External Watchers | see §15 | ≥ 1 per watched instance outside the operator's jurisdiction | Split-view and compelled-modification detection |
+
+Jurisdiction is the legal system that can compel the key holder (residence and employer seat); a holder changing jurisdiction triggers re-evaluation within 30 days. Holder spread is re-attested yearly and published.
 
 ## 4. Contribution model: DCO, not CLA
 
@@ -200,8 +218,10 @@ Lessons applied:
 |---|---|---|---|
 | Trust Path Maintainers | ≥ 4 active | ≥ 2 employers | TSC appoints; mentorship program |
 | Security Team | ≥ 4 | ≥ 2 employers, ≥ 2 jurisdictions | — |
-| TUF root keys | 5 holders, threshold 3 | ≥ 3 organizations, ≥ 2 jurisdictions | Documented rotation ceremony. Loss of ≤ 2 keys is recoverable. |
-| TUF targets keys | 3 holders, threshold 2 | ≥ 2 organizations | Root re-delegation |
+| TUF root keys | 5 holders, threshold 3 | Per §3.4 (≥ 3 organizations, ≥ 3 jurisdictions, ≤ 2 per organisation or jurisdiction) | Documented rotation ceremony. Loss of ≤ 2 keys is recoverable. |
+| TUF targets keys | 3 holders, threshold 2 | Per §3.4 (3 organisations, 3 jurisdictions) | Root re-delegation |
+| Reproducible builders | ≥ 2 | Different organisations and jurisdictions | Third builder on standby |
+| Watcher/witness registry signing key | 3 holders, threshold 2 | ≥ 2 organisations | Board re-issues |
 | Forge organization owners | ≥ 3 | ≥ 2 organizations | Board designates |
 | Domain registrar and DNS | ≥ 2 accounts with hardware 2FA | Foundation-controlled | Registrar lock |
 | Onion keys for project sites | Held offline by ≥ 2 | — | Re-key with a signed announcement |

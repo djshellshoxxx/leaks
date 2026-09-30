@@ -1,11 +1,11 @@
 # 37 — Security Audit, Disclosure and Assurance Plan
-Status: Draft v1.0 · Edition applicability: both (CE and EE share one disclosure process; EE modules audited additionally) · Owner: Security Lead (Assurance Programme), with Governance (36) for publication and funding
+Status: Draft v1.1 (revision round 2: ADR-034..046) · Edition applicability: both (CE and EE share one disclosure process; EE modules audited additionally) · Owner: Security Lead (Assurance Programme), with Governance (36) for publication and funding
 
 ## 1. Purpose and scope
 
 This document defines how Candor's security and anonymity claims are **independently checked** and how vulnerabilities are **received, fixed and disclosed**:
 
-- external assurance activities: the pre-release penetration test, recurring independent audits, major-version audits, cryptographic review and formal verification, anonymity review, infrastructure review, supply-chain review, source-code review, and reproducible-build verification;
+- external assurance activities: the pre-release penetration test, recurring independent audits, major-version audits, cryptographic review and formal verification, anonymity review, infrastructure review, supply-chain review, source-code review, reproducible-build verification, and (since round 2) the Confidential-VM (TEE) sealer profile review, the External Watcher and Operator Statement programme review, and the Key Directory governance and organisation-as-adversary controls review (A15–A17);
 - responsible disclosure: the vulnerability disclosure policy (VDP), intake channels (including an anonymous onion channel), SLAs, embargoes, public advisories, the CVE process, EU CRA reporting, and a bug bounty with scope, rewards and safe harbor;
 - shared disclosure across the Community and Enterprise/Government editions (ADR-020);
 - the audit publication policy and a schedule by milestone.
@@ -16,7 +16,8 @@ Honest language: independent audits find some defects in a time-boxed scope. A c
 
 | Document | Relationship |
 |---|---|
-| `DECISIONS.md` | ADR-006 (formal modelling before 1.0), ADR-020 (simultaneous CE/EE fixes; trust path public and auditable), ADR-022 (reproducible builds, threshold signing), ADR-027 (safe-path API and harness) |
+| `DECISIONS.md` | ADR-006 (formal modelling before 1.0), ADR-020 (simultaneous CE/EE fixes; trust path public and auditable), ADR-022 (reproducible builds, threshold signing), ADR-027 (safe-path API and harness), ADR-035 (external watchers, operator statement, optional Confidential-VM sealer, IR capture approval), ADR-036/037 (directory governance, triage-first routing, blinded COI), ADR-040 (platform manifest, security floors, signer/builder spread), ADR-042/043 (Desk containment tiers, independent custody), ADR-044/045 (key-access continuity, Erasure Key Vault, organisation-as-adversary controls) |
+| `40-SECURITY-ASSUMPTIONS.md` | TEE and watcher-independence assumptions whose validity A15/A16 re-check |
 | `27-SECURE-DEVELOPMENT.md` | Triage and fix SLAs (§14), root-cause and regression rules (SDL-051..SDL-053), gate SG-22 (pentest), SG-21 (finding→test mapping) |
 | `28-SUPPLY-CHAIN.md` | Controls audited by the supply-chain review and reproducible-build verification |
 | `29-SECURITY-TESTING.md` | ST-140 (pentest), ST-141 (red team), ST-142 (LLM-assisted sweep), ST-012 (finding regression mapping) |
@@ -48,20 +49,23 @@ Research basis:
 
 | Activity | Scope | Auditor qualification | Minimum effort | Trigger / frequency | Output |
 |---|---|---|---|---|---|
-| **A1 Pre-release penetration test** | Release candidate: source web over Tor (Tier W/V), Source App, Desk + desk/admin APIs, relay, key directory, viewer containment, installer, host hardening for CE-HARDENED and EE-ONPREM; malicious-server and malicious-insider perspectives | Web/API/desktop/mobile pentest firm with Tor and Rust experience | 4 person-weeks (major); 1–2 person-weeks (scoped minor) | Every major RC; any minor adding attack surface (§4.1) | Report; retest letter |
+| **A1 Pre-release penetration test** | Release candidate: source web over Tor (Tier W/V incl. RAM-only drafts and passphrase confirmation), Source App (incl. fetch-all reply retrieval), Desk + desk/admin APIs (incl. hostile-string rendering), relay and fixed-schedule import, key directory, viewer containment on every Desk platform tier (ADR-042), installer, host hardening for CE-HARDENED and EE-ONPREM; malicious-server, malicious-insider and organisation-as-adversary perspectives | Web/API/desktop/mobile pentest firm with Tor and Rust experience | 4 person-weeks (major); 1–2 person-weeks (scoped minor) | Every major RC; any minor adding attack surface (§4.1) | Report; retest letter |
 | **A2 Recurring independent audit** | Rotating deep-dive across trust-path components so that every T0/T1 component is covered at least every 24 months | Security firm (different from last A2) | 6 person-weeks/year | Yearly | Report |
 | **A3 Major-version audit** | Full architecture + code review of all changed T0/T1 components since the last major, plus threat-model review | Security firm + independent cryptographer | 8–10 person-weeks | Each major (1.0, 2.0, …) before GA | Report |
 | **A4 Cryptographic design review** | Protocol composition (HPKE/X-Wing, epoch keys, source key derivation, key directory/transparency, STREAM + key commitment, padding), parameter choices, FIPS profile | Academic or specialist cryptographers (≥2 people, ≥1 external to any vendor) | 4 person-weeks | Protocol design freeze; any protocol change | Report; spec errata |
 | **A5 Formal verification** | Tamarin/ProVerif models: secrecy, authentication, forward secrecy for submissions/replies/epochs, key directory consistency; optional verified parsers (hax/F*/Kani) for envelope and safefs | Formal-methods group | 8–12 person-weeks initial; 2 person-weeks per protocol change | Before 1.0 (ADR-006); on protocol changes | Models (public), proof report |
 | **A6 Crypto implementation review** | `candor-core` and all callers: constant-time, zeroization, nonce handling, misuse resistance, FIPS build | Crypto-engineering auditors | 3–4 person-weeks | Before 1.0; each major; change to crypto backend | Report |
-| **A7 Anonymity review** | Metadata inventory vs implementation; canary harness completeness; compromise-drill answers (30 §6.3); timing/size/fingerprinting; Tor configuration; notification/telemetry; aggregate outputs | Anonymity/privacy researchers (Tor/traffic-analysis background) | 3 person-weeks | Before 1.0; each major; after any SEV-1 anonymity regression | Report; updated disclosure inventory review |
-| **A8 Infrastructure review** | Deployment profiles (ADR-024), host hardening baselines, secret placement (ADR-028), zone separation (ADR-009), backup design, HA (EE), Kubernetes (EE-HA) | Infrastructure security firm | 3 person-weeks | Before 1.0; each new profile; each major | Report |
-| **A9 Supply-chain review** | SLSA Build L3 / Source L4 assessment, builder independence, mirror controls, CI hardening, key custody, TUF metadata practices, signing-ceremony observation, SAMM re-score | Supply-chain security specialists | 2–3 person-weeks + ceremony attendance | Before 1.0; yearly; after any keyholder or builder change | Report; ceremony attestation |
+| **A7 Anonymity review** | Metadata inventory vs implementation; canary harness completeness; compromise-drill answers and the generation of the drill oracle from the 03 inventory and 09 classifications (30 §6.3, ANT-034); the inferential tests and their adversary models (timing correlation, visit-day intersection, exclusion inference, all-surface small-cell/differencing: 30 §9A); timing/size/fingerprinting; fixed-schedule import and constant-schedule notifications; fetch-all reply retrieval; blinded COI; Tor configuration; telemetry; aggregate outputs against 24 §TEL | Anonymity/privacy researchers (Tor/traffic-analysis background) | 3 person-weeks | Before 1.0; each major; after any SEV-1 anonymity regression | Report; updated disclosure inventory review |
+| **A8 Infrastructure review** | Deployment profiles (ADR-024), host hardening baselines, secret placement (ADR-028), zone separation (ADR-009), backup design incl. Erasure Key Vault replication, erasure-log restore and the infrastructure-backup exclusion attestation (ADR-044(4)), Platform Manifest verification and security floors (ADR-040), intake no-replication settings (ADR-046(1)), HA (EE), Kubernetes (EE-HA) | Infrastructure security firm | 3 person-weeks | Before 1.0; each new profile; each major | Report |
+| **A9 Supply-chain review** | SLSA Build L3 / Source L4 assessment, builder independence, mirror controls incl. the pinned snapshot mirror for OS/tor/PostgreSQL packages and the TUF-signed Platform Manifest (ADR-040), signer and builder spread (≥ 2 organisations, ≥ 2 jurisdictions), emergency-release cooling and signer rules, security-floor issuance, CI hardening, key custody, TUF metadata practices, signing-ceremony observation, SAMM re-score | Supply-chain security specialists | 2–3 person-weeks + ceremony attendance | Before 1.0; yearly; after any keyholder or builder change | Report; ceremony attestation |
 | **A10 Source-code review (incl. LLM-assisted)** | Whole trust-path code base with a human + LLM-assisted adversary model (GlobaLeaks 2026 [B-GL-19]); authorization, tenancy, mass-assignment, logic flaws | Security firm with LLM-assisted methodology, human validation of every finding | 4 person-weeks | Yearly (may be combined with A2) | Report |
 | **A11 Reproducible-build verification** | Independent rebuild of release artefacts from source by a third party not operating Builder A or B; publishes attestations | Independent rebuilder (e.g. a reproducible-builds community member or partner org) | 1 person-week per major + automated per release | Every release (automated); manual per major | Signed rebuild attestation |
 | **A12 EE module boundary audit** | EE commercial modules (C-26, C-34, C-35, C-36 tooling, C-40, SSO/SCIM, HA operator): verify no plaintext, keys or source-trust-path access; API usage only per ADR-020 | Security firm | 2–3 person-weeks | EE GA; each EE major | Report (published; modules are source-available to auditors) |
 | **A13 Mobile Source App audit** | C-03 Android (and iOS if shipped): MASVS incl. PRIVACY; Arti embedding; residue | Mobile security firm | 2 person-weeks | Before Source App GA; each major of C-03 | Report |
-| **A14 Accessibility-security audit** (optional) | Assistive technology interaction with security prompts (mode warnings, passphrase display) | Accessibility auditors | 1 person-week | Before 1.0 | Report (feeds 26, 30 §10) |
+| **A14 Accessibility-security audit** (optional) | Assistive technology interaction with security prompts (mode warnings, passphrase display and 3-word confirmation, operator-statement banner, COI checklist) | Accessibility auditors | 1 person-week | Before 1.0 | Report (feeds 26, 30 §10) |
+| **A15 Confidential-VM (TEE) sealer review** (conditional) | The optional SEV-SNP/TDX sealer profile (ADR-035(3)): measurement binding of the sealer image to a transparency-logged release; generation and binding of the sealer key inside the TEE; attestation freshness, replay and debug/migration policy checks in Desk and watcher verifiers (29 ST-156); guest hardening, interrupt/side-channel posture and firmware/TCB version policy; honesty of all source-, operator- and procurement-facing statements (never presented as a guarantee); the ASM entries in 40 | Firm or academic group with confidential-computing and side-channel expertise | 3–4 person-weeks | Before the TEE profile is offered; each major while offered; within 90 days after a published TEE break affecting supported CPUs | Report; updated ASM review |
+| **A16 External Watcher and Operator Statement programme review** | ADR-035(1)(2): watcher reference implementation (code audit; fetch over Tor; coverage of static assets, templates, CSP headers and the signed running manifest; sampling against selective serving; publication path); independence of watcher organisations (≥ 2, ≥ 1 outside the operator's jurisdiction for EE/GOV/MANAGED; no shared funding/control with operator or vendor); operator-statement quorum composition (k-of-n incl. ≥ 1 independent role), 30-day renewal, banner behaviour, small-organisation disclosure (ADR-045); IR capture approval and INCIDENT_NOTICE publication (ADR-035(4)) | Security firm with web-integrity and governance experience; not itself a watcher organisation | 2–3 person-weeks | Before 1.0 GA; yearly; on any watcher-protocol change or change of watcher organisations | Report; published watcher-independence statement |
+| **A17 Key Directory governance and organisation-as-adversary review** | ADR-036/037/043/044/045: time-locks (72 h; GOV/HIGH 7 days) and their clock sources; dual approval with an independent role and out-of-band `person_ref` verification; OVERSIGHT role-label certification; witness cosignature independence (≥ 2, ≥ 1 outside the operating organisation); snapshot high-water mark and independent time floor; weekly publication slot; follow-up sealing rule; Triage Set composition and triage-first enforcement; blinded COI storage (tags, padding, reason-code uniformity); break-glass independent approver; Fleet Manager restrictions; key-wrap deletion cooling-off and SCIM suspend-only; independent-custody enforcement for INDEPENDENT channels. Reviewed from the perspective of a management that controls the IdP, endpoints, mail and legal functions (RVW-C premise) | Security firm + governance/insider-threat specialist; ≥ 1 reviewer independent of any EE customer | 3–4 person-weeks | Protocol design freeze (design review); 1.0 RC (implementation review); each major; any change to directory, routing or approval code | Report |
 
 ### 4.1 When a minor release needs a scoped pentest (A1)
 Any of the following:
@@ -71,11 +75,15 @@ Any of the following:
 - a new deployment profile;
 - new EE integration types;
 - changes to C-07 sealing;
-- the introduction of Tier V web delivery.
+- the introduction of Tier V web delivery;
+- changes to Key Directory governance, time-locks, witness handling, triage-first routing or COI blinding (also triggers A17);
+- introduction of, or changes to, the Confidential-VM sealer profile (also triggers A15);
+- changes to the watcher protocol, running-manifest format or operator-statement format (also triggers A16);
+- changes to the fetch-all reply retrieval protocol, draft handling in C-07, or the import schedule mechanism.
 
 ### 4.2 Auditor selection and independence
 - Written conflict-of-interest declaration.
-- No auditor may be a keyholder (28), a Builder B operator, or an EE reseller.
+- No auditor may be a keyholder (28), a Builder B operator, or an EE reseller. An A16 auditor may not be a watcher organisation or a directory witness; an A17 auditor may not be a directory witness for any instance whose governance evidence it reviews.
 - A2/A10 firms rotate after two consecutive engagements. A4/A5 involve at least one academic or non-commercial participant.
 - Contracts require (a) the right for Candor to publish the full report, (b) regression artefacts (PoCs, Semgrep/CodeQL rules) delivered with findings, and (c) an embargo period of no more than 90 days, after which publication proceeds even if fixes are pending (unfixed items are then disclosed with mitigations).
 
@@ -83,7 +91,8 @@ Any of the following:
 - Spec set 00–40 and DECISIONS.md.
 - Threat model version.
 - Previous audit reports and their fix/regression mapping.
-- 29/30 latest results including drill reports.
+- 29/30 latest results including drill reports, the generated drill oracle, inferential-test reports (30 §9A) and the spec-constant registry and lint results (29 ST-167).
+- Watcher publications, witness cosignature logs and operator statements from the bounty lab instances (A16/A17).
 - The lab environment.
 - Test accounts.
 - Build instructions.
@@ -216,7 +225,7 @@ The published VDP includes a safe-harbor statement:
 
 | Rule | Specification |
 |---|---|
-| What is published | Full final report of every external assurance activity A1–A14, including methodology, scope, findings, severity, Candor response per finding, and retest results |
+| What is published | Full final report of every external assurance activity A1–A17, including methodology, scope, findings, severity, Candor response per finding, and retest results |
 | When | Within 30 days after all Critical/High findings are fixed and released, and **no later than 120 days after report delivery** regardless of fix status (unfixed items then published with mitigations and planned dates) |
 | Redactions | Only: (a) exploit details of unfixed issues until fixed (max 90 days extra), (b) personal data of individuals, (c) any customer/operator identifying information. Each redaction is marked with a reason. No redaction of findings, severity or count |
 | Where | Project site and onion mirror, repository `audits/` directory (signed commit), and the forge release attached to the fixed version |
@@ -230,26 +239,27 @@ Milestone names align with `38-IMPLEMENTATION-ROADMAP.md`. The exact milestone I
 
 | Milestone | Activities (must be complete before the milestone exits) | Notes |
 |---|---|---|
-| Protocol design freeze | A4 crypto design review; A5 initial formal models (secrecy/authentication lemmas proven) | ADR-006 requires both before 1.0; design freeze is the cheapest time to fix |
+| Protocol design freeze | A4 crypto design review; A5 initial formal models (secrecy/authentication lemmas proven, incl. follow-up sealing rule, triage-first wrapping and directory high-water mark); A17 governance design review | ADR-006 requires both before 1.0; design freeze is the cheapest time to fix |
 | Alpha (internal) | A9 supply-chain review of pipeline design (builders, mirrors, key ceremonies dry run); threat-model review by A3 firm (1 week) | Keys used in alpha are TEST-ONLY |
 | Beta (public, non-production) | A10 source-code review #1 (incl. LLM-assisted); A7 anonymity review #1; A8 infrastructure review (CE-SINGLE, CE-HARDENED); bounty opens on lab instances (reduced rewards 50%) | Beta release notes carry "not for real submissions" |
-| 1.0 Release Candidate | A1 full pentest; A6 crypto implementation review; A5 final proofs; A11 independent rebuild; A13 Source App audit (if the Source App ships at 1.0); A14 optional | SG-22 gate |
-| 1.0 GA | All reports published per §11; bounty full rewards; CNA application submitted; first root key ceremony observed by the A9 auditor | — |
+| 1.0 Release Candidate | A1 full pentest; A6 crypto implementation review; A5 final proofs; A11 independent rebuild; A13 Source App audit (if the Source App ships at 1.0); A17 implementation review; A7 anonymity review #2 covering the inferential tests; A14 optional | SG-22 gate |
+| 1.0 GA | All reports published per §11; bounty full rewards; CNA application submitted; first root key ceremony observed by the A9 auditor; A16 watcher and operator-statement programme review complete | EE/GOV/MANAGED require ≥ 2 independent watchers (ADR-035(1)), so A16 precedes their GA at the latest |
 | EE 1.0 GA | A12 EE module boundary audit; A8 for EE-ONPREM, EE-HA, PRIVATE-CLOUD; A1 scoped pentest of multi-tenancy (ADR-021) | — |
-| GOV / FIPS profile GA | A6 review of CANDOR-FIPS-1 build; A8 for GOV-ONPREM and AIRGAP-RCP | FIPS module validation is the module vendor's; Candor audits integration |
-| MANAGED profile launch | A8 of vendor-operated infrastructure; A7 anonymity review focused on the provider-observer risk (30 AT-031/AT-032) | — |
+| GOV / FIPS profile GA | A6 review of CANDOR-FIPS-1 build; A8 for GOV-ONPREM and AIRGAP-RCP (incl. physical-TPM vault and Recovery Quorum default, ADR-044(3)(4)); A17 for GOV time-lock/approval settings | FIPS module validation is the module vendor's; Candor audits integration |
+| MANAGED profile launch | A8 of vendor-operated infrastructure; A7 anonymity review focused on the provider-observer risk and the documented vendor union (30 AT-031/AT-032); A16 review of watcher independence from the vendor | — |
+| Confidential-VM (TEE) profile offered | A15 TEE sealer review; A1 scoped pentest of attestation endpoints and verifiers | Profile SHALL NOT be offered before A15 is published |
 | Every minor (1.x) | ST-142 LLM-assisted sweep; A1 scoped pentest if §4.1 triggers; A11 automated rebuild | — |
-| Yearly | A2 recurring audit (rotating component focus); A10 (may merge with A2); A9 supply-chain review + SAMM re-score; bounty programme review | Rotation ensures every T0/T1 component is audited at least every 24 months |
-| Each major (2.0, 3.0, …) | A3 major-version audit; A1 full pentest; A7 anonymity review; A4/A5 if protocol changed; A6 if crypto backend changed | SG-22 gate |
-| Event-driven | A7 after any SEV-1 anonymity regression; A9 after keyholder/builder change or supply-chain incident; A4/A5 on protocol change | Within 90 days of the event |
+| Yearly | A2 recurring audit (rotating component focus); A10 (may merge with A2); A9 supply-chain review + SAMM re-score; A16 watcher programme review; bounty programme review | Rotation ensures every T0/T1 component is audited at least every 24 months |
+| Each major (2.0, 3.0, …) | A3 major-version audit; A1 full pentest; A7 anonymity review; A17 governance review; A15 if the TEE profile is offered; A4/A5 if protocol changed; A6 if crypto backend changed | SG-22 gate |
+| Event-driven | A7 after any SEV-1 anonymity regression or any inferential-test (30 §9A) failure accepted as residual; A9 after keyholder/builder change or supply-chain incident; A4/A5 on protocol change; A15 after a published TEE break affecting supported CPUs; A16 on watcher-organisation change or a published watcher mismatch; A17 on governance-code change | Within 90 days of the event |
 
-Indicative first-year budget (1.0 cycle, excluding bounty payouts): about 55–70 external person-weeks across A1, A3–A11 and A13. This is an engineering estimate; the SecureDrop Workstation assessment by Trail of Bits alone was 6 person-weeks [B-SD-28].
+Indicative first-year budget (1.0 cycle, excluding bounty payouts): about 62–80 external person-weeks across A1, A3–A11, A13, A16 and A17 (plus 3–4 for A15 if the TEE profile ships in the first year). This is an engineering estimate; the SecureDrop Workstation assessment by Trail of Bits alone was 6 person-weeks [B-SD-28].
 
 ## 13. Requirements
 
 | ID | Requirement | Evidence | Threats | Component | Verification |
 |---|---|---|---|---|---|
-| SAP-001 | The project SHALL operate the assurance programme A1–A13 (A14 optional) with the scopes, efforts and triggers in §4. | B-SD-43; B-GL-13; B-GL-19 | THR-012; THR-021; THR-023; THR-024 | C-30 | INSP: audit index vs §12 schedule; AUD: yearly A9 re-checks programme |
+| SAP-001 | The project SHALL operate the assurance programme A1–A13, A16 and A17 (A14 optional; A15 whenever the Confidential-VM profile is offered) with the scopes, efforts and triggers in §4. | B-SD-43; B-GL-13; B-GL-19 | THR-012; THR-021; THR-023; THR-024 | C-30 | INSP: audit index vs §12 schedule; AUD: yearly A9 re-checks programme |
 | SAP-002 | A pre-release external penetration test (A1) SHALL be completed on every major release candidate, and on minors meeting §4.1 triggers, with no open Critical/High findings at signing. | B-SD-28; B-SD-40; B-GL-18 | THR-021; THR-023; THR-014; THR-001 | C-06; C-10; C-15; C-03; C-17 | AUD: A1 report; TST: ST-140 status in SG-22 |
 | SAP-003 | Every T0/T1 component SHALL receive an external code-level audit at least every 24 months. | B-GL-19; B-SD-43 | THR-012; THR-021; THR-023 | C-11; C-06; C-07; C-10; C-15 | INSP: coverage matrix in audit index |
 | SAP-004 | A major-version audit (A3) SHALL be completed before each major GA. | B-SD-28 | THR-021; THR-014; THR-012 | C-30 | AUD: A3 report |
@@ -286,6 +296,12 @@ Indicative first-year budget (1.0 cycle, excluding bounty payouts): about 55–7
 | SAP-035 | Assurance activities SHALL be scheduled per §12 and a milestone SHALL NOT exit while its required activities are incomplete. | ADR-006 | THR-012; THR-024 | C-30 | INSP: milestone exit checklist (38) |
 | SAP-036 | An LLM-assisted source audit sweep (ST-142) SHALL run for each minor release with human triage of every candidate finding. | B-GL-19 | THR-021; THR-023 | C-30 | TST: ST-142 triage completion |
 | SAP-037 | The assurance programme, VDP metrics and bounty statistics SHALL be summarized in a yearly public transparency report, with aggregate counts only. | B-SD-43; REQ-H-74 | THR-024; THR-039 | C-37 | INSP: published report |
+| SAP-038 | Before the optional Confidential-VM sealer profile is offered, and at each major while it is offered, an independent review (A15) SHALL assess measurement binding to logged releases, in-TEE key generation, attestation verifier logic in Desk and watchers, TCB/firmware policy and side-channel posture, and SHALL confirm that no source-facing text presents the TEE as a guarantee; a published TEE break affecting supported CPUs SHALL trigger A15 within 90 days. | ADR-035; RVW-A-01 | THR-014; THR-026; THR-007 | C-07; C-15; C-25 | AUD: A15 report; TST: 29 ST-156 |
+| SAP-039 | The External Watcher and Operator Statement programme SHALL be reviewed (A16) before 1.0 GA, yearly, and on any change of watcher protocol or watcher organisations, including code audit of the reference watcher, verification of watcher independence (≥ 2 organisations, ≥ 1 outside the operator's jurisdiction for EE/GOV/MANAGED) and of operator-statement quorum composition; the review SHALL publish a watcher-independence statement. | ADR-035; ADR-045; RVW-A-01; RVW-A-13; RVW-C-04 | THR-007; THR-014; THR-025; THR-026 | C-06; C-07; C-14; C-37 | AUD: A16 report; TST: 29 ST-154; ST-155; ST-157 |
+| SAP-040 | Key Directory governance and organisation-as-adversary controls SHALL be reviewed (A17) at protocol design freeze, at 1.0 RC, at each major and on any change to directory, routing, COI or approval code, from the perspective of a management that controls the IdP, endpoints, mail and legal functions. | ADR-036; ADR-037; ADR-043; ADR-044; ADR-045; RVW-A-04; RVW-A-05; RVW-A-08; RVW-B-01; RVW-B-02; RVW-C-01; RVW-C-03; RVW-C-05; RVW-C-09; RVW-C-10 | THR-018; THR-020; THR-046; THR-043 | C-10; C-14; C-15; C-21; C-22; C-34 | AUD: A17 report; TST: 29 ST-146..ST-152; ST-162..ST-164 |
+| SAP-041 | Auditors of A16 SHALL NOT be watcher organisations or directory witnesses, and auditors of A17 SHALL NOT act as directory witnesses for instances whose governance evidence they review. | ADR-035; ADR-036 | THR-026; THR-046 | C-30 | INSP: COI declarations |
+| SAP-042 | The anonymity review (A7) SHALL assess the adversary models and thresholds of the inferential tests (30 §9A) and the generation of drill oracles from the 03 inventory, and SHALL report any inferential residual that the project has accepted. | RVW-B-29; ADR-038; ADR-046 | THR-011; THR-039; THR-020 | C-08; C-12; C-24 | AUD: A7 report; TST: 30 AT-080..AT-085 |
+| SAP-043 | The infrastructure (A8) and supply-chain (A9) reviews SHALL cover, respectively, the Erasure Key Vault replication/restore/erasure-log path and the infrastructure-backup exclusion attestation, and the Platform Manifest, pinned package mirror, security-floor issuance and the ≥ 2-organisation / ≥ 2-jurisdiction signer and builder spread. | ADR-040; ADR-044; RVW-A-12; RVW-A-16; RVW-C-06; RVW-C-07; RVW-C-17 | THR-017; THR-024; THR-025 | C-12; C-27; C-31; C-32; C-33; C-39 | AUD: A8 and A9 reports; TST: 29 ST-153; ST-158; ST-159 |
 
 ## 14. Residual risks and limitations
 
@@ -295,6 +311,9 @@ Indicative first-year budget (1.0 cycle, excluding bounty payouts): about 55–7
 - **Bounty lab realism.** Lab instances do not reproduce operator-specific configurations. Operator misconfigurations are out of bounty scope and rely on the config checker and operator audits.
 - **Legal safe harbor is limited.** The project cannot bind operators or prosecutors. Researchers in some jurisdictions may still face legal risk.
 - **CRA role and deadline details** are pending legal review, and the 24 h/72 h/14 d timelines above are Knowledge (unverified).
+- **TEE reviews age quickly.** A15 assesses a TEE profile against known side channels at review time; new breaks can invalidate it between reviews. The TEE is defense in depth only (ADR-035(3)).
+- **Watchers and governance can be captured.** A16 verifies stated independence and code; it cannot detect a watcher organisation that is secretly compelled or colluding, nor can A17 stop collusion among independent approvers. These are recorded as assumptions in 40.
+- **Audits of attested infrastructure rely on attestations.** A8 can check that the backup-exclusion attestation workflow exists and is enforced by the checker, not that a customer's hypervisor team told the truth (ADR-044(4)).
 - **Pre-notification risk.** Advance notice to subscribers could leak before public disclosure. It is limited to non-exploit details and 7 days.
 
 ## 15. Open issues
@@ -305,6 +324,8 @@ Indicative first-year budget (1.0 cycle, excluding bounty payouts): about 55–7
 4. Whether A5 extends to verified implementations (hax/F*, Kani) of envelope parsing and `candor-safefs` before 2.0.
 5. Coordinate milestone names and IDs with 38 once RM- IDs are fixed.
 6. Tighten the acknowledgement SLA (cf. GlobaLeaks 8 h [B-GL-03]) once staffing is known.
+7. Identify candidate watcher organisations and A16 auditors early enough that EE/GOV/MANAGED GA is not blocked (coordinate with 36 for funding).
+8. Availability of firms with confidential-computing and side-channel expertise for A15; if none is available, the TEE profile is not offered.
 
 ### Open Issues for ADR revision
 - None. Conforms to DECISIONS.md. Suggest adding to ADR-020 an explicit rule that the pre-notification list is edition-neutral (SAP-026/SAP-028), so that commercial pressure cannot erode it later.
