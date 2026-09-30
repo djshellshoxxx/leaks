@@ -1,5 +1,5 @@
 # 33 — Release and Update Security
-Status: Draft v1.0 · Edition applicability: both (one release process, identical trust-path artifacts for CE and EE) · Owner: Release Engineering & Supply Chain team
+Status: Draft v1.1 (round-2 revision: ADR-034..046) · Edition applicability: both (one release process, identical trust-path artifacts for CE and EE) · Owner: Release Engineering & Supply Chain team
 
 ## 1. Purpose and scope
 
@@ -13,7 +13,7 @@ Out of scope (referenced): source-repository controls, CI hardening, dependency 
 
 | Document | Relationship |
 |---|---|
-| DECISIONS.md | ADR-004 (Tier V client integrity), ADR-006 (Ed25519 + ML-DSA-65 release roots), ADR-019 (packaging), ADR-020/031 (licensing; trust path), ADR-022 (TUF, thresholds, transparency, no targeted updates), ADR-023 (no telemetry), ADR-024 (profiles) |
+| DECISIONS.md | ADR-004 (Tier V client integrity), ADR-006 (Ed25519 + ML-DSA-65 release roots), ADR-019 (packaging), ADR-020/031 (licensing; trust path), ADR-022 (TUF, thresholds, transparency, no targeted updates), ADR-023 (no telemetry), ADR-024 (profiles). Round 2: ADR-035(1) (External Watchers, running manifest), ADR-036(5) (Source App witness key set and tree-head pin), ADR-040 (Platform Manifest, security floors, emergency ≥ 2 h cooling, ≥ 2 organisations/jurisdictions for signers and builders), ADR-041 (Source App distribution), ADR-042 (Desk platform tiers), ADR-043 (Desk self-verification), ADR-045 (Fleet Manager cannot lower floors), ADR-046(3) (update paths per zone) |
 | 04-CRYPTOGRAPHY.md | K26 release keys, K27 WEBCAT keys (§19); CLIENT_RELEASE directory entries (§14.2); server-delivered-code analysis (§24) |
 | 16-TOR-I2P.md | Intake hosts have no clearnet egress; Source App uses Arti for updates |
 | 18-DEPLOYMENT.md | Installation, maintenance windows, rollback of deployments |
@@ -31,11 +31,13 @@ Out of scope (referenced): source-repository controls, CI hardening, dependency 
 |---|---|---|
 | Build-system compromise (SUNBURST class) | INC-38 SolarWinds, INC-41 3CX, INC-48 CCleaner | ≥ 2 independent reproducible builders; SLSA Build L3 provenance (§5) |
 | Update-server/distribution compromise | INC-49 NotPetya (M.E.Doc), INC-52 Linux Mint | TUF with offline keys; update server holds no signing key (§6) |
-| Signing-key theft or compelled signing | INC-58 Storm-0558, INC-01/INC-02 compelled providers | Threshold hybrid keys in hardware, independent holders in ≥ 2 jurisdictions (§6) |
+| Signing-key theft or compelled signing | INC-58 Storm-0558, INC-01/INC-02 compelled providers | Threshold hybrid keys in hardware; holders of every role in ≥ 2 organisations and ≥ 2 jurisdictions (root ≥ 3), so no single jurisdiction can meet a threshold (§6; ADR-040) |
 | Targeted malicious update to one customer/user | INC-14 Anom, INC-01 Hushmail | Identical artifacts for all; transparency log; no per-instance metadata (§7, §15) |
 | Dependency/maintainer compromise | INC-37 xz, INC-40 event-stream, INC-42 ua-parser-js | 28 (cargo-vet, review); reproducibility makes backdoors attributable to source |
 | CI secret/tool compromise | INC-39 Codecov, INC-44 tj-actions | 28; builders hold no signing keys |
-| Rollback / freeze / mix-and-match | TUF threat model (B-CR-45) | TUF versioning and expiry; security floor (§8) |
+| Rollback / freeze / mix-and-match | TUF threat model (B-CR-45) | TUF versioning and expiry; signed security floor (§8) |
+| Third-party platform packages bypassing release controls (RVW-A-12) | INC-37 xz (sshd dependency) | Platform Manifest (§4.1), snapshot mirror, verification of all installed packages (§18.5) |
+| Selective withholding / divergent running state (RVW-A-13) | INC-14 Anom | Security floors Fleet cannot override (§8.1, §14.1); External Watchers and running manifest (§7.1) |
 | Web code substitution to sources | INC-01, INC-27, INC-28 | No JS without WEBCAT; WEBCAT threshold manifests (§16) |
 
 ### 3.2 Assumptions (to be registered as ASM-* in 40)
@@ -52,16 +54,21 @@ Out of scope (referenced): source-repository controls, CI hardening, dependency 
 | Artifact | Formats | Delegated TUF role | Platform signature (in addition to TUF) |
 |---|---|---|---|
 | Server packages (intake: C-05..C-08; core: C-09..C-14, C-21..C-25; `candorctl`) | Debian .deb (primary), APT repository metadata | `server` | OpenPGP-signed APT `InRelease` (offline key) for manual installs |
-| Candor Desk (C-15, admin mode C-19) | Linux .deb/AppImage, Windows MSI, macOS .dmg | `desk` | Authenticode (Windows), Developer ID + notarization (macOS) |
-| Candor Source App (C-03) | Linux AppImage, Windows, macOS, Android APK (F-Droid + direct), iOS (App Store) | `source-app` | APK v2/v3 signature; Apple App Store signature |
+| Candor Desk (C-15, admin mode C-19) | Linux .deb/AppImage (Tier 1, incl. Qubes templates), Windows MSI and macOS .dmg (Tier 2) per ADR-042 | `desk` | Authenticode (Windows), Developer ID + notarization (macOS) |
+| Candor Source App (C-03) | Linux AppImage (incl. Tails), Windows, macOS, Android APK — primary distribution from the project onion service and ≥ 2 independent mirrors (§15.3, ADR-041); optional F-Droid; optional generic Google Play / Apple App Store listings (iOS: App Store only, labelled "higher trace") | `source-app` | APK v2/v3 signature; Apple App Store signature |
 | Source web bundle (optional Tier V-web, C-06) | WEBCAT manifest + static files | `web-bundle` | WEBCAT threshold signatures (§16) |
 | OCI images (EE-HA / PRIVATE-CLOUD Z-CORE only) | OCI | `oci` | cosign signature |
 | Appliance VM image | qcow2/OVA | `appliance` | — |
-| Platform pins (tor/vanguards version floors, Dangerzone-class viewer images, reference OS snapshot IDs) | JSON policy | `platform-pins` | — |
+| **Platform Manifest** (ADR-040; replaces v1.0 "platform pins"): per profile and host role, exact versions and hashes of OS, kernel, tor, vanguards and PostgreSQL packages, Debian snapshot ID, Tor Project key, viewer image digests, pinned Roughtime keys, vanguards maintenance-gate result, and signed **security floors** per product (§4.1) | JSON policy | `platform` | — |
 | EE commercial modules (non-trust-path, ADR-020) | .deb / OCI | `ee-modules` (separate delegation; cannot sign trust-path targets) | as above |
 | SBOM (CycloneDX 1.6 with CBOM), SLSA provenance, in-toto attestations, reproducibility reports | JSON | same role as the artifact | — |
 
-No per-customer or per-instance build of any trust-path artifact exists (ADR-022). Tenant-specific configuration is data (signed by the tenant's own keys, 04), never code.
+No per-customer or per-instance build of any trust-path artifact exists (ADR-022). Tenant-specific configuration is data (signed by the tenant's own keys, 04), never code. Tenant branding in the Source App (name, icon) is runtime data from the signed onion address statement, never a build variant or a tenant-specific store listing (RVW-A-14).
+
+### 4.1 Platform Manifest and security floors (ADR-040; RVW-A-12, RVW-A-13)
+- The Platform Manifest (format owned here; production and derivation in 28 §5.4) is a `platform` target of every release; the self-test (C-25, `candorctl verify-installed`) verifies **every installed package** on Z-INTAKE and Z-CORE — not only trust-path files — against it daily and before and after each update, and alerts on any unlisted package, version or hash.
+- **Security floor:** for each trust-path product the manifest carries `{min_secure_version, effective_day}`. `effective_day` = publication day + 7 days for normal security releases, + 2 days for emergency releases of actively exploited issues. Trust-path components (C-05..C-10, C-12..C-14, C-21..C-25, C-15, C-03) **refuse to start** below the floor after `effective_day`; a running Z-INTAKE below the floor after `effective_day` stops accepting submissions and shows the outage page (ADR-002; 04 §12.6), and Desk blocks case access. Before `effective_day` admins see a countdown and security releases auto-install (§14).
+- **No override below the floor:** Fleet Manager ring policies, maintenance windows and local admin settings cannot defer an instance past `effective_day` or lower a floor (ADR-040, ADR-045); only a newer signed manifest can change a floor.
 
 ## 5. Build: reproducibility and independent builders
 

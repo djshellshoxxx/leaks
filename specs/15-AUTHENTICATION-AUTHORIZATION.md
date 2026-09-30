@@ -137,7 +137,7 @@ IdP compromise analysis:
 | Idle timeout | 15 min | 10 min |
 | Absolute lifetime | 8 h | 2 h |
 | Concurrent sessions | max 2 devices | 1 |
-| Revocation | synchronous on logout, role change, authenticator removal, deactivation, COI exclusion of all cases (no), password/PIN change; checked on every request (no stateless JWT) | same |
+| Revocation | synchronous on logout, role change, authenticator removal, suspension (incl. SCIM/IdP-driven), password/PIN change; checked on every request (no stateless JWT) | same |
 | Cross-audience replay | rejected (B-SD-20 CVE-2026-50000 lesson) | same |
 
 ### 4.7 Step-up re-authentication
@@ -177,7 +177,7 @@ The server verifies that the signed operation descriptor matches the operation e
 | METRICS_VIEWER | k-suppressed reports | no | |
 | SECURITY_OFFICER | SECURITY/SYSTEM events, SIEM export config (EE) | no | |
 | SYS_ADMIN | infrastructure, updates, backups, health | **no, cryptographically** | |
-| USER_ADMIN | create/deactivate accounts, enrollment approvals | no | ≠ SYS_ADMIN holder in CE-HARDENED+ |
+| USER_ADMIN | create/suspend accounts, enrollment approvals | no | ≠ SYS_ADMIN holder in CE-HARDENED+ |
 | TENANT_ADMIN (EE) | tenant configuration within tenant | no | |
 | RECOVERY_TRUSTEE | Recovery Quorum share holder (ADR-013; GOV default enabled, ADR-044(3)) | only with k-of-n | offline; from independent roles in GOV |
 | `fleet` (non-human principal, EE) | C-34 Fleet Manager actions (ADR-045) | **no** | §5.12: explicit action allow-list; cannot disable intake, lower security floors, change routing, rosters, COI, break-glass or retention/logging except tightening |
@@ -209,7 +209,7 @@ Legend: Y = allowed; A = allowed with relation on the object (member/lead); D = 
 | audit.export | — | — | — | — | — | — | — | Y D S | — | Y D S | — | Y D S | — | — |
 | metrics.read (k-suppressed) | — | — | — | — | Y | — | — | Y | — | — | Y | — | — | — |
 | channel membership/role labels/COI config | — | — | — | — | Y D S | — | — | approve | — | — | — | — | — | — |
-| user.create/deactivate | — | — | — | — | — | — | — | — | — | — | — | — | — | Y |
+| user.create/suspend | — | — | — | — | — | — | — | — | — | — | — | — | — | Y |
 | user.enroll_approve | — | — | — | — | — | — | — | — | — | — | — | — | — | Y D S |
 | role.assign | — | — | — | — | — | — | — | — | — | — | — | — | — | Y D S |
 | system.config (SAFE) | — | — | — | — | — | — | — | — | — | — | — | — | Y S | — |
@@ -235,7 +235,7 @@ Rules of thumb: tenant equality is mandatory for every decision (plus PostgreSQL
 - Need-to-know: no role grants "all cases"; there is no global read (contrast SecureDrop's flat authorization, B-SD-20).
 - COI exclusions are evaluated **before** ACL: an excluded subject is denied even if an ACL row exists (deny overrides).
 - Intake-time COI exclusion is cryptographic (ADR-030, ADR-037): the envelope content key is wrapped only to eligible Triage Set members' Member Epoch Keys, so a source-excluded, COI-map-excluded or non-triage member holds no decrypting key; import is permitted only to Triage Set members (C-22 cannot know which slot a Desk opened; the Desk proves possession by producing the signed import record). Exclusions are stored only as blinded tags `HMAC(K_case_excl, user_id)` padded to 8 (ADR-037(3)); C-22 evaluates the explicit-deny step by a blind membership test on the tag supplied by the granting or requesting Desk, and denial reason codes do not distinguish COI from other relations (`NO_RELATION`). See `14-CASE-MANAGEMENT.md` §8.
-- Evaluation order: (1) authentication/audience/tenant → (2) explicit deny (COI, deactivated, expired grant) → (3) role permission → (4) relation (case ACL, or envelope recipient for import) → (5) attribute conditions → (6) dual-control/step-up tokens. Default deny.
+- Evaluation order: (1) authentication/audience/tenant → (2) explicit deny (COI blinded tag, suspended, expired grant) → (3) role permission → (4) relation (case ACL, or Triage Set membership for import) → (5) attribute conditions → (6) dual-control/step-up tokens. Default deny.
 
 ### 5.5 Temporary access and expiry
 

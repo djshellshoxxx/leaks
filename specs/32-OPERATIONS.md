@@ -1,6 +1,6 @@
 # 32 — Operations, Human-Factor Controls and Configuration Classification
 
-Status: Draft v1.0 · Edition applicability: both (EE-only items marked) · Owner: Operations & Security Team
+Status: Draft v1.1 (revision round 2: ADR-034..046) · Edition applicability: both (EE-only items marked) · Owner: Operations & Security Team
 
 ## 1. Purpose and scope
 
@@ -25,6 +25,7 @@ Requirement prefixes:
 | Source | Use |
 |---|---|
 | ADR-010, 013, 015, 016, 017, 023, 028, 029, 030 | Timing minimization; recovery; admin ≠ case access; audit classes; content-free notifications; telemetry; secret manifest; audience-bound tokens; per-member epoch keys (cryptographic COI) |
+| ADR-035, 036, 038, 040, 043, 044, 045, 046 (revision round 2) | Operator Statement and External Watchers, independent IR approval; roster time-locks; fixed import slots and constant-schedule notifications; Platform Manifest and security floors; independent-custody devices; key-access continuity; organisation-as-adversary controls and small-organisation mode; config labels (WEAKENING → DANGEROUS), metrics regime (24 §TEL), CE-SINGLE VM default |
 | `05-SOURCE-OPSEC.md` | Source guidance (authoritative) |
 | `14-CASE-MANAGEMENT.md` | Case workflow, COI maps, metric k-thresholds |
 | `15-AUTHENTICATION-AUTHORIZATION.md` | Roles (SYS_ADMIN, USER_ADMIN, SECURITY_OFFICER, CHANNEL_OWNER, INVESTIGATOR, IDENTITY_CUSTODIAN, RECOVERY_TRUSTEE, METRICS_VIEWER, OVERSIGHT, …) and dual-control catalogue DC-01..DC-nn |
@@ -52,6 +53,7 @@ Source guidance is authoritative in `05-SOURCE-OPSEC.md`. Operators' duties towa
 1. Publish the onion address and guidance only on the Clearnet Information Site (C-37) and in channels the organization controls. Never publish it on pages with analytics or third-party scripts (INC-53).
 2. Do not advertise the portal on the corporate intranet with tracking links, or with instructions that lead employees to use corporate devices (REQ-H-31).
 3. Keep C-37 guidance in sync with `05-SOURCE-OPSEC.md` releases (checked quarterly, §9).
+4. C-37 SHALL NOT use a CDN, analytics or third-party resources (`16-TOR-I2P.md` §11.3; the v1.0 "unless a CDN is used" allowance in `03-PRIVACY-ANONYMITY.md` is withdrawn, RVW-A-23). For high-risk tenants and INDEPENDENT channels, C-37 SHOULD be hosted outside the organisation's own web stack (static host without access logs), because the organisation's proxy would otherwise log who read the guidance (RVW-C-20). The quarterly review (OPS-012) checks that no intranet page links to C-37 through tracking redirects.
 
 ### 3.2 RECIPIENT (channel member)
 
@@ -96,7 +98,7 @@ Admins have no case-content capability (ADR-015; admins publish no member epoch 
 2. Review admin activity weekly: config changes, SSH sessions, approvals, secret-manifest results, attestation.
 3. Hold the co-approver role for DANGEROUS changes (DC-09 in `15-AUTHENTICATION-AUTHORIZATION.md`) together with SYS_ADMIN.
 4. Run the quarterly privacy-preserving access review (§4.4).
-5. Own the IR Evidence Key share (with the DPO and Legal) and IR exercises.
+5. Own the IR Evidence Key share (with the DPO and an independent holder, `31-INCIDENT-RESPONSE.md` §6.2) and IR exercises. Never initiate intake memory or uplink capture without the Independent Approver (ADR-035(4)).
 6. Must **not** request SOURCE-SENSITIVE data (there is none as events), must not enable packet capture on intake uplinks (IR-008), and must not route Candor events beyond the C-26 allow-list.
 
 ### 3.6 ORGANIZATION MANAGEMENT
@@ -104,7 +106,9 @@ Admins have no case-content capability (ADR-015; admins publish no member epoch 
 | Obligation | Detail |
 |---|---|
 | Published non-retaliation and non-identification policy | A board-approved statement: no attempt to identify anonymous reporters, and sanctions for attempts (INC-22) |
-| Appoint independent roles | OVERSIGHT (audit committee / ombudsman), IRK custodians (`19-BACKUPS-DR.md`), Identity Custodians (ADR-014), Recovery Quorum trustees if enabled (ADR-013), and at least one reporting channel that bypasses executive management (ADR-015 routing) |
+| Appoint independent roles | OVERSIGHT (audit committee / ombudsman), IRK custodians (`19-BACKUPS-DR.md`), Identity Custodians (ADR-014), Recovery Quorum trustees if enabled (ADR-013; GOV default, ADR-044(3)), the Independent Approver for IR captures and break-glass (ADR-035(4), ADR-045), the Emergency Admin set (appointed by OVERSIGHT, `31-INCIDENT-RESPONSE.md` §4), an external retained IR firm, and at least one reporting channel that bypasses executive management (ADR-015 routing) |
+| Fund independent custody | Independent-custody devices for Triage Set members of INDEPENDENT channels (ADR-043, §4.6); refusing to fund them is visible to sources through the channel's custody status |
+| Operator Statement | Sign (as one of the k-of-n, with ≥ 1 independent role) and renew the Operator Statement every 30 days (ADR-035(2), §9); a quorum member who cannot truthfully sign declines, and the lapse is shown to sources |
 | Resourcing | Staffing for the SLA engine (acknowledgement deadlines per `25-COMPLIANCE.md`), administrators (§3.4 frequency), and a yearly budget for independent audit (`37-SECURITY-AUDIT-PLAN.md`) |
 | Information management receives | Only k-thresholded, month-granular statistics (REQ-H-74; `14-CASE-MANAGEMENT.md`). Never case lists, never "who reported" |
 | Accept exclusion | Executives named in the COI map for a category are cryptographically excluded (ADR-030) and SHALL NOT request exceptions |
@@ -119,15 +123,19 @@ Admins have no case-content capability (ADR-015; admins publish no member epoch 
 | Curious admin (SYS_ADMIN) | Read reports; browse the DB; look up "who submitted around the time of X" | No case keys (ADR-015, ADR-030); DB holds ciphertext + day-granular dates (ADR-010); no admin tooling for source data (REQ-H-70); the Admin API has no content routes (ADR-029 deny-by-default) | SoD (§4.2); signed admin-conduct statement | SSH session events; DB access by the admin role outside maintenance windows (connection-level only) | Can see coarse metadata (`17-INFRASTRUCTURE.md` §8.6). With root on a live intake, could capture future Tier W (see next row) |
 | Malicious admin | Modify the intake to capture Tier W plaintext; copy the onion key; weaken config | Attestation (`17-INFRASTRUCTURE.md` §5.6) from an independently administered H-MON; secret manifest; config checker blocks unapproved DANGEROUS changes; TUF-only code (no ad-hoc binaries: `debsums`, measured boot) | EE: two-person SSH certificate issuance for H-INTAKE (HUM-005); H-MON administered by the security team, not by SYS_ADMIN (HUM-006) | `host.attestation_mismatch`, `secret.placement_violation`, checker exit ≥ 20 | Memory-only implants (`17-INFRASTRUCTURE.md` §10); Tier V removes the exposure |
 | Malicious investigator | Identify the source from content; leak to the accused; export originals; widen the ACL | ACL + COI cryptographic exclusion (ADR-030); dual approval for original exports (ADR-012); Export Package watermark and manifest; time-bounded grants; no global read (AUTHZ-006) | Non-identification policy (§3.6); training; paraphrase rule | CASE audit analytics: bulk export, access to cases after COI declaration attempts, exports shortly before confrontations (PB-01) | Content-based inference by an authorized reader cannot be technically prevented (THR-010) |
-| Executive seeking identity | Pressure recipients or admins; demand logs; request "IT forensics" on the employee network | Nothing identifying exists in Candor (ADR-001, ADR-010); cryptographic COI exclusion (ADR-030); routing to independent channels (ADR-015); admins cannot read content | Escalation path to OVERSIGHT, bypassing the executive; staff instructed to record and report such requests; legal protections for recipients | An OVERSIGHT-visible record of any "identity request" logged by recipients (CASE event `case.identity_request_refused`, defined in `14-CASE-MANAGEMENT.md`) | Correlation with corporate network logs (Tor use by an employee at time T) happens outside Candor. Source guidance (never use employer networks) is the only mitigation |
+| Executive seeking identity | Pressure recipients or admins; demand logs; request "IT forensics" on the employee network; order corporate IT to instrument recipients' laptops (MDM repackaging, EDR live response, screen recording, VDI; RVW-C-01); declare a pretextual incident to capture intake memory (RVW-C-04); re-roster channels (RVW-C-05) | Nothing identifying exists in Candor (ADR-001, ADR-010); triage-first routing with blinded COI (ADR-037); routing to independent channels (ADR-015); admins cannot read content; independent-custody devices for INDEPENDENT channels (ADR-043, §4.6); IR captures need an Independent Approver and publish INCIDENT_NOTICE (ADR-035(4)); roster changes time-locked with an independent approver (ADR-036(2)) | Escalation path to OVERSIGHT, bypassing the executive; staff instructed to record and report such requests; legal protections for recipients | An OVERSIGHT-visible record of any "identity request" logged by recipients (CASE event `case.identity_request_refused`, defined in `14-CASE-MANAGEMENT.md`) | Correlation with corporate network logs (Tor use by an employee at time T) happens outside Candor. Source guidance (never use employer networks) is the only mitigation. An organisation that controls a member's endpoint can defeat Desk protections (ADR-043 honest residual) |
 | DBA (customer DB team, EE) | Dump the case DB; restore to a sandbox; run queries | Dedicated DB (not shared); RLS; case content encrypted; DB superuser not held by the enterprise DBA team (Candor-operated role); TDE optional | DBA access to the Candor DB only via an audited maintenance procedure with SECURITY_OFFICER co-approval | Connection-level audit; RT-0 detects unexpected snapshot/backup activity | Metadata exposure per `17-INFRASTRUCTURE.md` §8.6 |
 | Support engineer (vendor or internal helpdesk) | Obtain logs/HAR/screenshots with tokens; request remote access | Support bundles scrubbed (§8); no HAR from sources (REQ-H-56); vendor remote access off by default; audience-bound tokens (ADR-029) | Two-person, time-bound vendor access with a customer-visible log (DEP-028) | Bundle creation events; access-log review | Helpdesk social engineering of recipients: training |
 | Cloud admin (provider or customer cloud team) | Snapshot disks/RAM; read flow logs; use KMS | In-guest FDE with customer-held Tang/HSM; no provider KMS (INFRA-022); SCPs deny snapshots (DEP-015); confidential VMs | Separate cloud account for Candor with minimal principals; break-glass only | Cloud audit-log alerts on snapshot, console or disk-attach events | Hypervisor-level observation cannot be prevented (`17-INFRASTRUCTURE.md` §7) |
+| Corporate endpoint administrators (MDM/EDR/IRM/VDI teams) | Push a modified Desk; dump Desk memory via EDR live response; record screens; run Desk in VDI | Independent-custody devices for INDEPENDENT-channel Triage Set members (ADR-043); Desk self-check of its binary against the transparency log (accidental divergence only); custody status in the Admin UI | §4.6; enabling an INDEPENDENT channel without independent custody is DANGEROUS | Custody status changes; PB-18 | An organisation that controls the endpoint defeats Desk protections; cannot be prevented technically |
+| Virtualization, SAN and enterprise backup teams | Image-level backups or snapshots of Z-CORE including the Erasure Key Vault and vTPM (RVW-C-06); SPAN/NetFlow on the intake port; BMC console logging (RVW-C-12) | Vault on a separate excluded volume, VMK on physical TPM/HSM for HIGH/GOV (INFRA-037); intake snapshots FIXED off | Signed attestations by the owning teams (CFG-008), re-signed yearly; RT-7 probe | Attestation expiry; RT-7 finding | Attestations are only as honest as the signers, who may report to the accused |
+| HR / IdP administrators | Engineer key loss by SCIM deactivation, attribute poisoning or manager-chain edits (RVW-C-03) | IdP/HR changes only suspend (ADR-044(1)); wrap deletion needs dual control, 7-day cooling-off and OVERSIGHT notice; `min_recipients` 2; ≥ 2 authenticators per member (ADR-044(2)) | OVERSIGHT reviews suspensions | IR-037 mass-loss trigger → PB-15/PB-16 | An organisation that physically destroys all devices, including backups, still wins |
+| In-house legal function | Break-glass or litigation exports satisfied entirely by counsel (RVW-C-10) | Break-glass needs ≥ 1 approver from an independent role outside the legal/management chain, before execution (ADR-045); only external counsel counts as independent | §4.3 | OVERSIGHT review of every break-glass | Lawful court orders still compel production |
 | Vendor personnel (Candor/EE vendor, MANAGED operator) | Access customer instance data; build a targeted update; learn deployment metadata | E2EE with endpoint keys (ADR-007); identical updates for all customers + transparency (ADR-022); opaque instance IDs (ADR-022, C-34); licensing offline (C-35) | MANAGED: two-person SSH issuance, customer-visible access log, per-customer keys (DEP-027/028); vendor staff background checks | Transparency monitors; customer access-log review | A MANAGED operator can observe intake metadata and live Tier W (`18-DEPLOYMENT.md` §4.8, disclosed) |
 
 ### 4.2 Separation of duties
 
-The following role pairs SHALL NOT be held by the same person (`person_ref`) in CE-HARDENED and above. In CE-SINGLE they are ADVANCED exceptions with acknowledgement.
+The following role pairs SHALL NOT be held by the same person (`person_ref`, bound to authenticator attestation) in CE-HARDENED and above. In CE-SINGLE they are ADVANCED exceptions with acknowledgement; with fewer than 4 distinct persons, small-organisation mode (§4.5) applies instead.
 
 | Role A | Role B | Reason |
 |---|---|---|
@@ -144,7 +152,7 @@ The following role pairs SHALL NOT be held by the same person (`person_ref`) in 
 | Grant | Default duration | Renewal |
 |---|---|---|
 | Case co-investigator grant | 30 days | Requested by the case owner; CHANNEL_OWNER approves |
-| Break-glass | 4 h | Dual approval; post-hoc OVERSIGHT review within 7 days |
+| Break-glass | 4 h | Dual approval with ≥ 1 approver from an independent role outside the legal/management chain **before** execution (ADR-045; `IMMINENT_DANGER` may proceed with the independent approval given by phone/out-of-band and recorded within 1 h); post-hoc OVERSIGHT review within 7 days |
 | Admin role | 365 days | Re-certification (`15-AUTHENTICATION-AUTHORIZATION.md`) |
 | EE SSH certificate for H-INTAKE | 8 h | Two-person issuance |
 | Vendor support access (MANAGED/EE) | 24 h | Customer approval per session |
@@ -160,7 +168,35 @@ The following role pairs SHALL NOT be held by the same person (`person_ref`) in 
    - OVERSIGHT reviews break-glass and identity-unsealing events.
    - Every review is itself a CASE/SECURITY event: **who audits the auditors** is visible to OVERSIGHT.
 3. Staff-activity analytics (for PB-01/PB-05 detection) run on CASE/SECURITY events only. Rules are published internally and limited to defined anomaly patterns: bulk export, off-ACL attempts, access after COI declaration, unusual volume. They are **not** general productivity monitoring. Results go to the SECURITY_OFFICER and, for SECURITY_OFFICER subjects, to OVERSIGHT.
-4. Metrics exported to management follow k-thresholds (`14-CASE-MANAGEMENT.md`) and month granularity (REQ-H-74).
+4. Metrics exported to management follow the single metrics regime of `24-LICENSING-BUSINESS-MODEL.md` §TEL (ADR-046(5)): k = 10, minimum period one calendar month, complementary suppression, no medians/ratios/percentiles for cells < k, no per-channel metrics for channels with < 3 cases/month (REQ-H-74).
+
+### 4.5 Small-organisation separation-of-duties mode (ADR-045; RVW-C-09)
+
+Applies automatically when fewer than 4 distinct natural persons are enrolled (`18-DEPLOYMENT.md` §8.1, DEP-039). Distinctness is judged by authenticator attestation, not by the administrator-entered `person_ref` (`15-AUTHENTICATION-AUTHORIZATION.md`).
+
+| Control | Normal | Small-organisation mode |
+|---|---|---|
+| OVERSIGHT | Internal independent body | **At least one external party** (external counsel, board member, statutory auditor, ombuds service); mandatory, intake closes without it |
+| DC-09 (DANGEROUS config) | SYS_ADMIN + SECURITY_OFFICER | Operator + external OVERSIGHT holder |
+| DC-07 (user enrolment), identity check | 2 USER_ADMINs | Operator enrols; the external OVERSIGHT holder performs the out-of-band identity check |
+| Roster additions (ADR-036(2)) | Dual approval, ≥ 1 independent | Operator + external OVERSIGHT holder; 72 h time-lock unchanged |
+| Break-glass | Per §4.3 | External OVERSIGHT holder is the mandatory independent approver |
+| H-MON administration (HUM-006) | Different person from SYS_ADMIN | Not achievable in CE-SINGLE; disclosed: "a malicious administrator is not detectable" (`18-DEPLOYMENT.md` §4.1) |
+| IR roles | `31-INCIDENT-RESPONSE.md` §4 | `31-INCIDENT-RESPONSE.md` §4.1 |
+| Disclosure | — | Admin UI banner and the published Operator Statement state "Reduced separation of duties" and list the combined roles |
+
+Dual controls that remain single-person with notice (listed in the Operator Statement): SYS_ADMIN + USER_ADMIN held by the operator; H-MON administration by the operator.
+
+### 4.6 Independent-custody devices (ADR-043; RVW-C-01)
+
+| Duty | Specification |
+|---|---|
+| Scope | Triage Set members of INDEPENDENT channels (IG, audit committee, ombudsman, external counsel, ethics) |
+| Device | Not enrolled in the organisation's MDM/EDR/DLP/IRM or VDI; FDE with TPM+PIN; OS installed from verified media by the member or by an OVERSIGHT-designated provider; Candor Desk installed from the project distribution (not an MDM package) |
+| Authenticators | 2 hardware authenticators (primary + stored backup, ADR-044(2)); attestation (AAGUID and, where exposed, serial) recorded at enrolment |
+| Records | Custody status per device shown in the Admin UI; member re-attests yearly and after any repair or IT hand-off; custody lapses trigger PB-18 |
+| Enabling a channel without it | DANGEROUS (`custody.independent_channels`), DC-09 + OVERSIGHT, disclosed to sources as "Recipient devices managed by the organisation" |
+| Honest limit | Custody is self-reported plus authenticator attestation. Desk's binary self-check detects accidental divergence only. An organisation with physical access can still implant hardware |
 
 ## 5. Self-test subsystem (C-25)
 
@@ -190,25 +226,33 @@ The following role pairs SHALL NOT be held by the same person (`person_ref`) in 
 | `net.egress` | all | Egress default-deny holds | non-tor UID connect attempt to a TEST-NET address must fail; ruleset hash | 15 min | OK/FAIL; `egress_violation` boolean | FAIL → stop C-06, alert |
 | `net.listeners` | all | Only inventoried listeners | `ss -ltnpx` vs listener inventory (ARCH-033) | 5 min | OK/FAIL | FAIL → alert; intake stop if on H-INTAKE |
 | `clock.offset` | all | NTP offset | chronyc tracking | 5 min | bucket {<1 s, 1–5 s, 5–30 s, >30 s} | >30 s WARN; Tor-consensus skew >30 min FAIL (INFRA-007) |
+| `clock.independent_floor` | intake | Tor consensus `valid-after` floor, Roughtime agreement (≥ 2 operators over tor), monotonic high-water mark (ADR-036(6), INFRA-033) | local | 6 h ± 30 min (Roughtime); 5 min (floor) | OK/WARN/FAIL | Disagreement WARN; skew > 30 min or backwards step > 5 min FAIL → intake refuses new envelopes (F10) |
 | `storage.disk_free` | all | Free space | statvfs | 5 min | band {≥50%, 30–50%, 20–30%, 10–20%, <10%} | <20% WARN; <10% FAIL (per FAIL table) |
 | `storage.health` | all | SMART/NVMe health, RAID state | smartctl, mdadm | hourly | OK/WARN/FAIL | WARN → maintenance |
 | `storage.fde` | all | Data volumes are LUKS2 and open only as expected; no swap or encrypted ephemeral swap | lsblk, cryptsetup status, swapon | hourly | OK/FAIL | FAIL → alert (baseline) |
-| `relay.lag` | core | Time since the last successful pull | relay state | 5 min | bucket {<1 h, 1–2 h, 2–6 h, >6 h} | >2 h WARN (`06-SYSTEM-ARCHITECTURE.md` R-8) |
+| `relay.lag` | core | Whether the last scheduled import slot completed (ADR-038(1)) | relay state | 5 min | {slot OK, 1 slot missed, ≥ 2 slots missed} | 1 slot missed WARN; ≥ 2 FAIL alert |
 | `intake.queue_capacity` | intake | Queue fill relative to the 7-day capacity (DR-007) | used/capacity | 15 min | state {OK <50%, WARN 50–80%, FAIL >80%} | FAIL → per FAIL table (storage full) |
 | `backup.status` | core, monitor | Last successful set per type within schedule; RT-0 result | backup state + RT-0 | hourly | OK/WARN/FAIL per set type | 2 missed nightly sets → FAIL alert |
 | `crypto.selftest` | intake, core | candor-core KATs, CSPRNG health, AEAD round trip | built-in test vectors (`04-CRYPTOGRAPHY.md`) | at start + daily | OK/FAIL | FAIL → stop the affected service (fail closed) |
-| `keys.epoch_runway` | core | For each channel: at least `min_recipients` eligible member epoch keys valid for the next N days (ADR-030) | key directory | hourly | per channel: {≥14 d, 7–14 d, 1–7 d, 0} | <7 d WARN to Channel Owner; 0 → intake for that channel fails closed (ARCH-037) |
-| `keys.availability` | intake, core | Intake Routing Key unsealable; Erasure Key Vault readable and integrity-checked (ADR-033(3)); backup public keys present; audit signing key usable; HSM reachable | local ops (sign/verify test) | hourly | OK/FAIL | FAIL → per FAIL table |
+| `keys.epoch_runway` | core | For each channel: at least `min_recipients` (default 2) eligible Triage Set member epoch keys valid for the next N days (ADR-030, ADR-037) | key directory | hourly | per channel: {≥14 d, 7–14 d, 1–7 d, 0} | <14 d WARN to Channel Owner **and OVERSIGHT** (RVW-C-18); <7 d repeated daily; 0 → intake for that channel fails closed and sources are directed to the independent route (F5) |
+| `keys.holder_loss` | core | Number of members of a channel who lost key access (suspension, device revocation) in the last 7 days, as a threshold state | authz state | hourly | {0–1, ≥ 2} | ≥ 2 → PB-15 alert to OVERSIGHT (IR-037) |
+| `keys.availability` | intake, core | Intake Routing Key unsealable; Erasure Key Vault readable and integrity-checked (ADR-033(3)); EE-HA: DR vault replica lag ≤ 15 min; backup public keys present; audit signing key usable; HSM reachable (no fallback key present, ADR-046(2)) | local ops (sign/verify test) | hourly | OK/FAIL | FAIL → per FAIL table |
 | `certs.expiry` | all | mTLS certificates (relay, agent, RCP-LAN) | parse | daily | bucket {>30 d, 7–30 d, <7 d, expired} | <7 d WARN; expired FAIL |
 | `perm.secrets` | all | Secret file owner/mode per manifest | stat | 15 min | OK/FAIL | FAIL → alert |
 | `secret.placement` | all | ADR-028 manifest equality | scan (`18-DEPLOYMENT.md` §15) | 5 min light / daily full | OK/FAIL | FAIL → `secret.placement_violation`; forbidden item → intake stop (DEP-024) |
 | `logging.config` | all | No access logs, tor SafeLogging, journald volatile on intake, no nft LOG targets, no capture tools | per `20-LOGGING-AUDITING.md` LOG-018 | hourly | OK/FAIL with `check_code` | FAIL → `selftest.logging_violation` |
 | `update.status` | all | TUF metadata freshness; pending security updates; running version = installed version | candor-update, apt | hourly | {current, update-available, security-update-pending>72h, metadata-stale>7d} | security pending > 72 h WARN; stale > 7 d WARN |
+| `update.security_floor` | all | Installed trust-path versions ≥ signed `min_secure_version` (ADR-040) | TUF metadata | hourly | OK/FAIL | FAIL → affected units refuse to start (INFRA-036, F17); cannot be deferred by local or Fleet policy |
+| `integrity.platform_manifest` | all | Installed package set (name, version, SHA-256) equals the Platform Manifest of the running release; no upstream apt sources configured (ADR-040) | dpkg database vs TUF-verified manifest | daily + after every update | OK/FAIL with `code` {EXTRA, MISSING, HASH, SOURCE} | FAIL → IR PB-02 (intake stopped if on H-INTAKE, F13) |
+| `integrity.running_manifest` | intake | C-06/C-07 running binaries and served static assets equal the released digests that External Watchers compare (ADR-035(1), INFRA-041) | local digest | hourly | OK/FAIL | FAIL → F13 |
 | `integrity.packages` | all | debsums + Candor file manifest | debsums -c | daily | OK/FAIL | FAIL → IR PB-02 |
 | `integrity.attestation` | intake, core | TPM PCR quote vs golden | H-MON verifies (INFRA-018) | 15 min | OK/FAIL | FAIL → `host.attestation_mismatch` |
 | `hw.intrusion` | all | Chassis intrusion sensor | sysfs/IPMI SEL | 5 min | OK/ALARM | ALARM on intake → power-off (PHYS-007) |
 | `config.checker` | all | `candorctl check` exit code | local | daily + on change | exit code class | ≥20 → intake blocked at next start |
 | `canary.files` | core, intake | Ransomware canaries unchanged | hash | 5 min | OK/FAIL | FAIL → alert (BAK-025) |
+| `attest.infrastructure` | core | Current signed attestations for guest-invisible knobs (CFG-008: vault backup exclusion, core snapshots, intake port mirroring, LUN snapshots, BMC console logging) exist and are < 1 year old | attestation store | daily | OK/WARN/DANGEROUS | Missing/expired → DANGEROUS state (checker exit 20) and deletion statement made conditional (INFRA-037) |
+| `governance.operator_statement` | core | Age of the last published Operator Statement (ADR-035(2)) | key directory | daily | {< 25 d, 25–30 d, > 30 d} | 25 d WARN to signers; > 30 d the lapse banner is shown to sources automatically |
+| `governance.custody` | core | INDEPENDENT channels: every Triage Set device has current independent-custody status (ADR-043) | admin state | daily | OK/WARN | WARN → CHANNEL_OWNER + OVERSIGHT; PB-18 if a device changed to managed |
 
 ### 5.3 Example result record
 
@@ -223,7 +267,8 @@ The following role pairs SHALL NOT be held by the same person (`person_ref`) in 
 | FAIL on privacy-critical checks (`net.egress`, `logging.config`, `secret.placement`, `integrity.*`, `tor.config_hash`) | SECURITY_OFFICER + SYS_ADMIN, immediately | `check_id`, `host_role`, `code` only (content-free, ADR-017) |
 | Other FAIL | SYS_ADMIN | same |
 | WARN | Daily digest | same |
-| `keys.epoch_runway` WARN | CHANNEL_OWNER | "Channel requires member key refresh". No member names |
+| `keys.epoch_runway` WARN | CHANNEL_OWNER and OVERSIGHT | "Channel requires member key refresh". No member names |
+| `keys.holder_loss` ≥ 2, `governance.*` | OVERSIGHT (+ CHANNEL_OWNER) | Content-free; PB-15/PB-18 reference |
 
 Alert transports: SMTP over tor, or a Matrix/Teams webhook over tor from H-MON (flow F10). Alerts never include onion addresses, IPs, counts or case data.
 
@@ -235,7 +280,9 @@ Classes:
 - **DANGEROUS**: materially weakens source protection. It requires dual approval DC-09 (SYS_ADMIN + SECURITY_OFFICER, OVERSIGHT notified, `15-AUTHENTICATION-AUTHORIZATION.md`). Where it affects sources, it is disclosed on the source interface and in the key directory. Where marked ⏱, it auto-reverts after 90 days (or the stated period). The config checker exits 20 without valid approval.
 - **FIXED**: not configurable. Listed so that operators know it cannot be changed.
 
-`15-AUTHENTICATION-AUTHORIZATION.md` uses the label "WEAKENING" for some authentication options. For classification purposes WEAKENING = DANGEROUS (DC-09).
+Only these labels exist (ADR-046(6)). The former label "WEAKENING" used in some v1.0 documents is **DANGEROUS** (DC-09) everywhere.
+
+- **ATTESTED** (not a class, a verification mode): for knobs Candor cannot observe from inside the guest, the SAFE state is established by a signed attestation of the owning team, re-signed yearly (CFG-008). A missing or expired attestation counts as DANGEROUS.
 
 | Control (key) | SAFE DEFAULT | ADVANCED | DANGEROUS | FIXED / not allowed | Consequences text (shown in UI and checker) |
 |---|---|---|---|---|---|
@@ -243,27 +290,28 @@ Classes:
 | `intake.clearnet_confidential` (C-38) | off | — | on (separately branded "NOT ANONYMOUS") | — | "Creates a clearnet path where the network, hosting provider and any proxy see reporter IP addresses. Reports via this path are CONFIDENTIAL, not anonymous. Risk of mode confusion (THR-040)." |
 | `tor.pow` | on | — | off | — | "Removes onion DoS protection; floods can make the portal unreachable at critical moments (THR-032)." |
 | `tor.vanguards` | lite (all); full (GOV, MANAGED high-risk, HIGH tenants per `16-TOR-I2P.md` NET-007) | full where not required | — | disabling vanguards-lite | "Full vanguards raise guard-discovery resistance at the cost of latency." |
-| `tor.log_level` | notice | — | info/debug ⏱ 24 h | `SafeLogging 0` | "Verbose tor logs can record timing of source connections (THR-016)." |
-| `intake.tier_w.enabled` | on | off (Tier V only) | — | — | "Tier V only removes server-side plaintext exposure but excludes sources without the Source App." |
+| `tor.log_level` | warn (`16-TOR-I2P.md` NET-008) | notice | info/debug ⏱ 24 h | `SafeLogging 0` | "Verbose tor logs can record timing of source connections (THR-016)." |
+| `intake.tier_w.enabled` | on; **off** for MANAGED high-risk tenants (`18-DEPLOYMENT.md` DEP-042) | off (Tier V only); on for MANAGED high-risk tenants with OVERSIGHT acceptance | — | — | "Tier V only removes server-side plaintext exposure but excludes sources without the Source App." |
 | `intake.js_required` | false | — | — | true (ADR-004) | — |
 | `intake.max_submission_size` | profile default (`34-PERFORMANCE-SCALABILITY.md` §4) | up to the profile hard max | — | above the hard max | "Larger uploads take longer over Tor and increase exposure time and storage use." |
 | `intake.rate_limits` | defaults (ADR-026) | tuned values within ±50% | disabled | — | "Without limits, one party can exhaust intake capacity (THR-032/033)." |
-| `intake.resumable_uploads` (Tier V) | on (design in 34 §5) | off | — | — | "Off: interrupted large uploads restart from zero." |
-| `intake.upload_session_ttl` | 72 h | 24–168 h | > 168 h | — | "Longer TTL keeps partial-upload records (which link the reconnections of one upload to each other) for longer (THR-047)." |
+| `intake.resumable_uploads` (Tier V) | on, within one Source App session only (ADR-046(4); 08 canonical) | off | — | cross-session resume; any resume for Tier W | "Off: interrupted large uploads restart from zero." |
+| `intake.upload_session_ttl` (Tier V) | 24 h (ADR-046(4)) | 1–23 h | — | > 24 h | "Longer TTL keeps partial-upload records (which link the reconnections of one upload to each other) for longer (THR-047)." |
 | `intake.passphrase_multi_report` | off (one passphrase per report, ADR-005) | on | — | — | "Lets a source link several reports under one passphrase; increases linkability if the passphrase is compromised." |
-| `intake.min_recipients` per channel | 1 | ≥ 2 | — | 0 | "With 1, a single member's absence blocks intake for the channel (fail closed)." |
+| `intake.min_recipients` per channel | 2 (ADR-044(2)) | 3–16; or 1 (not for INDEPENDENT channels) | 1 on an INDEPENDENT channel | 0 | "With 1, a single device loss or reimaging makes envelopes unreadable (no escrow) and a single absence blocks intake (RVW-C-03)." |
 | `intake.coi_checklist` | shown, none preselected (ADR-030) | hidden | — | — | "Hidden: sources cannot exclude accused roles themselves; only the pre-configured COI map applies." |
-| `relay.pull_interval` | 15 ± 10 min uniform | 5–60 min mean, jitter ≥ 50% of mean | jitter < 50% of mean or fixed | — | "Regular pulls let observers of the relay link infer submission timing (THR-011)." |
+| `relay.import_schedule` (replaces v1.0 `relay.pull_interval`) | 4×/day at fixed local times (HIGH/GOV: 1×/day) (ADR-038(1)) | 1–6×/day at fixed times | event-driven or interval-based pulls (the v1.0 15 ± 10 min design) | — | "Imports that follow arrivals put arrival-derived times into the case DB WAL, backups and blob metadata (RVW-A-09, RVW-B-06)." |
+| `intake.delayed_delivery` | offered to sources (random 1–3 days, ADR-038(4)) | not offered | — | — | "Not offering it removes the source's option to decouple arrival from submission." |
 | Timestamp granularity (source actions) | — | — | — | day only (ADR-010) | — |
 | Read receipts / presence / push to sources | — | — | — | off (ADR-010, ADR-017) | — |
-| `notify.mode` | hourly content-free digest | daily digest | per-event immediate | content in notifications (ADR-017) | "Per-event notifications reveal submission timing to the mail/chat provider (THR-028)." |
+| `notify.mode` | constant-schedule daily digest at a fixed time, sent every day (ADR-038(2)); **off** (Desk badge only) for HIGH | off | event-driven (hourly or per-event) digests | content in notifications (ADR-017) | "Event-driven notifications reveal report arrival day and hour to the mail/chat operator and, via staff reactions, to IT (THR-028, THR-129)." |
 | `notify.transport` | none, or SMTP with pinned certificate | Matrix/Teams webhook over tor | plaintext SMTP / unpinned TLS | — | "Unpinned or plaintext transport exposes notification timing and staff addresses." |
 | Web/tor access logs | off | — | — | on (ADR-016) | — |
 | `ir.diagnostic_mode` | off | — | on ⏱ 24 h (allow-listed fields) | debug logging on Z-INTAKE | "Adds diagnostic SYSTEM fields during incidents; never request data." |
-| `journald.intake_storage` | volatile, ≤ 7 d | — | persistent | — | "Persistent intake logs survive seizure (THR-016/031)." |
+| `journald.intake_storage` | volatile, ≤ 24 h (INFRA-016) | — | persistent | — | "Persistent intake logs survive seizure (THR-016/031)." |
 | `siem.export` (C-26, EE) | off | on (allow-listed events) | — | custom fields beyond the allow-list | "Scrubbed SECURITY/SYSTEM events leave Candor; reviewers outside Candor see staff activity." |
 | `telemetry` | off (ADR-023) | on (TEL schema, previewable) | — | source-side telemetry | "Sends fixed-schema instance statistics to the configured collector." |
-| `recovery_quorum` | off (ADR-013) | — | on (k-of-n, published in the key directory) | — | "k trustees acting together can decrypt all cases wrapped to the quorum. Visible to sources." |
+| `recovery_quorum` | off (CE/EE, ADR-013); **on** for GOV with independent custodians (ADR-044(3)) | — | on in CE/EE (k-of-n, published in the key directory); off in GOV (with records-officer determination) | — | "k trustees acting together can decrypt all cases wrapped to the quorum. Visible to sources." |
 | `case.min_key_holders` | 2 | 1 | — | 0 | "With a single key holder, loss of one device loses the case (no escrow)." |
 | `retention.*` | per `35-DATA-RETENTION-DELETION.md` | longer within legal limits | indefinite | — | "Longer retention increases exposure under seizure or compulsion (THR-017/026)." |
 | `backup.retention_days` | 35 | 36–365 | > 365 | — | "Deleted data persists in backups until expiry." |
@@ -272,27 +320,39 @@ Classes:
 | Backup encryption | on | — | — | off | — |
 | `fde.unlock_mode` | U3 or U4 per profile (U1, U6, U7 are equivalent alternatives) | U2 (TPM-only) | U5 (Tang-only) | none | "TPM-only: a stolen, powered-off server boots to a running OS without any secret." |
 | `swap` | off | encrypted with a per-boot random key | plain swap | — | "Plain swap can write plaintext and keys to disk." |
-| `hypervisor.intake_snapshots` | off | — | on | — | "Snapshots capture intake RAM and disk, including Tier W plaintext in flight." |
-| `ce_single.separation` | VMs | containers | — | same process space | "Containers share a kernel; one kernel exploit crosses from intake to core." |
-| `site.uplink_independent` | true | false (acknowledged risk) | — | — | "The uplink operator can observe intake traffic timing (THR-002/003)." |
+| `hypervisor.intake_snapshots` | off | — | — | on (FIXED off) | "Snapshots capture intake RAM and disk, including Tier W plaintext in flight." |
+| `infra.core_vault_backup_exclusion` (ATTESTED; RVW-C-06) | attested: no hypervisor snapshot, SAN/LUN snapshot or image-level backup contains the Erasure Key Vault volume or vTPM state | — | not attested / attestation expired | — | "The 14-day deletion bound does not hold; deleted cases stay recoverable for the retention of those copies." |
+| `infra.hypervisor_snapshots_core` (ATTESTED) | attested off | — | on or not attested | — | "Core snapshots copy case metadata and, unless excluded, the vault." |
+| `infra.intake_port_mirroring` (ATTESTED; RVW-C-12) | attested: no SPAN/TAP/NetFlow on the intake switch port | — | present or not attested | — | "The network team records timing and volume of all intake Tor connections (THR-003)." |
+| `infra.intake_lun_snapshots` (ATTESTED) | attested off | — | on or not attested | — | "Storage snapshots copy the intake store." |
+| `infra.bmc_console_logging` (ATTESTED) | attested off | — | on or not attested | — | "Console logs may capture boot output and diagnostics." |
+| `intake.sealer_confidential_vm` | off (CE); recommended on for HIGH/GOV/MANAGED high-risk | on | — | — | "TEE attestation is defence in depth, not a guarantee (ADR-035(3))." |
+| `boot.site_signed_uki` | off (distribution-signed boot, ADR-040) | on (HIGH/GOV; signing action per kernel update) | — | signing key on the server | "Closes the modified-initrd gap at the cost of a signing ceremony per update." |
+| `ce_single.separation` | VMs (ADR-046(6)) | containers | — | same process space | "Containers share a kernel; one kernel exploit crosses from intake to core." |
+| `site.uplink_independent` | true | false (acknowledged risk) | false for high-risk tenants, GOV-IG/IA or deployments with INDEPENDENT channels (disclosed to sources) | — | "The uplink operator can observe intake traffic timing (THR-002/003)." |
 | `rcp.path` | per profile (RCP-ONION or RCP-LAN) | the other option | — | browser-based recipient UI (ADR-007) | "RCP-LAN reveals staff IPs and times to the internal network team." |
+| `rcp.path.independent` (devices of INDEPENDENT-channel members) | RCP-ONION | RCP-LAN over the padded WireGuard variant (`17-INFRASTRUCTURE.md` §4.6) | plain RCP-LAN | — | "The network team sees which independent-channel staff work on Candor and when (RVW-C-20)." |
+| `custody.independent_channels` | required (ADR-043) | — | INDEPENDENT channel enabled with managed devices (disclosed to sources) | — | "The organisation's endpoint administrators can read everything these members decrypt." |
 | `ssh.auth` | FIDO2 sk-keys, N-MGMT or SSH onion | — | — | passwords, non-sk keys, root login | — |
 | `auth.synced_passkeys` | off | — | on for limited roles (DC-09) | for content/admin roles (AUTH-008) | "Credential secrets are replicated to the passkey provider." |
 | `auth.totp_fallback` (CE) | off | — | on ⏱ 90 d (AUTH-009) | for SYS_ADMIN/USER_ADMIN/custodians | "Phishable second factor." |
-| `authz.break_glass` | enabled, dual approval + post-hoc review | disabled | — | single-approval break-glass | "Disabled: no emergency access; lost access is permanent without members." |
+| `authz.break_glass` | enabled, dual approval with ≥ 1 independent approver before execution + post-hoc OVERSIGHT review (ADR-045) | disabled (not settable by Fleet Manager, ADR-045) | — | single-approval break-glass; approver sets without an independent role | "Disabled: no emergency access; lost access is permanent without members." |
 | Original-evidence export | dual approval (ADR-012) | — | — | single approval | — |
 | `viewer.containment` | disposable microVM/DispVM (C-17) | air-gapped station (C-18) | allow "open with system application" ⏱ 90 d | — | "Opening outside containment exposes the workstation to hostile files (THR-023)." |
 | `edr.sample_upload_candor_paths` | off | — | on | — | "EDR vendors receive submitted files or decrypted content (IR-027)." |
-| `metrics.k_threshold` | per `14-CASE-MANAGEMENT.md` | higher k | lower k | k < 5 | "Small cells can identify sources (THR-039)." |
+| `metrics.k_threshold` | k = 10, one calendar month minimum, per `24-LICENSING-BUSINESS-MODEL.md` §TEL (ADR-046(5)) | higher k or longer period | — | k < 10; periods shorter than a month; medians/ratios/percentiles for cells < k | "Small cells can identify sources (THR-039)." |
 | `keydir.external_witness` | on (if available) | off | — | — | "Without an external witness, split-view attacks on the key directory are harder to detect." |
 | `intake.physical.intrusion_action` | poweroff | alert-only | — | — | "Alert-only keeps a possibly tampered intake host running." |
-| `updates.auto_security` | on (0–72 h random delay) | manual (≤ 14 days) | disabled > 30 days | — | "Unpatched intake exposes sources to known exploits." |
+| `updates.auto_security` | on (0–72 h random delay) | manual (≤ 14 days) | — | running below the signed security floor (ADR-040; units refuse to start) | "Unpatched intake exposes sources to known exploits." |
+| Fleet Manager policy (EE, ADR-045) | local-only for all keys except an allow-list (update window, self-test schedule, telemetry off) | — | — | Fleet Manager disabling intake, lowering security floors, changing routing, or changing availability-affecting keys (`intake.min_recipients`, `authz.break_glass`, `backup.retention_days`) without the customer's independent role | — |
 | `update.offline.max_age_days` | 30 | 31–90 | > 90 | — | "Stale offline metadata may miss revocations." |
 | `vendor.remote_access` | off | on, two-person, time-bound, customer-logged | standing access | — | "The vendor can operate the hosts during sessions." |
 | `tenancy` (EE) | dedicated | shared for low/moderate tenants in one customer group (ADR-021) | — | shared for high-risk tenants | "Shared instances increase co-residency exposure (THR-045)." |
 | `cloud.intake_flow_logs` (PRIVATE-CLOUD) | off | — | on | — | "Flow logs record timing and volume of all intake Tor connections (THR-003/011)." |
 | `cloud.provider_kms_for_candor_keys` | not used | — | — | used (INFRA-022) | — |
 | `support.bundle.include_intake_logs` | off | on (scrubbed, §8) | — | raw logs | "Intake system logs are included after scrubbing." |
+| `support.bundle.recipient` | vendor key | internal support key (not for INDEPENDENT-channel Desks, whose bundles go only to the vendor key or an OVERSIGHT-designated key, RVW-C-13) | — | corporate helpdesk key for INDEPENDENT-channel Desks | "Internal helpdesk staff receive diagnostic data from recipient devices." |
+| `smallorg.mode` | automatic below 4 distinct persons (ADR-045) | — | — | disabling it while below 4 persons | — |
 
 ## 8. Support-bundle scrubbing
 

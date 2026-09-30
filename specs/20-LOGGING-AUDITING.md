@@ -157,7 +157,7 @@ All release rules for these counters are those of `24-LICENSING-BUSINESS-MODEL.m
 
 | Counter | Granularity stored | Release |
 |---|---|---|
-| `submissions_received` per channel | per `received_day` in C-08 ephemeral state; aggregated to calendar month in C-24; per-day values never leave C-08 and are deleted after monthly aggregation | 24 §TEL (monthly minimum, k = 10, per-channel only for channels meeting the §TEL per-channel rule) |
+| `submissions_received` per channel | per `received_day` in C-08 ephemeral state; aggregated to calendar month in C-24; per-day values never leave C-08 and are deleted after monthly aggregation | 24 §TEL (including its per-channel rule) |
 | `source_logins` (Tier W only; Tier V retrieval is fetch-all and unauthenticated, ADR-039) | month total per instance | 24 §TEL; never per channel |
 | `replies_delivered` | month total per instance | 24 §TEL |
 | `intake.coi_exhausted` | month total per instance | 24 §TEL (14 ROUTE-021) |
@@ -194,7 +194,7 @@ All release rules for these counters are those of `24-LICENSING-BUSINESS-MODEL.m
 |---|---|
 | Z-INTAKE | No per-request logs of any level; SYSTEM events with `ts` truncated to the hour and batched; journald volatile; retention ≤ 24 h on host (aligned with 16 NET-008, RVW-A-23); logs never shipped off-host except SYSTEM events pulled by C-09 as part of sealed batch (optional) |
 | Z-CORE | SECURITY/CASE/SYSTEM via typed API only; exact staff timestamps only in the audit streams and the 09-enumerated SECURITY/SYSTEM tables (ADR-046(11)); PostgreSQL `log_statement = none`, `log_min_error_statement = panic`, `log_connections = off`, `log_disconnections = off`, `log_line_prefix` without client host, no `auto_explain`, `log_min_duration_statement = -1` |
-| Z-RCP (Desk) | Desk emits CASE/SECURITY events to C-10 over its API; local Desk logs are SYSTEM-class only, in memory ring buffer (1 MiB), written to disk only when the user exports a diagnostic bundle, which is scrubbed (REQ-H-56) and encrypted only to the vendor key or an OVERSIGHT-designated key, never to a corporate helpdesk on INDEPENDENT channels (RVW-C-13); OS and webview crash reporting is disabled for Desk processes (LOG-024) |
+| Z-RCP (Desk) | Desk emits CASE/SECURITY events to C-10 over its API; local Desk logs are SYSTEM-class only, in memory ring buffer (1 MiB), written to disk only when the user exports a diagnostic bundle, which is scrubbed (REQ-H-56) and encrypted only to the vendor key or an OVERSIGHT-designated key, never to a corporate helpdesk on INDEPENDENT channels (RVW-C-13); OS and webview crash reporting is disabled for Desk processes (LOG-023) |
 | Z-VIEW | C-17 VMs emit no logs outside the fixed result schema (10 §12 H6) |
 | Z-SOC | Receives only C-26 allow-listed events |
 

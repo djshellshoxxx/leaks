@@ -231,7 +231,7 @@ Notes and constraints:
 - Patch SLA: tor security releases are included in an emergency Platform Manifest update (≥ 2 h cooling, ≥ 2 signers from ≥ 2 organisations, 33 §10) and deployed ≤ 72 h after upstream publication (INC-29 lesson / REQ-H-29).
 
 ### 7.4 Configuration lint (CI and on-host self-test)
-`candorctl net lint` fails if: any listening TCP socket on a non-loopback address other than the C-08 relay endpoint; SocksPort/TransPort/DNSPort non-zero on the intake instance; ControlPort TCP enabled; SingleHop/NonAnonymous mode = 1; `SafeLogging` ≠ 1; log level below `warn`; `HiddenServiceVersion` ≠ 3; PoW disabled; more than one `HiddenServicePort`; torrc hash ≠ release manifest.
+`candorctl net lint` fails if: any listening TCP socket on a non-loopback address other than the C-08 relay endpoint and the exporter endpoint (§14.2 F3/F4); a SocksPort on the source onion instance; an onion service on the `candor-client` instance; SocksPort/TransPort/DNSPort non-zero on the intake instance; ControlPort TCP enabled; SingleHop/NonAnonymous mode = 1; `SafeLogging` ≠ 1; log level below `warn`; `HiddenServiceVersion` ≠ 3; PoW disabled; more than one `HiddenServicePort`; torrc hash ≠ release manifest.
 
 ## 8. Staff access onion (optional)
 
@@ -349,9 +349,9 @@ Candor Source App: supports configuring obfs4, Snowflake and WebTunnel through A
 | L2 tor | Intro-point DoS defence | 25/s rate, 200 burst per intro point | — |
 | L3 tor | `HiddenServiceMaxStreams 32` + close circuit | — | — |
 | L4 app | Per-CircuitToken token bucket in C-06 (e.g., 20 requests/min, burst 40; uploads 2 concurrent) | In-memory map, entries evicted on circuit close or 10 min idle | Tokens never persisted/logged (ADR-026) |
-| L5 app | Global concurrency limits: C-07 Argon2 slots (04 CRYPTO-044), upload bandwidth cap, queue with wait page (meta-refresh, no JS) | 34 | Queue position not tied to identity |
+| L5 app | Global concurrency limits: C-07 Argon2id semaphore of 4 (04 CRYPTO-044, ADR-046(7)), upload bandwidth cap, FIFO queue; the busy/wait page only on queue overflow sized ≥ 10× design peak | 34 | Queue length, position and saturation are not exposed in any response or dashboard beyond a coarse daily health band (ADR-038(5); RVW-A-27) |
 | L6 app | Optional app-level Equi-X PoW for Tier V clients to enter the priority tier when queue > threshold | Difficulty adaptive | — |
-| L7 abuse | Upload quotas per source account; submission size caps; spam triage queue | 10, 14 | Quota counters keyed by `lookup_tag`, reset per epoch |
+| L7 abuse | Upload quotas per source account (Tier W session / authenticated Tier V operations) and per CircuitToken for unauthenticated Tier V envelope uploads (04 CRYPTO-065); submission size caps; spam triage queue | 10, 14 | Quota counters keyed by `lookup_tag` hold the current UTC day only and are reset daily; no quota history is retained (ADR-038(3); RVW-A-26, RVW-B-11) |
 | L8 availability | Standby onion (§10); in EE-HA/GOV-ONPREM a second intake host holding the same onion key, **passive** (tor instance stopped) until failover, so only one host publishes descriptors at a time (ADR-032) | 21 | — |
 
 No third-party CAPTCHA or CDN (ADR-026; INC-54).
@@ -364,6 +364,18 @@ No third-party CAPTCHA or CDN (ADR-026; INC-54).
 
 ### 14.2 Host enforcement (Intake Gateway)
 - C-06 and C-07 run with `PrivateNetwork=yes` (only loopback in their namespace) and communicate via Unix sockets; they have no route to any network.
+- **Normative H-INTAKE flow matrix (RVW-A-23; single source of truth for 06/17):**
+
+| # | Direction | Process / UID | Interface | Peer | Port | Purpose |
+|---|---|---|---|---|---|---|
+| F1 | out | `_tor-candor-intake` (source onion instance) | ext0 | Tor relays | any TCP | onion service circuits |
+| F2 | out | `_tor-candor-client` (client instance, §14.3) | ext0 | Tor relays | any TCP | TUF updates from the project onion mirror (ADR-046(3)); Roughtime over Tor; nothing else |
+| F3 | in | C-08 relay endpoint | int0 | C-09 relay host only | 8443 | core-initiated pull/push (ADR-009) |
+| F4 | in | health exporter | int0 | C-25 collector host only | 9443 (mTLS) | monitoring **pull**; the intake never pushes to the monitor (inverts 06 §8.5 agent push) |
+| F5 | in (optional) | sshd | mgmt0 | admin jump host | 22 | administration (or admin over the staff onion) |
+| — | any other | — | — | — | — | dropped and counted |
+
+The C-25 collector reachable in F4 SHALL NOT be the host that relays mail or has any other clearnet egress (H-MON mail relay on a separate host; RVW-A-23). No NTP, DNS or other clearnet flow exists.
 - nftables (normative ruleset; interface names per 17):
 ```
 table inet candor_intake {
@@ -371,44 +383,63 @@ table inet candor_intake {
     type filter hook input priority 0; policy drop;
     iif "lo" accept
     ct state established,related accept
-    iifname "int0" ip saddr $RELAY_IP tcp dport 8443 ct state new accept      # C-09 pull only (ADR-009)
-    iifname "mgmt0" ip saddr $ADMIN_JUMP tcp dport 22 ct state new accept      # optional; or admin over staff onion
+    iifname "int0" ip saddr $RELAY_IP tcp dport 8443 ct state new accept      # F3: C-09 pull only (ADR-009)
+    iifname "int0" ip saddr $COLLECTOR_IP tcp dport 9443 ct state new accept  # F4: C-25 pull of exporter
+    iifname "mgmt0" ip saddr $ADMIN_JUMP tcp dport 22 ct state new accept      # F5: optional; or admin over staff onion
   }
   chain output {
     type filter hook output priority 0; policy drop;
     oif "lo" accept
-    ct state established,related accept                                         # replies to C-09/admin
-    meta skuid "_tor-candor-intake" oifname "ext0" tcp dport 1-65535 accept     # tor to relays only
-    meta skuid "_tor-candor-intake" oifname "ext0" udp dport 53 drop            # tor needs no DNS for onion service
+    ct state established,related accept                                         # replies to F3/F4/F5
+    meta skuid "_tor-candor-intake" oifname "ext0" tcp dport 1-65535 accept     # F1
+    meta skuid "_tor-candor-client" oifname "ext0" tcp dport 1-65535 accept     # F2
+    meta skuid { "_tor-candor-intake", "_tor-candor-client" } udp dport 53 drop # tor needs no DNS here
     log prefix "candor-egress-deny " level warn limit rate 1/minute drop        # counters only; no payload
   }
   chain forward { type filter hook forward priority 0; policy drop; }
 }
 ```
-- No DNS resolver configured for application users; no NTP over clearnet — host time from authenticated timestamps supplied by C-09 during pull (chrony SOCK refclock) with tor's own consensus skew warnings as a cross-check.
+- No DNS resolver configured for application users; no NTP over clearnet; host time per §14.3 (the v1.0 chrony SOCK refclock fed by C-09 timestamps is removed; RVW-A-04, ADR-036(6)).
 - Cloud metadata endpoints (169.254.169.254, fd00:ec2::254) and IPv6 router advertisements blocked/disabled (PRIVATE-CLOUD profile; THR-030).
-- Updates to intake hosts arrive as signed bundles pushed by C-09 from Z-CORE or via a dedicated tor client instance to the vendor's onion mirror (33); never via direct clearnet.
-- Fail-closed checks: `candorctl net selftest` asserts no non-loopback TCP listeners except the relay endpoint, that an egress attempt by any non-tor user fails, and that the onion is the only path to C-06; runs at boot and every 15 min; failure stops C-06.
+- **Updates (ADR-046(3); RVW-C-08):** intake hosts fetch TUF metadata and artifacts only through the `_tor-candor-client` instance (F2) from the Candor project's onion mirror, verifying TUF and log proofs themselves (33 §14); the v1.0 option of bundles pushed by C-09 is withdrawn, so each zone has exactly one update path; never via direct clearnet.
+- Fail-closed checks: `candorctl net selftest` asserts no non-loopback TCP listeners except the relay and exporter endpoints, that an egress attempt by any UID other than the two tor UIDs fails, that no packet from H-INTAKE can reach a host with a default route to the Internet except via tor (probe to a canary host behind int0/mgmt0), and that the onion is the only path to C-06; runs at boot and every 15 min; failure stops C-06.
+
+### 14.3 Independent time source (ADR-036(6); RVW-A-04)
+- **Client instance.** A second tor instance `candor-client` (user `_tor-candor-client`; `SocksPort unix:/run/tor-instances/candor-client/socks.sock`, group `_candor-net`; no onion services; `ControlSocket` readable only by `_candor-time`; `SafeLogging 1`) serves the updater and the time checker. It holds no onion service key.
+- **Floor from the Tor consensus.** `_candor-time` reads the `valid-after` of the latest consensus that the `candor-client` instance has verified (directory-authority signatures checked by tor; Knowledge (unverified): `GETINFO consensus/valid-after`, else the cached consensus file). Rule: `valid_after ≤ now ≤ valid_after + 27 h` (3 h validity + 24 h "reasonably live" tolerance; Knowledge (unverified) exact tor tolerance).
+- **Cross-check with Roughtime.** Every hour at a random minute the time checker queries ≥ 3 Roughtime servers from ≥ 2 independent operators over the client instance (Roughtime over TCP; Knowledge (unverified) server support, 04 OI-16), verifies their signatures against pinned server keys shipped in the Platform Manifest, and takes the median of valid responses.
+- **Clock discipline.** chrony runs with no network sources; `_candor-time` feeds it the Roughtime median through a local SOCK refclock when Roughtime is available, otherwise only enforces the consensus floor. The host clock is accepted if it satisfies the consensus rule and is within ± 10 min of the Roughtime median; if skew to Roughtime exceeds 2 h or the consensus rule fails, the time checker signals C-07, which fails closed for sealing (04 §12.1 step 3, §12.6) until resolved; C-25 alerts. Z-CORE-supplied timestamps (C-09 pulls, checkpoint `issued`) are never used to set or validate the clock.
+- **Residual:** the consensus floor bounds rollback of time to ≈ 1 day; an adversary controlling a directory-authority majority, or all configured Roughtime operators, can skew time within those bounds (04 CA-10).
 
 ## 15. Monitoring onion reachability without observing source traffic
 
 - **Active probing from C-25 (Z-SOC host), not from the intake host:** a separate tor client on the monitor host fetches `/.well-known/candor/health` (fixed-size static response served by C-06 without touching C-07/C-08) at exponentially distributed intervals (mean 10 min); records success/failure, descriptor fetch time and total latency; retains results ≤ 30 days.
 - **Descriptor integrity check:** C-25 fetches the service descriptor via its own tor client and compares intro points / revision counter with values exported by the intake's health exporter (§10.1).
-- **Intake health exporter** (runs as `_candor-torctl`, reads control socket, pulled by C-25 over mTLS): tor bootstrap state, descriptor upload success counts per hour, intro-point count, PoW active flag and suggested-effort bucket (0, 1–100, 101–1000, >1000), rendezvous circuit count rounded to the nearest 10 per 1-hour window and suppressed when < 10 (k-threshold, ADR-016). No per-circuit data, no event timestamps finer than 1 hour, no stream counts per circuit.
+- **Intake health exporter** (runs as `_candor-torctl`, reads control socket, **pulled** by C-25 over mTLS on flow F4): tor bootstrap state, whether the current descriptor was published (yes/no), intro-point count, PoW active flag (public in the descriptor anyway). Load-related values (descriptor uploads, rendezvous circuits, suggested PoW effort, Argon2 queue) are exported only as a **coarse daily health band** (normal / elevated / overloaded, computed over the UTC day and emitted after the day ends; ADR-038(5), ADR-046(5); RVW-A-27). No per-circuit data, no event timestamps finer than 1 day for load values, no stream counts per circuit.
 - **Never:** packet capture, NetFlow/sFlow, eBPF per-connection tracing, or tor `Log info/debug` on intake hosts in production; debugging requires a documented change with dual approval and a volatile, time-boxed (≤ 1 h) window, with sources warned via the info site only if the intake stays open (20, 32).
 - Alerts are content-free (ADR-017).
+
+### 15.1 External Watchers (ADR-035(1); RVW-A-01, RVW-A-13)
+- **Who:** ≥ 2 independent watcher organisations per tenant (EE/GOV/MANAGED: ≥ 1 outside the operator's jurisdiction; selection per 36), listed with their K39 keys in ORG_ROOT (04 §14.2). Watchers are never operated by the tenant's operator or its hosting provider.
+- **What they fetch, over Tor:** the landing page and all static source-UI routes, response headers (CSP, cookies, cache headers), `/.well-known/candor/running-manifest` (04 §9.14), the key-directory snapshot and checkpoint, and — for HIGH/GOV Confidential-VM profiles — the latest SEALER_ATTESTATION.
+- **How, to resist selective serving:** each fetch uses a fresh Tor Browser (Safest) profile or an HTTP client that reproduces Tor Browser's request headers and ordering exactly (C-06 cannot distinguish watchers from sources by request shape), a new circuit (new isolation token) per fetch, at exponentially distributed intervals with mean 6 h, from ≥ 2 vantage points per watcher.
+- **Comparison:** static assets and CSP strings are compared byte-for-byte with the release digests in the transparency log (33 §7); the running manifest's release and Platform Manifest hashes must be current, and the manifest must be ≤ 48 h old; directory checkpoints must be consistent with those the watcher saw before and with witnesses. Mismatches and staleness are published by the watcher (signed with K39) and sent to the tenant's OVERSIGHT; C-06 does not learn which fetches were watchers.
+- **Honest limit:** watchers see only what an anonymous first-time visitor sees. A modification that activates only for a specific logged-in session, a specific form answer or after a delay is not observable by watchers (RVW-A-01); Tier V remains the only content-protecting path.
 
 ## 16. Attack classes, status and Candor mitigations
 
 | Attack class | Status | Candor mitigation | Residual |
 |---|---|---|---|
-| End-to-end timing correlation (B-AN-01..05) | PRACTICAL for adversaries seeing both ends | Onion-only (no exit); full/lite vanguards; ADR-010 day-granularity timestamps; randomized pull (ADR-009); no push notifications; guidance against employer networks | Not defeated (NA-3) |
+| End-to-end timing correlation (B-AN-01..05) | PRACTICAL for adversaries seeing both ends | Onion-only (no exit); full/lite vanguards; ADR-010 day-granularity timestamps; fixed import schedule and constant-schedule staff digests (ADR-038(1)/(2)); optional delayed delivery (ADR-038(4)); guidance against employer networks | Not defeated (NA-3) |
 | State timing analysis of long-lived endpoints (INC-35) | PRACTICAL (in the wild) | Sources need no persistent client or onion service; current Tor Browser; service runs current tor + vanguards | Long-running service remains a guard-discovery target |
 | Guard discovery against the service (B-AN-09..13) | PRACTICAL | Vanguards (lite/full), patch SLA, dedicated host, no co-hosting | Seizure after location found |
 | Website fingerprinting of the portal (B-AN-14..19) | LAB → PRACTICAL for one monitored site | Minimal uniform pages, fixed response size classes (11), no third-party resources, bundled assets | Employer may get a lead, not proof |
 | Onion circuit fingerprinting (B-AN-20) | LAB → PRACTICAL for malicious guard | Tor circuit padding (defaults on); bridges advice | Reveals "visits an onion" |
-| Predecessor / intersection over repeat visits (B-AN-21, B-AN-22) | PRACTICAL over time | Few return visits (replies visible on next login only, ADR-010), guidance to vary networks | Accumulates with each visit |
+| Predecessor / intersection over repeat visits (B-AN-21, B-AN-22) | PRACTICAL over time | Tier V: fetch-all reply retrieval and unauthenticated follow-ups, so the server cannot tell which mailbox is active (ADR-039); Tier W: server-side lookup reveals account activity to a compromised intake (residual); follow-up days stored only at slot granularity (ADR-038(3)); guidance to vary networks and batch visits (05) | Accumulates with each visit at the network edge |
 | Global passive adversary | THEORETICAL for most / PRACTICAL for Five-Eyes class | Out of scope; future cover-traffic transport via §6 | Not addressed |
+| Upload volume/time at the service uplink (RVW-A-22) | PRACTICAL for a compelled hosting provider plus a source-side observer | Tier V pads before upload (ADR-011); Tier W parts padded before staging (ADR-038(5)) protect storage only; honesty text and guidance (05) that large website uploads are recognisable by size; optional HIGH-profile decoy uploads from an independent network (evaluation, OI-5) | Tier W upload spikes remain a correlation feature |
+| Harvest-now-decrypt-later of recorded circuits (RVW-A-11) | THEORETICAL today; recording is PRACTICAL | Onion TLS with hybrid PQ group default in HIGH/GOV (04 CRYPTO-029); Tier V recommended for HIGH risk; passphrase rotation (04 §11.7); adoption of PQ onion handshakes (§9.4) | Tier W sessions recorded before PQ transport exists (ADR-046(8)) |
+| Clock/directory freeze via the intake's time source (RVW-A-04) | PRACTICAL for a compromised Z-CORE under the v1.0 design | Independent time (§14.3), directory high-water mark (04 §12.1) | Bounded to ≈ 1 day by the consensus floor |
 | Active tagging (RELAY_EARLY, INC-29) | PRACTICAL (observed) | Current tor; patch SLA 72 h | New variants |
 | Sybil relays (INC-30) | PRACTICAL (observed) | Onion-only (exit Sybils irrelevant), vanguards | Network-level, outside our control |
 | Congestion/bandwidth attacks | LAB (deanon) / PRACTICAL (DoS) | Congestion control (tor), PoW, vanguards bandguards (HIGH) | — |
@@ -422,8 +453,11 @@ table inet candor_intake {
 
 ## 17. Source App transport rules (C-03)
 - All network traffic of C-03 goes through embedded Arti; the app has no code path for direct connections (build-time check: no socket APIs outside the Arti crate; runtime: OS-level VPN/proxy settings ignored).
-- Update checks (33) also go over Arti to a vendor onion mirror, identical requests for every user; no organisation-specific endpoint is contacted for updates.
-- Session isolation: one isolation token per app session; circuits torn down on exit; no background networking when the app is not in the foreground (mobile).
+- Update checks (33) also go over Arti to the Candor project's onion mirror, identical requests for every user; no organisation-specific endpoint is contacted for updates.
+- **Acquisition (ADR-041; RVW-A-14):** the primary download is the project's onion service and independent onion/clearnet mirrors (reproducible, signed, identical for all tenants, 33 §15.3); guidance (05) recommends downloading over Tor Browser. App-store installs are optional and disclosed as leaving account-linked records.
+- **Witness checkpoint fetch (ADR-036(5); 04 VR-3):** once per session the app fetches the tenant's latest cosigned checkpoint from ≥ 1 external witness onion endpoint (from ORG_ROOT and the witness key set embedded in the release), on a separate isolation token from the tenant connection, in a fixed request shape identical for all tenants of that witness.
+- **Replies (ADR-039):** reply retrieval downloads all dead-drop pages in a fixed order in every session that opens the inbox, regardless of whether the source expects replies, so traffic volume depends on the tenant's reply volume, not on the source.
+- Session isolation: one isolation token per app session (plus the witness token); circuits torn down on exit; no background networking when the app is not in the foreground (mobile).
 
 ## 18. Requirements
 
@@ -431,11 +465,11 @@ table inet candor_intake {
 |---|---|---|---|---|---|
 | NET-001 | ANONYMOUS mode SHALL be reachable only through a Tor v3 onion service on the Intake Gateway; no other transport SHALL be labelled anonymous in v1. | ADR-001; B-AN-57; B-AN-54 | THR-001; THR-040 | C-05, C-06 | INSP: route/transport registry; TST: C-06 rejects non-Anonymous streams for anonymous routes |
 | NET-002 | The source web service SHALL have no clearnet listener, reverse proxy or CDN; it SHALL listen only on Unix sockets (or loopback in an isolated namespace) reachable from tor. | ADR-002; INC-33; INC-34 | THR-001; THR-035 | C-06, C-05 | TST: external port scan of all host IPs; `ss -ltnp` check in `net selftest` |
-| NET-003 | The Intake Gateway SHALL run C-tor ≥ 0.4.8 (or an admitted Arti per §9) at or above the version floor published in signed release metadata, and tor security releases SHALL be deployed within 72 hours. | INC-29; INC-35; B-AN-26 | THR-005; THR-003 | C-05, C-25 | TST: C-25 version-floor check; DEMO: advisory drill |
+| NET-003 | The Intake Gateway SHALL run C-tor ≥ 0.4.8 (or an admitted Arti per §9) installed only from the release's TUF-signed Platform Manifest (Tor Project repository pinned by key and exact version), at or above the signed security floor, and tor security releases SHALL be deployed within 72 hours via the emergency release path. | INC-29; INC-35; B-AN-26; ADR-040; RVW-A-12 | THR-005; THR-003; THR-024 | C-05, C-25 | TST: C-25 version-floor and manifest-hash check; no APT source on H-INTAKE; DEMO: advisory drill |
 | NET-004 | The intake torrc SHALL be exactly the release template of §7.1 (hash-verified) with only documented tunables changed within bounds. | INC-34 | THR-035 | C-05 | TST: `candorctl net lint`; INSP |
 | NET-005 | `HiddenServiceSingleHopMode` and `HiddenServiceNonAnonymousMode` SHALL be 0 on every onion service and the build SHALL refuse templates setting either to 1. | B-AN-12 | THR-001; THR-005 | C-05, C-31 | TST: config lint in CI and on host |
 | NET-006 | Onion PoW defence (`HiddenServicePoWDefensesEnabled 1`) and intro-point DoS defence SHALL be enabled on every onion service. | ADR-026; B-AN-26; B-AN-27; B-AN-28 | THR-032 | C-05 | TST: lint; load test (34) shows PoW activation |
-| NET-007 | Vanguards-lite SHALL be enabled on all profiles; the full vanguards protection (add-on or Arti full mode) SHALL be enabled for GOV-ONPREM, MANAGED high-risk and HIGH-flagged tenants. | ADR-001; B-AN-11; B-AN-12; B-AN-13 | THR-005 | C-05 | TST: control-socket query in self-test; INSP: profile config |
+| NET-007 | Vanguards-lite SHALL be enabled on all profiles; full vanguards (add-on while it passes the §7.2 maintenance gate, or Arti full mode once admitted) SHALL be enabled for GOV-ONPREM, MANAGED high-risk and HIGH-flagged tenants; when the gate fails, the vanguards-lite fallback SHALL be recorded in the Platform Manifest and shown to admins and in the Operator Statement's configuration digest. | ADR-001; ADR-046(9); B-AN-11; B-AN-12; B-AN-13 | THR-005 | C-05 | TST: control-socket query in self-test; INSP: profile config and manifest flag |
 | NET-008 | tor on intake hosts SHALL log at level `warn` or higher with `SafeLogging 1` to volatile journald storage retained ≤ 24 h; web server access logs SHALL be disabled. | ADR-016; B-SD-21; INC-60 | THR-016; THR-011 | C-05, C-06 | TST: log canary test; INSP: journald config |
 | NET-009 | The tor ControlPort SHALL be disabled; control access SHALL be via a Unix socket with cookie authentication readable only by the vanguards and health-exporter users. | INC-34 | THR-035; THR-014 | C-05 | TST: lint; permission check |
 | NET-010 | tor SHALL run with `Sandbox 1`, `DisableDebuggerAttachment 1`, no core dumps and the systemd hardening of §7.3. | INC-58 | THR-014 | C-05 | TST: `systemd-analyze security` threshold; lint |
@@ -457,39 +491,50 @@ table inet candor_intake {
 | NET-026 | Any Tor exit-list check on C-37 SHALL be performed in memory for banner selection only and SHALL NOT be logged or stored. | ADR-003 | THR-001; THR-016 | C-37 | TST: log canary; INSP |
 | NET-027 | Source guidance SHALL advise against employer networks/devices and describe WebTunnel, obfs4 and Snowflake bridges per §12. | INC-31; B-AN-30; B-AN-31 | THR-002 | C-06, C-37 | INSP: content review (05) |
 | NET-028 | The Source App SHALL support obfs4, Snowflake and WebTunnel bridges with hash-pinned PT binaries and SHALL never fall back to non-Tor connectivity. | B-AN-30; B-AN-31 | THR-002 | C-03 | TST: bridge connectivity tests; network capture |
-| NET-029 | C-06 SHALL enforce per-CircuitToken rate limits and global concurrency limits (§13) and serve a no-JS wait page when saturated. | ADR-026 | THR-032; THR-033 | C-06, C-07 | TST: load test (34) |
+| NET-029 | C-06 SHALL enforce per-CircuitToken rate limits and global concurrency limits (§13), queue waiting requests without revealing queue state, and serve a no-JS busy page only on queue overflow. | ADR-026; ADR-038(5); RVW-A-27 | THR-032; THR-033; THR-011 | C-06, C-07 | TST: load test (34); responses below overflow indistinguishable in size class and latency floor |
 | NET-030 | No third-party CAPTCHA, CDN or WAF SHALL be placed in the source path. | ADR-026; INC-54 | THR-036; THR-001 | C-05, C-06 | INSP; TST: resource origin scan |
-| NET-031 | Intake-host egress SHALL be default-deny with only the tor user allowed to reach the Internet (§14.2), inbound limited to the relay endpoint from C-09 and optional admin path. | ADR-009; INC-33 | THR-001; THR-035 | C-05, C-39 | TST: egress test as non-tor user fails; ruleset diff against template |
+| NET-031 | Intake-host network flows SHALL be exactly the matrix F1–F5 of §14.2 (default-deny; only the two tor UIDs reach ext0; inbound only the C-09 relay endpoint, the C-25 exporter pull and the optional admin path; no push to monitoring; no clearnet DNS/NTP). | ADR-009; INC-33; RVW-A-23 | THR-001; THR-035; THR-104 | C-05, C-39 | TST: egress test as every other UID fails; ruleset diff against template; canary-host reachability probe |
 | NET-032 | C-06 and C-07 SHALL run in a network namespace with only loopback and communicate through Unix sockets. | INC-33 | THR-014; THR-001 | C-06, C-07 | TST: namespace inspection in self-test |
-| NET-033 | Intake hosts SHALL use no clearnet DNS or NTP; time SHALL come from authenticated C-09 timestamps cross-checked by tor's consensus skew. | INC-33 | THR-043; THR-035 | C-05, C-09 | TST: no resolver; clock-skew injection |
+| NET-033 | Intake hosts SHALL use no clearnet DNS or NTP; host time SHALL satisfy the Tor-consensus floor rule and the Roughtime cross-check of §14.3, SHALL NOT be set or validated from Z-CORE-supplied timestamps, and violations SHALL make C-07 fail closed. | ADR-036(6); INC-33; RVW-A-04 | THR-043; THR-035 | C-05, C-07 | TST: no resolver; clock-skew injection; Z-CORE-supplied wrong time ignored |
 | NET-034 | `candorctl net selftest` SHALL run at boot and every 15 minutes and stop C-06 on any failure of §14.2 checks. | ADR-002 | THR-035 | C-05, C-06, C-25 | TST: fault injection |
 | NET-035 | If the onion service is unavailable, no alternative anonymous path SHALL be offered; the info site SHALL display an outage notice. | ADR-002; INC-03 | THR-040 | C-37, C-06 | DEMO; TST |
-| NET-036 | Reachability monitoring SHALL be performed from C-25 using its own tor client against a static health endpoint; intake hosts SHALL export only the bucketed aggregates of §15. | ADR-016; INC-60 | THR-016; THR-011 | C-25, C-05 | INSP: exporter schema; TST: exporter output contains only allowed fields |
+| NET-036 | Reachability monitoring SHALL be performed from C-25 using its own tor client against a static health endpoint; intake hosts SHALL export only the liveness fields and daily load bands of §15, pulled by C-25. | ADR-016; ADR-038(5); ADR-046(5); INC-60 | THR-016; THR-011 | C-25, C-05 | INSP: exporter schema; TST: exporter output contains only allowed fields and no sub-day load values |
 | NET-037 | Packet capture, flow export, per-connection tracing and tor info/debug logging SHALL be disabled on intake hosts in production, except in a dual-approved, time-boxed (≤ 1 h), volatile debugging window. | ADR-016; INC-60 | THR-016 | C-05, C-39 | INSP: config; TST: flow-export absent |
 | NET-038 | Source-facing pages SHALL be minimal and uniform in size class to reduce website fingerprinting (targets in 11). | B-AN-16; B-AN-19 | THR-004 | C-06 | TST: size-class test (30) |
 | NET-039 | Each tenant/customer SHALL have a dedicated onion service and intake gateway; onion services SHALL NOT be shared across customers. | ADR-021 | THR-045 | C-05 | INSP: deployment inventory |
-| NET-040 | The Source App's update checks and all other network requests SHALL use Arti to a vendor onion mirror with identical requests for all users and SHALL NOT contact organisation-specific endpoints for updates. | ADR-022 | THR-002; THR-025 | C-03, C-33 | TST: traffic capture |
+| NET-040 | The Source App's update checks, witness-checkpoint fetches, reply retrieval and all other network requests SHALL use Arti, with identical request shapes for all users; updates SHALL come from the project onion mirror and SHALL NOT contact organisation-specific endpoints. | ADR-022; ADR-036(5); ADR-039; ADR-041 | THR-002; THR-025 | C-03, C-33 | TST: traffic capture |
 | NET-041 | Intake hosts SHALL block cloud metadata endpoints and IPv6 router advertisements. | INC-59 | THR-030 | C-39 | TST: probe from host |
 | NET-042 | The optional onion TLS mode SHALL replace (not add to) the HTTP onion port and SHALL NOT permit downgrade to HTTP. | B-CR-08 | THR-003 | C-05, C-06 | TST: port scan over Tor |
 | NET-043 | An onion service private key SHALL be present on exactly one intake host in single-host profiles and on at most two intake hosts (active/passive, only one tor instance publishing at a time) in EE-HA/GOV-ONPREM, both listed in the Secret Placement Manifest and monitored identically. | ADR-032; ADR-028 | THR-044 | C-05, C-25 | TST: placement self-test counts key copies; failover test shows single publisher |
+| NET-044 | Intake hosts SHALL fetch updates only through the `candor-client` tor instance from the Candor project's onion mirror and SHALL verify TUF and log proofs themselves; no other update path SHALL exist for Z-INTAKE. | ADR-046(3); ADR-009; RVW-C-08 | THR-001; THR-025 | C-05, C-10 | TST: egress capture during update; bundle push from C-09 refused |
+| NET-045 | A separate `candor-client` tor instance without onion keys SHALL serve updates and time checks; the source onion instance SHALL have no SocksPort and its control socket SHALL NOT be readable by the updater or time checker. | ADR-028; RVW-A-23 | THR-044; THR-035 | C-05 | TST: lint; permission check |
+| NET-046 | External Watchers (≥ 2 organisations, ≥ 1 outside the operator's jurisdiction for EE/GOV/MANAGED) SHALL fetch the source UI, headers, running manifest and directory over Tor per §15.1 with Tor Browser-identical request shapes and fresh circuits at random intervals, compare them with the transparency log and publish mismatches. | ADR-035(1); RVW-A-01; RVW-A-13 | THR-007; THR-026; THR-025 | C-06, C-25 (external) | DEMO: watcher report per release; TST: injected asset change detected within 24 h in staging |
+| NET-047 | The signed onion address statement SHALL carry a cosignature by ≥ 1 external witness in EE, GOV and MANAGED (CE: SHOULD). | ADR-036(5); RVW-A-08 | THR-044; THR-046 | C-37, C-14 | TST: Source App rejects statement without required cosignature |
+| NET-048 | C-37 SHALL NOT host or log downloads of the Source App and SHALL link to the project distribution; its first viewport SHALL show the "work device or work network: stop here" warning; for D1/D2 and GOV-IG/IA tenants it SHALL be hosted outside the organisation's web stack with host access logging disabled. | ADR-041; RVW-A-14; RVW-B-17; RVW-C-20 | THR-002; THR-036 | C-37 | INSP: hosting attestation (quarterly C-37 review); TST: page scan; no installer served |
+| NET-049 | Onboarding and source guidance SHALL advise offline publication of the onion address and non-hyperlinked intranet text (§11.2 item 0). | RVW-B-17; INC-31 | THR-002 | C-37, C-19 | INSP: content review (05, 13) |
+| NET-050 | Candor SHALL adopt PQ onion/circuit handshakes in client and service in the first minor release after they are available in a stable Tor release meeting §6.3, and SHALL enable onion TLS with the hybrid PQ group by default in HIGH/GOV where a `.onion` certificate is obtainable. | ADR-046(8); RVW-A-11 | THR-003; THR-012 | C-05, C-03, C-06 | INSP: Platform Manifest release checklist; TST: TLS scan (04 CRYPTO-029) |
 
 ## 19. Residual risks and limitations (honest)
-1. **Tor use is visible** to the source's local network, employer and ISP (THR-002). Bridges reduce, but do not eliminate, this signal; on managed devices nothing at the transport layer helps.
-2. **End-to-end correlation** by adversaries who see both the source's link and the service's link is not prevented (THR-003); timing minimization reduces application-level correlation only.
+1. **Tor use is visible** to the source's local network, employer and ISP (THR-002). Bridges reduce, but do not eliminate, this signal; on managed devices nothing at the transport layer helps. Visits to a hyperlinked C-37 from work are logged before any guidance is read; offline publication (§11.2) is advice organisations may ignore.
+2. **End-to-end correlation** by adversaries who see both the source's link and the service's link is not prevented (THR-003); timing minimization reduces application-level correlation only. Unpadded Tier W upload volume at the service uplink remains a correlation feature (RVW-A-22).
 3. **Website fingerprinting** of a single monitored portal can give an employer a lead (THR-004).
-4. **Guard discovery** against a long-lived service remains a state-level threat; vanguards raise cost, not impossibility.
+4. **Guard discovery** against a long-lived service remains a state-level threat; vanguards raise cost, not impossibility. If the full vanguards add-on fails its maintenance gate, HIGH profiles fall back to vanguards-lite until Arti services are admitted (ADR-046(9)).
 5. **Onion address impersonation** after key theft cannot be revoked inside Tor; Tier W sources on bookmarks may be phished.
 6. **No offline onion identity keys** with C-tor: the key is on an Internet-connected host — on two hosts in HA profiles (ADR-032), doubling THR-044 exposure.
 7. **Anonymity set within an organisation** may be very small (the employees who use Tor) regardless of Tor's global size.
 8. **Onion Browser (iOS)** offers weaker protections; iOS-only sources are at higher risk.
 9. **Availability**: large DoS can still degrade intake, and sources may turn to unsafe channels.
+10. **Harvest-now-decrypt-later:** Tier W sessions recorded before PQ onion handshakes exist can be decrypted by a future quantum adversary, including passphrases (ADR-046(8)).
+11. **Independent time** depends on Tor directory authorities and Roughtime operators; freeze is bounded to ≈ 1 day, not eliminated; Roughtime over Tor depends on TCP-capable servers (Knowledge (unverified)).
+12. **External Watchers** only see what an anonymous first-time visitor sees; selective modification after login or for specific answers is invisible to them; watcher diversity depends on external organisations' participation.
 
 ## 20. Open issues
 | # | Issue | Proposed resolution |
 |---|---|---|
 | OI-1 | Verify `HiddenServiceExportCircuitID` with Unix-socket targets, and `Sandbox 1` with vanguards `SETCONF` (Knowledge (unverified)). | Integration tests in 29/30; fall back to loopback TCP in isolated namespace. |
-| OI-2 | **Open Issue for ADR revision — ADR-001 vanguards baseline.** ADR-001 requires full vanguards only for HIGH profiles. Arti guidance recommends full mode for services with > 1 month uptime (B-AN-13), which describes every Candor intake; the add-on's maintenance status is UNVERIFIED. | Propose full vanguards for all profiles once Arti service mode is admitted (or a maintained add-on is confirmed). |
+| OI-2 | ADR-001 vanguards baseline and add-on maintenance status. | **Resolved by ADR-046(9):** full vanguards for HIGH with a maintenance gate and documented fallback to vanguards-lite / Arti full mode (§7.2). Extending full vanguards to all profiles remains a proposal for when Arti services are admitted. |
 | OI-3 | C-tor has no offline onion identity key support (Knowledge (unverified)). | Track Arti; revisit K16 custody. |
 | OI-4 | Current Tor Metrics figures, Onion Browser status and Arti service-side PoW status require re-verification (R4 §8). | Research follow-up before 1.0. |
-| OI-5 | Cover-traffic transport (CoverDrop/Nym-style) evaluation for "using the channel is not a signal". | Separate research track; admission per §6.3. |
+| OI-5 | Cover-traffic transport (CoverDrop/Nym-style) evaluation for "using the channel is not a signal"; decoy uploads for HIGH (RVW-A-22). | Separate research track; admission per §6.3. |
 | OI-6 | Active/active HA with one onion address (OnionBalance-style) is deferred by ADR-032; the passive host doubles THR-044 exposure. | Security review before any active/active design (21). |
+| OI-7 | Roughtime-over-TCP server availability and the exact tor control query for consensus `valid-after` (Knowledge (unverified)). | Integration test; if no TCP Roughtime server is reachable, operate on the consensus floor alone and record it in the health band. |

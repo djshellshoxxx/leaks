@@ -235,7 +235,7 @@ Common first steps for every playbook: (1) `candorctl ir declare`; (2) staff the
 |---|---|
 | DETECT | `host.attestation_mismatch`; debsums/file-manifest failure; `egress_violation=true`; secret-manifest violation; unexpected listening sockets; AppArmor denial count anomaly (counts only); external vulnerability report or exploit in the wild; transparency-log monitor alert about the key directory (unexpected key entries) |
 | CONTAIN | **Intake suspected (SEV-0):** `candorctl ir intake stop` immediately (fail closed; sources see an unreachable onion, never a clearnet fallback). **Core suspected:** isolate (`ir isolate`), revoke all staff sessions (ADR-029 tokens), suspend relay pulls and backups, keep intake running only if intake integrity is verified by attestation from a clean H-MON |
-| PRESERVE | E-SYS; E-HOST/E-INTAKE disk images; E-MEM-CORE if useful; E-MEM of intake **only** with DPO approval (§6.1). Freeze config. Export self-test and attestation history. Record T0 candidates |
+| PRESERVE | E-SYS; E-HOST/E-INTAKE disk images; E-MEM-CORE if useful; E-MEM of intake **only** with DPO + Independent Approver approval, the evidence precondition and a published INCIDENT_NOTICE (§6.1). Freeze config. Export self-test, attestation, Platform Manifest and External Watcher history. Record T0 candidates |
 | NOTIFY | DPO; Channel Owners. If Tier W exposure is possible, SSN-GLOBAL `compromise-intake-window` with day-granular window [T0, containment]. Candor PSIRT if a product vulnerability is suspected (vendor → CRA if actively exploited). Customers/tenants (MANAGED) |
 | ROTATE | Intake: new source onion key (PB-10 procedure), SSH-onion keys, relay mTLS pair, Argon2 deployment salt (forces nothing on sources; new accounts only), monitor credentials. Core: RCP-ONION keys and client-auth keys or RCP-LAN certificates (re-enroll Desks), audit/directory signing keys if not in an HSM, backup-agent key, DB credentials, WORM agent credentials. Verify key-directory consistency: every channel/recipient key entry must carry valid Channel Identity signatures. Invalid entries mean THR-046 (key substitution), and affected channels must be re-verified by members |
 | RECOVER | DR-P4 (`19-BACKUPS-DR.md`): rebuild from clean media; restore pre-T0 sets; new golden PCRs; self-test; reopen intake; publish the resolution notice |
@@ -287,7 +287,7 @@ PRESERVE: how the key left its boundary (manifest scan, attestation, device fore
 | Phase | Actions |
 |---|---|
 | DETECT | DANGEROUS config change without valid dual approval (checker exit ≥ 20); secret-manifest violations; attestation mismatch after an admin session; SSH certificate issuance anomalies; backup-store admin actions; attempts to create staff accounts and enroll them into channels (fails without member wrapping, ADR-008, but is logged); a report about the admin received **through Candor** (routed to an independent channel via the COI map) |
-| CONTAIN | The break-glass admin set (other admins + security team, physical console where needed) revokes the admin's SSH CA principals, FIDO2 registrations and admin-api roles; freeze config; stop intake if host integrity is in doubt (the admin had root → SEV-0 for Tier W exposure since the admin's first suspicious action) |
+| CONTAIN | The Emergency Admin set (§4; appointed by OVERSIGHT, physical console where needed) revokes the admin's SSH CA principals, FIDO2 registrations and admin-api roles; if the admin's reporting chain is implicated, switch to PB-19; freeze config; stop intake if host integrity is in doubt (the admin had root → SEV-0 for Tier W exposure since the admin's first suspicious action) |
 | PRESERVE | SECURITY audit (admin actions), SSH certificate log, host images, config history, HSM audit |
 | NOTIFY | Management excluding the admin's reporting chain if implicated; Legal; DPO; Oversight. SSN-GLOBAL `compromise-intake-window` if Tier W exposure is plausible |
 | ROTATE | Everything the admin could reach: source onion key (PB-10), SSH-onion keys, relay/monitor mTLS, Tang keys (re-bind FDE), WORM store root credentials (if the admin knew the safe), HSM PINs/partitions the admin could activate, IRK shares held by the admin (re-split the IRK), RCP-ONION keys or RCP-LAN server key |
@@ -303,7 +303,7 @@ PRESERVE: how the key left its boundary (manifest scan, attestation, device fore
 | PRESERVE | E-HOST images, E-MEM-CORE, ransom note, RT-0 history; determine T0 |
 | NOTIFY | DPO (availability breach + possible exfiltration of metadata); regulators as required; SSN-GLOBAL if the intake outage exceeds 24 h or data loss affects sources (for example, source accounts created after the last restorable set) |
 | ROTATE | All online secrets (as PB-02). The source onion key only if the intake was touched |
-| RECOVER | DR-P4 (rebuild from clean media; restore chain-verified pre-T0 sets). Exfiltration is metadata-only by design (`17-INFRASTRUCTURE.md` §8); payment is an organizational decision outside this spec |
+| RECOVER | DR-P4 (rebuild from clean media; restore chain-verified pre-T0 sets; if the dwell time exceeds the 14-day vault retention, restore the latest verifiable vault set with dual approval and re-wrap missing cases from Desks, `19-BACKUPS-DR.md` DR-012; apply the erasure log). Exfiltration is metadata-only by design (`17-INFRASTRUCTURE.md` §8); payment is an organizational decision outside this spec |
 | LESSONS | Entry vector; backup coverage; admin workstation hygiene |
 
 ### PB-08 Supply-chain compromise (dependency, build, CI, repository)
@@ -347,7 +347,7 @@ PRESERVE: how the key left its boundary (manifest scan, attestation, device fore
 | Phase | Actions |
 |---|---|
 | DETECT | HSM tamper event; HSM audit log anomalies (unexpected key usage, logins); signatures (audit checkpoints, directory entries, SSH certificates) that do not match expected issuance; a vendor advisory for the HSM firmware |
-| CONTAIN | Disable affected partitions/roles; revoke SSH certificates issued by the HSM CA (KRL); stop key-directory publication until a new log key is installed |
+| CONTAIN | Disable affected partitions/roles; revoke SSH certificates issued by the HSM CA (KRL); stop key-directory publication until a new log key is installed. **No fallback signing keys** are activated (ADR-046(2)); audit checkpoints queue per `34-PERFORMANCE-SCALABILITY.md` F5c |
 | PRESERVE | HSM audit logs, tamper records, issued-signature inventory |
 | NOTIFY | Internal; Oversight; vendor; customers (MANAGED) |
 | ROTATE | Every key resident in the HSM (`17-INFRASTRUCTURE.md` §6.5): audit signing (re-anchor externally), key-directory log key (publish a signed transition; clients re-pin), SSH CA, internal CA (re-issue relay/monitor certificates), DB TDE (re-encrypt), backup KEK if resident (DR-P9) |
@@ -382,7 +382,7 @@ PRESERVE: how the key left its boundary (manifest scan, attestation, device fore
 
 | Phase | Actions |
 |---|---|
-| DETECT | EDR alert (EDR SHALL be configured with no automatic sample upload for Candor paths; `32-OPERATIONS.md`); Candor Desk self-integrity failure; C-17 viewer anomaly (network attempt from the disposable VM, crash patterns); unexpected outbound connections from WS-RCP; a user report |
+| DETECT | EDR alert (EDR SHALL be configured with no automatic sample upload for Candor paths; `32-OPERATIONS.md`); Candor Desk self-integrity failure; Desk or webview crash reports found leaving the host; Export Packages found in a cloud-sync root (RVW-C-11); C-17 viewer anomaly (network attempt from the disposable VM, crash patterns); unexpected outbound connections from WS-RCP; a user report |
 | CONTAIN | Disconnect the workstation; remove the hardware token; revoke the device key and sessions (PB-05); assume exposure of everything the user decrypted since T0 and of any case key/epoch key used while the token was inserted (keys are hardware-wrapped and cannot be exported, but can be **used** by malware while unlocked) |
 | PRESERVE | Disk image encrypted to the IEK. It is E-CASE-class if decrypted content may be cached: access limited to case members + IR Lead, analyzed air-gapped. Malware samples analyzed offline; **never** uploaded to public services (§6.1 E-SRC) |
 | NOTIFY | Channel Owners; DPO; SSN-ACCOUNT for affected cases if replies could have been forged; if the malware arrived via a submitted file → assess THR-023 and warn other recipients handling the same case; do **not** notify the source that "your file contained malware" unless the Channel Owner decides it is safe and useful |
@@ -390,11 +390,83 @@ PRESERVE: how the key left its boundary (manifest scan, attestation, device fore
 | RECOVER | Reimage from known-good media; re-enroll the device; verify C-17 isolation configuration |
 | LESSONS | Was a file opened outside C-17? Viewer escape? Update the sanitization pipeline (`10-FILE-EVIDENCE-PIPELINE.md`) |
 
+### PB-15 Organisational suppression / mass key loss (RVW-C-03, RVW-C-22(c))
+
+| Phase | Actions |
+|---|---|
+| DETECT | `keys.epoch_runway` falling for several members at once; several members' devices reimaged, revoked or offline in the same week; SCIM deactivations or HR attribute changes that would remove key holders; un-imported envelopes older than 7 days (ADR-033(2) escalation); OVERSIGHT's dead-man canary (`14-CASE-MANAGEMENT.md`) |
+| CONTAIN | OVERSIGHT (not management) leads. Freeze all wrap deletions: IdP/HR changes already only **suspend** (ADR-044(1)); refuse any pending dual-control wrap deletion; block device revocations except those requested by the device holder personally; ask each affected member to activate their stored backup authenticator (ADR-044(2)) |
+| PRESERVE | SCIM/IdP change log, MDM/reimaging tickets (requested from IT in writing), SECURITY audit of suspensions and revocations, `keys.epoch_runway` history |
+| NOTIFY | OVERSIGHT; external counsel; Independent Oversight's own board/regulator where law provides it. If intake for a channel fails closed, sources are directed to the channel's `independent_route` (`34-PERFORMANCE-SCALABILITY.md` F5) |
+| ROTATE | Re-wrap case keys from any surviving holder to replacement members appointed by OVERSIGHT; GOV: Recovery Quorum ceremony (ADR-044(3)) |
+| RECOVER | DR-P6 (`19-BACKUPS-DR.md`); enrol replacements under the 72 h/7 d roster time-lock (ADR-036(2)) with OVERSIGHT as the independent approver |
+| LESSONS | Key-holder site diversity (`19-BACKUPS-DR.md` §11.1); independent-custody devices (ADR-043); whether the channel needs an external member |
+
+### PB-16 IdP / SCIM / SOAR compromise or attribute poisoning (RVW-C-22(b))
+
+| Phase | Actions |
+|---|---|
+| DETECT | Mass deactivations or group changes; manager-chain edits affecting COI computation; SOAR `force re-enrollment` bursts; sign-ins from unusual IdP tenants |
+| CONTAIN | Disconnect the SCIM bridge (set to read-only); IdP changes can only suspend server-side authorization (ADR-044(1)), so no keys are lost; staff authenticate with their hardware authenticators directly (the IdP never unlocks keys, AUTH-011) |
+| PRESERVE | SCIM request log, IdP audit export (requested from the IdP owner), Candor SECURITY audit |
+| NOTIFY | OVERSIGHT; SECURITY_OFFICER; DPO if staff data was altered |
+| ROTATE | SCIM bearer tokens; SSO federation certificates; re-verify every suspension with the member out of band |
+| RECOVER | Lift suspensions after verification; re-enable SCIM with the manager-chain attribute excluded from COI computation until the IdP is clean |
+| LESSONS | Whether a dedicated IdP is needed for INDEPENDENT channels |
+
+### PB-17 Unauthorized roster change, role-label change or orphan re-key (RVW-C-05, RVW-C-22(d))
+
+| Phase | Actions |
+|---|---|
+| DETECT | Content-free roster-change notifications to members and OVERSIGHT during the 72 h (GOV/HIGH 7 d) time-lock (ADR-036(2)); Desk warning about a member key < 7 days old; transparency-log monitor or witness alert on CHANNEL_ROSTER / CHANNEL_IDENTITY entries; a role label without an OVERSIGHT certification (ADR-036(3)) |
+| CONTAIN | An existing member or OVERSIGHT files an objection, which blocks activation during the time-lock; if already active, remove the new member (removals take effect immediately) and publish revocation of its epoch keys |
+| PRESERVE | Directory entries, approval records, `person_ref` verification evidence |
+| NOTIFY | OVERSIGHT; SSN-GLOBAL/SSN-APP if envelopes were sealed to the unauthorized member ("recipients of this channel changed between {DAY_FROM} and {DAY_TO}") |
+| ROTATE | Channel Identity Key if its holders approved the change under duress or were compromised (PB-04); follow-up sealing continues only to members of the original eligible set (ADR-036(4)) |
+| RECOVER | Re-verify every roster member out of band by OVERSIGHT |
+| LESSONS | Holder distribution of the Channel Identity Key and Org Root shares |
+
+### PB-18 Recipient endpoint tampering by the organisation (RVW-C-01, RVW-C-22(e))
+
+| Phase | Actions |
+|---|---|
+| DETECT | Desk self-check reports a binary digest not in the transparency log (detects accidental divergence only, ADR-043); a member reports an MDM-pushed "Candor Desk" package, EDR live-response session, screen-recording or insider-risk agent, or VDI session; custody status in the Admin UI changes from independent to managed |
+| CONTAIN | Treat the device as PB-14 (compromised); the member stops using it; OVERSIGHT suspends the member's case access from that device; the member continues on an independent-custody device |
+| PRESERVE | Device inventory and MDM/EDR records (requested from IT in writing, noting that IT may be the adversary), Desk self-check history |
+| NOTIFY | OVERSIGHT; external counsel; DPO. Do **not** notify the organisation's IT/security team first if it may be the actor |
+| ROTATE | PB-05 rotations for the member |
+| RECOVER | Re-enrol on an independent-custody device (ADR-043) |
+| LESSONS | Whether INDEPENDENT-channel members were ever on managed devices; update the custody attestation |
+
+### PB-19 Leadership-implicated incident (organisation as adversary) (RVW-C-22(a))
+
+| Phase | Actions |
+|---|---|
+| DETECT | Any incident where management, the IR Lead's reporting chain, IT/security leadership or in-house Legal may be implicated; an identity request by an executive recorded as `case.identity_request_refused`; a pretextual SEV-0 declaration without the evidence precondition (§6.1) |
+| CONTAIN | IR is run by **OVERSIGHT** with an external retained IR firm under a pre-signed engagement letter; the Emergency Admin set replaces platform admins in the implicated chain; captures follow §6.1 with OVERSIGHT as Independent Approver; implicated persons are removed from IR, notifications and approvals (IR-003) |
+| PRESERVE | As the underlying playbook; evidence encrypted to custodians that exclude implicated persons |
+| NOTIFY | Board/regulator/IG as law provides; SSN notices per the underlying playbook; the Operator Statement is not renewed if its signers cannot truthfully sign (ADR-035(2)) |
+| ROTATE | Per the underlying playbook, performed by the Emergency Admin set |
+| RECOVER | Per the underlying playbook |
+| LESSONS | Whether the independent roles are genuinely independent (TEN classification, `21-ENTERPRISE.md`) |
+
+### PB-20 Notification-transport or SIEM-sink compromise (RVW-C-22(f))
+
+| Phase | Actions |
+|---|---|
+| DETECT | Unexpected recipients or forwarding rules on notification mailboxes; SIEM sink exposure reports; webhook endpoint changes |
+| CONTAIN | Disable the affected transport (`notify.transport` none; Desk badge only) or SIEM export; notifications are content-free and constant-schedule (ADR-038(2)), so exposure is limited to the staff address list and daily digest times |
+| PRESERVE | Transport configuration history; C-26 export logs |
+| NOTIFY | SECURITY_OFFICER; DPO (staff personal data) |
+| ROTATE | Webhook secrets, SMTP credentials, SIEM tokens, pinned certificates |
+| RECOVER | Re-enable with pinned transport over tor |
+| LESSONS | Whether staff event export should be day-granular only (`20-LOGGING-AUDITING.md`) |
+
 ## 10. Exercises
 
 | Exercise | Frequency | Scope |
 |---|---|---|
-| Tabletop | Quarterly (rotate playbooks so each is exercised ≥ once in 2 years; PB-01, PB-02, PB-10 yearly) | Roles, decisions, notice drafting (templates signed in a test directory) |
+| Tabletop | Quarterly (rotate playbooks so each is exercised ≥ once in 2 years; PB-01, PB-02, PB-10, PB-19 yearly). Small-organisation mode: twice yearly, each playbook ≥ once in 3 years (RVW-C-17) | Roles, decisions, notice drafting (templates signed in a test directory) |
 | Technical drill | Yearly (EE-HA/GOV twice yearly) | Onion rotation in the lab, IR capture tooling, DR-P4 combined with PB-02 |
 | Notice rehearsal | Yearly | Publish a test SSN on a staging instance; verify that Tier V verifies and Tier W displays the fingerprint |
 
@@ -402,14 +474,14 @@ PRESERVE: how the key left its boundary (manifest scan, attestation, device fore
 
 | ID | Requirement | Evidence | Threats | Component | Verification |
 |---|---|---|---|---|---|
-| IR-001 | Each deployment SHALL maintain the fourteen playbooks of §9, each with DETECT, CONTAIN, PRESERVE, NOTIFY, ROTATE, RECOVER and LESSONS, adapted to its profile. | INC-27; INC-55; INC-37 | THR-014, THR-031, THR-042 | C-19 | INSP: playbook set review; DEMO: tabletop records |
+| IR-001 | Each deployment SHALL maintain the twenty playbooks of §9 (PB-01..PB-20), each with DETECT, CONTAIN, PRESERVE, NOTIFY, ROTATE, RECOVER and LESSONS, adapted to its profile. | INC-27; INC-55; INC-37; RVW-C-22 | THR-014, THR-031, THR-042 | C-19 | INSP: playbook set review; DEMO: tabletop records |
 | IR-002 | Severity SHALL be assigned per §5. Any incident involving a possible person-to-report link SHALL be at least SEV-1. | INC-22 | THR-019, THR-020 | C-19 | INSP: IR records sample |
 | IR-003 | The IR team SHALL exclude persons implicated in the incident or listed in COI maps for affected cases. Notifications SHALL not be sent to them. | ADR-015; INC-22 | THR-020 | C-10, C-22 | DEMO: tabletop with an executive-implicated scenario; INSP |
-| IR-004 | IR SHALL NOT use break-glass to read report content except in PB-01/PB-14, by decision of the case's own members under dual approval, recorded in the CASE audit. | ADR-015; REQ-H-68 | THR-018 | C-22, C-24 | TST: break-glass without a case-member co-sign is refused; INSP: audit review |
+| IR-004 | IR SHALL NOT use break-glass to read report content except in PB-01/PB-14, by decision of the case's own members under dual approval that includes one approver from an independent role outside the legal/management chain (ADR-045), recorded in the CASE audit. | ADR-015; ADR-045; REQ-H-68; RVW-C-10 | THR-018 | C-22, C-24 | TST: break-glass without a case-member co-sign is refused; INSP: audit review |
 | IR-005 | When Z-INTAKE may be live-compromised, the intake SHALL be stopped (fail closed) within 1 h of declaration. No clearnet or alternative anonymous path SHALL be offered. | ADR-002; INC-28 | THR-014, THR-007 | C-05, C-06 | TST: `ir intake stop` disables the onion service and sealer; DEMO: drill timing |
-| IR-006 | All IR evidence SHALL be encrypted at capture to the IR Evidence Key (2-of-3 split), with signed chain-of-custody records in the SECURITY audit. | INC-58; THR-037 | THR-037, THR-016 | C-19, C-24 | TST: capture tool writes no plaintext (canary scan of the target media); custody signature verification |
-| IR-007 | Memory capture of H-INTAKE SHALL require IR Lead + DPO approval, SHALL be encrypted in the capture tool before any write, and SHALL be retained ≤ 90 days unless under legal hold. | ADR-004; REQ-H-58 | THR-016, THR-014 | C-19 | TST: `capture memory --host intake` without the approval token is refused |
-| IR-008 | Packet capture on N-INTAKE-EXT or RCP-ONION uplinks SHALL be disabled by default and SHALL require IR Lead + DPO + Legal approval, headers only, ≤ 24 h, encrypted, ≤ 30-day retention. | B-AN-01; ADR-016 | THR-003, THR-011 | C-05, C-19 | TST: IR tooling refuses unapproved ext capture; INSP |
+| IR-006 | All IR evidence SHALL be encrypted at capture to the IR Evidence Key (2-of-3 split, ≥ 1 holder from an independent role) or, for intake E-MEM/E-NET, to a one-time capture key split with the Independent Approver, with signed chain-of-custody records in the SECURITY audit. | INC-58; THR-037; ADR-035(4); RVW-C-04 | THR-037, THR-016 | C-19, C-24 | TST: capture tool writes no plaintext (canary scan of the target media); custody signature verification |
+| IR-007 | Memory capture of H-INTAKE SHALL require IR Lead + DPO + Independent Approver approval and the evidence precondition of §6.1, SHALL publish a cosigned INCIDENT_NOTICE before starting, SHALL be encrypted in the capture tool before any write, and SHALL be retained ≤ 90 days unless under legal hold. | ADR-004; ADR-035(4); REQ-H-58; RVW-C-04 | THR-016, THR-014, THR-127 | C-19, C-14 | TST: `capture memory --host intake` without either approval token, without an evidence record, or when the INCIDENT_NOTICE append fails is refused |
+| IR-008 | Packet capture on N-INTAKE-EXT or RCP-ONION uplinks SHALL be disabled by default and SHALL require IR Lead + DPO + Legal + Independent Approver approval, the evidence precondition and a published INCIDENT_NOTICE; headers only, ≤ 24 h, encrypted to a one-time capture key split with the Independent Approver, ≤ 30-day retention. | B-AN-01; ADR-016; ADR-035(4); RVW-C-04 | THR-003, THR-011, THR-127 | C-05, C-19, C-14 | TST: IR tooling refuses ext capture lacking any approval, evidence record or notice; INSP |
 | IR-009 | IR SHALL NOT enable debug logging on Z-INTAKE. Only the allow-listed `ir diagnostic mode` MAY be used, and it SHALL auto-expire after 24 h. | INC-60; ADR-016 | THR-016 | C-06, C-07 | TST: diagnostic mode output schema contains no request data, circuit IDs or payloads; expiry test |
 | IR-010 | Submitted files, their hashes and IR memory/disk images SHALL NOT be uploaded to public or third-party analysis services. | INC-56; THR-010 | THR-016, THR-027 | C-17, C-19 | INSP: IR procedure; TST: EDR/IR tool config disables cloud sample submission for Candor paths |
 | IR-011 | Evidence analysis SHALL NOT extract or derive exact timestamps of source actions from host artifacts of intake data paths. | ADR-010 | THR-011 | C-19 | INSP: forensic tool profile; AUD |
@@ -428,25 +500,33 @@ PRESERVE: how the key left its boundary (manifest scan, attestation, device fore
 | IR-024 | The vendor SHALL implement CRA Art 14 reporting (actively exploited vulnerabilities, severe incidents) via the ENISA Single Reporting Platform with a 24 h early-warning capability. | B-CR-50; B-CR-51 | THR-025, THR-024 | C-36 | INSP: PSIRT runbook; DEMO: reporting rehearsal |
 | IR-025 | Operator runbooks SHALL include GDPR Art 33 (72 h) and, where applicable, NIS2 (24 h/72 h) notification steps, using the compelled-disclosure inventory to describe categories without source data. | B-CO-09; B-CO-47; REQ-H-06 | THR-026 | C-19 | INSP: runbook review |
 | IR-026 | After hostile compromise or seizure of a host, every key present on that host per its manifest SHALL be rotated, and recovery SHALL follow DR-P4 (clean rebuild). | ADR-028; INC-28 | THR-044, THR-013 | C-19 | DEMO: IR drill; TST: `ir rotate --host` covers every manifest entry |
-| IR-027 | EDR or anti-malware on recipient workstations SHALL be configured with no automatic sample or file upload for Candor data paths and C-17 images. | INC-56 | THR-016, THR-027 | C-16 | INSP: EDR policy export; TST: config check on managed devices where supported |
+| IR-027 | EDR or anti-malware on recipient workstations SHALL be configured with no automatic sample or file upload for Candor data paths and C-17 images; OS and webview crash reporting for Desk processes SHALL be disabled and Export Packages SHALL NOT be written to cloud-sync roots (owner of the Desk-side controls: `12-FRONTEND-RECIPIENT.md`). | INC-56; RVW-C-11 | THR-016, THR-027, THR-109 | C-16, C-15 | INSP: EDR policy export; TST: config check on managed devices where supported |
 | IR-028 | Backup-theft incidents SHALL trigger an accelerated backup-key epoch (new BK, fresh full backup, early destruction of the old IRK shares). | INC-55; B-CR-33 | THR-017, THR-015 | C-27, C-28 | DEMO: tabletop; INSP: key-epoch register |
-| IR-029 | Tabletop exercises SHALL be held quarterly and technical drills yearly (twice yearly for EE-HA/GOV), with every playbook exercised at least once every 2 years. | R1 R-AUDIT-1 | THR-042 | C-19 | DEMO: exercise records |
+| IR-029 | Tabletop exercises SHALL be held quarterly (twice yearly in small-organisation mode) and technical drills yearly (twice yearly for EE-HA/GOV), with every playbook exercised at least once every 2 years (3 years in small-organisation mode). | R1 R-AUDIT-1; RVW-C-17 | THR-042 | C-19 | DEMO: exercise records |
 | IR-030 | Every IR finding SHALL produce a regression test, rule or checker item before the incident is closed. | B-SD-28 (R1 R-AUDIT-1) | THR-035 | C-30 | INSP: closure checklist; TST: traceability job |
 | IR-031 | IR records and custody logs SHALL be retained per legal requirement and destroyed afterwards by crypto-erasure, with the destruction recorded. | ADR-025 | THR-017 | C-19 | INSP: destruction records |
 | IR-032 | Where legal gag orders prevent notification, the deployment SHALL rely on key-directory transparency and client pinning. The operator's documentation SHALL state this limitation publicly. | INC-07; ADR-022 | THR-026, THR-046 | C-14, C-37 | INSP: public threat-model text |
+| IR-033 | The IR capture tool SHALL append an INCIDENT_NOTICE entry (capture class, day, approver role labels; cosigned by the Independent Approver) to the key directory before any intake E-MEM/E-NET capture, and Tier V clients, Desks and the Tier W `capture-performed` banner SHALL surface it for ≥ 90 days. | ADR-035(4); RVW-A-03; RVW-C-04 | THR-127, THR-135 | C-19, C-14, C-06, C-03 | TST: capture in the lab → directory entry present and cosigned before the first captured byte; banner visible on Tier W pages |
+| IR-034 | When management, the IR Lead's chain, IT/security leadership or in-house Legal may be implicated, IR SHALL be run under PB-19 by OVERSIGHT with an external IR firm engaged under a pre-signed engagement letter, and platform administration SHALL pass to the Emergency Admin set appointed by OVERSIGHT. | RVW-C-22; ADR-045; INC-22 | THR-020, THR-018, THR-127 | C-19, C-22 | DEMO: yearly PB-19 tabletop; INSP: engagement letter and Emergency Admin appointment records |
+| IR-035 | Breach scoping for persons concerned SHALL be performed by case members in their Desks via signed federated searches with completeness tracking, and SHALL never use a server-side global search. | ADR-044(5); RVW-C-14; B-CO-09 | THR-019, THR-016 | C-15, C-10 | DEMO: tabletop producing a completeness report; INSP: no server-side search route (AUTHZ-006) |
+| IR-036 | In small-organisation mode, the IR roles SHALL be staffed per §4.1, the Independent Approver role SHALL be held by the external OVERSIGHT party and SHALL NOT be waived, and the combined roles SHALL be disclosed in the Operator Statement. | ADR-045; RVW-C-09; RVW-C-22 | THR-139, THR-127 | C-19 | INSP: role register; TST: capture tool refuses when Independent Approver = IR Lead |
+| IR-037 | PB-15 SHALL be triggered when two or more members of a channel lose key access (device revocation, reimaging, suspension) within 7 days; during PB-15 no wrap deletion SHALL be executed except at the personal request of the holder. | ADR-044(1); RVW-C-03 | THR-128, THR-020 | C-22, C-25 | TST: simulated mass suspension → PB-15 alert to OVERSIGHT; pending wrap deletions blocked |
 
 ## 12. Residual risks and limitations
 
 1. Notices reach only sources who return to the platform or check C-37. A source who never returns is not warned.
 2. Onion addresses cannot be revoked in Tor. An adversary holding an old key can keep impersonating it. Only source-side verification (Tier V pinning, C-37 checks) mitigates this.
 3. A gagged operator cannot warn sources. Transparency mechanisms detect key substitution but not passive seizure.
-4. Memory capture during IR creates a new copy of source-sensitive data. Governance reduces but does not remove this risk.
+4. Memory capture during IR creates a new copy of source-sensitive data. Independent approval, split capture keys and the self-disclosing INCIDENT_NOTICE (ADR-035(4)) reduce but do not remove this risk: collusion that includes the Independent Approver, or an organisation that modifies the intake binary instead of "doing IR", is not prevented (the latter is detectable only by External Watchers and only if untargeted).
 5. Past disclosures cannot be undone. Rotation protects only future confidentiality.
 6. Staff audit analytics used for detection can themselves create a surveillance risk for staff. They are scoped per `20-LOGGING-AUDITING.md` and `32-OPERATIONS.md` HUM controls.
+7. Playbooks do not create independence where none exists. In small organisations the external OVERSIGHT holder is the only independent party; if captured, PB-19 offers no protection.
+8. Persons-concerned scoping depends on members completing searches; completeness tracking shows gaps but cannot force them.
 
 ## 13. Open issues
 
 1. Descriptor-based detection of a second publisher for our onion address needs validation (`16-TOR-I2P.md`).
 2. The SSN template catalog needs translation and a legal review per jurisdiction pack (`26-ACCESSIBILITY.md`, `25-COMPLIANCE.md`).
-3. Whether to support an optional, legally reviewed warrant-canary mechanism (INC-07 shows lapses cause uncertainty). Deferred to `25-COMPLIANCE.md`.
+3. Warrant canary: resolved by ADR-035(2) (quorum-signed Operator Statement every 30 days; absence shown to sources). Legal review per jurisdiction remains with `25-COMPLIANCE.md`.
 4. A remote-wipe signal for Candor Desk (PB-05) needs a design in `12-FRONTEND-RECIPIENT.md` that cannot be abused by a compromised server to destroy evidence (ADR-027 malicious-server model).
+5. The INCIDENT_NOTICE entry type and its cosignature format must be defined in `04-CRYPTOGRAPHY.md` (key-directory entry types); the Emergency Admin role in `15-AUTHENTICATION-AUTHORIZATION.md`; the federated records/persons-concerned search in `35-DATA-RETENTION-DELETION.md` / `12-FRONTEND-RECIPIENT.md` (cross-document requests).

@@ -1,5 +1,5 @@
 # 28 — Software Supply-Chain Security
-Status: Draft v1.0 · Edition applicability: both (identical trust-path artefacts for CE and EE, ADR-022) · Owner: Release & Supply-Chain Engineering
+Status: Draft v1.1 (round-2 revision: ADR-034..046) · Edition applicability: both (identical trust-path artefacts for CE and EE, ADR-022) · Owner: Release & Supply-Chain Engineering
 
 ## 1. Purpose and scope
 
@@ -20,7 +20,7 @@ Honest language: these controls are designed to make a supply-chain compromise o
 
 | Document | Relationship |
 |---|---|
-| `DECISIONS.md` | ADR-019 (stack, cargo-vet/deny, pinned lockfiles), ADR-020 (open-core, simultaneous fixes), ADR-022 (TUF, threshold 3-of-5 root / 2-of-3 targets, ≥2 builders, transparency log, no per-customer builds), ADR-006 (release roots Ed25519 + ML-DSA-65), ADR-004 (Tier V client integrity, WEBCAT) |
+| `DECISIONS.md` | ADR-019 (stack, cargo-vet/deny, pinned lockfiles), ADR-020 (open-core, simultaneous fixes), ADR-022 (TUF, threshold 3-of-5 root / 2-of-3 targets, ≥2 builders, transparency log, no per-customer builds), ADR-006 (release roots Ed25519 + ML-DSA-65), ADR-004 (Tier V client integrity, WEBCAT). Round 2: **ADR-040** (pinned snapshot mirror and TUF-signed Platform Manifest for OS/tor/PostgreSQL packages, signed security floors, emergency ≥ 2 h cooling with ≥ 2 signers from ≥ 2 organisations, signers and builders across ≥ 2 organisations and ≥ 2 jurisdictions, distribution-signed secure boot), **ADR-041** (Source App distribution from the project onion service and independent mirrors), ADR-035 (release digests of static source-UI assets for External Watchers) |
 | `27-SECURE-DEVELOPMENT.md` | Tiers T0/T1/T2, review rules, gates SG-02/SG-05/SG-13/SG-14/SG-15 |
 | `29-SECURITY-TESTING.md` | ST-008/009/010/011/040–056/130–135 test definitions |
 | `33-RELEASE-UPDATE-SECURITY.md` | Update client, release channels, rollout |
@@ -48,13 +48,13 @@ flowchart TB
   end
   subgraph CI[CI - C-31]
     C1[PR checks: SAST, tests, secret scan,<br/>dep review, zizmor]
-    BA[Builder A<br/>ephemeral, hermetic<br/>org infra]
-    BB[Builder B<br/>ephemeral, hermetic<br/>independent operator]
+    BA[Builder A<br/>ephemeral, hermetic<br/>org infra, jurisdiction J1]
+    BB[Builder B<br/>ephemeral, hermetic<br/>independent organisation, jurisdiction J2 ≠ J1]
     CMP[Comparator<br/>bit-for-bit + diffoscope]
   end
   subgraph REL[Release - C-32]
     AP[Release approval<br/>RM + Security Lead + keyholder]
-    TS[Offline threshold signing<br/>targets 2-of-3, root 3-of-5]
+    TS[Offline threshold signing<br/>targets 2-of-3, root 3-of-5<br/>holders ≥2 orgs, ≥2 jurisdictions]
     TL[Transparency log<br/>Sigsum/Rekor + witnesses]
   end
   subgraph DIST[Distribution - C-33]
@@ -132,10 +132,13 @@ The Desk UI is bundled static content inside the Tauri app (ADR-007, ADR-019). N
 | Runtime loading | The bundled app loads **no** remote script, style, font or image; CSP `default-src 'self'`; Tauri `dangerousRemoteDomainIpcAccess` absent; no CDN (INC-46, INC-47, REQ-H-46). |
 | Malware heuristics | guarddog-style heuristic scan of new/updated packages (as SecureDrop does [B-SD-02]) → SARIF; findings block until reviewed. |
 
-### 5.4 OS packages and container bases
-- Debian base: packages resolved from `snapshot.debian.org` at a pinned timestamp through the mirror. The package set and hashes are recorded in `images/<profile>/packages.lock`. Base OCI images are referenced **by digest only**.
-- Appliance/VM images are built from these locks. The image manifest (package list + hashes) is part of the SBOM.
-- Security updates to the base are adopted through the same review, without a cooling-off period for DSA-announced fixes.
+### 5.4 OS packages, tor and container bases — Platform Manifest (ADR-040; RVW-A-12)
+- **One supply chain for instances.** OS, tor, vanguards and PostgreSQL packages that run on Z-INTAKE and Z-CORE come **only** from Candor's pinned, snapshot-based mirror: Debian packages resolved from `snapshot.debian.org` at a pinned timestamp; tor and the vanguards add-on from the Tor Project repository, pinned by signing-key fingerprint **and** exact version; PostgreSQL from the Debian snapshot (or PGDG pinned by key and version where 09 requires it). The v1.0 split between image locks (`packages.lock`) and live `unattended-upgrades` from upstream on hosts is removed: hosts never consume upstream APT sources directly (17, 33 §14).
+- **Platform Manifest.** Each Candor release includes a TUF-signed **Platform Manifest** target (delegated role `platform`, 33 §6.1): for every profile, the package names, exact versions and SHA-256 hashes of all OS/tor/vanguards/PostgreSQL/kernel packages permitted on each host role, the Debian snapshot timestamp, the Tor Project key fingerprint, pinned Roughtime server keys (16 §14.3), the vanguards maintenance-gate result (16 §7.2) and the **security floor** per trust-path component (33 §8.1). The manifest is logged in the transparency log like any target.
+- **Independent derivation.** Builder A and Builder B each derive the Platform Manifest independently from upstream through their own mirror instances (§5.5); signing is refused unless both derivations are byte-identical (same gate as artefacts, §8.2). C-tor and the crypto set are additionally rebuilt from source (S2C2F Level 4, §5.5) and compared with the upstream binaries they replace.
+- **Security updates of platform packages.** A Debian security advisory or tor security release relevant to a host role is adopted by an emergency Platform Manifest release (33 §10: ≥ 2 h cooling, ≥ 2 signers from ≥ 2 organisations), target ≤ 72 h from upstream publication. The 14-day dependency cooling of §5.1 does not apply to these fixes; the diff review of §5.1 item 4 does.
+- **Secure boot (ADR-040; RVW-C-17):** hosts boot the distribution-signed shim and kernels listed in the Platform Manifest; no per-kernel offline signing ceremony and no site-held kernel-signing key is required, so unattended kernel security updates do not need a human with a hardware token (17 owns boot measurement policy).
+- Appliance/VM images are built from the same manifest; base OCI images are referenced **by digest only**; the image manifest (package list + hashes) is part of the SBOM.
 
 ### 5.5 Internal mirrors (S2C2F-style)
 Target S2C2F **Level 3** for all ecosystems, and **Level 4 (rebuild from source)** for the crypto set and for C-tor [R5 §C].
@@ -145,6 +148,7 @@ Target S2C2F **Level 3** for all ecosystems, and **Level 4 (rebuild from source)
 | crates mirror | Allow-listed crates at pinned versions | Name + version + checksum allow-list; 14-day cooling; RustSec scan on ingest |
 | npm mirror | Allow-listed packages | Same; tarball integrity recomputed and compared with the registry value |
 | Debian snapshot proxy | Pinned snapshots | Release-file signature checked against the Debian archive keys; hashes recorded |
+| Tor Project proxy | tor and vanguards packages at pinned versions | Signed by the pinned Tor Project key; version allow-list; hashes recorded in the Platform Manifest; C-tor rebuilt from source and compared (Level 4) |
 | OCI mirror | Base images by digest | Signature verification (cosign/Notation where upstream signs) on ingest |
 | Toolchain/tool mirror | rustc, cargo-fuzz, diffoscope, linters, SBOM tools | Upstream signature/hash verification on ingest |
 | CI actions mirror | Forked copies of third-party Actions at reviewed SHAs | Only mirrored actions may run (§7) |
@@ -206,7 +210,7 @@ The primary forge may be GitHub. The same rules apply if a self-hosted forge (Fo
 ### 8.2 Reproducible builds with ≥2 independent builders
 | Aspect | Specification |
 |---|---|
-| Builders | **Builder A**: project CI on the primary forge (ephemeral runners). **Builder B**: an independently operated build service. Its administrators, hosting provider, identity provider and mirror instance must all differ from Builder A's, and no person may have administrative access to both. Builder B may be operated by a partner organization under agreement. **Optional community rebuilders**: anyone may rebuild and publish attestations (37 reproducible-build verification). |
+| Builders | **Builder A**: project CI on the primary forge (ephemeral runners). **Builder B**: an independently operated build service. Its operating organisation, administrators, hosting provider, identity provider and mirror instance must all differ from Builder A's, it must be located and operated in a **different jurisdiction** from Builder A (ADR-040; RVW-A-16), and no person may have administrative access to both. Builder B may be operated by a partner organization under agreement. **Optional community rebuilders**: anyone may rebuild and publish attestations (37 reproducible-build verification). |
 | Determinism | `SOURCE_DATE_EPOCH` = tag commit time; fixed locale/TZ/umask; `--remap-path-prefix`; `-C codegen-units=1` for release crates where needed; sorted archive members; stripped build IDs replaced by deterministic ones; `dpkg` built with `reproducible` settings; OCI images built with deterministic layering (e.g. `buildkit` `SOURCE_DATE_EPOCH`, rewrite-timestamp). |
 | Comparison | A comparator job fetches both builders' outputs and provenance and compares SHA-256 of every artefact. **Mismatch = release blocked**, and diffoscope runs automatically to publish a diff report (build-twice + diffoscope, as SecureDrop CI does [B-SD-26]). |
 | Scope (must be reproducible) | `.deb` packages for all trust-path services; OCI images for Z-CORE (EE); appliance image contents (package set + config files; the filesystem image itself where the tool supports it); Candor Desk binaries for Linux (AppImage/.deb) and the unsigned payloads for macOS/Windows; Source App Android APK (compared excluding the APK signature block, i.e. apksigcopier-style verification); the optional WEBCAT-signed JS/WASM bundle for Tier V web; `candorctl`; TUF metadata tooling. |
@@ -224,18 +228,18 @@ The primary forge may be GitHub. The same rules apply if a self-hosted forge (Fo
 ### 9.1 Key architecture (producer side; client verification in 33)
 | Role (TUF) | Keys | Threshold | Storage | Expiry of metadata |
 |---|---|---|---|---|
-| root | 5 keyholders, each a hybrid Ed25519 + ML-DSA-65 pair (ADR-006) | 3-of-5 (ADR-022) | Offline hardware tokens/HSM in ≥3 jurisdictions; no two keyholders from the same employer where feasible | 365 days |
-| targets | 3 keyholders (hybrid) | 2-of-3 (ADR-022) | Offline hardware tokens; used in signing ceremonies only | 90 days |
+| root | 5 keyholders, each a hybrid Ed25519 + ML-DSA-65 pair (ADR-006) | 3-of-5 (ADR-022) | Offline hardware tokens/HSM; holders in ≥ 3 jurisdictions and ≥ 2 organisations, no organisation or jurisdiction holding ≥ 3 keys (so no single jurisdiction can meet the threshold) | 365 days |
+| targets | 3 keyholders (hybrid) | 2-of-3 (ADR-022) | Offline hardware tokens; used in signing ceremonies only; holders in ≥ 2 organisations and ≥ 2 jurisdictions with no organisation or jurisdiction holding 2 keys (ADR-040; RVW-A-16) | 90 days |
 | snapshot | 1 online key (Ed25519) in HSM on the repository signer host (not the distribution server) | 1 | HSM | 7 days |
 | timestamp | 1 online key (Ed25519) in HSM | 1 | HSM | 1 day |
-| delegated `channel/*` roles (stable, lts, beta) | as targets | 2-of-3 | offline | 90 days |
+| delegated product roles incl. `platform` (33 §6.1) and `channel/*` roles | as targets (same organisation/jurisdiction spread) | 2-of-3 | offline | 90 days |
 
 - Online keys (snapshot/timestamp) cannot authorize new targets. They only prevent freeze and mix-and-match attacks.
 - The APT repository `InRelease` and the OCI signatures are *transport conveniences*. The authoritative check is the TUF targets metadata verified by `candor-updater` (33) before any package is installed by hash. This avoids relying on APT's single-key model and on the `trusted.gpg.d` global trust mistake (GlobaLeaks install.sh [B-GL-41]).
 
 ### 9.2 Signing ceremony (targets)
 1. **Preconditions** (automated check, signed gate bundle): 27 gates pass; builder A/B match; provenance valid for both builders; SBOMs present; release tag signed; Source VSA present.
-2. **Approval:** the Release Manager, the Security Lead and one targets keyholder who is not the Release Manager approve in the release tracker. For trust-path **major/minor** releases, a **72-hour cooling window** runs between public announcement of the candidate hashes (transparency log + signed announcement) and signing, during which any keyholder or maintainer may veto. **Emergency security releases** may skip the cooling window with 3 approvals, and a post-hoc review is published within 14 days.
+2. **Approval:** the Release Manager, the Security Lead and one targets keyholder who is not the Release Manager approve in the release tracker. For trust-path **major/minor** releases, a **72-hour cooling window** runs between public announcement of the candidate hashes (transparency log + signed announcement) and signing, during which any keyholder or maintainer may veto. **Emergency security releases** (33 §10) shorten the window to **≥ 2 hours**, never less, and require targets signatures from **≥ 2 signers belonging to ≥ 2 different organisations** (ADR-040); the source diff of the fix is published at log time so external monitors can review it during the window, and a post-hoc review is published within 14 days. The v1.0 rule allowing emergency releases to skip the cooling window is withdrawn (RVW-A-16).
 3. **Signing:** each of ≥2 targets keyholders independently downloads both builders' artefacts, verifies them locally with the published `candor-verify` tool (hashes match, provenance, SBOM), and signs the targets metadata on an offline machine. Signatures are collected; nobody holds more than one key.
 4. **Logging:** signed targets metadata and artefact hashes are submitted to the transparency log (Sigsum with witness cosigning, or Rekor v2 [B-CR-42]). Clients require inclusion proofs (33).
 5. **Out-of-band publication:** release hashes are published on ≥2 independent channels: the transparency log, a signed announcement on the project site **and** its onion mirror, and the independent forge mirror (INC-48, INC-52, REQ-H-48).
@@ -253,9 +257,10 @@ The primary forge may be GitHub. The same rules apply if a self-hosted forge (Fo
 |---|---|---|
 | No signing keys on distribution | Distribution servers host only static signed files; they cannot create valid metadata. Their compromise yields DoS or freeze (bounded by timestamp expiry), not malicious installs. | INC-49 (REQ-H-49); INC-52 |
 | Static hosting | No server-side code on repo hosts; read-only deploys from the release pipeline; separate admin credentials per mirror | INC-52 |
-| Onion + clearnet | Repositories reachable via onion service and clearnet; instances in HIGH profile use onion only | ADR-001 |
+| Onion + clearnet | Repositories reachable via the project onion service and clearnet mirrors; Z-INTAKE hosts use the onion mirror only (ADR-046(3)); Z-CORE uses an egress-restricted HTTPS mirror (vendor or enterprise); the Source App uses the onion mirror only | ADR-001; ADR-046(3) |
+| Source App distribution (ADR-041; RVW-A-14, RVW-B-16) | Source App installers/APKs are published on the project onion service and on ≥ 2 independent mirrors operated by other organisations, byte-identical and TUF/transparency-verifiable; no tenant-branded or per-tenant builds (branding is runtime data); F-Droid (reproducible build) optional; Google Play / Apple App Store listings optional, generic (project name, no tenant branding) and documented as leaving account-linked records | ADR-041; ADR-022 |
 | No "latest" | No URL, tag or doc refers to a floating version (`latest`, `stable` symlinks, `:latest` image tags). Every download URL includes the version and the docs show the expected SHA-256 **and** how to verify the signature with a fingerprint published out of band. OCI references in docs and Helm/compose files use `@sha256:` digests. | INC-47; B-GL-05 (Docker `:latest`) |
-| Installer | No curl-piped-to-shell installers. The bootstrap is a signed `.deb` (`candor-archive-keyring` + `candor-updater`) whose SHA-256 and signing-key fingerprint are published on ≥2 channels; APT source uses `signed-by=/usr/share/keyrings/candor.gpg` and the keyring is **never** placed in `/etc/apt/trusted.gpg.d/`. The installer verifies TUF root v1 fingerprint against the value typed by the admin. | B-GL-41; INC-52 |
+| Installer | No curl-piped-to-shell installers. The bootstrap is a signed `.deb` (`candor-archive-keyring` + `candor-updater`) whose SHA-256 and signing-key fingerprint are published on ≥2 channels; APT source uses `signed-by=/usr/share/keyrings/candor.gpg` and the keyring is **never** placed in `/etc/apt/trusted.gpg.d/`. The installer verifies the TUF root v1 fingerprint against the value typed by the admin **and** against the root hash fetched over Tor from ≥ 2 independent monitor endpoints (33 §18.1), refusing on any mismatch; the bootstrap package hash is logged in the transparency log and witness-cosigned (RVW-A-16). | B-GL-41; INC-52; RVW-A-16 |
 | Checksums | No placeholder checksums in docs. A doc-lint job fails on all-zero/`<hash>` placeholders and verifies every hash in docs against the release manifest. | B-GL-05 |
 | Update privacy | Repositories keep no access logs (or logs with IP truncated to /16 and retained ≤ 7 days on clearnet mirrors; none on onion). Update clients send no instance identifiers (ADR-022). | ADR-022; INC-60 |
 | Same bits for all | No per-customer builds of trust-path code; the repository serves identical targets to every client. Transparency-log monitors check that each published target hash appears exactly once per version (ADR-022). | INC-14 |
@@ -268,7 +273,7 @@ The primary forge may be GitHub. The same rules apply if a self-hosted forge (Fo
 | No long-lived publish tokens | Registry publishing only via OIDC trusted publishing from the release workflow; token scanners check developer dotfiles on managed endpoints | INC-45 (REQ-H-45) |
 | Offboarding | Automatic revocation of forge, mirror, registry, builder and keyholder roles within 1 hour of a removal event; quarterly reconciliation of all publisher/admin lists | INC-47 (REQ-H-47) |
 | Maintainer admission | New maintainers with T0/T1 merge rights need a ≥6-month contribution history, sponsorship by 2 existing maintainers, and, for T0, an identity verified by 2 maintainers (pseudonymous contributors are welcome for review, but T0 merge rights require verified identity). Per 36. | INC-37; INC-40 |
-| Keyholder independence | TUF root/targets keyholders span ≥2 organizations; keyholder rotation on departure with a root ceremony within 30 days | INC-38; INC-48 |
+| Keyholder independence | TUF root, targets and delegated-role keyholders span ≥ 2 organizations and ≥ 2 jurisdictions (root ≥ 3 jurisdictions) such that no single organisation or jurisdiction can meet any threshold; builders likewise span ≥ 2 organisations and ≥ 2 jurisdictions (ADR-040); keyholder rotation on departure with a root ceremony within 30 days | INC-38; INC-48; RVW-A-16 |
 
 ## 11. Incident → requirement table
 
@@ -307,6 +312,8 @@ The primary forge may be GitHub. The same rules apply if a self-hosted forge (Fo
 | Scorecard | weekly | Regression |
 | Keyholder roster vs governance roster | monthly | Mismatch |
 | Community rebuilder attestations | per release | Missing or mismatching attestations published on release page |
+| Platform Manifest re-derivation (independent monitors re-derive package hashes from upstream snapshots/Tor Project repo) | per Platform Manifest release | Any hash not matching upstream; version below floor |
+| Emergency-release diff review (external monitors) | during every emergency cooling window (≥ 2 h) | Unreviewed or suspicious diff → veto (33 §9.3) |
 
 ## 13. Requirements
 
@@ -342,7 +349,7 @@ The primary forge may be GitHub. The same rules apply if a self-hosted forge (Fo
 | SCM-028 | Release workflow logs SHALL be private and secret masking SHALL be verified with a canary secret each release. | INC-44 | THR-024 | C-31 | TST: ST-009 masking canary |
 | SCM-029 | Release jobs SHALL NOT use caches written by PR workflows; artefacts passed between jobs SHALL be hash-verified. | INC-38 | THR-024 | C-31 | TST: ST-133 cache-key policy check |
 | SCM-030 | Every release artefact SHALL be built on a SLSA v1.2 Build L3 platform (isolated, ephemeral, non-forgeable provenance) in a hermetic two-phase (fetch/no-network build) process. | INC-38 (REQ-H-38); B-CR-46 | THR-024; THR-025 | C-31 | AUD: supply-chain review; TST: build phase network-deny test |
-| SCM-031 | At least two independent builders (different administrators, hosting, identity provider and mirror; no shared admin) SHALL build every release artefact, and signing SHALL be refused unless outputs are bit-identical. | INC-38; INC-48; ADR-022; B-SD-26 | THR-024; THR-025 | C-31; C-32 | TST: ST-131; SG-13 |
+| SCM-031 | At least two independent builders (different organisations, jurisdictions, administrators, hosting, identity provider and mirror; no shared admin) SHALL build every release artefact and derive every Platform Manifest, and signing SHALL be refused unless outputs are bit-identical. | INC-38; INC-48; ADR-022; ADR-040; B-SD-26; RVW-A-16 | THR-024; THR-025; THR-026 | C-31; C-32 | TST: ST-131; SG-13; INSP: builder organisation/jurisdiction register |
 | SCM-032 | All trust-path packages, the Desk payloads, the Source App APK payload and the Tier V web bundle SHALL be reproducible; a non-reproducible trust-path artefact SHALL block release. | B-SD-26; B-CR-43; B-CR-44 | THR-024; THR-007 | C-31; C-03; C-15; C-06 | TST: ST-131 |
 | SCM-033 | On any builder mismatch, diffoscope SHALL run automatically and its report SHALL be published with the incident record. | B-SD-26 | THR-024 | C-31 | TST: comparator lab test with injected byte |
 | SCM-034 | Build and release infrastructure SHALL be administrable only from managed, hardware-key-authenticated, device-attested release workstations. | INC-41 (REQ-H-41) | THR-024 | C-31; C-32 | TST: access attempt from unmanaged device rejected (quarterly); INSP |
@@ -353,17 +360,17 @@ The primary forge may be GitHub. The same rules apply if a self-hosted forge (Fo
 | SCM-039 | Build hosts SHALL NOT run third-party management or monitoring agents with broad network privileges beyond the documented hardening stack. | INC-38 (REQ-H-38) | THR-024 | C-31 | INSP: host inventory audit |
 | SCM-040 | Release metadata SHALL follow TUF with offline root 3-of-5 and targets 2-of-3 hybrid (Ed25519 + ML-DSA-65) keys, online snapshot/timestamp keys in HSMs, and expiries root 365 d, targets 90 d, snapshot 7 d, timestamp 1 d. | ADR-022; ADR-006; B-CR-45 | THR-025; THR-024 | C-32 | TST: ST-130 metadata conformance; AUD: ceremony audit |
 | SCM-041 | CI SHALL hold no release-signing keys; CI identities MAY sign provenance and SBOM attestations only. | INC-38; INC-48 | THR-024; THR-025 | C-31; C-32 | INSP: key inventory; TST: CI secret inventory scan |
-| SCM-042 | Release keyholders SHALL span ≥2 organizations and ≥3 jurisdictions for root; no person SHALL hold more than one key in a role; keyholder departure SHALL trigger rotation within 30 days. | ADR-022; B-CR-40 | THR-024; THR-026 | C-32 | INSP: keyholder roster; AUD: ceremony audit |
+| SCM-042 | Release keyholders SHALL span ≥ 2 organizations and ≥ 2 jurisdictions for every role (root: ≥ 3 jurisdictions) such that no single organisation or jurisdiction can meet any role's threshold; no person SHALL hold more than one key in a role; keyholder departure SHALL trigger rotation within 30 days. | ADR-022; ADR-040; B-CR-40; RVW-A-16 | THR-024; THR-026 | C-32 | INSP: keyholder roster; AUD: ceremony audit |
 | SCM-043 | Each artefact SHALL ship CycloneDX 1.6 (with CBOM) and SPDX 3.0 SBOMs generated by both builders, signed, logged and verified complete against embedded `cargo auditable` data. | R5 §C; B-GL-40 | THR-024 | C-31; C-32 | TST: SBOM completeness job; SG-14 |
 | SCM-044 | Released SBOMs SHALL be matched daily against advisory databases; new High/Critical matches SHALL be triaged within 24 h and either fixed or covered by a reviewed VEX statement. | B-GL-40; B-CR-50 | THR-024 | C-32 | TST: ST-010 daily job; INSP: VEX records |
-| SCM-045 | Releases SHALL be approved by the Release Manager, the Security Lead and one targets keyholder; trust-path major/minor releases SHALL observe a 72-hour public cooling window before signing, except emergency releases with 3 approvals and post-hoc review within 14 days. | R5 B.3 row 2; INC-48 | THR-025; THR-024 | C-32 | INSP: release tracker records; TST: signing tool enforces approvals |
+| SCM-045 | Releases SHALL be approved by the Release Manager, the Security Lead and one targets keyholder; trust-path major/minor releases SHALL observe a 72-hour public cooling window before signing; emergency releases SHALL observe a cooling window of ≥ 2 hours, carry targets signatures from ≥ 2 signers of ≥ 2 organisations, publish the source diff at log time, and receive a post-hoc review within 14 days. | R5 B.3 row 2; INC-48; ADR-040; RVW-A-16 | THR-025; THR-024 | C-32 | INSP: release tracker records; TST: signing tool refuses emergency signing < 2 h after log publication or with signers from one organisation |
 | SCM-046 | Release hashes SHALL be published on ≥2 independent channels (transparency log, signed announcement on site and onion mirror, independent forge mirror). | INC-48 (REQ-H-48); INC-52 | THR-025 | C-32; C-33; C-37 | TST: release checklist automation verifies presence on each channel |
 | SCM-047 | Each targets keyholder SHALL independently verify both builders' artefacts, provenance and SBOM with `candor-verify` on an offline machine before signing. | INC-38; INC-48 | THR-024; THR-025 | C-32 | INSP: ceremony log; AUD |
 | SCM-048 | Signed metadata and artefact hashes SHALL be logged in a witness-cosigned transparency log, and a monitor SHALL alert on any entry not matching the release tracker. | B-CR-42; R5 B.2; ADR-022 | THR-025; THR-007 | C-32; C-14 | TST: monitor lab test with rogue entry |
 | SCM-049 | Distribution servers and mirrors SHALL hold no signing keys and SHALL serve only static files deployed read-only by the release pipeline. | INC-49 (REQ-H-49); INC-52 | THR-025 | C-33 | TST: ST-130 (replaced repo content rejected); INSP |
 | SCM-050 | The repository SHALL serve identical trust-path artefacts to all clients; monitors SHALL verify at most one target hash per version and channel. | ADR-022; INC-14 | THR-025; THR-046 | C-32; C-33 | TST: log monitor uniqueness check |
 | SCM-051 | No download URL, documentation example, image reference or installer SHALL use floating versions ("latest", mutable tags); OCI references SHALL use digests. | INC-47; B-GL-05 | THR-024; THR-025 | C-33; C-37 | TST: doc-lint and manifest-lint |
-| SCM-052 | Installation SHALL NOT use curl-piped-to-shell; the bootstrap SHALL be a signed package with fingerprint published out of band; the APT keyring SHALL be scoped via `signed-by` and never placed in `trusted.gpg.d`. | B-GL-41; INC-52 (REQ-H-52) | THR-024; THR-025 | C-33; C-19 | TST: installer integration test; ST-132 |
+| SCM-052 | Installation SHALL NOT use curl-piped-to-shell; the bootstrap SHALL be a signed package with fingerprint published out of band, logged and witness-cosigned; the installer SHALL verify the TUF root against the admin-entered fingerprint and ≥ 2 independent monitor endpoints over Tor; the APT keyring SHALL be scoped via `signed-by` and never placed in `trusted.gpg.d`. | B-GL-41; INC-52 (REQ-H-52); RVW-A-16 | THR-024; THR-025 | C-33; C-19 | TST: installer integration test with one monitor returning a different root → refusal; ST-132 |
 | SCM-053 | Documentation SHALL contain no placeholder checksums; a doc-lint job SHALL verify every published hash against the release manifest. | B-GL-05 | THR-025 | C-37 | TST: doc-lint |
 | SCM-054 | Package repositories SHALL keep no access logs on onion endpoints and, on clearnet mirrors, at most /16-truncated IPs retained ≤7 days; update requests SHALL carry no instance identifiers. | ADR-022; INC-60 | THR-036; THR-001 | C-33 | TST: AT-063 capture of update requests; INSP: mirror config |
 | SCM-055 | Secret scanning SHALL run on every PR diff, weekly on full history, and on build logs, artefacts and image layers of every release. | INC-44; INC-58 | THR-024; THR-013 | C-30; C-31 | TST: ST-009; SG-15 |
@@ -376,6 +383,12 @@ The primary forge may be GitHub. The same rules apply if a self-hosted forge (Fo
 | SCM-062 | Transitive dependency counts and `unsafe` totals SHALL be reported per release and increases in T0/T1 SHALL require Security Lead approval. | INC-37; ADR-019 | THR-024 | C-31 | TST: geiger/count diff job |
 | SCM-063 | Branch protection, forge settings and CI policies SHALL be defined as code and compared nightly with the live configuration; drift SHALL alert and block release. | INC-44; B-CR-46 | THR-024 | C-30; C-31 | TST: `bp-verify` drift test |
 | SCM-064 | Toolchains used by Builder A and Builder B SHALL be obtained via independent download paths and verified against upstream-signed manifests. | Knowledge (unverified): trusting-trust class | THR-024 | C-31 | INSP: builder configuration; AUD |
+| SCM-065 | Each release SHALL include a TUF-signed Platform Manifest (per profile and host role: package names, exact versions and hashes of OS, kernel, tor, vanguards and PostgreSQL packages; Debian snapshot timestamp; Tor Project key; Roughtime keys; security floors) derived independently by both builders and logged. | ADR-040; RVW-A-12 | THR-024; THR-025; THR-005 | C-31; C-32 | TST: manifest derivation diff between builders; release gate refuses without manifest |
+| SCM-066 | Z-INTAKE and Z-CORE platform packages SHALL be obtainable only from the pinned snapshot mirror and the Tor Project proxy of §5.5 (tor pinned by key and exact version); no upstream APT source SHALL be configured on those hosts. | ADR-040; RVW-A-12 | THR-024; THR-005 | C-33; C-39 | TST: host APT source scan; INSP: mirror config |
+| SCM-067 | Platform-package security fixes SHALL be released as emergency Platform Manifest updates within 72 h of upstream publication, with diff review, ≥ 2 h cooling and ≥ 2 signers from ≥ 2 organisations. | ADR-040; INC-29; RVW-A-12 | THR-005; THR-024 | C-32 | DEMO: DSA/tor-advisory drill; INSP: timeline records |
+| SCM-068 | Hosts SHALL boot distribution-signed shim and kernels listed in the Platform Manifest; no site-held per-kernel signing key SHALL be required for security updates. | ADR-040; RVW-C-17 | THR-024; THR-042 | C-39; C-32 | INSP: boot chain review (17); TST: unattended kernel update boots |
+| SCM-069 | Source App artefacts SHALL be published byte-identically on the project onion service and on ≥ 2 independent mirrors of other organisations; no per-tenant or tenant-branded build SHALL exist; app-store listings, if any, SHALL be generic and documented as leaving account-linked records. | ADR-041; ADR-022; RVW-A-14; RVW-B-16 | THR-002; THR-048; THR-025 | C-33; C-03 | TST: hash comparison across mirrors; INSP: store listings |
+| SCM-070 | The release digests of all static source-UI assets, templates and the CSP header string SHALL be published with each release and logged, for External Watchers (ADR-035(1)). | ADR-035(1); RVW-A-01 | THR-007; THR-026 | C-31; C-32 | TST: digest list generated by both builders and matches served assets in staging |
 
 ## 14. Residual risks and limitations
 
@@ -386,15 +399,19 @@ The primary forge may be GitHub. The same rules apply if a self-hosted forge (Fo
 - **Forge provider.** If GitHub (or another hosted forge) is compromised or compelled, the independent mirror detects history rewrites but not a malicious change that goes through normal review UI manipulation (for example forged approvals in the forge database). Mitigation is partial: review evidence is cross-checked with signed commits, and Source VSAs are logged.
 - **Community rebuilders are optional.** If none participate, the two-builder guarantee rests on the two contracted operators.
 - **Some control values** (14-day cooling, Scorecard 8.0) are engineering judgements.
+- **Platform packages** (Debian, kernel, tor, PostgreSQL) now pass through pinning, independent derivation, TUF signing, logging and delay (ADR-040), but an upstream-at-source backdoor (xz-class) in them is faithfully pinned and logged, not detected; Debian and Tor Project signing remain trusted roots, now with visibility and delay (RVW-A-12).
+- **Cross-jurisdiction coercion** (treaty-based or coordinated) and reviewed-but-malicious code are not prevented by the ≥ 2-organisation/≥ 2-jurisdiction rule; the ≥ 2 h emergency cooling window gives monitors little time to review a diff (RVW-A-16). Transparency makes such releases visible after the fact.
+- **App stores:** iOS users have no store-independent option; an App Store install is tied to an Apple account (ADR-041, RVW-A-14).
 
 ## 15. Open issues
 
 1. Final SLSA Source-track attestation predicate (VSA/source provenance) format and tooling maturity (2026). Fix a predicate type in 33.
-2. Selection and contract for the Builder B operator. Candidates: a partner NGO, or a separate legal entity with distinct administrators.
+2. Selection and contract for the Builder B operator in a different jurisdiction from Builder A (ADR-040). Candidates: a partner NGO, or a separate legal entity with distinct administrators.
 3. Sigsum vs Rekor v2 as the primary transparency log, and the witness set (coordinate with C-14 key transparency in 04/33).
 4. Whether apksigcopier-style APK reproducibility is sufficient for Play-distributed builds. F-Droid reproducible builds are the preferred distribution.
 5. Whether ML-DSA-65 signing is supported by available hardware tokens for keyholders. Fallback: software ML-DSA on the offline ceremony machine, with Ed25519 on hardware tokens.
 6. OSS-Fuzz acceptance for `candor-core` (affects ST-056 scale).
+7. Independent mirror operators for Source App distribution (ADR-041) and Platform Manifest re-derivation monitors (36).
 
 ### Open Issues for ADR revision
 - None blocking. Note for ADR-022: this document adds online snapshot/timestamp keys (standard TUF) and metadata expiries. ADR-022 fixes only the root/targets thresholds. It does not conflict, but the expiries should be referenced from ADR-022 so that 33 and 28 cannot diverge.

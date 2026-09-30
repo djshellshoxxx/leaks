@@ -1,6 +1,6 @@
 # 06 — System Architecture
 
-Status: Draft v1.0 · Edition applicability: both (CE and EE; EE-only elements marked **EE**) · Owner: Architecture team
+Status: Draft v1.1 (revision round 2: ADR-034..046) · Edition applicability: both (CE and EE; EE-only elements marked **EE**) · Owner: Architecture team
 
 ## 1. Purpose and scope
 
@@ -27,7 +27,7 @@ Out of scope, and specified in the named documents:
 
 | Depends on | For |
 |---|---|
-| DECISIONS.md §4 and ADR-001…029 | Component IDs, zones and all baseline decisions (binding) |
+| DECISIONS.md §4 and ADR-001…046 | Component IDs, zones and all baseline decisions (binding). ADR-034..046 supersede conflicting earlier text in this document. |
 | 02-THREAT-MODEL.md | THR-/ADV- definitions |
 | 03-PRIVACY-ANONYMITY.md | Metadata budget; this document implements its data-minimization at the architecture level |
 | 04-CRYPTOGRAPHY.md | Key hierarchy (ADR-006/008), envelope and STREAM formats, source KDF (ADR-005) |
@@ -48,7 +48,7 @@ Out of scope, and specified in the named documents:
 | P3 | **Pull, not push, toward higher trust.** Higher-trust zones initiate connections to lower-trust zones: Z-CORE→Z-INTAKE, Z-CORE→Z-BAK, agents→Z-SOC collector. The only listeners on Z-CORE are the recipient (Desk) and admin endpoints. | ADR-009; B-GL-22 (CoverDrop pull-only CoverNode) |
 | P4 | **Identity from transport, never from payload.** Every inter-service call derives the caller's identity from mTLS peer certificate, SO_PEERCRED or onion client-auth key. | INC-103, INC-105 |
 | P5 | **Deny by default.** Every route, IPC verb, firewall rule and DB role starts denied. | ADR-029; INC-114 |
-| P6 | **Coarse time for source events.** Source events carry a day number and a batch number, never an exact time. | ADR-010 |
+| P6 | **Coarse time for source events; fixed schedules for everything they trigger.** Source events carry a day number and a batch number, never an exact time. Imports, reply pushes, staff notifications and directory publications run on fixed schedules, never on arrival. | ADR-010; ADR-036(7); ADR-038 |
 | P7 | **No parsing of evidence on servers.** Attachments are opaque ciphertext until they are inside C-15/C-17. | ADR-012 |
 | P8 | **Admin ≠ content.** No administrative role or host holds a key that decrypts case content. | ADR-015 |
 | P9 | **Secrets have declared homes.** Every secret has a declared host set, verified post-deploy by the Secret Placement Manifest. | ADR-028; INC-106 |
@@ -62,8 +62,8 @@ Out of scope, and specified in the named documents:
 |---|---|---|---|---|
 | Z-SRC | Source-trusted, platform-untrusted | C-01, C-02, C-03 | — | Z-NET only |
 | Z-NET | Untrusted transport | C-04 | Z-SRC, Z-INTAKE, Z-RCP (optional), Z-ADM (optional) | — |
-| Z-INTAKE | Low (assumed attackable from the Internet via onion) | C-05, C-06, C-07, C-08, plus the intake half of the C-11 library | Z-NET (onion only); Z-CORE relay (C-09) on the relay link; Z-ADM (SSH, management link) | Z-NET (Tor), Z-SOC collector, Z-SOC time server, Z-SUPPLY mirror (via Tor) |
-| Z-CORE | High | C-09, C-10, C-12, C-13, C-14, C-21, C-22, C-23, C-24, C-29 (EE) | Z-RCP (Desk API), Z-ADM (Admin API, SSH) | Z-INTAKE (relay link), Z-BAK, Z-SOC, Z-SUPPLY mirror, notification egress, Z-VENDOR fleet (EE), C-40 targets (EE) |
+| Z-INTAKE | Low (assumed attackable from the Internet via onion) | C-05, C-06, C-07, C-08, plus the intake half of the C-11 library | Z-NET (onion only); Z-CORE relay (C-09) on the relay link; Z-ADM (SSH, management link) | Z-NET (Tor, including the project onion update mirror and Roughtime over Tor), Z-SOC collector (dedicated monitoring interface; collector host has no clearnet egress). No NTP from any Candor host (ADR-036(6)). |
+| Z-CORE | High | C-09, C-10, C-12, C-13, C-14, C-21, C-22, C-23, C-24, C-29 (EE) | Z-RCP (Desk API), Z-ADM (Admin API, SSH) | Z-INTAKE (relay link), Z-BAK, Z-SOC, Z-SUPPLY mirror (egress-restricted HTTPS, ADR-046(3)), notification egress, Z-VENDOR fleet (EE), C-40 targets (EE), witnesses |
 | Z-RCP | High (holds private keys) | C-15, C-16 | — | Z-CORE Desk API; Z-VIEW via local IPC only |
 | Z-VIEW | Hostile content, no trust | C-17, C-18 | Z-RCP local IPC only (vsock, qrexec) | nothing (no network) |
 | Z-ADM | High for configuration, zero for content | C-19, C-20, C-28 (offline) | — | Z-CORE Admin API, host SSH (management link) |
@@ -78,9 +78,10 @@ Out of scope, and specified in the named documents:
 
 | Host role | Components | OS users (see 07-BACKEND.md §4) | Listeners |
 |---|---|---|---|
-| `intake-gw` | C-05 tor, C-06 `candor-web`, C-07 `candor-sealer`, C-08 `candor-intake-store` plus PostgreSQL (intake) and blob directory; C-25 agent | `debian-tor`, `candor-web`, `candor-sealer`, `candor-istore`, `postgres`, `candor-health` | Onion service → Unix socket `/run/candor/web/http.sock`; relay export on TCP 7443 bound **only** to the relay-link interface; sshd on the management interface only |
+| `intake-gw` | C-05 tor, C-06 `candor-web`, C-07 `candor-sealer`, C-08 `candor-intake-store` plus PostgreSQL (intake), blob directory and the tmpfs staging area `/run/candor/staging` (ADR-034); C-25 agent | `debian-tor`, `candor-web`, `candor-sealer`, `candor-istore`, `postgres`, `candor-health` | Onion service → Unix socket `/run/candor/web/http.sock`; relay export on TCP 7443 bound **only** to the relay-link interface; sshd on the management interface only |
 | `core` | C-09 `candor-relay`, C-10+C-22 `candor-case`, Erasure Key Vault `candor-ekv` (part of C-12 per ADR-033), C-21 `candor-auth`, C-14 `candor-keydir`, C-23 `candor-notify`, C-24 `candor-audit`, `candor-worker`, C-12 PostgreSQL, C-13 blob store (local or S3 on-prem), C-25 agent, C-27 backup agent, core tor instance (optional, for the Desk/Admin onion) | one OS user per service | Desk API (Unix socket behind the core onion **or** TCP 8443 mTLS on the recipient VLAN); Admin API (Unix socket behind a separate onion **or** TCP 9443 mTLS on the management VLAN); sshd on the management interface |
-| `monitor` | C-25 collector, time server (chrony serving NTP to Z-INTAKE), alert sender; C-26 (EE) | `candor-monitor`, `chrony` | TCP 8514 mTLS (collector); UDP 123 (NTP, intake and core subnets only) |
+| `monitor` | C-25 collector; C-26 (EE). The collector host has **no clearnet egress** (RVW-A-23). | `candor-monitor` | TCP 8514 mTLS (collector) on the dedicated monitoring interface |
+| `alert-relay` | Alert sender (mail/webhook) reading from the collector; separate host or VM with no route from intake-gw | `candor-alert` | none (outbound only) |
 | `backup` | C-27 store (append-only object store or SFTP) | store-specific | TCP 443 or 22 from core only |
 | Recipient workstation | C-15 Desk, C-16 OS, C-17 viewer (DispVM or microVM), C-29 token | user | none |
 | Admin workstation | C-19 (Desk in admin mode plus `candorctl`), C-20 | admin | none |

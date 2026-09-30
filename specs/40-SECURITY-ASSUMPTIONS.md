@@ -1,18 +1,18 @@
 # 40 — Security Assumptions Register
-Status: Draft v1.0 · Edition applicability: both (CE / EE; edition-specific notes inline) · Owner: Security Architecture
+Status: Draft v1.1 (revision round 2: ADR-034..046, REVIEW-A/B/C; disposition in `process/DISP-G1.md`) · Edition applicability: both (CE / EE; edition-specific notes inline) · Owner: Security Architecture
 
 ## 1. Purpose and scope
 
 Every Candor protection holds only under stated assumptions (DECISIONS.md §0). This document:
-1. Enumerates every security assumption as `ASM-001..ASM-048`, each with statement, dependent protections, consequence of violation, how it is monitored or verified, owner, verifiability class and related threats.
-2. Defines the protection catalogue `P-01..P-30` and the table **Protection → assumptions required** (§6), which other specifications cite when they state "protects X from Y under assumptions A".
-3. Specifies requirements (`ASM-101..ASM-124`) that make assumptions monitored, disclosed and change-controlled.
+1. Enumerates every security assumption as `ASM-001..ASM-061`, each with statement, dependent protections, consequence of violation, how it is monitored or verified, owner, verifiability class and related threats.
+2. Defines the protection catalogue `P-01..P-34` and the table **Protection → assumptions required** (§6), which other specifications cite when they state "protects X from Y under assumptions A".
+3. Specifies requirements (`ASM-101..ASM-137`) that make assumptions monitored, disclosed and change-controlled.
 
 Out of scope: threat enumeration (`02-THREAT-MODEL.md`), control design (owning documents). This document states what must be true, not how each control works.
 
 ## 2. Context and dependencies
 
-- Binding: `DECISIONS.md` (ADR-001..029, THR-001..048, C-01..C-40).
+- Binding: `DECISIONS.md` (ADR-001..046 — ADR-034..046 are binding revision ADRs — THR-001..048, C-01..C-40); threat IDs THR-100..142 from `02-THREAT-MODEL.md`.
 - Evidence: `00-RESEARCH.md` (findings F-nnn, incidents INC-nn).
 - Consumers: all specs that make protection statements; in particular `02-THREAT-MODEL.md`, `03-PRIVACY-ANONYMITY.md`, `04-CRYPTOGRAPHY.md`, `05-SOURCE-OPSEC.md`, `06-SYSTEM-ARCHITECTURE.md`, `10-FILE-EVIDENCE-PIPELINE.md`, `16-TOR-I2P.md`, `17-INFRASTRUCTURE.md`, `20-LOGGING-AUDITING.md`, `28-SUPPLY-CHAIN.md`, `31-INCIDENT-RESPONSE.md`, `33-RELEASE-UPDATE-SECURITY.md`, `37-SECURITY-AUDIT-PLAN.md`, `11-FRONTEND-SOURCE.md` (source-facing disclosure).
 - Self-test agent C-25 implements the automated checks in §8.
@@ -21,7 +21,7 @@ Out of scope: threat enumeration (`02-THREAT-MODEL.md`), control design (owning 
 
 | Item | Rule |
 |---|---|
-| Assumption IDs | `ASM-001..ASM-099` (this revision uses ASM-001..ASM-048). Never reused; retired entries marked RETIRED. |
+| Assumption IDs | `ASM-001..ASM-099` (this revision uses ASM-001..ASM-061). Never reused; retired entries marked RETIRED. `02` §3 maps its `[A:…]` tags to these IDs. |
 | Requirement IDs | `ASM-101..ASM-199` (requirements *about* assumptions), in the DECISIONS.md §1 table format (§9). |
 | Protection IDs | `P-01..P-99` (local to this document; cited by other specs as "40 P-nn"). |
 | Verifiability class | **C** = continuously monitored by automation (C-25/C-15/C-03); **P** = periodically verified (drill, audit, review; interval stated); **A** = verifiable only by independent audit/analysis; **N** = not verifiable by Candor — documented residual, disclosed to affected party. |
@@ -98,7 +98,7 @@ Out of scope: threat enumeration (`02-THREAT-MODEL.md`), control design (owning 
 - Owner: SUX, SRC · Class: N · Threats: THR-002, THR-010, THR-011.
 
 **ASM-010 — Source passphrase confidential and uncoerced.**
-- Statement: The Source Passphrase (ADR-005, ≈129 bits) is known only to the source, is not stored in identifiable places, and the source is not coerced into revealing it.
+- Statement: The Source Passphrase (ADR-005, ≈129 bits; KDF Argon2id m=64 MiB, t=3, p=1, FIPS PBKDF2-HMAC-SHA-512 210,000 iterations — security rests on entropy, stretching is defence in depth, ADR-046(7)) is known only to the source, is never stored by Candor (ADR-034), is not stored by the source in identifiable places, and the source is not coerced into revealing it. For Tier W it is also assumed that the intake was not live-compromised at any login (ASM-013), since each Tier W login reveals it to the server.
 - Protections: P-03, P-04 (replies), P-05 (replies).
 - If violated: Holder can read replies and impersonate the source in that thread (THR-034); other threads with other passphrases remain unlinked.
 - Monitoring / verification: Not observable; entropy verified by unit test (CSPRNG-generated, 10 EFF words). Evidence: INC-05, INC-32; F-020, F-023.
@@ -123,8 +123,8 @@ Out of scope: threat enumeration (`02-THREAT-MODEL.md`), control design (owning 
 **ASM-013 — Intake not under live adversary control during a Tier W session.**
 - Statement: During a Tier W submission or login, C-06/C-07 and their host are not under live adversary control.
 - Protections: P-05.
-- If violated: Plaintext of Tier W submissions and replies rendered during the compromise window are exposed (ADR-004 honest statement). Earlier sealed submissions, whose content keys are sealed to epoch keys held only by recipients, remain protected.
-- Monitoring / verification: Deployment attestation (ASM-116), host integrity monitoring (17), no-inbound segmentation (ASM-016). Cannot prove absence of compromise. Evidence: F-004, F-005; INC-27, INC-28.
+- If violated: Plaintext and drafts of Tier W submissions during the window are exposed; a Tier W login during the window exposes the passphrase and thereby all replies stored for that mailbox, the linkage of the source's reports and the source's COI preferences, and allows impersonation; return-visit times can be logged (ADR-035(5); RVW-A-03, RVW-A-10). Earlier sealed submissions, whose content keys are sealed to epoch keys held only by recipients, remain protected.
+- Monitoring / verification: Operator-run checks (ASM-116, host integrity monitoring in 17, no-inbound segmentation ASM-016) detect accidental divergence only and are useless against a compelled operator. Independent: External Watchers detect untargeted changes to static assets, CSP headers and the signed running manifest (ASM-050, ASM-126); optional confidential-VM attestation (ASM-052); the Operator Statement is a signal (ASM-056). **No specified control detects a careful targeted or memory-only modification** (RVW-A-01). Evidence: F-004, F-005; INC-27, INC-28.
 - Owner: INF, PLT · Class: P/A · Threats: THR-014.
 
 **ASM-014 — Process isolation of the Intake Sealer.**
@@ -168,8 +168,8 @@ Out of scope: threat enumeration (`02-THREAT-MODEL.md`), control design (owning 
 - Statement: C-15/C-16 are not controlled by an adversary (malware or local insider with OS-level access) while Candor Desk is unlocked.
 - Protections: P-08, P-10, P-11, P-15, P-24.
 - If violated: Adversary obtains that member's unwrapped case keys and plaintext for cases that member can access (bounded by ACL, ADR-008).
-- Monitoring / verification: Desk startup posture checks (OS patch level, disk encryption, screen lock) reported to SECURITY log; hardware-bound unlock limits offline theft; cannot detect a competent live compromise. Evidence: F-094; INC-41.
-- Owner: RCP, OPR · Class: P · Threats: THR-013, THR-019, THR-022.
+- Monitoring / verification: Desk startup posture checks (OS patch level, disk encryption, screen lock) reported to SECURITY log; Desk verifies its own binary against the transparency log (non-authoritative); hardware-bound unlock limits offline theft; cannot detect a competent live compromise, and cannot hold against the endpoint's own administrator — where the organisation administers the endpoint see ASM-053. Evidence: F-094; INC-41; RVW-C-01.
+- Owner: RCP, OPR · Class: P · Threats: THR-013, THR-019, THR-022, THR-126.
 
 **ASM-020 — Evidence containment holds.**
 - Statement: Every decryption-for-viewing of an attachment happens in a fresh C-17 sandbox with no network route, no key material, no persistent writable storage, and the sandbox boundary is not escaped by the file.
@@ -186,9 +186,9 @@ Out of scope: threat enumeration (`02-THREAT-MODEL.md`), control design (owning 
 - Owner: OPR · Class: P · Threats: THR-041.
 
 **ASM-022 — Case key availability.**
-- Statement: For every active case at least one authorised member retains a working device and unlock factor (default: keys wrapped to ≥2 members; no escrow, ADR-013).
+- Statement: For every active case at least one authorised member retains a working device and unlock factor (default: `min_recipients` 2 per case and each member enrols ≥ 2 hardware authenticators, ADR-044(2); SCIM/HR/IdP changes only suspend, wrap deletion needs dual control, 7-day cooling-off and OVERSIGHT notice, ADR-044(1); no escrow by default in CE/EE, Recovery Quorum enabled by default in GOV, ADR-044(3)); the Erasure Key Vault needed to open cases is available (replicated to DR, ADR-044(4)).
 - Protections: availability of P-04..P-07 protected data.
-- If violated: Case content becomes permanently inaccessible (by design, not a confidentiality failure).
+- If violated: Case content becomes permanently inaccessible (by design, not a confidentiality failure). An organisation can engineer this to suppress a report (THR-128).
 - Monitoring / verification: C-10 warns when a case has <2 members with active keys (ASM-122). Evidence: F-036, F-037.
 - Owner: OPR, PLT · Class: C · Threats: THR-042.
 
@@ -223,7 +223,7 @@ Out of scope: threat enumeration (`02-THREAT-MODEL.md`), control design (owning 
 - Owner: CRY · Class: C (model CI) / A · Threats: THR-012.
 
 **ASM-027 — Key erasure is effective.**
-- Statement: When an epoch private key, case key wrapping or object key is destroyed, no recoverable copy remains: private key material is never written to swap, core dumps, logs, backups or VM snapshots, and all wrappings are enumerated and destroyed.
+- Statement: When an epoch private key, case key wrapping, Erasure Key or object key is destroyed, no recoverable copy remains: private key material is never written to swap, core dumps, logs, backups or VM snapshots, all wrappings are enumerated and destroyed, and the Erasure Key Vault is absent from infrastructure-level backups (ASM-054).
 - Protections: P-07, P-18.
 - If violated: Forward secrecy of intake and crypto-erasure deletion fail silently.
 - Monitoring / verification: Key-inventory reconciliation after destruction (signed deletion receipt, 35); backup-content inventory test (restore without member keys yields nothing, INC-55); swap/core checks (ASM-118). Evidence: F-096, F-097; B-CR-33.
@@ -267,11 +267,11 @@ Out of scope: threat enumeration (`02-THREAT-MODEL.md`), control design (owning 
 - Owner: INF · Class: C · Threats: THR-044.
 
 **ASM-033 — Channel membership signing keys not jointly compromised.**
-- Statement: Changes to channel membership and to published recipient/channel keys in C-14 are signed by the Channel Identity Key or existing members, and the adversary does not control enough member signing capability to authorise a hidden member.
+- Statement: Changes to channel membership and to published recipient/channel keys in C-14 are signed by the Channel Identity Key, which is held only by the channel's Triage Set and OVERSIGHT (ADR-036(1)); additions, role-label changes and COI-policy loosening need dual approval with ≥ 1 independent approver and a 72 h (GOV/HIGH 7 d) time lock with content-free notice (ADR-036(2)); and the adversary does not control enough of these parties to authorise a hidden member.
 - Protections: P-07, P-10, P-12.
 - If violated: A hidden recipient (Anom class, THR-046) can be added and receive future submissions.
 - Monitoring / verification: Clients verify signatures and show membership changes; key directory is transparency-logged (ASM-036, ASM-111). Evidence: INC-14, INC-62, INC-67; F-120.
-- Owner: CRY, RCP · Class: C · Threats: THR-046.
+- Owner: CRY, RCP · Class: C · Threats: THR-046, THR-131.
 
 ### 4.7 Supply chain and release (Z-SUPPLY)
 
@@ -290,7 +290,7 @@ Out of scope: threat enumeration (`02-THREAT-MODEL.md`), control design (owning 
 - Owner: REL, GOV · Class: P · Threats: THR-024, THR-025, THR-026.
 
 **ASM-036 — At least one honest monitor; clients check log proofs.**
-- Statement: At least one independent, honest monitor checks the release and key-directory transparency logs for consistency and unexpected entries; witnesses cosign checkpoints; clients (C-03, C-15, update agents) refuse artifacts and keys without valid inclusion proofs and cosigned checkpoints.
+- Statement: At least one independent, honest monitor checks the release and key-directory transparency logs for consistency and unexpected entries; witnesses cosign checkpoints (≥ 2 external witnesses, ≥ 1 outside the operating organisation, mandatory in EE/GOV/MANAGED — ASM-051); clients (C-03, C-15, update agents) refuse artifacts and keys without valid inclusion proofs and cosigned checkpoints.
 - Protections: P-12, P-13, P-14, P-09.
 - If violated: Split views or targeted entries go undetected; targeted updates or key substitution become possible.
 - Monitoring / verification: Vendor-run monitor + ≥1 independent monitor; witness cosignature quorum enforced in clients (ASM-110, ASM-111). Evidence: F-108; B-CR-42; INC-67.
@@ -327,7 +327,7 @@ Out of scope: threat enumeration (`02-THREAT-MODEL.md`), control design (owning 
 ### 4.8 Time
 
 **ASM-041 — Clocks within tolerance.**
-- Statement: Server clocks (Z-INTAKE, Z-CORE, Z-SUPPLY) are within ±5 minutes of UTC using authenticated time (NTS or ≥3 independent sources with sanity checks); client clocks are within ±24 h for TUF metadata expiry.
+- Statement: Server clocks (Z-INTAKE, Z-CORE, Z-SUPPLY) are within ±5 minutes of UTC using authenticated time (NTS or ≥3 independent sources with sanity checks); the intake's time is not taken from Z-CORE alone but floored by the signed Tor consensus `valid-after` plus Roughtime (ADR-036(6), ASM-055); client clocks are within ±24 h for TUF metadata expiry.
 - Protections: P-07 (epoch schedule), P-13 (TUF expiry/freeze), P-17 (log timestamps), P-19 (day boundaries), P-24 (TOTP where used), P-27 (SLA clocks).
 - If violated: Epoch keys used past their window or destroyed early; stale metadata accepted or valid updates rejected; SLA deadlines miscomputed (THR-043).
 - Monitoring / verification: C-25 clock-offset check every 10 min (ASM-103). Evidence: THR-043.
@@ -343,11 +343,11 @@ Out of scope: threat enumeration (`02-THREAT-MODEL.md`), control design (owning 
 - Owner: GOV · Class: P · Threats: THR-026.
 
 **ASM-043 — Operator independence where the organisation is the adversary.**
-- Statement: For deployments where the reported-on organisation (or its senior staff) is a plausible adversary, either the operator is independent of that organisation or the organisation's administrators hold no case keys and cannot deploy modified trust-path code undetected.
+- Statement: For deployments where the reported-on organisation (or its senior staff) is a plausible adversary, either the operator is independent of that organisation, or (a) the organisation's administrators hold no case keys and cannot deploy modified trust-path code without it becoming visible to External Watchers (untargeted) — **and** (b) the organisation does not administer the endpoints of the channel's Triage Set (ASM-053), (c) independent roles required by ADR-035(4), ADR-036(2), ADR-037, ADR-045 are not captured (ASM-057, ASM-058), and (d) its infrastructure backups exclude the Erasure Key Vault (ASM-054). v1.0 read this as server attestation only (RVW-C-01).
 - Protections: P-09, P-10, P-11.
-- If violated: The organisation can modify intake code (Tier W plaintext) or surveil access patterns (INC-22).
-- Monitoring / verification: Deployment attestation vs transparency log reported to Desk (ASM-116); deployment profile guidance (18, 21). Evidence: F-038; INC-22.
-- Owner: OPR, GOV · Class: C (attestation) / P · Threats: THR-020, THR-018.
+- If violated: The organisation can modify intake code (Tier W plaintext), read recipients' endpoints, re-roster channels, suppress reports by key loss or undo deletion (INC-22; THR-126..THR-131).
+- Monitoring / verification: External Watchers (ASM-126); custody status (ASM-129); organisation-as-adversary review (`02` TM-017); deployment profile guidance (18, 21). ASM-116 is operator-run and detects accidental divergence only. Evidence: F-038; INC-22; RVW-C-01.
+- Owner: OPR, GOV · Class: P / N · Threats: THR-020, THR-018, THR-126, THR-128, THR-131.
 
 **ASM-044 — Administrators trusted for availability, not confidentiality.**
 - Statement: System administrators may delete data or deny service, but hold no case keys (ADR-015) and cannot alter trust-path code undetected (ASM-036, ASM-116).
@@ -364,14 +364,14 @@ Out of scope: threat enumeration (`02-THREAT-MODEL.md`), control design (owning 
 - Owner: GOV, OPR · Class: P · Threats: THR-018, THR-027.
 
 **ASM-046 — Notification channels observed only as coarse timing.**
-- Statement: Third parties carrying staff notifications (email, Teams, Matrix) learn only that an hourly digest was sent to a staff address; this coarse timing does not identify sources.
+- Statement: Third parties carrying staff notifications (email, Teams, Matrix) learn only that a content-free daily digest is sent at a fixed time every day to each subscribed staff address, whether or not anything is pending (ADR-038(2)); they learn the subscriber list, not when reports arrive. (Amended r2: the v1.0 hourly event-driven digest revealed the existence of events per hour — RVW-A-19, RVW-B-05, RVW-C-02.)
 - Protections: P-20, P-19.
-- If violated: Very low-volume instances could leak "a submission arrived today" to email providers or the reported-on organisation's mail system.
-- Monitoring / verification: Notification timing test (fixed cadence regardless of submissions); configuration option to disable notifications. Evidence: INC-25, INC-57; F-068.
-- Owner: PLT · Class: C (test) · Threats: THR-028.
+- If violated (schedule becomes event-driven): mail providers and the reported-on organisation's mail system learn when reports arrive and in which channel.
+- Monitoring / verification: Notification timing test (constant cadence and addressee set regardless of submissions, `03` META-017); HIGH default disabled. Staff reactions remain observable (THR-129) and are outside this assumption. Evidence: INC-25, INC-57; F-068.
+- Owner: PLT · Class: C (test) · Threats: THR-028, THR-129.
 
 **ASM-047 — Backup operators do not hold member unlock factors.**
-- Statement: Backups (C-27) contain only ciphertext and keys wrapped to member/quorum keys; persons with backup access do not also hold member devices + unlock factors or ≥k quorum shares.
+- Statement: Backups (C-27) contain only ciphertext and keys wrapped to member/quorum keys; persons with backup access (including hypervisor/SAN/enterprise backup teams, ASM-054) do not also hold member devices + unlock factors or ≥k quorum shares.
 - Protections: P-06, P-18.
 - If violated: Backups become decryptable and outlive crypto-erasure.
 - Monitoring / verification: Backup-content inventory test (restore without member keys yields nothing, INC-55); role-conflict checks (ASM-045). Evidence: F-095.
@@ -383,6 +383,99 @@ Out of scope: threat enumeration (`02-THREAT-MODEL.md`), control design (owning 
 - If violated: Log truncation or rewriting after the last honestly witnessed checkpoint goes undetected.
 - Monitoring / verification: Periodic verification of hash chain against witnessed checkpoints (daily, C-25). Evidence: INC-68; REQ-H-68.
 - Owner: SOC · Class: C · Threats: THR-037, THR-038.
+
+### 4.10 Assumptions added in revision round 2 (ADR-033(1), ADR-035..046; REVIEW-A/B/C)
+
+**ASM-049 — KEM key privacy of anonymous recipient slots.**
+- Statement: The KEMs used in the 16 fixed HPKE recipient slots (ADR-033(1)) are key-private (IND-CCA anonymity): a ciphertext and encapsulation reveal nothing about which public key they were produced for. This covers X-Wing (X25519 + ML-KEM-768, CANDOR-STD-1) and the FIPS suite's MLKEM1024-P384 hybrid (CANDOR-FIPS-1); key privacy of each component must carry over to the hybrid combiner as used in `04`.
+- Protections: P-10 (servers and DB thieves cannot tell who was excluded before import), P-33.
+- If violated: Anyone holding the envelope and the Key Directory can compute which members were wrapped, and hence which role labels were excluded (a strong hint at the accused, THR-133). Content confidentiality is unaffected. After import the recipient set is visible to case members anyway (RVW-A-18).
+- Monitoring / verification: Cryptographic review at each release and before 1.0 (ASM-125): cite a key-privacy proof or analysis for each KEM and for the combiner; formal model property "recipient-set anonymity" in the Tamarin/ProVerif models (ASM-123); FIPS suite may use pure ML-KEM-1024 slots if the hybrid's key privacy cannot be established. Evidence: ADR-033(1); RVW-C-15; RVW-B-30. Knowledge (unverified): key privacy of ML-KEM and of X25519-based DHKEM is argued in the literature but the hybrid combiner requires specific analysis.
+- Owner: CRY · Class: A · Threats: THR-012, THR-133, THR-110.
+
+**ASM-050 — External Watchers are independent and honest.**
+- Statement: At least 2 External Watcher organisations, at least one outside the operator's jurisdiction for EE/GOV/MANAGED, periodically fetch the onion service over Tor and compare served static source-UI assets and templates, CSP headers and the Sealer's signed running manifest with the transparency log, and publish mismatches; they are not jointly compelled or captured by the operator (ADR-035(1)).
+- Protections: P-32 (detection of untargeted intake modification), P-13 (running-state uniformity).
+- If violated: Untargeted modification or divergence of the intake goes unsignalled. Even when the assumption holds, a modification targeted by selector (served only to one source) or confined to memory is invisible to watchers.
+- Monitoring / verification: Watcher registry and publication freshness (ASM-126, K-14); cross-check between watchers. Evidence: ADR-035(1); RVW-A-01, RVW-A-13.
+- Owner: GOV, OPR · Class: P · Threats: THR-007, THR-014, THR-026, THR-137.
+
+**ASM-051 — Key Directory witnesses are independent.**
+- Statement: Key Directory checkpoints carry ≥ 2 external witness cosignatures with ≥ 1 witness outside the operating organisation (mandatory in EE/GOV/MANAGED, recommended in CE); witnesses do not collude with the operator to cosign split views (ADR-036(5)).
+- Protections: P-12, P-33.
+- If violated: A split or frozen directory can be shown to a targeted Tier V source without detection before sealing; in CE without external witnesses the operator's own witness is compellable together with the operator (RVW-A-08).
+- Monitoring / verification: Clients enforce the cosignature quorum (ASM-127); witness inventory published with organisation and jurisdiction. Evidence: ADR-036(5); RVW-A-08; INC-14.
+- Owner: GOV, REL · Class: C (quorum enforcement) / P (independence) · Threats: THR-046, THR-102, THR-118.
+
+**ASM-052 — Confidential-VM sealer (optional; HIGH/GOV).**
+- Statement: Where the Sealer runs in an AMD SEV-SNP or Intel TDX confidential VM (ADR-035(3)), the TEE vendor's attestation root is not compromised or compelled, firmware is patched against known attacks, and no side channel exploitable by the adversary in question exists; the attestation report binds the sealer measurement to a logged release and is verified by Desk and External Watchers.
+- Protections: P-32 (defence in depth only).
+- If violated: A modified sealer can present a valid-looking attestation or leak memory via side channels. TEEs have a record of side-channel breaks; this assumption is **never presented to sources as a guarantee** and no rating in `02` credits it.
+- Monitoring / verification: Attestation verification by Desk and watchers (ASM-128); TCB-version floor tracking by CRY/INF. Evidence: ADR-035(3); RVW-A-01; THR-123.
+- Owner: INF, CRY · Class: A · Threats: THR-014, THR-123, THR-141.
+
+**ASM-053 — Independent-custody recipient devices (INDEPENDENT channels).**
+- Statement: For channels of type INDEPENDENT (IG, audit committee, ombudsman, external counsel, ethics), the Desk devices of Triage Set members are not enrolled in the operating organisation's MDM/EDR/DLP/VDI, are not remotely administrable by it, and use hardware authenticators whose attestation is recorded (ADR-043).
+- Protections: P-34, P-08, P-10, P-11.
+- If violated: The organisation can repackage Desk, dump Desk/webview memory (case keys, plaintext), capture screens, or read VDI memory; all Desk protections are defeated for that member (THR-126). ADR-043 honest residual: this cannot be prevented technically once the organisation controls the endpoint.
+- Monitoring / verification: Custody status recorded and shown in the Admin UI and to sources (ASM-129, K-18); Desk self-verification of its binary against the transparency log and release-digest report (non-authoritative: detects accidental divergence only). Evidence: ADR-043; RVW-C-01; RVW-A-24.
+- Owner: OPR, RCP · Class: P / N · Threats: THR-126, THR-108, THR-109.
+
+**ASM-054 — Infrastructure-level backups exclude the Erasure Key Vault.**
+- Statement: Hypervisor, SAN/storage-snapshot and enterprise backup systems of the core hosts exclude the Erasure Key Vault volume (and, where the vault key is sealed to a vTPM, the vTPM state); in HIGH/GOV the vault is sealed to the physical host TPM, not a vTPM (ADR-044(4)).
+- Protections: P-18.
+- If violated: Crypto-erased cases remain recoverable, for the life of those infrastructure backups, by anyone who later holds a former member's keys; the documented 14-day deletion bound does not hold.
+- Monitoring / verification: Not checkable from the guest; the configuration checker requires a signed operator attestation and makes source/staff deletion statements conditional on it (ASM-130, K-16; `03` META-036). Evidence: ADR-044(4); RVW-C-06, RVW-C-07.
+- Owner: OPR, INF · Class: N (attestation only) · Threats: THR-017, THR-130.
+
+**ASM-055 — Independent intake time sources.**
+- Statement: The adversary does not control both the Tor directory authorities' signed consensus (`valid-after`, used as a time floor) and the Roughtime servers used by the intake; Z-CORE-supplied time is never the sole source (ADR-036(6)).
+- Protections: P-33, P-07, P-27.
+- If violated: A stale Key Directory snapshot can be kept "fresh" so that sealing continues to removed members (THR-132).
+- Monitoring / verification: K-17 (disagreement between Tor consensus, Roughtime and host clock > 2 h fails closed); snapshot high-water mark. Evidence: ADR-036(6); RVW-A-04.
+- Owner: NET, INF · Class: C · Threats: THR-132, THR-043.
+
+**ASM-056 — Operator Statement signers include an independent role; the statement is only a signal.**
+- Statement: The 30-day Operator Statement ("no compelled modification, no instrumentation of intake memory, no targeted update") is quorum-signed k-of-n including ≥ 1 independent role (ADR-035(2)); signers will stop renewing rather than sign falsely.
+- Protections: P-29, P-32 (signal only).
+- If violated: A coerced or dishonest quorum keeps renewing a false statement. Canaries are legally uncertain and can be coerced; no protection rating depends on this assumption.
+- Monitoring / verification: Freshness check and source-visible banner on lapse (ASM-132, K-15). Evidence: ADR-035(2); RVW-A-01.
+- Owner: GOV, OPR · Class: N · Threats: THR-026, THR-127.
+
+**ASM-057 — Triage Set independence.**
+- Statement: Each channel's Triage Set (≥ 2 members holding independent-body role labels, or channel owner + OVERSIGHT where none exist) is not wholly captured by, or subordinate to, the persons a report may concern (ADR-037(1)).
+- Protections: P-10, P-33.
+- If violated: Raw reports reach the accused or its allies first; COI decisions and further wraps are controlled by them (THR-020, THR-131).
+- Monitoring / verification: Role labels certified by OVERSIGHT (ADR-036(3)); organisation-as-adversary review (`02` TM-017); small-organisation mode requires an external party (ADR-045). Evidence: ADR-037; RVW-B-02; INC-22.
+- Owner: OPR, GOV · Class: P · Threats: THR-020, THR-110, THR-131.
+
+**ASM-058 — Independent approvers are not captured.**
+- Statement: Approvers from independent roles required by ADR-035(4) (intake memory/packet capture), ADR-036(2) (roster additions, label changes, COI loosening), ADR-044(1) (wrap deletion notice) and ADR-045 (break-glass approver outside the legal/management chain; external OVERSIGHT in small organisations) act independently of the organisation's management and do not all collude.
+- Protections: P-33, P-09, P-11.
+- If violated: IR-pretext captures, re-rostering and break-glass become single-organisation decisions (THR-127, THR-131, THR-139).
+- Monitoring / verification: Approver role labels recorded in audit and C-14; INCIDENT_NOTICE for captures; "reduced separation of duties" disclosure. Evidence: ADR-035(4), ADR-036(2), ADR-045; RVW-C-04, RVW-C-05, RVW-C-09, RVW-C-10.
+- Owner: GOV, OPR · Class: P · Threats: THR-127, THR-131, THR-139, THR-116.
+
+**ASM-059 — Platform package upstreams are not backdoored at source.**
+- Statement: Debian (pinned snapshot mirror), the Tor Project repository (pinned by key and version) and PostgreSQL upstream do not ship a backdoor at source; Candor's Platform Manifest (ADR-040) makes the installed set identical, logged and verifiable, but does not review upstream code.
+- Protections: P-13.
+- If violated: An xz-class upstream backdoor reaches every intake, logged but not detected.
+- Monitoring / verification: Platform Manifest verification by self-test (ASM-134); security floor; monitors compare against upstream. Evidence: ADR-040; RVW-A-12; INC-37.
+- Owner: REL, INF · Class: A · Threats: THR-024, THR-137.
+
+**ASM-060 — Source-side acquisition channel is not identity-linked (Tier V).**
+- Statement: A Tier V source obtained the Source App through a channel that does not bind the download to their identity (project onion service or independent mirror over Tor), or accepts the residual of an account-linked app store (ADR-041).
+- Protections: P-02, P-23.
+- If violated: App-store or clearnet download records identify prospective sources before any Candor protection applies (THR-138).
+- Monitoring / verification: Not observable; guidance and distribution policy (ASM-135). Evidence: ADR-041; RVW-A-14, RVW-B-16.
+- Owner: SUX, REL, SRC · Class: N · Threats: THR-138.
+
+**ASM-061 — Staff-side observers see only constant-schedule or coarse staff activity.**
+- Statement: The organisation's IdP, SIEM, mail system and network see staff activity that is not a fine-grained function of report arrival: imports happen only at fixed slots (ADR-038(1)), notifications are constant-schedule (ADR-038(2)), SOC sees only daily health bands (ADR-046(5)), and staff do not systematically react within minutes of a slot.
+- Protections: P-19.
+- If violated: Staff login bursts and Desk activity reveal the hour a report was imported and which channel's staff handle it (THR-129).
+- Monitoring / verification: Staff-reaction correlation drill in `30` (`02` TM-019); SIEM export schema (`20`). Evidence: RVW-B-31, RVW-C-02, RVW-A-19.
+- Owner: SOC, OPR · Class: P / N · Threats: THR-129.
 
 ## 5. Protection catalogue
 
@@ -420,6 +513,10 @@ Each protection states WHAT is protected and FROM WHOM (DECISIONS.md §0).
 | P-28 | Service location hiddenness | Physical/network location of C-05 | Network adversaries, scanners |
 | P-29 | Legal-process transparency | Knowledge of compelled requests | Secret orders (signalling only) |
 | P-30 | Weak-key / RNG failure detection | Key quality | Faulty RNG, flawed keygen |
+| P-31 | Metadata-private reply retrieval (Tier V) | Which mailbox is checked and when | Live or compelled intake, DB thief (ADR-039) |
+| P-32 | Intake integrity evidence (detection/signal, not prevention) | Knowledge that the intake was modified or captured | Compelled or compromised operator — untargeted modifications only (ADR-035) |
+| P-33 | Recipient-set governance | Who can decrypt future reports; COI exclusions | Accused members, management, compelled key-admins (ADR-036, ADR-037) |
+| P-34 | Independent-custody recipient endpoints | Desk memory, screen and binaries of INDEPENDENT-channel Triage Set members | The operating organisation's endpoint administrators (ADR-043) |
 
 ## 6. Protection → assumptions required
 
@@ -431,21 +528,21 @@ Each protection states WHAT is protected and FROM WHOM (DECISIONS.md §0).
 | P-02 Network identity vs observers | ASM-001, ASM-002, ASM-003, ASM-004, ASM-005, ASM-007, ASM-009 | ASM-001, ASM-007 | Content still confidential (P-04..P-06); adversary learns "visited" only |
 | P-03 Unlinkability across submissions | ASM-009, ASM-010, ASM-011, ASM-023 | ASM-011 | Network and server identifiers still unlinked; content may link |
 | P-04 Tier V content confidentiality | ASM-008, ASM-012, ASM-023, ASM-024, ASM-025, ASM-026, ASM-033, ASM-036 | ASM-012 | Falls to Tier W level or none if client malicious |
-| P-05 Tier W content confidentiality | ASM-013, ASM-014, ASM-015, ASM-016, ASM-017, ASM-023, ASM-024, ASM-025, ASM-026, ASM-027 | ASM-013 | Submissions outside the compromise window stay sealed |
+| P-05 Tier W content confidentiality | ASM-013, ASM-014, ASM-015, ASM-016, ASM-017, ASM-023, ASM-024, ASM-025, ASM-026, ASM-027 (detection only: ASM-050, ASM-052) | ASM-013 | Submissions outside the compromise window stay sealed; a login during the window exposes that mailbox's replies |
 | P-06 Content at rest | ASM-018 (metadata only), ASM-024, ASM-025, ASM-027, ASM-028, ASM-030 (if quorum enabled), ASM-047 | ASM-024 | None for affected primitive; hybrid KEM requires both components to fail |
 | P-07 Intake forward secrecy | ASM-014, ASM-023, ASM-026, ASM-027, ASM-033, ASM-041 | ASM-027 | Envelopes decryptable by holder of undeleted epoch key |
-| P-08 Recipient private keys | ASM-019, ASM-023, ASM-025, ASM-028 | ASM-019 | Other members' keys unaffected; exposure bounded by that member's ACL |
+| P-08 Recipient private keys | ASM-019, ASM-023, ASM-025, ASM-028, ASM-053 (INDEPENDENT channels) | ASM-019 / ASM-053 | Other members' keys unaffected; exposure bounded by that member's ACL |
 | P-09 Admin has no content access | ASM-015, ASM-016, ASM-034, ASM-035, ASM-036, ASM-043, ASM-044, ASM-045 | ASM-036, ASM-043 | Admin still lacks keys for past content; future Tier W plaintext at risk |
-| P-10 COI exclusion | ASM-019, ASM-033, ASM-045 | ASM-033 | Excluded user still lacks keys unless membership forged |
+| P-10 COI exclusion | ASM-019, ASM-033, ASM-045, ASM-049, ASM-053, ASM-057 | ASM-057 | Excluded user still lacks keys unless membership forged; before import servers cannot tell who was excluded only under ASM-049 |
 | P-11 Sealed identity | ASM-019, ASM-021, ASM-024, ASM-031, ASM-043, ASM-045 | ASM-031 | Unseal is audited and visible to oversight |
-| P-12 No hidden recipients | ASM-012, ASM-024, ASM-025, ASM-026, ASM-033, ASM-036 | ASM-036 | Clients still display recipient list (manual detection) |
+| P-12 No hidden recipients | ASM-012, ASM-024, ASM-025, ASM-026, ASM-033, ASM-036, ASM-051, ASM-055 | ASM-036 / ASM-051 | Clients still display recipient list (manual detection); Desk recipient-list check at import |
 | P-13 Release/update integrity | ASM-029, ASM-034, ASM-035, ASM-036, ASM-037, ASM-038, ASM-039, ASM-041, ASM-042 | ASM-035 + ASM-036 | Reproducibility still detects single-builder compromise; log still makes malicious release public |
 | P-14 Web client code integrity | ASM-035, ASM-036, ASM-040 | ASM-040 | Tier W properties only |
 | P-15 Evidence containment | ASM-015, ASM-019, ASM-020 | ASM-020 | Keys not present in sandbox; endpoint compromise bounded to viewer session if ASM-015 holds |
 | P-16 Metadata removal | ASM-011, ASM-020, ASM-021 | ASM-011 | Embedded metadata removed; content-level marks remain |
 | P-17 Audit tamper evidence | ASM-024, ASM-029, ASM-041, ASM-048 | ASM-048 | Tampering detectable up to last honest checkpoint |
-| P-18 Crypto-erasure deletion | ASM-027, ASM-029, ASM-030, ASM-047 | ASM-027 | None for copies that retained keys |
-| P-19 Timing minimisation | ASM-007, ASM-009, ASM-041, ASM-046 | ASM-009 | Stored timing coarse regardless; source behaviour may still correlate |
+| P-18 Crypto-erasure deletion | ASM-027, ASM-029, ASM-030, ASM-047, ASM-054 | ASM-054 | None for copies that retained keys; metadata of disposed cases persists in backups until expiry regardless |
+| P-19 Timing minimisation | ASM-007, ASM-009, ASM-041, ASM-046, ASM-061 | ASM-009 / ASM-061 | Stored timing at import-slot/day granularity regardless; follow-up slot dates and staff reactions may still correlate |
 | P-20 Content-free notifications | ASM-046 | ASM-046 | Notifications contain no case data in any case |
 | P-21 DoS resistance | ASM-002, ASM-015 | ASM-002 | Standby onion; no unsafe fallback (ADR-002) |
 | P-22 Onion authenticity | ASM-006, ASM-032 | ASM-006 | Phishing onion cannot decrypt past submissions |
@@ -455,8 +552,12 @@ Each protection states WHAT is protected and FROM WHOM (DECISIONS.md §0).
 | P-26 Recovery Quorum safety | ASM-029, ASM-030, ASM-045 | ASM-030 | Quorum enablement visible to sources |
 | P-27 Compliance clocks | ASM-041 | ASM-041 | Audit trail shows timestamps for correction |
 | P-28 Service location hiddenness | ASM-002, ASM-003, ASM-016, ASM-017 | ASM-003 | Content confidentiality unaffected; seizure risk |
-| P-29 Legal-process transparency | ASM-035, ASM-042 | ASM-042 | Signalling only; protection is cryptographic |
+| P-29 Legal-process transparency | ASM-035, ASM-042, ASM-056 | ASM-056 | Signalling only; protection is cryptographic |
 | P-30 Weak-key/RNG detection | ASM-023, ASM-025 | ASM-023 | Blocklists catch known-weak classes only |
+| P-31 Metadata-private reply retrieval | ASM-001, ASM-004, ASM-012 | ASM-012 | Tier W: none (server-side lookup) |
+| P-32 Intake integrity evidence | ASM-050, ASM-052 (optional), ASM-056, ASM-058 | ASM-050 | Targeted/memory-only modification undetected in any case |
+| P-33 Recipient-set governance | ASM-033, ASM-049, ASM-051, ASM-055, ASM-057, ASM-058 | ASM-058 | Changes are logged, time-locked and visible even if approvers collude |
+| P-34 Independent-custody endpoints | ASM-028, ASM-053 | ASM-053 | None for that member once the organisation controls the endpoint |
 
 ## 7. Assumption lifecycle and change control
 
