@@ -219,14 +219,14 @@ Users' **own** assistive technology is fully supported. CI accessibility scanner
 
 ```mermaid
 flowchart LR
-  DEV[Developer adds/changes EN string\n+ class annotation] --> PR[PR: string lint, class check]
+  DEV["Developer adds/changes EN string + class annotation"] --> PR["PR: string lint, class check"]
   PR --> MAIN[main branch]
-  MAIN -->|push .ftl templates| WL[Self-hosted Weblate\n(translation host, separate from builders/signers)]
-  WL --> TR[Translators] --> RV[Reviewers / back-translation\nper class]
-  RV -->|approved strings only| WLPR[Weblate opens PR]
-  WLPR --> CHK[CI: Fluent syntax, placeholder parity,\nno URLs/HTML added, pseudo-loc, a11y, readability]
-  CHK --> MR[Maintainer review + signed merge]
-  MR --> REL[Release manifest: per-locale Tier-0 / critical approval state]
+  MAIN -->|push .ftl templates| WL["Self-hosted Weblate (translation host, separate from builders/signers)"]
+  WL --> TR[Translators] --> RV["Reviewers / back-translation per class"]
+  RV -->|approved strings only| WLPR["Weblate opens PR"]
+  WLPR --> CHK["CI: Fluent syntax, placeholder parity, no URLs/HTML added, pseudo-loc, a11y, readability"]
+  CHK --> MR["Maintainer review + signed merge"]
+  MR --> REL["Release manifest: per-locale Tier-0 / critical approval state"]
 ```
 
 - **Hosting:**
