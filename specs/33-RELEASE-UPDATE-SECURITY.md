@@ -37,7 +37,7 @@ Out of scope (referenced): source-repository controls, CI hardening, dependency 
 | CI secret/tool compromise | INC-39 Codecov, INC-44 tj-actions | 28; builders hold no signing keys |
 | Rollback / freeze / mix-and-match | TUF threat model (B-CR-45) | TUF versioning and expiry; signed security floor (§8) |
 | Third-party platform packages bypassing release controls (RVW-A-12) | INC-37 xz (sshd dependency) | Platform Manifest (§4.1), snapshot mirror, verification of all installed packages (§18.5) |
-| Selective withholding / divergent running state (RVW-A-13) | INC-14 Anom | Security floors Fleet cannot override (§8.1, §14.1); External Watchers and running manifest (§7.1) |
+| Selective withholding / divergent running state (RVW-A-13) | INC-14 Anom | Security floors Fleet cannot override (§4.1, §14.1); External Watchers and running manifest (§7.1) |
 | Web code substitution to sources | INC-01, INC-27, INC-28 | No JS without WEBCAT; WEBCAT threshold manifests (§16) |
 
 ### 3.2 Assumptions (to be registered as ASM-* in 40)
@@ -169,7 +169,7 @@ Platform signatures are never sufficient alone: clients and operators verify TUF
 Channels are expressed as custom metadata on targets (`channels: ["stable", "lts-2026"]`); the same artifact hash may be on several channels. Security fixes to shared code are released to CE and EE simultaneously (ADR-020).
 
 ### 9.2 Version policy
-SemVer; each product declares `min_secure_version`; minor releases may include format version N+1 only if N−1 compatibility is kept (04 §13.9).
+SemVer; each product's security floor is carried in the Platform Manifest (§4.1); minor releases may include format version N+1 only if N−1 compatibility is kept (04 §13.9).
 
 ### 9.3 Cooling period and veto
 Normal releases: ≥ 72 h between log publication of the release bundle and the timestamp role making it available. Emergency releases: ≥ 2 h, never less (ADR-040). During cooling, any targets signer, builder operator or registered monitor may file a **veto** (signed statement to the release list citing a mismatch or concern); a veto holds the release until resolved by a root-holder quorum decision (3-of-5), recorded publicly.
@@ -181,13 +181,13 @@ Normal releases: ≥ 72 h between log publication of the release bundle and the 
 | E1 | Security lead declares emergency (actively exploited or CVSS ≥ 9 in trust path, or anonymity-affecting critical) per 31; embargo coordination | T0 |
 | E2 | Fix developed on private branch; two-party review (never waived) | T0 + ≤ 24 h |
 | E3 | Tag signed; both builders build and attest; hashes must match (never waived) | T0 + ≤ 30 h |
-| E4 | Release bundle logged; targets signers (2-of-3, never reduced) sign | T0 + ≤ 32 h |
-| E5 | Cooling period shortened to 0–24 h; notification sent to all root holders and monitors at log publication | T0 + ≤ 32–56 h |
-| E6 | Timestamp published; clients auto-install on `emergency` flag (servers: outside maintenance windows allowed; Desk: forced before use; Source App: floor raised) | immediately after E5 |
-| E7 | `min_secure_version` raised; advisory published (CVE, CWE, affected versions, IOCs, mitigations); CRA Art. 14 reporting where applicable (actively exploited vulnerabilities: early warning within 24 h, per B-CR-50/B-CR-51) | with E6 |
+| E4 | Release bundle **and the source diff of the fix** logged and published; targets signers (2-of-3, never reduced; signers from ≥ 2 organisations, ADR-040) sign | T0 + ≤ 32 h |
+| E5 | Cooling period shortened to **≥ 2 h** (never less; up to 24 h at the security lead's discretion); notification with the diff sent to all root holders and monitors at log publication; external monitors SHOULD publish a signed "reviewed" attestation within the window; any veto holds the release (§9.3) | T0 + ≥ 34 h |
+| E6 | Timestamp published; clients auto-install on `emergency` flag (Z-CORE servers: outside maintenance windows allowed; **Z-INTAKE hosts apply no earlier than 6 h after log publication** unless an admin and an independent-role approver override jointly, RVW-A-16; Desk: forced before use; Source App: floor raised) | immediately after E5 |
+| E7 | Security floor raised with `effective_day` = publication + 2 days (§4.1); advisory published (CVE, CWE, affected versions, IOCs, mitigations); CRA Art. 14 reporting where applicable (actively exploited vulnerabilities: early warning within 24 h, per B-CR-50/B-CR-51) | with E6 |
 | E8 | Post-incident review within 14 days | — |
 
-What is never relaxed in an emergency: reproducible build agreement across two builders, targets threshold, log inclusion, two-party code review.
+What is never relaxed in an emergency: reproducible build agreement across two builders, targets threshold with signers from ≥ 2 organisations, log inclusion with published diff, two-party code review, and a cooling window of ≥ 2 h (the v1.0 0-hour option is withdrawn; RVW-A-16).
 
 ## 11. Key rotation
 
@@ -223,7 +223,7 @@ Builder hash mismatch; monitor rebuild mismatch or veto; unexpected log entry (n
 1. **Security hold:** timestamp metadata carries `security_hold: {products, versions, reason_id}`; clients stop installing affected versions immediately and show an admin alert. (Clients never auto-uninstall; rollback is operator-driven, §8.)
 2. Publish new targets metadata that removes the malicious targets and raises `min_secure_version` above them, with a clean fixed release when available.
 3. Publish advisory with hashes, affected window, IOCs and instance-side checks; notify EE customers through the support channel and CE via mailing list, website and log.
-4. Instance-side checklist (18/31): verify installed hashes against the clean manifest (`candorctl verify-installed`); if the malicious version ran on Z-INTAKE: treat as intake compromise (Tier W plaintext exposure window; rotate onion key per 16 §10; rotate K31/K35/K28); if on Z-CORE: rotate service credentials, internal CA leaves, K02/K24 if accessible; if on Desk: treat as endpoint compromise (revoke user keys and MEKs, rotate case keys per 04 §25.6); if on Source App: publish source-facing advisory on the info site.
+4. Instance-side checklist (18/31): verify installed hashes against the clean manifest (`candorctl verify-installed`); if the malicious version ran on Z-INTAKE: treat as intake compromise (Tier W plaintext exposure window; rotate onion key per 16 §10; rotate K31/K35/K37/K28; publish INCIDENT_NOTICE, 04 §9.14); if on Z-CORE: rotate service credentials, internal CA leaves, K02/K24 if accessible; if on Desk: treat as endpoint compromise (revoke user keys and MEKs, rotate case keys per 04 §25.6); if on Source App: publish source-facing advisory on the info site.
 5. Root-cause and key-compromise analysis (§12); rotate keys as needed.
 6. Regulatory reporting (CRA Art. 14 where applicable, B-CR-50).
 
@@ -232,33 +232,43 @@ Builder hash mismatch; monitor rebuild mismatch or veto; unexpected log entry (n
 - Implemented in Rust as part of the trust path; TUF client library behind an internal interface (Open Issue OI-1: hybrid key type support).
 - **No instance identity:** requests carry no instance ID, tenant name, onion address, license ID, cookie or authentication header; fixed `User-Agent: candor-updater/<major>`; all instances fetch identical metadata files (full `targets` and delegated metadata for all products, not only installed ones, so file requests do not reveal installed components); artifact downloads by content hash path.
 - **Schedule:** randomized check interval (uniform 2–6 h) to avoid fleet-wide timing correlation; no push channel.
-- **Network paths:** Z-CORE hosts: HTTPS to vendor mirrors or the enterprise mirror (C-33). Z-INTAKE hosts: never direct clearnet (16 §14); updates are either pushed as verified bundles by C-09 from Z-CORE (default) or fetched through a dedicated tor client instance from the vendor's onion mirror. In both cases the intake host verifies TUF + log proofs itself.
+- **Network paths — one per zone (ADR-046(3); RVW-C-08):** **Z-INTAKE** hosts fetch only through their dedicated `candor-client` tor instance from the Candor project's onion mirror (16 §14.2 F2, NET-044); the v1.0 C-09 push path is withdrawn. **Z-CORE** hosts fetch over an egress-restricted HTTPS path (allow-list: the configured mirror only) from the vendor mirror or the enterprise mirror (C-33); a Z-CORE fetch via the project onion mirror is RECOMMENDED where the tenant does not want the vendor's CDN to learn its egress IP (RVW-C-13). **Candor Desk** fetches only through Z-CORE's update proxy endpoint (§15.1), never directly from vendor mirrors. **Source App**: project onion mirror via Arti (§15.2). Every client verifies TUF + log proofs itself.
 - **No targeting by construction:** there is no server-side logic that selects artifacts per requester; staged rollout is **client-side** — each instance draws a local random rollout delay (0–72 h for non-emergency minor releases) from a locally generated seed; the server serves the same metadata to all.
-- **Install policy:** security patch releases auto-install within the configured maintenance window; minor releases require admin approval (dual approval in GOV profile) unless configured otherwise; pre-install self-test and post-install health check with automatic rollback to the previous installed version (≥ security floor) on failure.
+- **Install policy:** security patch releases auto-install within the configured maintenance window and in any case before the floor's `effective_day` (§4.1); minor releases require admin approval (dual approval in GOV profile) unless configured otherwise; pre-install self-test and post-install health check with automatic rollback to the previous installed version (≥ security floor) on failure. Platform Manifest updates are applied by the same client: packages are installed only from the local verified repository built from the manifest.
 - **Integrity at rest:** downloaded artifacts verified before unpacking; packages installed via `apt install ./<verified>.deb` from a local verified repository, never from a remote APT source when TUF is in use.
 - **No telemetry:** update checks send nothing beyond the file requests (ADR-023).
 
 ### 14.1 Enterprise mirrors (C-33) and Fleet Manager (C-34)
 - Mirrors are content-addressed caches of the vendor TUF repository and artifacts; they cannot sign anything, and clients verify end-to-end.
 - Mirrors SHALL NOT store onion addresses, tenant names, instance labels or per-request identifiers; access logs, if enabled, are limited to date, path and status (no client IP retention beyond 24 h) and are excluded from SIEM export of source-sensitive classes.
-- Fleet Manager distributes **policy** (approved version per ring, maintenance windows) keyed by opaque instance IDs (ADR-022), never artifacts or metadata; instances still verify TUF. Fleet Manager never receives onion addresses in cleartext (C-34 definition).
+- Fleet Manager distributes **policy** (approved version per ring, maintenance windows) keyed by opaque instance IDs (ADR-022), never artifacts or metadata; instances still verify TUF. Fleet Manager never receives onion addresses in cleartext (C-34 definition). **Fleet policy cannot hold an instance below the signed security floor after its `effective_day`, cannot lower a floor, and cannot disable intake or change routing (ADR-040, ADR-045); instances ignore any ring policy that would violate this and raise an admin alert** (RVW-A-13, RVW-C-13). Ring assignments that keep an instance on an older release are shown in the instance's own admin console with the release age.
 
 ## 15. Candor Desk and Candor Source App update rules
 
 ### 15.1 Candor Desk (C-15) — forced pre-flight update
-- On every start and every 24 h while running, Desk refreshes TUF metadata (via Z-CORE's mirror endpoint or the vendor mirror) before unlocking the keystore for case access — the SecureDrop Workstation pre-flight updater pattern (B-SD-05).
-- If a newer release with `security: true` or a raised `min_secure_version` exists, Desk installs it before opening any case (hard block; admin mode can install but not open cases).
+- **Fixed schedule, one path (RVW-C-02, RVW-C-13):** Desk refreshes TUF metadata **only through Z-CORE's update proxy endpoint** (a content-addressed cache inside Z-CORE that itself fetches per §14), once per day at a fixed local time set tenant-wide (default 03:00), and never as a consequence of Desk start or unlock; at start Desk uses the metadata cached from the last scheduled refresh (≤ 24 h old). Desk never contacts vendor mirrors directly, so neither the vendor, its CDN nor the corporate proxy observes Desk start times. Before unlocking the keystore for case access Desk checks the cached metadata — the SecureDrop Workstation pre-flight pattern (B-SD-05).
+- If a newer release with `security: true` or a raised floor exists, Desk installs it before opening any case (hard block; admin mode can install but not open cases); after the floor's `effective_day` a Desk below the floor blocks case access (§4.1).
 - If metadata cannot be refreshed: up to 72 h grace with a banner; after 7 days, case access is blocked (freeze protection) unless an AIRGAP-RCP offline bundle ≤ 30 days old has been applied; overrides require dual approval and are audited.
 - Desk refuses to run past the embedded end-of-life date of its version line (REQ-H-35 pattern, INC-35).
 - Desk's self-update verifies TUF + log proofs itself; the OS platform signature is checked additionally.
+- **Enterprise distribution mode (RVW-C-01; ADR-043):** where users lack local admin rights, IT deploys the vendor-signed package **unmodified** (MSI/.dmg/.deb exactly as listed in the `desk` target; no repackaging, wrappers or post-install scripts). At every start Desk hashes its own installed binaries and bundled UI assets, compares them with the TUF `desk` target and the transparency log, and reports its release digest to Z-CORE (C-25 compares it with CLIENT_RELEASE). This check is performed by the binary being checked and is therefore **non-authoritative**: it detects accidental divergence and careless repackaging, not a deliberately modified build (ADR-043 honest residual). For Triage Set members of INDEPENDENT channels, independent-custody devices are required (ADR-043; 04 §9.4).
 
 ### 15.2 Candor Source App (C-03)
-- On each start, before any submission or login, the app fetches TUF metadata from the **vendor onion mirror via embedded Arti** — identical requests for every user, never an organisation-specific endpoint (16 NET-040).
-- If installed version < `min_secure_version`: the app refuses to submit or log in and shows update instructions (desktop: in-app TUF update over Arti; Android: F-Droid/direct APK update verified by TUF hash; iOS: App Store update).
+- On each start, before any submission or login, the app fetches TUF metadata from the **project onion mirror via embedded Arti** — identical requests for every user, never an organisation-specific endpoint (16 NET-040).
+- If installed version < the security floor: the app refuses to submit or log in and shows update instructions (desktop: in-app TUF update over Arti; Android: update from the project onion service or F-Droid, verified by TUF hash; iOS: App Store update).
 - If metadata cannot be fetched for > 30 days or metadata has expired: the app refuses to submit (it may still display guidance); embedded end-of-life date enforced.
-- The app embeds a KD checkpoint and `root.json` at build time (04 VR-3); updates can raise, never lower, embedded trust anchors.
+- **Embedded trust anchors (RVW-A-08; ADR-036(5)):** the app embeds `root.json` and the **witness/monitor key set and onion endpoints** (K39 keys of the witness networks, 04 §14.3) at build time; it does **not** embed any tenant checkpoint (a per-tenant log cannot be embedded in an app identical for all tenants; the v1.0 claim is withdrawn). Per tenant, the app keeps a persistent pin of the last seen directory tree head in its data directory (04 VR-3; a disclosed device trace). Updates can raise, never lower, embedded trust anchors.
 - Desktop in-app updates leave no persistent update logs; downloaded installers are deleted after install (THR-048).
-- Mobile store distribution: the Android build is reproducible and verifiable against the F-Droid/direct APK; the iOS App Store binary is re-signed by Apple and not user-verifiable (residual §20).
+- Mobile store distribution: the Android build is reproducible and verifiable against the APK published on the project onion service; the iOS App Store binary is re-signed by Apple and not user-verifiable, and the iOS install is tied to an Apple account — the app's distribution page and 05 guidance label iOS as "higher trace" (residual §20).
+
+### 15.3 Source App distribution (ADR-041; RVW-A-14, RVW-B-16)
+| Channel | Status | What it leaves behind | Guidance (05) |
+|---|---|---|---|
+| Project onion service (Tor Browser download; TUF hash and log proof shown) | **Primary**, all desktop and Android builds | No account; Tor use visible locally | Recommended, especially Tails + AppImage |
+| ≥ 2 independent mirrors run by other organisations (onion and clearnet) | Required, byte-identical (28 SCM-069) | Clearnet mirror: mirror operator and network see the download | Prefer onion |
+| F-Droid (reproducible build) | Optional | F-Droid client state on device; clearnet unless used over Tor | Acceptable over Tor |
+| Google Play / Apple App Store (generic listing, project name, no tenant branding) | Optional; iOS only option | Account-linked install record held by the store (compellable); MDM inventories on managed phones | "The store keeps a record that your account downloaded this app"; never on an employer-managed phone |
+| Organisation's clearnet information site (C-37) | **Never hosts or logs** app downloads; links to the project distribution (16 §11.3) | — | — |
 
 ## 16. WEBCAT manifest signing for the source web bundle
 
@@ -277,7 +287,7 @@ Each release includes: CycloneDX 1.6 SBOM with CBOM section (cryptographic asset
 Commands below use `candorctl` subcommands defined by this document plus standard tools. Syntax of third-party tools is Knowledge (unverified) and must be re-checked against the tool versions pinned in the release notes.
 
 ### 18.1 Bootstrap trust (first install)
-1. Obtain the root fingerprint from ≥ 2 independent channels (project website over HTTPS, signed announcement on the mailing list, printed in the release notes, published by monitors). Compare:
+1. Obtain the root fingerprint from ≥ 2 independent channels (project website over HTTPS, signed announcement on the mailing list, printed in the release notes, published by monitors); `candorctl tuf init` additionally fetches the root hash over Tor from ≥ 2 independent monitor endpoints listed in the bootstrap bundle and refuses on any mismatch (RVW-A-16); the bootstrap bundle hash is logged and witness-cosigned. Compare:
    ```
    sha256sum root.json            # must equal the published root.json v1 hash on all channels
    ```
@@ -324,8 +334,8 @@ diffoscope out/candor-core_1.4.2_amd64.deb candor-core_1.4.2_amd64.deb   # on mi
 
 ### 18.5 Verify installed state and platform pins
 ```
-sudo candorctl verify-installed            # all installed trust-path files match TUF-listed package manifests
-sudo candorctl platform-pins check         # tor/vanguards/viewer image versions ≥ floors in platform-pins
+sudo candorctl verify-installed            # all installed trust-path files AND all installed OS/tor/PostgreSQL/kernel packages match the release's TUF-listed manifests
+sudo candorctl platform check              # installed platform packages = Platform Manifest; versions ≥ security floors; effective days
 sudo candorctl update log --since 30d      # local update history (SYSTEM audit class, date-granular)
 ```
 
@@ -335,23 +345,23 @@ sudo candorctl update log --since 30d      # local update history (SYSTEM audit 
 | ID | Requirement | Evidence | Threats | Component | Verification |
 |---|---|---|---|---|---|
 | REL-001 | Every trust-path artifact SHALL be built from a signed, two-party-reviewed git tag. | B-CR-46; INC-37; INC-50 | THR-024 | C-30, C-31 | INSP: tag signature + review record check in release checklist |
-| REL-002 | Every artifact SHALL be built by ≥ 2 independently operated builders (different organisation, infrastructure and CI software) and SHALL be released only if all builder outputs are bit-identical. | ADR-022; INC-38; INC-41; B-CR-43 | THR-024; THR-025 | C-31 | TST: release pipeline gate; AUD: builder independence review |
+| REL-002 | Every artifact and every Platform Manifest SHALL be built/derived by ≥ 2 independently operated builders (different organisation, jurisdiction, infrastructure and CI software) and SHALL be released only if all builder outputs are bit-identical. | ADR-022; ADR-040; INC-38; INC-41; B-CR-43; RVW-A-16 | THR-024; THR-025; THR-026 | C-31 | TST: release pipeline gate; AUD: builder independence and jurisdiction review |
 | REL-003 | Builds SHALL be hermetic and reproducible (pinned toolchains, vendored hash-locked dependencies, `SOURCE_DATE_EPOCH`, no network) and each builder SHALL build twice and diff with diffoscope. | B-SD-26; B-CR-44; INC-37 | THR-024 | C-31 | TST: CI job `repro-twice`; published reproducibility report |
 | REL-004 | Builders SHALL NOT hold any release signing key; they SHALL emit signed rebuild attestations with hardware-backed builder keys. | INC-39; INC-44; INC-58 | THR-024 | C-31, C-32 | INSP: Secret Placement Manifest of builders |
 | REL-005 | Releases SHALL be delivered via TUF with the roles, thresholds, storage and expiries of §6.1 (root 3-of-5 offline 365 d; targets and delegated roles 2-of-3 offline 90 d; snapshot 7 d; timestamp 1 d online HSM). | ADR-022; B-CR-45 | THR-025 | C-32 | TST: metadata validator in CI; INSP: key ceremony records |
 | REL-006 | Root, targets and delegated-role keys SHALL be Ed25519 + ML-DSA-65 pairs; a signer SHALL count toward a threshold only if both signatures verify. | ADR-006; B-CR-10 | THR-025; THR-012 | C-32 | TST: client rejects single-algorithm signature |
-| REL-007 | Root key holders SHALL be spread over ≥ 2 organisations and ≥ 2 jurisdictions with no holder holding more than one root key. | INC-02; ADR-022 | THR-026; THR-025 | C-32 | INSP: holder register (36) |
+| REL-007 | Holders of every TUF role SHALL span ≥ 2 organisations and ≥ 2 jurisdictions (root: ≥ 3 jurisdictions) such that no single organisation or jurisdiction can meet any role's threshold, with no holder holding more than one key of a role. | INC-02; ADR-022; ADR-040; RVW-A-16 | THR-026; THR-025 | C-32 | INSP: holder register (36); TST: signing tool rejects threshold met by one organisation |
 | REL-008 | The repository publisher (snapshot/timestamp HSM) and update mirrors SHALL be separate systems, and neither SHALL hold root, targets or delegated keys. | INC-49; INC-52 | THR-025 | C-32, C-33 | INSP: architecture review; AUD |
 | REL-009 | The `ee-modules` role SHALL be a terminating delegation limited to `ee-modules/**` and SHALL NOT be able to sign trust-path targets. | ADR-020 | THR-025; THR-027 | C-32 | TST: client rejects trust-path path signed by ee-modules |
 | REL-010 | No per-customer, per-instance or per-user build or metadata of any trust-path artifact SHALL exist; all clients SHALL receive identical metadata and artifacts. | ADR-022; INC-14; INC-01 | THR-025; THR-007 | C-32, C-33 | AUD: repository content review; TST: two instances fetch byte-identical metadata |
 | REL-011 | Every release (artifact hashes, TUF metadata versions, SBOM, provenance, attestations, WEBCAT manifests, holds) SHALL be logged in Sigsum (primary) with witness cosignatures, mirrored to Rekor, and the inclusion proof embedded in TUF custom metadata. | ADR-022; B-CR-42; INC-48 | THR-025 | C-32 | TST: release gate checks proof; INSP |
 | REL-012 | At least 2 independent monitors plus the project monitor SHALL watch the log, rebuild releases and publish results; monitor tooling SHALL be open source. | B-CR-42; B-CR-45 | THR-025 | C-32 | DEMO: monitor report per release; INSP: monitor agreements |
-| REL-013 | Normal releases SHALL observe a ≥ 72 h cooling period between log publication and timestamp availability during which any signer, builder or monitor can veto; vetoes SHALL be resolved by a 3-of-5 root-holder decision recorded publicly. | B-CR-45 | THR-025; THR-024 | C-32 | INSP: release timeline records |
+| REL-013 | Normal releases SHALL observe a ≥ 72 h cooling period and emergency releases a ≥ 2 h cooling period between log publication and timestamp availability, during which any signer, builder or monitor can veto; vetoes SHALL be resolved by a 3-of-5 root-holder decision recorded publicly. | B-CR-45; ADR-040 | THR-025; THR-024 | C-32 | INSP: release timeline records; TST: timestamp role refuses earlier publication |
 | REL-014 | Each targets signer SHALL independently verify tag signature, rebuild attestations, hash equality, SBOM diff and log inclusion on their own workstation before signing. | INC-38; INC-41 | THR-024 | C-32 | INSP: signer checklist records |
 | REL-015 | Release channels SHALL be `stable`, `lts` (24-month support), `emergency` and `preview` as in §9.1; `preview` SHALL be refused on production profiles. | ADR-020 | THR-025 | C-32, C-33 | TST: installer refuses preview on production profile |
 | REL-016 | Security fixes to shared code SHALL be released to CE and EE simultaneously. | ADR-020 | THR-025 | C-32 | INSP: release notes comparison |
-| REL-017 | Emergency releases SHALL follow §10 and SHALL NOT relax two-builder reproducibility, targets threshold, log inclusion or two-party review. | INC-37; INC-44 | THR-024; THR-025 | C-31, C-32 | DEMO: annual emergency-release drill |
-| REL-018 | Each product SHALL publish `min_secure_version`; installers and updaters SHALL refuse versions below it. | B-CR-45 | THR-025 | C-32, C-15, C-03 | TST: floor enforcement tests |
+| REL-017 | Emergency releases SHALL follow §10 and SHALL NOT relax two-builder reproducibility, targets threshold (signers from ≥ 2 organisations), log inclusion with published source diff, two-party review or the ≥ 2 h cooling window. | INC-37; INC-44; ADR-040; RVW-A-16 | THR-024; THR-025 | C-31, C-32 | DEMO: annual emergency-release drill; TST: signing tool enforces organisation diversity |
+| REL-018 | Each product SHALL have a signed security floor `{min_secure_version, effective_day}` in the Platform Manifest; installers and updaters SHALL refuse versions below it and trust-path components SHALL refuse to start below it after `effective_day`. | B-CR-45; ADR-040; RVW-A-13 | THR-025; THR-005 | C-32, C-15, C-03, C-05, C-10 | TST: floor enforcement tests incl. start refusal and intake outage page |
 | REL-019 | Root keys SHALL be rotated in an annual ceremony with chained root metadata; any role holder's departure SHALL trigger rotation of the roles they held within 30 days. | INC-44; INC-47 | THR-024 | C-32 | INSP: ceremony transcripts; holder register |
 | REL-020 | Signing-key compromise SHALL be handled per §12, including re-bootstrap via ≥ 3 independent channels for root threshold compromise. | INC-58; INC-48 | THR-025 | C-32 | DEMO: tabletop exercise annually (31) |
 | REL-021 | Malicious-release response SHALL follow §13, including a `security_hold` in timestamp metadata honoured by all clients. | INC-38; INC-41; INC-49 | THR-025 | C-32, C-15, C-03 | TST: hold flag stops installation in update client tests |
@@ -364,6 +374,9 @@ sudo candorctl update log --since 30d      # local update history (SYSTEM audit 
 | REL-028 | The APT keyring SHALL be installed only under `/usr/share/keyrings/` and referenced with `signed-by`; installation instructions SHALL NOT place keys in `trusted.gpg.d`. | B-GL-41 | THR-025 | C-33 | INSP; TST: `candorctl` warns on global keys |
 | REL-029 | Operator verification commands of §18 SHALL be documented, tested in CI against each release, and runnable without vendor infrastructure other than public mirrors. | INC-52 | THR-025 | C-32 | TST: CI job `verify-docs-commands` |
 | REL-030 | A release SHALL NOT be published on any channel if any artifact is not reproducible. | INC-38 | THR-024 | C-31 | TST: release gate |
+| REL-031 | Each release SHALL include a `platform`-role Platform Manifest (§4.1) signed at the targets threshold and logged; the `platform` role SHALL have the same organisation/jurisdiction spread as targets. | ADR-040; RVW-A-12 | THR-024; THR-025 | C-32 | TST: release gate; client rejects unsigned manifest |
+| REL-032 | Each release SHALL publish and log the digests of all static source-UI assets, templates and the CSP header string; ≥ 2 independent External Watchers (≥ 1 outside the operator's jurisdiction for EE/GOV/MANAGED) SHALL compare served assets and running manifests against them per §7.1 and 16 §15.1. | ADR-035(1); RVW-A-01; RVW-A-13 | THR-007; THR-026; THR-025 | C-32, C-06, C-07 | DEMO: watcher reports per release; TST: staged asset change detected |
+| REL-033 | Source App artefacts SHALL be distributed per §15.3: project onion service primary, ≥ 2 independent byte-identical mirrors, optional generic store listings disclosed as account-linked, never hosted by C-37; tenant branding SHALL be runtime data only. | ADR-041; RVW-A-14; RVW-B-16 | THR-002; THR-048 | C-33, C-03, C-37 | TST: mirror hash comparison; INSP: store listing and C-37 review |
 
 ### 19.2 Update clients (UPD-)
 | ID | Requirement | Evidence | Threats | Component | Verification |
@@ -372,42 +385,49 @@ sudo candorctl update log --since 30d      # local update history (SYSTEM audit 
 | UPD-002 | Update clients SHALL enforce TUF version monotonicity, expiry, snapshot binding and length limits, and SHALL persist last trusted metadata. | B-CR-45 | THR-025 | C-15, C-03, C-05, C-10 | TST: rollback, freeze, mix-and-match and endless-data tests |
 | UPD-003 | Update requests SHALL carry no instance ID, tenant name, onion address, license ID, cookie or auth header, use a fixed User-Agent, and fetch the complete metadata set regardless of installed products. | ADR-022; ADR-023 | THR-027; THR-036 | C-05, C-10, C-15 | TST: traffic capture of update checks |
 | UPD-004 | Server update checks SHALL occur at uniformly random 2–6 h intervals, and staged rollout SHALL be decided client-side by a locally random delay, never by server-side selection. | ADR-022; INC-14 | THR-025; THR-011 | C-10, C-05 | INSP: code review; TST: identical metadata for all requesters |
-| UPD-005 | Intake hosts SHALL receive updates only as verified bundles pushed by C-09 or via a dedicated tor client to the vendor onion mirror, never via direct clearnet, and SHALL verify TUF and log proofs themselves. | ADR-009; INC-33 | THR-001; THR-025 | C-05, C-09 | TST: egress test during update; bundle tamper test |
-| UPD-006 | Security patch releases SHALL auto-install within the maintenance window; minor releases SHALL require admin approval (dual approval in GOV); failed post-install health checks SHALL roll back to the previous version ≥ security floor. | B-SD-02 | THR-025; THR-042 | C-10, C-05, C-19 | TST: forced-failure rollback test |
+| UPD-005 | Intake hosts SHALL fetch updates only through their dedicated tor client instance from the project onion mirror (ADR-046(3)), never via C-09 push or direct clearnet, and SHALL verify TUF and log proofs themselves. | ADR-009; ADR-046(3); INC-33; RVW-C-08 | THR-001; THR-025 | C-05, C-10 | TST: egress test during update; C-09 bundle push refused |
+| UPD-006 | Security patch releases SHALL auto-install within the maintenance window and before the floor's `effective_day`; minor releases SHALL require admin approval (dual approval in GOV); failed post-install health checks SHALL roll back to the previous version ≥ security floor. | B-SD-02; ADR-040; RVW-A-13 | THR-025; THR-042 | C-10, C-05, C-19 | TST: forced-failure rollback test; maintenance window cannot defer past effective_day |
 | UPD-007 | Clients SHALL alert when metadata cannot be refreshed for > 36 h and servers SHALL display "update status unknown" in the admin console. | B-CR-45 | THR-025 | C-10, C-25 | TST: freeze simulation |
 | UPD-008 | Operator-initiated downgrades SHALL require dual approval and SHALL NOT go below `min_secure_version`. | B-CR-45 | THR-025 | C-19, C-10 | TST |
 | UPD-009 | Air-gapped instances SHALL accept offline bundles only if targets metadata is unexpired, versions are monotonic and the bundle is ≤ 30 days old; the relaxation SHALL be logged. | B-CR-45 | THR-025 | C-15, C-10 | TST: stale-bundle rejection |
 | UPD-010 | Clients SHALL honour `security_hold` by stopping installation of the listed versions and alerting admins. | INC-38 | THR-025 | C-15, C-03, C-10, C-05 | TST |
 | UPD-011 | Enterprise mirrors SHALL be content-addressed caches that cannot sign, SHALL NOT store onion addresses, tenant names, instance labels or per-request identifiers, and SHALL retain client IPs ≤ 24 h if logging at all. | ADR-022; INC-59 | THR-027; THR-016 | C-33 | INSP: mirror config; TST: log content scan |
-| UPD-012 | Fleet Manager SHALL distribute only version policy keyed by opaque instance IDs, never artifacts, metadata or onion addresses in cleartext. | ADR-022; ADR-020 | THR-027 | C-34 | INSP; TST: Fleet Manager data inventory |
-| UPD-013 | Candor Desk SHALL refresh TUF metadata at every start and every 24 h, and SHALL install any security release or floor increase before opening cases. | B-SD-05; INC-35 | THR-025; THR-013 | C-15 | TST: outdated Desk blocked from case access |
+| UPD-012 | Fleet Manager SHALL distribute only version policy keyed by opaque instance IDs, never artifacts, metadata or onion addresses in cleartext, and instances SHALL ignore any Fleet policy that would keep them below a security floor after its `effective_day`, lower a floor, disable intake or change routing. | ADR-022; ADR-020; ADR-040; ADR-045; RVW-A-13; RVW-C-13 | THR-027; THR-025 | C-34, C-10 | INSP; TST: Fleet Manager data inventory; hostile ring policy ignored with alert |
+| UPD-013 | Candor Desk SHALL refresh TUF metadata only through Z-CORE's update proxy once per day at a fixed tenant-wide time (never triggered by start or unlock), and SHALL install any security release or floor increase before opening cases. | B-SD-05; INC-35; RVW-C-02; RVW-C-13 | THR-025; THR-013; THR-011 | C-15, C-10 | TST: outdated Desk blocked from case access; traffic capture shows no Desk-start-correlated requests and no vendor-mirror contact |
 | UPD-014 | Candor Desk SHALL block case access when metadata could not be refreshed for > 7 days, except with an applied offline bundle ≤ 30 days old or a dual-approved, audited override. | B-CR-45 | THR-025 | C-15 | TST: freeze simulation |
 | UPD-015 | Candor Desk and the Source App SHALL refuse to run past the embedded end-of-life date of their version line. | INC-35 | THR-025; THR-005 | C-15, C-03 | TST: clock-forward test |
-| UPD-016 | The Source App SHALL check for updates over embedded Arti against the vendor onion mirror with identical requests for every user and SHALL NOT contact organisation-specific endpoints for updates. | ADR-022; ADR-023 | THR-002; THR-036 | C-03 | TST: traffic capture |
-| UPD-017 | The Source App SHALL refuse to submit or log in when its version is below `min_secure_version` or when metadata could not be refreshed for > 30 days. | INC-35; B-SD-05 | THR-025; THR-007 | C-03 | TST |
-| UPD-018 | The Source App SHALL embed `root.json` and a key-directory checkpoint at build time; updates SHALL NOT lower embedded trust anchors. | B-CR-45; INC-67 | THR-046; THR-025 | C-03 | TST: anchor-downgrade rejection |
+| UPD-016 | The Source App SHALL check for updates over embedded Arti against the project onion mirror with identical requests for every user and SHALL NOT contact organisation-specific endpoints for updates. | ADR-022; ADR-023; ADR-041 | THR-002; THR-036 | C-03 | TST: traffic capture |
+| UPD-017 | The Source App SHALL refuse to submit or log in when its version is below the security floor or when metadata could not be refreshed for > 30 days. | INC-35; B-SD-05; ADR-040 | THR-025; THR-007 | C-03 | TST |
+| UPD-018 | The Source App SHALL embed `root.json` and the witness/monitor key set and endpoints at build time (no tenant checkpoint), SHALL keep a persistent per-tenant directory tree-head pin, and updates SHALL NOT lower embedded trust anchors. | B-CR-45; INC-67; ADR-036(5); RVW-A-08 | THR-046; THR-025 | C-03 | TST: anchor-downgrade rejection; pin rollback rejected |
 | UPD-019 | Desktop Source App updates SHALL delete downloaded installers after installation and keep no update logs. | INC-35 | THR-048 | C-03 | TST: filesystem residue scan |
 | UPD-020 | Downloaded artifacts SHALL be verified before unpacking and installed from a local verified repository; remote APT sources SHALL NOT be used when TUF is in use. | B-GL-41 | THR-025 | C-10, C-05 | TST: tampered-artifact test |
-| UPD-021 | C-25 SHALL verify installed trust-path file hashes against TUF-listed package manifests daily and alert on mismatch. | INC-38 | THR-025; THR-024 | C-25 | TST: planted-binary test |
+| UPD-021 | C-25 SHALL verify daily, and before and after each update, that all installed trust-path files and all installed platform packages match the release's TUF-listed manifests (Platform Manifest included) and alert on any unlisted package, version or hash. | INC-38; ADR-040; RVW-A-12 | THR-025; THR-024 | C-25 | TST: planted-binary and planted-package tests |
 | UPD-022 | Update checks SHALL send no telemetry beyond the file requests. | ADR-023 | THR-036 | C-10, C-15, C-03 | TST: traffic capture |
-| UPD-023 | C-25 SHALL check that tor, vanguards and viewer image versions meet the `platform-pins` floors and alert otherwise. | INC-29 | THR-005; THR-023 | C-25 | TST |
+| UPD-023 | C-25 SHALL check that tor, vanguards, PostgreSQL, kernel and viewer image versions equal the Platform Manifest entries and meet the security floors, and alert otherwise. | INC-29; ADR-040 | THR-005; THR-023 | C-25 | TST |
+| UPD-024 | Z-INTAKE hosts SHALL apply emergency releases no earlier than 6 h after log publication unless an admin and an independent-role approver jointly override; the override SHALL be audited. | RVW-A-16 | THR-025 | C-05, C-10 | TST: early install refused without dual override |
+| UPD-025 | `candorctl tuf init` SHALL verify the root hash against ≥ 2 independent monitor endpoints fetched over Tor and refuse on mismatch; the bootstrap bundle hash SHALL be logged and witness-cosigned. | RVW-A-16; INC-52 | THR-025; THR-024 | C-19, C-10 | TST: mismatching monitor response → refusal |
+| UPD-026 | In enterprise distribution mode Desk SHALL verify at every start that its installed binaries and UI assets match the TUF `desk` target and report its release digest to C-25, which SHALL alert on digests not in CLIENT_RELEASE; documentation SHALL state that the check is non-authoritative. | ADR-043; RVW-C-01 | THR-013; THR-025 | C-15, C-25 | TST: repackaged MSI detected; INSP: documentation |
+| UPD-027 | Z-CORE update fetches SHALL use an egress allow-list containing only the configured mirror; Desk SHALL never contact vendor mirrors directly. | ADR-046(3); RVW-C-02; RVW-C-13 | THR-027; THR-036 | C-10, C-15 | TST: egress capture |
 
 ## 20. Residual risks and limitations (honest)
-1. **Reviewed-but-malicious source changes** (xz-class, INC-37) are reproduced faithfully by honest builders; defences are review, dependency vetting and public audit (27/28), not the release pipeline.
-2. **Threshold collusion or coercion** of 2 targets signers plus control of distribution can publish a malicious release; it is detectable (log, monitors, rebuilds) but may reach auto-updating instances before a veto if cooling is bypassed in an emergency.
-3. **iOS Source App** binaries are re-signed by Apple and cannot be verified by users against reproducible builds.
+1. **Reviewed-but-malicious source changes** (xz-class, INC-37) are reproduced faithfully by honest builders; defences are review, dependency vetting and public audit (27/28), not the release pipeline. The same applies to upstream-at-source backdoors in platform packages pinned by the Platform Manifest (RVW-A-12).
+2. **Threshold collusion or coercion** of 2 targets signers from 2 organisations plus control of distribution can publish a malicious release; it is detectable (log, published diff, monitors, rebuilds) but a ≥ 2 h emergency window gives monitors little review time; Z-INTAKE's 6 h apply delay adds margin. Cross-jurisdiction (treaty-based) coercion is not prevented by the organisation/jurisdiction spread (RVW-A-16).
+3. **iOS Source App** binaries are re-signed by Apple and cannot be verified by users against reproducible builds; iOS installs are tied to an Apple account (ADR-041).
 4. **Platform signing dependencies** (Authenticode, Apple) introduce third parties that can revoke or refuse signing (availability risk).
-5. **Freeze protection vs availability:** blocking Desk after 7 days without metadata may hamper work in outages; overrides exist but are auditable, not preventable.
+5. **Freeze protection vs availability:** blocking Desk after 7 days without metadata, and refusing to start below the security floor after its effective day, may hamper work or close intake in outages; overrides for freeze exist but are auditable; there is no override below the floor by design.
 6. **WEBCAT** is alpha; the web bundle path is unavailable until Tor Browser integration exists.
-7. **Update timing** (randomized) still reveals to network observers that a host runs Candor if the update endpoint is Candor-specific; intake hosts avoid this by pushed bundles.
-8. **Monitor diversity** depends on external organisations' continued participation.
+7. **Update timing** of Z-CORE (randomized) still reveals to network observers that a host runs Candor if the update endpoint is Candor-specific; intake hosts fetch over Tor; Desk fetches only via Z-CORE on a fixed schedule.
+8. **Monitor and watcher diversity** depends on external organisations' continued participation.
+9. **Running state is self-reported:** the running manifest and Desk self-verification are produced by the software being checked; outside the Confidential-VM profile a root-level or compelled operator can forge them, and an organisation that repackages Desk through its MDM can defeat the Desk self-check (ADR-043, RVW-C-01). External Watchers detect only non-selective divergence.
+10. **MANAGED:** where the vendor operates the hosts, security floors and watchers bound, but do not remove, the vendor's ability to run modified code (RVW-A-13 item 3 not adopted beyond the optional Confidential-VM profile).
 
 ## 21. Open issues
 | # | Issue | Proposed resolution |
 |---|---|---|
 | OI-1 | Hybrid (Ed25519 + ML-DSA-65) TUF key type is not standard in TUF libraries (Knowledge (unverified) for python-tuf / Rust TUF clients). | Implement custom key type in the Rust client; contribute upstream; interim: require both signatures in a wrapper envelope verified before TUF processing. |
-| OI-2 | Selection and funding of Builder B and independent monitors. | 36-OPEN-SOURCE-GOVERNANCE. |
+| OI-2 | Selection and funding of Builder B (different jurisdiction, ADR-040), independent monitors, External Watchers and independent Source App mirrors. | 36-OPEN-SOURCE-GOVERNANCE. |
 | OI-3 | CRA role (steward vs manufacturer) affects reporting duties (B-CR-50). | Legal review (25). |
 | OI-4 | WEBCAT/Tor Browser integration timeline (B-CR-38). | Track; revisit REL-024. |
 | OI-5 | Sigsum witness policy for release logs (which witnesses, threshold 2-of-3) needs named operators. | 36. |
-| OI-6 | Consistency of the Source App's update source (vendor onion mirror) with organisations that forbid vendor contact (GOV): mirror operated by the organisation would reveal to that organisation which sources update — unacceptable; decide whether GOV builds embed only vendor mirrors. | ADR proposal: source-facing update endpoints are always vendor/public, never organisation-operated. |
+| OI-6 | Source App update/acquisition source for organisations that forbid vendor contact. | **Resolved by ADR-041 / ADR-046(3):** source-facing download and update endpoints are always the project onion service and independent mirrors, never organisation-operated. |
+| OI-7 | Whether the 6 h Z-INTAKE apply delay for emergency releases should be configurable per profile. | Review after the first emergency-release drill (REL-017). |

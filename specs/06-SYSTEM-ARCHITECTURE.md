@@ -224,9 +224,23 @@ flowchart LR
 | TB5 | core relay → intake | Sealed batches (down), sealed replies, signed directory and config (up) | mTLS 1.3, pinned Ed25519 certificates both ways, plus signed request bodies | THR-014 lateral movement | Core-initiated only; intake has no credential usable against core; host firewall |
 | TB6 | Desk → core | Ciphertext and workflow metadata | WebAuthn session + device-bound token (desk-api audience) + onion client auth or mTLS client certificate | THR-021/022/019 | ADR-029, per-case ACL, uniform 404 (08-API.md) |
 | TB7 | Admin → core | Configuration, users, roles | WebAuthn + admin-api audience + separate listener | THR-018/035 | No content endpoints on the admin router; DANGEROUS config needs dual approval |
-| TB8 | Desk ↔ Viewer | Ciphertext of one attachment plus a single-use per-job key in; sanitized derivative (ciphertext under a fresh per-object key) and rendered pixels out. The Desk main process never holds attachment plaintext (ADR-033 §5). | Hypervisor channel identity | THR-023 | Disposable VM, no network, no long-term keys in VM (INC-111, ADR-012) |
+| TB8 | Desk ↔ Viewer | Ciphertext of one attachment plus a single-use per-job key in; sanitized derivative (ciphertext under a fresh per-object key, with an OCR text layer produced inside the sandbox for accessibility, ADR-042) and rendered pixels out, labelled "rendering — not evidence" with converter output hash and release digest recorded. The Desk main process never holds attachment plaintext (ADR-033(5)). | Hypervisor channel identity | THR-023 | Disposable VM, no network, no long-term keys in VM (INC-111, ADR-012) |
 | TB9 | Hosts → monitor | SYSTEM/SECURITY-class events (source-influenced values only as global daily bands) | mTLS per agent | THR-016/038 | Allow-list schema, no application payloads; dedicated monitoring interface; collector host has no clearnet egress (RVW-A-23) |
 | TB10 | Core → backup | Double-encrypted ciphertext | Append-only credential | THR-017/042 | Backup key offline; write-once retention (19-BACKUPS-DR.md) |
+
+### 7.1 Intake integrity evidence (ADR-035, ADR-040; RVW-A-01, RVW-A-13)
+
+Tier W sources cannot verify the intake themselves. The architecture therefore provides **evidence for third parties**, and states its limit honestly: it detects divergence that the operator does not deliberately sign, and it makes a compelled modification a signed, attributable act. It does not prevent a live-compromised or compelled intake from reading Tier W plaintext (ADR-004, ADR-035(5)).
+
+| Mechanism | What it does | Where specified | Limit |
+|---|---|---|---|
+| Platform Manifest + security floor | OS, tor and PostgreSQL packages on Z-INTAKE and Z-CORE come from a pinned snapshot mirror; the TUF-signed Platform Manifest lists names, versions and hashes; the self-test verifies installed packages; trust-path services refuse to start below the signed security floor; Fleet policies cannot hold an instance below it | ADR-040; 07 BE-067; 33 | An upstream-at-source backdoor is logged, not detected |
+| Running manifest | The sealer signs `{release digest, Platform Manifest digest, security floor, static asset and template digests, CSP digest, optional attestation}`; served byte-identically at SW-23/SA-21/KD-09 and logged in C-14 as `SERVER_RELEASE` | ADR-035(1); 08 §7.1; 07 BE-068 | Signed by an operator-controlled key unless a confidential VM binds it |
+| External Watchers | ≥ 2 independent organisations (≥ 1 outside the operator's jurisdiction for EE/GOV/MANAGED) fetch the onion over Tor and compare static assets, CSP and the running manifest with the transparency log; mismatches are published | ADR-035(1) | Dynamic pages and selector-targeted modifications are not observable to watchers |
+| Operator Statement | Quorum-signed (incl. ≥ 1 independent role), ≤ 30-day cadence, in C-14; its absence produces a source-visible banner (SW-01) | ADR-035(2) | Canaries can be coerced; a signal, not a guarantee |
+| Confidential-VM profile (optional, HIGH/GOV) | The sealer runs in SEV-SNP/TDX; the attestation report in the running manifest binds the measurement to a logged release; Desks and watchers verify it | ADR-035(3); 40 | TEE side channels; vendor trust (THR-123) |
+| IR capture control | Intake memory/packet capture requires an independent-role approval, is encrypted to independent custodians, and publishes an `INCIDENT_NOTICE` entry | ADR-035(4); 31 | Depends on procedural compliance |
+| Desk import checks | Desk verifies the signed recipient list against C-14 including `effective_day` time locks (VR-9 in 04) | ADR-036; 04 | Detects slot insertion, not plaintext copying |
 
 ## 8. Data flows
 
@@ -253,10 +267,10 @@ flowchart LR
 | Step | Data at rest after step | Encryption state | Time metadata |
 |---|---|---|---|
 | 1–3 | none | Tor circuit encryption. Tier W: HTTP plaintext inside the onion connection. | none |
-| 4 | none (RAM only) | Tier W: the sealer applies the COI filter and wraps the envelope content key separately to each eligible member's Member Epoch Key, in 16 fixed-size **anonymous** HPKE slots (dummies for the rest, random order, no key IDs). The signed real-recipient list goes inside the AEAD payload (ADR-030, ADR-033 §1; envelope format in 04-CRYPTOGRAPHY.md). Tier V: the client did the same before upload. | none |
-| 5 | `envelope` and `envelope_part` rows plus blobs in C-08 | HPKE envelope; parts padded (ADR-011) | `received_date` only |
-| 6 | relay claims batch; intake deletes after ack | unchanged ciphertext | `batch_no` |
-| 7–8 | `import_envelope` in C-12, blobs in C-13; intake copy deleted | unchanged ciphertext; **new random ID** assigned (intake ID not retained, §14) | `received_date` and `import_batch_no` only; relay pull time not persisted (ADR-033 §4) |
+| 4 | Tier W: draft text in sealer RAM; attachment parts as ciphertext under a per-session key in the tmpfs staging area (ADR-034) | Tier W: **only at finalization** (after the 3-word passphrase confirmation), the sealer applies the COI filter to the channel's **Triage Set** (ADR-037(1)) and wraps the envelope content key separately to each eligible triage member's Member Epoch Key, in 16 fixed-size **anonymous** HPKE slots (dummies for the rest, random order, no key IDs). The signed real-recipient list goes inside the AEAD payload (ADR-030, ADR-033(1); envelope format in 04-CRYPTOGRAPHY.md). Tier V: the client did the same before upload. | none |
+| 5 | `envelope` and `envelope_part` rows plus blobs in C-08, `fsync`ed before "received" (ADR-046(1)) | HPKE envelope; parts padded (ADR-011) | `received_date` and optional `release_day` (delayed delivery, ADR-038(4)) |
+| 6 | at the next **fixed import slot** the relay claims released envelopes; intake deletes after ack | unchanged ciphertext | `batch_no`, `epoch_index` |
+| 7–8 | `import_envelope` in C-12, blobs in C-13; intake copy deleted | unchanged ciphertext; **new random ID** assigned (intake ID not retained, §14) | `import_date` (slot date) and `import_batch_no` only; rows committed once per slot at a fixed offset; blob mtimes set to slot start; WAL, backups and object metadata reveal only the slot (ADR-038(1); resolves RVW-A-09) |
 | 9–10 | case, case key wraps, re-wrapped DEKs | case key wrapped per member (ADR-008) | staff times inside encrypted payload and audit only |
 | 11–13 | evidence_derivative (ciphertext) | Attachment plaintext exists only inside the C-17 sandbox. The derivative key is wrapped under the case key by the Desk. | as above |
 
@@ -266,14 +280,17 @@ flowchart LR
 flowchart LR
   D["Desk C-15"] -->|"reply_ct to source X-Wing key + routing_ct to intake routing key"| CS["Case service C-10"]
   CS -->|"reply_outbox"| DB[("C-12")]
-  R["Relay C-09"] -->|"push sealed replies on next cycle"| IS[("Intake store C-08")]
-  IS -->|"decrypt routing_ct → mailbox"| IS
-  S["Source"] -->|"login next visit"| W["C-06"]
-  W -->|"Tier W: sealer decrypts in RAM"| SL["C-07"]
-  W -->|"Tier V: ciphertext to app"| S
+  R["Relay C-09"] -->|"push sealed replies at the next fixed slot"| IS[("Intake store C-08")]
+  IS -->|"decrypt routing_ct: Tier W mailbox or published set only"| IS
+  SW["Tier W source"] -->|"login (server-side lookup)"| W["C-06"]
+  W -->|"sealer decrypts in RAM"| SL["C-07"]
+  SV["Tier V source app"] -->|"fetch ALL reply pages (no auth)"| W
+  SV -->|"trial-decrypt locally"| SV
 ```
 
-Routing: the Desk encrypts `{mailbox_id}` to the **Intake Routing Key**. This is an X-Wing keypair whose private half exists only on the intake host, sealed to the intake host TPM where available. The Case DB therefore never stores a cleartext source mailbox/account identifier (§14, 09-DATABASE.md §9).
+**Fetch-all for Tier V (ADR-039; resolves RVW-A-10):** the intake publishes every reply ciphertext of the last 30 days in fixed-size pages (64 × 70,000 bytes, power-of-two page count). The Source App downloads all pages and trial-decrypts locally, so the intake cannot tell which source checked or when. Tier V needs no intake account and no session. Tier W necessarily performs a server-side lookup after passphrase derivation; that residual is stated to Tier W sources (R-1, R-14).
+
+Routing: the Desk encrypts `{mailbox_id | publish_only}` to the **Intake Routing Key** (ADR-046(12)). This is an X-Wing keypair whose private half exists only on the intake host, sealed to the intake host TPM where available. The Case DB therefore never stores a cleartext source mailbox/account identifier (§14, 09-DATABASE.md §9).
 
 ### 8.3 Recipient path
 Desk ↔ Desk API only. There is no browser-based recipient UI (ADR-007). Two transport options per profile:
@@ -298,11 +315,13 @@ AIRGAP-RCP: the Desk runs on an offline workstation. Import and export happen vi
   - tor health;
   - disk usage;
   - epoch key runway;
-  - clock offset;
+  - clock offset against independent sources (§10);
+  - Platform Manifest and security floor (ADR-040);
   - log-suppression checks (access logs absent).
-- Each agent **pushes** SYSTEM/SECURITY-class events to the monitor collector (TCP 8514, mTLS).
+- Each agent **pushes** SYSTEM/SECURITY-class events to the monitor collector (TCP 8514, mTLS) over a **dedicated monitoring interface**. The collector host has no clearnet egress; the alert sender runs on a separate `alert-relay` host that pulls from the collector and has no route from intake-gw (RVW-A-23). The normative H-INTAKE egress matrix is owned by 16-TOR-I2P.md §14.2.
+- Source-influenced states (rate limits, Argon2id queue, staging use, relay backlog) leave hosts only as global daily health bands (ADR-038(5), ADR-046(5)).
 - The monitor holds no credentials for any other host and initiates no connection into Z-INTAKE or Z-CORE.
-- Alerts leave the monitor content-free (ADR-017 wording rules).
+- Alerts leave the alert relay content-free (ADR-017 wording rules).
 - **EE:** C-24 exports allow-listed events to C-26, which forwards to the customer SIEM.
 
 ### 8.6 Backup path
@@ -311,8 +330,9 @@ AIRGAP-RCP: the Desk runs on an offline workstation. Import and export happen vi
   - C-13 blobs (already ciphertext);
   - audit DB;
   - key directory.
-- **Erasure Key Vault:** excluded from routine backups. It has its own encrypted backup stream with ≤ 14-day hard retention (ADR-033 §3; 09-DATABASE.md §5.6). That bounds how long erased cases stay recoverable from backups.
-- **Intake:** intake data is transient except source account records and pending replies. `candor-intake-store` produces a nightly snapshot encrypted to the Backup Public Key. **C-09 pulls it** (GET on the relay protocol), so Z-INTAKE never initiates to Z-BAK or Z-CORE. The snapshot is stored with the core backup set.
+- **Core timing:** because source-linked writes happen only at fixed import slots and commit at a fixed offset (ADR-038(1)), base backups, archived WAL and blob metadata in C-27 reveal slot times only (resolves RVW-A-09 for backups).
+- **Erasure Key Vault:** excluded from routine backups **and from infrastructure-level (hypervisor/SAN) backups**, the latter by recorded attestation of the virtualization owner; without the attestation the protection statement says the 14-day deletion bound does not hold. It has its own encrypted backup stream with ≤ 14-day hard retention, re-encrypted to the Backup Public Key so that it is restorable on new hardware. EE-HA replicates it to the DR site within the HA RPO. Every restore applies the signed erasure log before serving (ADR-044(4); 09-DATABASE.md §5.6). HIGH/GOV: vault key on physical TPM or HSM.
+- **Intake:** intake data is transient except Tier W account records. `candor-intake-store` produces a nightly snapshot of `source_account`, `deletion_tombstone` and `intake_meta` (no envelopes, **no replies**; the core is the source of truth for undelivered replies) encrypted to the Backup Public Key. **C-09 pulls it** (GET on the relay protocol), so Z-INTAKE never initiates to Z-BAK or Z-CORE. Tombstones are applied after any intake restore, so source deletions stay deleted (RVW-A-28). The intake database itself is never replicated (ADR-046(1)).
 - The onion service private key is backed up only as part of an **offline** ceremony (sealed to the Backup Key and exported to removable media). It is never included in routine backups (INC-106, B-SD-22).
 
 ### 8.7 Update path
@@ -320,24 +340,24 @@ AIRGAP-RCP: the Desk runs on an offline workstation. Import and export happen vi
 ```mermaid
 flowchart LR
   C31["CI + ≥2 reproducible builders C-31"] --> C32["Threshold signing + TUF + transparency C-32"]
-  C32 --> C33["Mirror APT/OCI C-33"]
-  C33 -->|"pull via Tor"| IG["intake-gw TUF client"]
-  C33 -->|"pull via egress proxy or Tor"| CO["core TUF client"]
-  C33 -->|"pull"| DK["Desk updater"]
+  C32 --> C33["Mirror APT/OCI C-33 (pinned snapshot; project onion mirror + HTTPS mirror)"]
+  C33 -->|"project onion mirror over Tor"| IG["intake-gw TUF client"]
+  C33 -->|"egress-restricted HTTPS mirror"| CO["core TUF client + update cache"]
+  CO -->|"Desk API DA-90, fixed daily time"| DK["Desk updater"]
   C32 --> TL["Public transparency log"]
   IG -.->|"verify inclusion"| TL
   CO -.->|"verify inclusion"| TL
   DK -.->|"verify inclusion"| TL
 ```
 
-- Every host verifies TUF metadata (ADR-022) and transparency-log inclusion before install.
+- Every host verifies TUF metadata (ADR-022) and transparency-log inclusion before install, including the Platform Manifest for OS, tor and PostgreSQL packages (ADR-040).
 - Instances never send an instance identifier or onion address to the mirror.
-- The intake host fetches exclusively through Tor.
+- Update paths (ADR-046(3); resolves RVW-C-08): Z-INTAKE fetches only from the project's onion mirror over Tor; Z-CORE fetches only from an egress-restricted HTTPS mirror (enterprise or project); Desks fetch TUF metadata and targets through the core update cache (08-API.md DA-90) at a fixed daily time independent of Desk start, so the vendor mirror, CDN and corporate proxy do not observe Desk starts (RVW-C-02, RVW-C-13). Direct Desk access to the vendor clearnet mirror is ADVANCED.
 - Staged rollouts are driven locally by the admin through `candorctl update stage` and `candorctl update apply`. Applying trust-path updates is an ADVANCED-class action (step-up authentication). Rollback and kill-switch behavior is specified in 33-RELEASE-UPDATE-SECURITY.md.
 
 ## 9. Sequence diagrams
 
-### 9.1 Tier W (no-JS web) submission
+### 9.1 Tier W (no-JS web) submission (ADR-034)
 
 ```mermaid
 sequenceDiagram
@@ -347,37 +367,38 @@ sequenceDiagram
   participant W as candor-web C-06
   participant L as candor-sealer C-07
   participant I as intake-store C-08
-  S->>T: GET /c/{channel_id} over onion
+  S->>T: GET /new over onion
   T->>W: unix socket
-  W-->>S: channel page with optional COI checklist (role labels, categories from the verified snapshot)
-  S->>W: POST /new (channel_id, COI selection, CSRF)
-  W->>L: GEN_ACCOUNT (session handle)
-  L-->>W: passphrase words (display only), pending account in RAM
-  W-->>S: page shows 10-word passphrase once, CSRF token, padded
-  S->>W: POST /submit/message (text, CSRF)
-  W->>L: SEAL_BEGIN(channel, COI selection)
-  L->>L: eligible = roster minus selected roles minus COI-map category exclusions
-  Note over L: zero eligible member keys means NO_ELIGIBLE_RECIPIENTS and a fail-closed busy page
-  W->>L: SEAL_CHUNK stream
+  W-->>S: channel page + optional COI checklist (role labels from the verified snapshot; Triage Set named)
+  S->>W: POST /new (channel_id, CSRF)
+  W->>L: SESSION_OPEN (session handle) — RAM only, per-session part key K_sp
+  S->>W: POST /concerns, /q, /identity (ticks, answers, identity block)
+  W->>L: DRAFT_SET (RAM only; never disk, including error paths)
+  S->>W: POST /files (multipart, one file per request, no resume)
+  W->>L: PART_BEGIN + SEAL_CHUNK stream (encrypted under K_sp-derived DEK; no recipient wraps)
   L-->>W: ciphertext chunks (STREAM 64 KiB)
-  W->>I: PUT_PART(draft, ciphertext)
-  S->>W: POST /submit/file (multipart, one file per request)
-  W->>L: SEAL_CHUNK stream, no disk writes
-  L-->>W: ciphertext
-  W->>I: PUT_PART
-  S->>W: POST /submit/send
-  W->>L: SEAL_FINISH (manifest incl. source reply pubkey and COI selection, header with 16 anonymous slots)
-  L-->>W: envelope header ct, manifest ct, account public record
-  W->>I: COMMIT_ENVELOPE(account record if new, envelope, day)
-  I-->>W: ok
-  W->>L: ZEROIZE(session)
-  W-->>S: confirmation page (no ID, no time), padded
+  W->>I: STAGE_PART (padded ciphertext to tmpfs /run/candor/staging)
+  S->>W: POST /submit
+  W->>L: GEN_ACCOUNT (new source) — passphrase + 3 random positions, RAM only
+  W-->>S: S10 Recovery Credential: 10-word passphrase + "re-type words #a, #b, #c"
+  S->>W: POST /saved (3 words)
+  W->>L: CONFIRM_PASSPHRASE
+  L->>L: eligible = Triage Set minus ticked roles minus COI-map exclusions for the final category, effective entries only
+  Note over L: no eligible triage member → NO_ELIGIBLE_TRIAGE → page naming the alternative independent channel
+  W->>L: SEAL_FINISH (parts, delayed_delivery)
+  L-->>W: header_ct (16 anonymous slots), manifest_ct, message part ct, account record, release offset
+  W->>I: COMMIT_ENVELOPE (account, envelope, staged parts moved to blob dir, fsync)
+  I-->>W: ok (only after fsync)
+  W->>L: ZEROIZE(session draft material)
+  W-->>S: "received" page (no ID, no time), padded
 ```
 
 Notes:
-- The passphrase is generated by C-07 using `getrandom` (ADR-005).
-- The pending account is committed only with the first envelope. Drafts not committed within 2 h are purged from RAM, and their parts are purged from C-08 by `draft_gc`.
+- The passphrase is generated by C-07 using `getrandom` (ADR-005) only at Submit, held only in RAM, never stored, and must be confirmed before the submission is finalized. If the S10 response is lost, nothing was submitted and the source restarts (ADR-034; RVW-B-13).
+- No recipient wrap exists before `SEAL_FINISH`, so changing ticks, category or roster during drafting cannot leave slots for excluded members (RVW-A-07).
+- A single timer set applies: idle 20 min, absolute 2 h. Expiry, logout or a sealer restart zeroizes the RAM draft and deletes staged parts; restart loses drafts, which the UI states (ADR-034).
 - No step writes plaintext to disk. Policy (allowed parts, sizes, counts) is enforced in the streaming parser before any byte reaches the sealer (INC-107).
+- Follow-ups by a logged-in source skip S10 and are sealed to the original eligible set ∩ current members (ADR-036(4)).
 
 ### 9.2 Tier V (verified client) submission
 
@@ -388,22 +409,21 @@ sequenceDiagram
   participant W as candor-web C-06 (source-app API)
   participant I as intake-store C-08
   A->>W: GET /app/v1/directory/checkpoint + channel lookup with proofs
-  A->>A: verify checkpoint sigs, witness cosigs, inclusion proofs, roster sig by channel identity key, member epoch key sigs by member identity keys
-  A->>A: show optional COI checklist, compute eligible members locally (ADR-030)
-  A->>A: derive keys from passphrase (Argon2id), encrypt message and files (STREAM), pad
-  A->>A: wrap content key to each eligible member epoch key into 16 anonymous slots (dummies, random order), sign the real recipient list inside the payload
-  A->>W: POST /app/v1/uploads (upload_id = H(U), chunk_count, size bucket)
-  loop each chunk, new circuit allowed, resumable
+  A->>A: verify checkpoint sigs, ≥2 witness cosigs (≥1 external where required), consistency with the pinned tree head, inclusion proofs, roster sig by channel identity key, role-label certs, member epoch key sigs; ignore entries before effective_day
+  A->>A: show optional COI checklist, compute eligible Triage Set members locally (ADR-030, ADR-037)
+  A->>A: encrypt message and files (STREAM), pad
+  A->>A: wrap content key to each eligible triage member epoch key into 16 anonymous slots (dummies, random order), sign the real recipient list inside the payload
+  A->>W: POST /app/v1/uploads (upload_id = H(U), chunk_count ≤ 512, size bucket)
+  loop each 8 MiB chunk, new circuit allowed, resumable within this app session ≤ 24 h
     A->>W: PUT /app/v1/uploads/{upload_id}/chunks/{n} + chunk MAC from U
-    W->>I: STORE_CHUNK (ciphertext)
+    W->>I: UPLOAD_CHUNK (ciphertext)
   end
-  A->>W: POST /app/v1/accounts (first time: locator_hash, public keys)
-  A->>W: POST /app/v1/envelopes (header ct, manifest ct, upload proofs)
-  W->>I: COMMIT_ENVELOPE
+  A->>W: POST /app/v1/envelopes (header ct, manifest ct, upload proofs, delayed_delivery)
+  W->>I: COMMIT_ENVELOPE (fsync)
   W-->>A: 201 (no ID, no time)
 ```
 
-Tier V never sends plaintext and never involves C-07. The server validates only the canonical envelope structure and size buckets, and rejects anything else. It never offers a "server-side encryption" fallback (INC-117).
+Tier V never sends plaintext and never involves C-07. It has no intake account or session (ADR-039): the reply key and `thread_tag` are inside the ciphertext. The server validates only the canonical envelope structure and size buckets, and rejects anything else. It never offers a "server-side encryption" fallback (INC-117). The upload protocol is canonical in 08-API.md §5.1 (ADR-046(4)).
 
 ### 9.3 Source return and reply
 
@@ -420,23 +440,24 @@ sequenceDiagram
   D->>D: encrypt reply to source X-Wing key (from envelope plaintext), routing to intake routing key
   D->>C: POST /desk/v1/cases/{case_id}/replies
   C->>C: authz (case member, reply permission), audit CASE event
-  R->>I: next cycle (15±10 min) POST /relay/v1/replies (signed batch)
-  I->>I: decrypt routing_ct, store reply under mailbox, available_day = today
-  S->>W: POST /login (passphrase) [Tier W]
+  R->>I: next fixed import slot: POST /relay/v1/replies (signed batch)
+  I->>I: decrypt routing_ct; Tier W: file under mailbox; all: add to published set; available_day = today
+  S->>W: Tier V: GET /app/v1/replies/index + ALL pages (no auth); trial-decrypt in the app
+  S->>W: Tier W: POST /login (passphrase)
   W->>L: LOGIN_DERIVE(passphrase)
-  L->>L: Argon2id → seed → keys, compute locator_hash, sign challenge
-  L->>I: via W: LOOKUP(locator_hash) + VERIFY(sig)
-  I-->>W: account ok + reply ciphertexts (padded list)
+  L->>L: Argon2id (64 MiB, t=3, p=1) → seed → keys, compute locator_hash, sign challenge
+  L->>I: via W: ACCOUNT_AUTH_CHALLENGE(locator_hash) + VERIFY(sig)
+  I-->>W: account ok + reply ciphertexts (padded list of 32)
   W->>L: OPEN_REPLIES(ciphertexts)
   L-->>W: plaintext for rendering (RAM)
-  W-->>S: inbox page, day-granular dates, padded
-  S->>W: POST /logout (Clear-Site-Data)
+  W-->>S: inbox page, day-granular dates, no own-message history, padded
+  S->>W: POST /leave (Clear-Site-Data)
   W->>L: ZEROIZE
 ```
 
-There are no read receipts: fetch or delete by the source is never reported to Z-CORE (ADR-010). For the Tier V flow, the app authenticates via challenge-signature and decrypts locally (08-API.md §5).
+There are no read receipts: fetch or delete by the source is never reported to Z-CORE (ADR-010). A Tier W source may rotate the passphrase from the inbox (ADR-046(7); 08-API.md SW-22).
 
-### 9.4 Recipient import and triage
+### 9.4 Recipient import and triage (ADR-037, ADR-038)
 
 ```mermaid
 sequenceDiagram
@@ -446,30 +467,32 @@ sequenceDiagram
   participant C as candor-case C-10
   participant Z as authz C-22
   participant K as keydir C-14
-  participant D as Desk C-15
-  R->>I: POST /relay/v1/batches/claim
-  I-->>R: batch manifest (padded)
+  participant D as Desk C-15 (Triage Set member)
+  R->>I: fixed import slot: POST /relay/v1/batches/claim (released envelopes only)
+  I-->>R: batch manifest (padded; epoch_index, no arrival day)
   R->>I: GET objects
-  R->>C: insert import_envelope (new random id), blobs to C-13
+  R->>C: stage import_envelope rows (new random id, import_date = slot date), blobs to C-13 (mtime = slot start)
+  R->>C: commit all rows of the slot at slot_start + commit offset (one transaction)
   R->>I: POST ack (digests)
   I->>I: delete acked envelopes and blobs
-  C->>C: enqueue content-free notification to the channel roster at the next hourly digest slot
-  D->>C: GET /desk/v1/intake/envelopes (active roster members of the channel)
-  C->>Z: authorize(intake.list, user, channel)
+  Note over C: no notification is triggered; staff get the constant daily digest or none (ADR-038(2))
+  D->>C: GET /desk/v1/intake/envelopes (active Triage Set members only)
+  C->>Z: authorize(intake.list, user, channel, triage)
   D->>C: GET envelope header + parts (ciphertext)
-  D->>D: trial-decrypt the 16 slots with own member epoch private keys (local, hardware-bound), verify the signed recipient list against C-14, decrypt message text, show triage view
+  D->>D: trial-decrypt the 16 slots with own member epoch private keys (hardware-bound), verify the signed recipient list against C-14 (effective_day, epoch), decrypt message text, show triage view
   Note over D: envelopes that open for no local key are hidden from the user
   D->>C: POST triage decision (import, or reject with a second approver)
-  D->>C: POST /desk/v1/cases/eligibility (channel, flags)
-  C->>Z: compute eligible members minus COI exclusions
-  Z-->>D: eligible member list
+  D->>C: POST /desk/v1/cases/eligibility (channel)
+  C->>Z: candidates = channel investigators minus standing COI registry
+  Z-->>D: candidate list
+  D->>D: remove source-ticked roles and manager-chain conflicts LOCALLY (HR data held outside Candor or by the triage member)
   D->>K: fetch member encryption keys + inclusion proofs
-  D->>D: verify proofs, generate case key, re-wrap envelope DEKs, wrap case key per member
-  D->>C: POST /desk/v1/cases (encrypted record, wraps, DEK rewraps, envelope refs)
-  C->>C: verify wraps cover only eligible members, audit CASE create
+  D->>D: verify proofs, generate case key, re-wrap envelope DEKs, wrap case key per member (≥ min_recipients = 2), compute blinded COI tags padded to 8
+  D->>C: POST /desk/v1/cases (encrypted record, wraps, DEK rewraps, envelope refs, coi_excl_tags)
+  C->>C: verify wraps ⊆ candidates, ≥ 2 holders, no wrap for a tagged user; audit CASE create
 ```
 
-### 9.5 Conflict-of-interest routing
+### 9.5 Conflict-of-interest routing (triage-first, ADR-037)
 
 ```mermaid
 sequenceDiagram
@@ -479,26 +502,26 @@ sequenceDiagram
   participant K as Key directory snapshot
   participant C as candor-case C-10
   participant Z as authz C-22
-  participant D as Desk (eligible recipient)
-  K-->>W: signed channel roster (role labels), COI map (category to excluded labels), member epoch keys
-  W-->>S: optional checklist "Is your report about any of these people or roles?" (default none)
+  participant T as Desk (Triage Set member)
+  participant D as Desk (investigator)
+  K-->>W: signed channel roster (role labels, Triage Set flags, effective_day), role-label certs, COI map, triage member epoch keys
+  W-->>S: optional checklist "Is your report about any of these people or roles?" (default none) + ADR-037(4) statement
   S->>W: select role label "CFO" and category "Executive leadership"
-  W->>W: eligible = roster minus CFO minus COI-map exclusions for the category
-  W->>W: wrap content key to each eligible member epoch key, 16 slots incl. dummies (Tier V in app, Tier W in sealer)
-  Note over W: excluded members hold no key that opens any slot
-  W->>C: (via intake + relay) envelope with 16 anonymous slots, recipient list only inside the AEAD payload
-  D->>C: list channel intake and trial-decrypt (excluded members open nothing)
-  D->>D: open slot, read source COI selection from the encrypted manifest
-  D->>C: request eligibility for case creation with the excluded role labels
-  C->>Z: apply COI: source selection, channel COI map, recipient self-declarations, admin COI registry
-  Z-->>D: eligible members (excluded users absent)
-  D->>C: create case, key wraps only for eligible members
-  C->>Z: on later member add, re-evaluate COI, deny if excluded
+  W->>W: eligible = Triage Set minus CFO minus COI-map exclusions for the category
+  W->>W: wrap content key to each eligible triage member epoch key, 16 slots incl. dummies (Tier V in app, Tier W in sealer at finalization)
+  Note over W: excluded and non-triage members hold no key that opens any slot
+  W->>C: (via intake + fixed-slot relay) envelope with 16 anonymous slots, recipient list only inside the AEAD payload
+  T->>C: list channel intake and trial-decrypt (excluded triage members open nothing; non-triage members cannot list)
+  T->>T: open slot, read source COI selection, assess COI incl. manager chain locally
+  T->>C: create case: wraps only for chosen investigators, blinded COI tags (no user IDs, no reasons)
+  D->>C: access case with own wrap
+  C->>Z: on later member add, blind tag check + standing registry, deny (uniform 404) if excluded
 ```
 
-- Excluded members never receive an envelope slot or a case key wrap (ADR-015, ADR-030).
-- Envelope headers carry no recipient key IDs (ADR-033 §1). Servers, DB thieves and admins cannot tell which members were excluded. Recipients verify the signed recipient list inside the payload against C-14 (THR-046). This relies on the key privacy of X-Wing/ML-KEM (assumption recorded in 40-SECURITY-ASSUMPTIONS.md). See §16, residual risk R-3.
-- Channel roster size is capped at the slot count (default 16) by the Admin API (08-API.md AP-11).
+- Excluded members never receive an envelope slot or a case key wrap (ADR-015, ADR-030). Non-triage members never list, receive notifications for, or trial-decrypt intake envelopes (ADR-037(2)).
+- Envelope headers carry no recipient key IDs (ADR-033(1), ADR-046(10)). Servers, DB thieves and admins cannot tell which members were excluded. Recipients verify the signed recipient list inside the payload against C-14 (THR-046). This relies on the key privacy of X-Wing/ML-KEM (assumption recorded in 40-SECURITY-ASSUMPTIONS.md). See §16, residual risk R-3.
+- Case-level COI exclusions are stored only as blinded tags `HMAC(K_case_excl, user_id)` padded to 8 per case (ADR-037(3); 09-DATABASE.md `coi_excl_tag`); audit reason codes do not distinguish COI removals.
+- The Triage Set is capped at the slot count (default 16) and has ≥ 2 members (08-API.md AP-11).
 
 ### 9.6 Export package
 
@@ -530,7 +553,7 @@ sequenceDiagram
   participant Q as Requester Desk (e.g. Investigations Lead)
   participant C as candor-case C-10
   participant Z as authz C-22
-  participant A as Approver Desk (independent role, e.g. Ombudsman)
+  participant A as Approver Desk (independent role outside the legal/management chain, e.g. Ombudsman; ADR-045)
   participant M as Remaining case member Desk OR Recovery Quorum ceremony
   participant RV as Independent reviewer
   Q->>C: POST /desk/v1/breakglass/requests (case_id, reason code, legal basis ct, duration ≤ 72 h)
@@ -555,11 +578,12 @@ The initiator is the row and the destination is the column. Empty = **DENY** (en
 | From \ To | Tor network | intake-gw (Z-INTAKE) | core (Z-CORE) | Case DB / blob (Z-CORE internal) | monitor (Z-SOC) | backup (Z-BAK) | update mirror (Z-SUPPLY) | Desk (Z-RCP) | Viewer (Z-VIEW) | admin WS (Z-ADM) |
 |---|---|---|---|---|---|---|---|---|---|---|
 | Source (Z-SRC) | any (Tor client) | only as onion via Tor | | | | | | | | |
-| intake-gw | TCP any (tor daemon only, uid `debian-tor`) | — (loopback/Unix only) | **DENY (ADR-009)** | **DENY** | TCP 8514 mTLS (agent push); UDP 123 NTP | **DENY** | via Tor SOCKS only | | | |
-| core | TCP any, core tor only (RCP-ONION, updates) | TCP 7443 mTLS relay (`candor-relay` uid only) | — | Unix socket or TCP 5432 mTLS (EE-HA); S3 443 (EE) | TCP 8514 mTLS; NTS upstream via own chrony | TCP 443/22 append-only (`candor-backup` uid) | TCP 443 via egress proxy or Tor | | | |
-| monitor | | **DENY** | **DENY** | | — | | TCP 443 | | | |
+| intake-gw | TCP any (tor daemon only, uid `debian-tor`; update-tor client uid for the project onion mirror and Roughtime over Tor) | — (loopback/Unix only) | **DENY (ADR-009)** | **DENY** | TCP 8514 mTLS (agent push, dedicated monitoring interface only); **no NTP** | **DENY** | project onion mirror via Tor only (ADR-046(3)) | | | |
+| core | TCP any, core tor only (RCP-ONION) | TCP 7443 mTLS relay (`candor-relay` uid only) | — | Unix socket or TCP 5432 mTLS (EE-HA); S3 443 (EE) | TCP 8514 mTLS; NTS upstream via own chrony | TCP 443/22 append-only (`candor-backup` uid) | TCP 443 egress-restricted HTTPS mirror (ADR-046(3)) | | | |
+| monitor | | **DENY** | **DENY** | | — | | **DENY** (no clearnet egress; updates via the management path) | | | |
+| alert-relay | | **DENY** | **DENY** | | TCP 8514 pull from collector | | TCP 443 | | | |
 | backup | | | | | TCP 8514 (agent) | — | | | | |
-| Desk (Z-RCP) | via Tor (RCP-ONION) | **DENY** | TCP 8443 mTLS (RCP-LAN) or via onion | **DENY** | | | TCP 443 (Desk updater) | — | vsock/qrexec only | |
+| Desk (Z-RCP) | via Tor (RCP-ONION) | **DENY** | TCP 8443 mTLS (RCP-LAN) or via onion; updates via DA-90 | **DENY** | | | **DENY** by default; TCP 443 only when `update.desk_direct_vendor_mirror` (ADVANCED) | — | vsock/qrexec only | |
 | Viewer (Z-VIEW) | **DENY** | **DENY** | **DENY** | **DENY** | **DENY** | **DENY** | **DENY** | reply over the same vsock only | — | |
 | admin WS (Z-ADM) | via Tor (remote onion admin) | TCP 22 SSH (management interface) | TCP 9443 Admin API; TCP 22 | **DENY** (no direct DB) | TCP 22; HTTPS 443 dashboard (read-only) | TCP 22 (restore only, dual-control) | TCP 443 | | | — |
 | C-26 SIEM gw (EE) | | | | | — | | | | | customer SIEM TCP 6514 (outbound) |
@@ -570,7 +594,7 @@ Additional rules:
 - Firewall rules are owner-matched (`meta skuid`) so that only the named service user can use a permitted flow.
 - Intake-gw has **no** default route to the Internet except via the tor process (`meta skuid debian-tor`).
 - Management interfaces are on a separate VLAN or NIC. The relay link is a dedicated VLAN, point-to-point link or WireGuard tunnel. In CE-SINGLE (VMs on one host), the relay link is a host-only bridge with nftables on both VMs and the hypervisor.
-- Clock: the intake host syncs only to the monitor's NTP (or a site GPS/NTP appliance on the management network). The core uses NTS (THR-043).
+- Clock (ADR-036(6); RVW-A-04, RVW-A-23): the intake host takes time only from independent sources: the signed Tor consensus `valid-after` as a floor (with `valid-until` + 3 h as a ceiling) and ≥ 2 Roughtime servers queried over Tor; never from Z-CORE and never from the monitor. The core uses NTS (THR-043).
 - **Forbidden on all hosts:**
   - IPMI/BMC on production networks (the BMC must be on the management VLAN or disabled);
   - mDNS, LLMNR, SSDP;
@@ -629,11 +653,11 @@ Tenant context: every request resolves `tenant_id` from the authenticated princi
 
 | Profile | Z-INTAKE | Z-CORE | Z-SOC | Z-BAK | Recipient | Notes |
 |---|---|---|---|---|---|---|
-| CE-SINGLE | VM on shared host | VM on same host | VM or omitted (agent-only local) | external disk or remote SFTP | Desk (RCP-ONION) | Documented reduced isolation: a hypervisor escape joins zones |
+| CE-SINGLE | VM on shared host (default isolation = VMs; container-only isolation is ADVANCED, ADR-046(6)) | VM on same host | VM or omitted (agent-only local) | external disk or remote SFTP | Desk (RCP-ONION) | Documented reduced isolation: a hypervisor escape joins zones. Vault VMK in swtpm is disclosed; the host's image backups must exclude the vault volume |
 | CE-HARDENED | dedicated physical host | dedicated physical host | dedicated small host | dedicated store | Desk + DispVM viewer; optional AIRGAP | Reference profile for this document |
 | EE-ONPREM | dedicated host or VM cluster (not shared with other workloads) | dedicated host(s) | customer SOC via C-26 | customer backup with Candor encryption | Desk (RCP-LAN) | SSO bridge (C-21) optional |
-| EE-HA | 2 intake hosts, active/passive, same onion key on both (≤ 2 hosts, ADR-032), both in the Secret Placement Manifest | Kubernetes permitted (ADR-024); PG HA (sync replica) | C-26 | as EE | RCP-LAN | Replicas carry ciphertext only |
-| GOV-ONPREM | dedicated hardware; FIPS profile | dedicated; HSM (C-29) for audit checkpoint and relay identity | C-26 | offline media rotation | RCP-LAN; AIRGAP optional | CANDOR-FIPS-1 suite |
+| EE-HA | 2 intake hosts, active/passive on **shared-nothing** hosts, same onion key on both (≤ 2 hosts, ADR-032), both in the Secret Placement Manifest; **no intake DB replication** (ADR-046(1)): envelopes pending on a failed node are recovered when its disk is recovered | Kubernetes permitted (ADR-024); PG HA (sync replica); Erasure Key Vault replicated to standby and DR site within the HA RPO (ADR-044(4)) | C-26 | as EE | RCP-LAN | Replicas carry ciphertext only |
+| GOV-ONPREM | dedicated hardware; FIPS profile | dedicated; HSM (C-29) for audit checkpoint, relay identity and vault key (physical TPM/HSM only, ADR-044(4)); Recovery Quorum enabled by default with independent custodians, disclosed to sources (ADR-044(3)) | C-26 | offline media rotation | RCP-LAN; AIRGAP optional | CANDOR-FIPS-1 suite; 1 import slot per day |
 | AIRGAP-RCP | any | any | any | any | offline Desk + transfer Desk | Media-bundle import/export |
 | PRIVATE-CLOUD | dedicated VMs; provider sees RAM/disk (THR-030) | VMs or K8s | C-26 | provider object store (ciphertext) | RCP-LAN / RCP-ONION | Tier W plaintext exposure to hypervisor documented; Tier V recommended |
 | MANAGED | vendor-run dedicated intake per customer | vendor-run core per customer | vendor SOC (SYSTEM class only) | vendor store (ciphertext) | customer Desk; keys never with vendor | Vendor can observe availability, sizes and coarse counts; cannot decrypt |
@@ -648,17 +672,17 @@ Tenant context: every request resolves `tenant_id` from the authenticated princi
 | C-05 tor daemon | no (onion) | no (sees HTTP bytes for Tier W inside TLS-less onion HTTP) | no | yes (in RAM) | yes | no | Tier W plaintext in transit; circuit metadata; onion key → impersonation (THR-044) |
 | C-06 candor-web | no | Tier W: yes, transiently (streams); Tier V: no | yes, during session | yes (RAM, never persisted) | yes | no | Tier W plaintext of new submissions and replies rendered during the compromise window; Tier V: ciphertext and metadata only |
 | C-07 sealer | no | Tier W: yes, transiently | yes (derives keys at login) | request-level only | yes | no | Tier W plaintext and source passphrases of sources who log in during the window (THR-014) |
-| C-08 intake store | no | no (ciphertext) | account ↔ own envelopes until relayed; account ↔ mailbox replies | day only | padded buckets | no | Ciphertext, public keys, locator hashes, day counts; ability to drop or delay (DoS) |
-| C-09 relay | no | no | no (routing blobs are opaque) | batch times | padded | no | Delay, drop, or replay attempts (detected by digest acks and the envelope nonce registry) |
-| C-10/C-22 case service | no | no | case ↔ envelopes (by new IDs); no source account ID | staff times (audit) | padded | yes | Workflow metadata, ACLs, ciphertext; cannot decrypt; can deny service or attempt key substitution (detected by C-14 transparency, THR-046) |
-| C-12/C-13 stores | no | no | as C-10 | day for source events | padded | yes | As C-10 at rest |
-| C-14 key directory | no | no | no | entry times | no | public keys | Key substitution attempts become visible in the log; split-view is detected by witnesses and clients |
+| C-08 intake store | no | no (ciphertext; Tier W staged parts are ciphertext under RAM-only keys) | Tier W account ↔ own envelopes until relayed; Tier W account ↔ mailbox replies; no Tier V accounts (ADR-039) | day only | padded buckets | no | Ciphertext, Tier W public keys, locator hashes, monthly counts; ability to drop or delay (DoS); Tier W mailbox open times (ADR-039 residual) |
+| C-09 relay | no | no | no (routing blobs are opaque) | fixed slot times only | padded | no | Delay, drop, or replay attempts (detected by digest acks and the envelope nonce registry) |
+| C-10/C-22 case service | no | no | case ↔ envelopes (by new IDs); no source account ID | staff times (audit); import slot dates | padded | yes (case members; COI exclusions only as blinded tags) | Workflow metadata, ACLs, ciphertext; cannot decrypt; can deny service or attempt key substitution (detected by C-14 transparency, THR-046) |
+| C-12/C-13 stores | no | no | as C-10 | slot date for source events; WAL/blob metadata = fixed slot times | padded | yes | As C-10 at rest |
+| C-14 key directory | no | no | no | weekly publication slot; removals immediate | no | public keys, role labels, Triage Sets | Key substitution attempts become visible in the log; split-view is detected by ≥ 2 witnesses and clients; time-locked additions are visible before they take effect |
 | C-15 Desk | no | yes for message text of authorized cases; attachment plaintext only inside C-17 (ADR-033 §5) | as revealed by content | as revealed by content | yes | yes | That member's cases (THR-019); bounded by ACL |
 | C-17 viewer | no | one object | no | no | yes | no | That object only; no network to exfiltrate (THR-023) |
-| C-19 admin | no | no | no | staff audit | aggregate counters (k ≥ 5) | yes | Config tampering (DANGEROUS needs 2 approvers); no content |
-| C-23 notify | no | no | no | digest times | no | recipient contact addresses | Recipient contact list; message text is fixed |
+| C-19 admin | no | no | no | staff audit | monthly aggregates per 24 §TEL (k = 10) | yes | Config tampering (DANGEROUS needs 2 approvers); roster additions need an independent approver and a time lock; no content |
+| C-23 notify | no | no | no | fixed daily send time, independent of activity | no | staff contact addresses | Staff contact list; message text and schedule are fixed (ADR-038(2)) |
 | C-24 audit | no | no | no | staff actions exact | no | pseudonymous staff IDs | Staff activity history; hash chain makes tampering detectable |
-| C-25/C-26 monitor/SIEM | no | no | no | system event times | host metrics | admin IDs (SECURITY) | Host health data; no path in (push-only) |
+| C-25/C-26 monitor/SIEM | no | no | no | system event times; source-influenced states only as global daily bands | host metrics | admin IDs (SECURITY) | Host health data; no path in (push-only); no clearnet egress from the collector |
 | C-27 backup | no | no | as C-12 (encrypted) | no | yes | encrypted | Nothing without the offline backup key |
 | C-34 fleet (EE) | no | no | no | heartbeat times | no | no | Version and health per opaque instance ID; can offer only signed, transparency-logged releases (ADR-022) |
 
@@ -669,7 +693,10 @@ Tenant context: every request resolves `tenant_id` from the authenticated princi
 | `source_account_id` | C-08 only | nowhere | Never leaves Z-INTAKE in cleartext. Replies are routed via `routing_ct` sealed to the intake routing key. |
 | `intake_envelope_id` | C-08 | relay, transiently (manifest) | C-09 assigns a fresh random `import_envelope_id` on insert and does not persist the intake ID (acks are by content digest and batch number). |
 | `locator_hash` | C-08 | nowhere | Lookup handle only |
-| Recipient slot key IDs (Member Epoch Key IDs) | C-08, C-12 (envelope header), C-14 | yes | Pseudonymous, rotate per epoch; mapping to role labels is public in C-14 (ADR-030) |
+| Recipient slot key IDs (Member Epoch Key IDs) | C-14, and inside the AEAD payload of envelopes only | no cleartext crossing | Never in cleartext envelope headers or any C-08/C-12 column (ADR-033(1), ADR-046(10)); pseudonymous, rotate per epoch; mapping to role labels is public in C-14 (ADR-030) |
+| COI exclusion of a user for a case | C-12 as blinded tag only | nowhere | `HMAC(K_case_excl, user_id)`, padded to 8 per case; no user ID or reason (ADR-037(3)) |
+| `header_digest` | C-08 (until ack), C-12 | relay | Nulled after ≤ 24 h in C-12 (ADR-039) |
+| Arrival day (`received_date`) | C-08 only | no (relay sends `epoch_index`) | Z-CORE stores only the import slot date (ADR-038(3)) |
 | `case_id` | C-12, C-15 | Desk only | Never shown to the source; the source sees no ID (ADR-010) |
 | `thread_tag` (source-side, inside encrypted envelope) | ciphertext only | — | Lets Desk attach follow-ups to a case without any server-visible link |
 
@@ -677,74 +704,92 @@ Tenant context: every request resolves `tenant_id` from the authenticated princi
 
 | ID | Requirement | Evidence | Threats | Component | Verification |
 |---|---|---|---|---|---|
-| ARCH-001 | Z-INTAKE and Z-CORE SHALL run on separate hosts in all profiles except CE-SINGLE, where they SHALL run in separate VMs with the documented reduced-isolation warning shown in the admin console. | ADR-009; ADR-024; B-SD-04 | THR-014; THR-015 | C-05; C-10 | INSP: deployment manifests per profile; TST: installer refuses co-location in CE-HARDENED+ (`deploy-topology-check`) |
+| ARCH-001 | Z-INTAKE and Z-CORE SHALL run on separate hosts in all profiles except CE-SINGLE, where they SHALL run in separate VMs (container-only isolation is ADVANCED) with the documented reduced-isolation warning shown in the admin console. | ADR-009; ADR-024; ADR-046(6); B-SD-04 | THR-014; THR-015 | C-05; C-10 | INSP: deployment manifests per profile; TST: installer refuses co-location in CE-HARDENED+ (`deploy-topology-check`) |
 | ARCH-002 | No network connection SHALL be initiated from any Z-INTAKE host to any Z-CORE address; host and network firewalls SHALL default-drop and log (SYSTEM class, no payload) such attempts. | ADR-009; B-GL-22 | THR-014 | C-05; C-09 | TST: `seg-matrix` probe from every intake uid to every core port expects failure; TST (security, 29): red-team pivot attempt from intake shell |
 | ARCH-003 | The relay (C-09) SHALL be the only component exchanging data with Z-INTAKE from Z-CORE. It SHALL use mTLS 1.3 with pinned Ed25519 certificates on both sides plus signed request bodies, and the intake SHALL hold no credential that authenticates to any Z-CORE service. | ADR-009; INC-103 | THR-014; THR-021 | C-09; C-08 | TST: relay link with unpinned/rotated certificate fails; INSP: Secret Placement Manifest for intake-gw lists no core credential |
-| ARCH-004 | The intake host SHALL have no network egress except by the `debian-tor` uid to the Tor network, the agent push to the monitor (TCP 8514), and NTP to the monitor. DNS resolution outside Tor SHALL be disabled. | ADR-001; INC-33; INC-34 | THR-001; THR-030 | C-05 | TST: nftables ruleset golden test; TST (security, 29): egress probe per uid expects drop |
+| ARCH-004 | The intake host SHALL have no network egress except by the `debian-tor` uid (and the update-tor client uid) to the Tor network, and the agent push to the monitor collector (TCP 8514) over the dedicated monitoring interface to a collector host with no clearnet egress. There SHALL be no NTP egress. DNS resolution outside Tor SHALL be disabled. The normative egress matrix is 16 §14.2. | ADR-001; ADR-036(6); INC-33; INC-34; RVW-A-23 | THR-001; THR-030 | C-05 | TST: nftables ruleset golden test; TST (security, 29): egress probe per uid expects drop; TST: no packet from intake-gw reaches any host with a default route to the Internet except via tor |
 | ARCH-005 | Every inter-service call SHALL derive caller identity from the transport (SO_PEERCRED, mTLS SAN, onion client-auth, hypervisor channel) and SHALL ignore identity claims in payloads. | INC-103; B-SD-34 | THR-021 | C-06; C-07; C-08; C-09; C-10; C-24; C-25 | TST: IPC spoofing suite sends payload-claimed identities from every peer and expects rejection |
 | ARCH-006 | The source onion service backend SHALL be a Unix socket. `candor-web` SHALL NOT bind any TCP port. | INC-33; INC-34 | THR-001 | C-05; C-06 | TST: `ss -ltnp` check in the self-test; INSP: systemd unit `RestrictAddressFamilies=AF_UNIX` |
-| ARCH-007 | Tier W plaintext SHALL exist only in RAM of `candor-web` (streaming buffers ≤ 256 KiB per request) and `candor-sealer`. It SHALL never be written to disk, swap, logs or core dumps. | ADR-004; INC-107; INC-58 | THR-014; THR-016 | C-06; C-07 | TST: fanotify zero-write test during submissions; TST: swap disabled or encrypted with ephemeral key check; TST (security, 29): core-dump attempt yields none |
+| ARCH-007 | Tier W plaintext, draft text, identity blocks and newly generated passphrases SHALL exist only in RAM of `candor-web` (streaming buffers ≤ 256 KiB per request) and `candor-sealer`. They SHALL never be written to disk, swap, tmpfs, logs or core dumps. Staged attachment parts SHALL be only ciphertext under per-session keys held in sealer RAM. | ADR-004; ADR-034; INC-107; INC-58; RVW-A-02 | THR-014; THR-016 | C-06; C-07 | TST: fanotify zero-write test during submissions; TST: swap disabled or encrypted with ephemeral key check; TST (security, 29): core-dump attempt yields none |
 | ARCH-008 | Tier V submissions SHALL be accepted only in the canonical envelope format. The server SHALL NOT offer or accept any server-side encryption fallback or client-declared "already encrypted" flag. | INC-117; ADR-004 | THR-007; THR-012 | C-06 | TST: submit plaintext with a forged header → 400 and nothing stored |
 | ARCH-009 | The Case DB SHALL NOT contain any cleartext source account identifier, locator hash, or intake envelope identifier. Reply routing SHALL use a routing ciphertext sealed to the Intake Routing Key. | ADR-010; INC-11 | THR-015; THR-018; THR-038 | C-09; C-12 | TST: schema lint forbids such columns; TST: relay integration test asserts intake IDs absent from C-12 after import |
-| ARCH-010 | The relay SHALL pull at randomized intervals (default 15 ± 10 min, uniform) and SHALL assign fresh random IDs on import. The intake SHALL delete envelopes and blobs only after a digest-verified ack. | ADR-009; ADR-010 | THR-011; THR-015 | C-09; C-08 | TST: interval distribution test; TST: ack with wrong digest leaves data intact |
+| ARCH-010 | The relay SHALL import only at fixed configured slots (default 4×/day; HIGH/GOV 1×/day; never event-driven) and SHALL assign fresh random IDs on import. The intake SHALL delete envelopes and blobs only after a digest-verified ack. (Amended by ADR-038(1): the v1 randomized 15 ± 10 min interval is withdrawn.) | ADR-009; ADR-010; ADR-038(1) | THR-011; THR-015 | C-09; C-08 | TST: slot schedule test (claims only at slot times); TST: ack with wrong digest leaves data intact |
 | ARCH-011 | Recipient access SHALL be only through Candor Desk via the Desk API over RCP-ONION (client-auth onion) or RCP-LAN (mTLS). No browser-accessible recipient or admin UI SHALL be served by any server. | ADR-007; INC-105 | THR-022; THR-007 | C-10; C-15 | TST: HTTP GET of every core listener without client credentials returns connection refusal or TLS failure; INSP |
 | ARCH-012 | The Admin API SHALL be served on a listener separate from the Desk API with a distinct audience, and SHALL expose no endpoint returning case content, case key wraps or evidence blobs. | ADR-015; ADR-029; INC-114 | THR-018; THR-021 | C-10; C-19 | TST: route registry diff test (admin router vs content route list = ∅) |
 | ARCH-013 | Attachment content SHALL be decrypted only inside C-17, using a single-use per-job key handed in by C-15 over the hypervisor channel. The C-15 main process SHALL never hold attachment plaintext. C-17 SHALL have no network interface and no long-term key material, and each object SHALL be opened in a fresh disposable instance. | ADR-012; ADR-033; INC-111; B-SD-05 | THR-023 | C-15; C-17 | TST (security, 29): weaponized corpus in viewer; TST: Desk process memory scan shows no attachment plaintext canary; TST: viewer VM has no NIC and no key files (self-test) |
 | ARCH-014 | Monitoring SHALL be push-only from agents to the collector. The monitor host SHALL hold no credential for, and SHALL initiate no connection to, Z-INTAKE or Z-CORE. | INC-103; INC-106; B-SD-22 | THR-016; THR-014 | C-25 | TST: Secret Placement Manifest check on the monitor; TST: segmentation probe |
-| ARCH-015 | Intake backups SHALL be produced encrypted to the Backup Public Key on intake and pulled by C-09. Z-INTAKE SHALL NOT connect to Z-BAK. | ADR-009; INC-55 | THR-017 | C-08; C-27 | TST: restore drill without the offline key yields no readable data; segmentation probe |
+| ARCH-015 | Intake backups SHALL be produced encrypted to the Backup Public Key on intake and pulled by C-09, SHALL contain only Tier W account records, deletion tombstones and intake metadata (no envelopes, no replies), and tombstones SHALL be applied after any restore. Z-INTAKE SHALL NOT connect to Z-BAK. | ADR-009; INC-55; RVW-A-28; RVW-A-03 | THR-017 | C-08; C-27 | TST: restore drill without the offline key yields no readable data; segmentation probe; delete-then-restore drill |
 | ARCH-016 | The onion service private key SHALL NOT be included in routine backups. Backing it up SHALL be a separate offline, dual-approved ceremony. | INC-106; B-GL-11 | THR-044; THR-017 | C-05; C-27 | INSP: backup manifest; TST: backup content scanner for onion key patterns |
 | ARCH-017 | Every host SHALL have a Secret Placement Manifest, verified post-deploy and every 5 min by C-25. Any violation SHALL fail deployment or raise a SECURITY alert. | ADR-028; INC-106 | THR-013; THR-035 | C-25 | TST: plant a stray key on the monitor → alert within 10 min |
-| ARCH-018 | All components SHALL fetch updates via TUF with transparency-log inclusion verification. The intake host SHALL fetch only through Tor, and no update request SHALL carry an instance identifier or onion address. | ADR-022; INC-49; INC-38 | THR-025; THR-024 | C-05; C-10; C-15; C-33 | TST: update client packet capture shows no instance ID; TST: unsigned or unlogged update rejected |
+| ARCH-018 | All components SHALL fetch updates via TUF with transparency-log inclusion verification, including the Platform Manifest for OS, tor and PostgreSQL packages. Z-INTAKE SHALL fetch only from the project onion mirror over Tor; Z-CORE only from an egress-restricted HTTPS mirror; Desks only through the core update cache at a fixed daily time (direct vendor mirror = ADVANCED). No update request SHALL carry an instance identifier or onion address. | ADR-022; ADR-040; ADR-046(3); INC-49; INC-38; RVW-C-02; RVW-C-08; RVW-C-13 | THR-025; THR-024 | C-05; C-10; C-15; C-33 | TST: update client packet capture shows no instance ID; TST: unsigned or unlogged update rejected; TST: Desk refresh time independent of Desk start |
 | ARCH-019 | Anonymous-mode reachability SHALL be implemented only via a `TransportAdapter` that meets all §11 admission criteria. Adding an adapter SHALL require a new ADR. | ADR-001; B-AN-33; B-AN-57 | THR-003; THR-005 | C-05 | INSP: ADR register; TST: adapter conformance suite |
 | ARCH-020 | `EphemeralCircuitToken` (and any transport connection metadata) SHALL NOT implement serialization, `Debug` or `Display`, and SHALL NOT be stored beyond the connection lifetime. | ADR-026 | THR-001; THR-016 | C-05; C-06 | TST: compile-fail test; INSP: code review |
 | ARCH-021 | Confidential Clearnet Intake (C-38), when enabled, SHALL run on separate hosts with separate onion/TLS keys, DB, sealer and channels, and SHALL display "NOT ANONYMOUS" on every page. It SHALL NOT share any process or store with anonymous intake. | ADR-002 | THR-040 | C-38 | TST: deploy check; DEMO: usability review of labeling |
 | ARCH-022 | Tenant context SHALL be derived from the authenticated principal or the onion listener binding, never from request input. EE shared instances SHALL use per-tenant onion services, per-tenant intake process sets and DBs, and RLS-enforced Case DB tenancy. | ADR-021; INC-113; B-GL-37 | THR-021; THR-045 | C-06; C-10; C-12 | TST: two-tenant isolation harness (tenant B snapshot unchanged after all tenant-A actions) |
 | ARCH-023 | High-risk customers (as defined in ADR-021) SHALL be deployed only on dedicated instances. The installer SHALL require an explicit risk classification at tenant creation. | ADR-021 | THR-045; THR-020 | C-10 | INSP: tenant creation flow; TST: `root-maint tenant create` without a risk class fails |
-| ARCH-024 | COI exclusions (source-selected role labels and COI-map categories) SHALL be applied before wrapping. Tier V clients SHALL apply them locally and the Tier W sealer in RAM. The envelope content key SHALL be wrapped only to eligible members' Member Epoch Keys. Case-level COI SHALL be re-evaluated by C-22 before every case key wrap. Excluded members SHALL never receive a slot or a wrap. | ADR-015; ADR-030; INC-22 | THR-020 | C-06; C-07; C-22; C-15 | TST: COI scenario suite (excluded user cannot list, fetch, or be added); TST (security, 29): attempt to add excluded member via API |
-| ARCH-025 | Break-glass SHALL require a requester and an approver who are distinct users with distinct roles, a time limit ≤ 72 h, notification to all case members, and a post-hoc independent review within 7 days. It SHALL grant content access only via a key wrap by an existing member or the Recovery Quorum. | ADR-015; ADR-013 | THR-018; THR-019 | C-10; C-22; C-15 | TST: break-glass state machine tests; DEMO: tabletop exercise |
+| ARCH-024 | COI exclusions (source-selected role labels and COI-map categories) SHALL be applied before wrapping. Tier V clients SHALL apply them locally and the Tier W sealer in RAM at finalization. The envelope content key SHALL be wrapped only to eligible **Triage Set** members' Member Epoch Keys; further investigators receive only case-key wraps from the Triage Set after its COI assessment. Case-level COI SHALL be enforced before every case key wrap by a blind check of Desk-computed tags (`coi_excl_tag`) and the standing registry. Excluded members SHALL never receive a slot or a wrap. | ADR-015; ADR-030; ADR-037; INC-22; RVW-B-02 | THR-020 | C-06; C-07; C-22; C-15 | TST: COI scenario suite (excluded user cannot list, fetch, or be added); TST (security, 29): attempt to add excluded member via API; AT (30): synthetic report concerning a non-ticked channel member is never decryptable by that member |
+| ARCH-025 | Break-glass SHALL require a requester and an approver who are distinct users with distinct roles, the approver holding an independent role outside the legal/management chain, a time limit ≤ 72 h, notification to all case members, and a post-hoc independent review within 7 days. It SHALL grant content access only via a key wrap by an existing member or the Recovery Quorum. Source-facing copy SHALL list break-glass as a way someone outside the listed team can gain access (RVW-B-14). | ADR-015; ADR-013; ADR-045; RVW-B-14 | THR-018; THR-019 | C-10; C-22; C-15 | TST: break-glass state machine tests; DEMO: tabletop exercise |
 | ARCH-026 | Export of report content to any external system SHALL occur only through an Export Package created in C-15. Exports of originals SHALL require approval by two distinct users. | ADR-018; INC-16 | THR-029; THR-041 | C-15; C-10; C-40 | TST: connector cannot fetch unapproved packages; TST: single-approver original export denied |
 | ARCH-027 | The segmentation matrix (§10) SHALL be implemented as owner-matched nftables rules generated from one machine-readable policy file, and verified by an automated probe after every deploy. | ADR-028; INC-118 | THR-035 | C-39; C-25 | TST: `seg-matrix` probe CI and post-deploy |
-| ARCH-028 | The intake host clock SHALL sync only from the monitor NTP or a site appliance. The core SHALL use NTS. Any component SHALL raise a SYSTEM alert at offset > 2 s and refuse token issuance at offset > 120 s (core). | ADR-010; Knowledge (unverified): onion-service clock-skew fingerprinting | THR-043; THR-005 | C-05; C-21; C-25 | TST: skew injection tests |
+| ARCH-028 | The intake host clock SHALL be derived only from the signed Tor consensus window (floor `valid-after`) and ≥ 2 Roughtime sources over Tor, never from Z-CORE. The core SHALL use NTS. Any component SHALL raise a SYSTEM alert at offset > 2 s (core) or on disagreement between intake time sources, and the core SHALL refuse token issuance at offset > 120 s. | ADR-010; ADR-036(6); RVW-A-04; RVW-A-23; Knowledge (unverified): onion-service clock-skew fingerprinting | THR-043; THR-005 | C-05; C-21; C-25 | TST: skew injection from core has no effect on the intake clock; consensus-floor test |
 | ARCH-029 | No component SHALL fall back to a less protective mode when a dependency fails: no clearnet fallback, no plaintext spool, no unverified-key encryption and no logging enablement (see 07-BACKEND.md §13). | ADR-002; ADR-004 | THR-040; THR-035 | all | TST: fault-injection suite per dependency |
 | ARCH-030 | The Case DB, blob store and backups SHALL contain source-derived data only as ciphertext under keys absent from Z-CORE, Z-BAK and Z-SOC. Media encryption (LUKS/TPM) SHALL additionally be enabled on all server volumes. | ADR-008; ADR-025; INC-02 | THR-015; THR-031 | C-12; C-13; C-27 | TST: seized-image analysis (disk image + DB dump contains no plaintext canary); INSP |
 | ARCH-031 | EE modules (C-26, C-34, C-40 and other ADR-020 modules) SHALL run only in Z-CORE, Z-SOC, Z-ADM or Z-VENDOR, SHALL interact only via the documented APIs in 08-API.md, and SHALL NOT be loaded into any process listed in §6 as trust path. | ADR-020 | THR-027; THR-029 | C-26; C-34; C-40 | INSP: process/crate dependency graph check in CI (`trust-path-deps`) |
-| ARCH-032 | The Fleet Manager (C-34) SHALL be reached only by outbound connections from the customer instance. It SHALL receive only opaque instance IDs, versions and SYSTEM-class health, and SHALL be unable to push unsigned configuration or trust-path code. | ADR-022; ADR-020 | THR-027; THR-025 | C-34 | TST: fleet agent payload schema test; TST (security, 29): malicious fleet server harness |
+| ARCH-032 | The Fleet Manager (C-34) SHALL be reached only by outbound connections from the customer instance. It SHALL receive only opaque instance IDs, versions and SYSTEM-class health, SHALL be unable to push unsigned configuration or trust-path code, and SHALL be unable to disable intake, lower the security floor or change routing (rosters, Triage Sets, COI maps, `min_recipients`). | ADR-022; ADR-020; ADR-040; ADR-045; RVW-C-13 | THR-027; THR-025 | C-34 | TST: fleet agent payload schema test; TST (security, 29): malicious fleet server harness attempting each forbidden change |
 | ARCH-033 | Every component with a listening socket SHALL be enumerated in a machine-readable listener inventory. Self-test SHALL fail if any unlisted listener exists. | INC-34 | THR-035; THR-001 | C-25 | TST: inventory diff in self-test |
 | ARCH-034 | The Clearnet Information Site (C-37) SHALL be hosted separately from all Candor zones, SHALL have no network path to them, and SHALL carry no third-party resources. | INC-53; INC-118 | THR-036; THR-004 | C-37 | TST: external header/resource probe; INSP |
 | ARCH-035 | The AIRGAP-RCP profile SHALL move data only as signed, encrypted transfer bundles processed through `candor-safefs`. The online transfer Desk SHALL hold no private keys. | ADR-027; INC-109; INC-111 | THR-023; THR-013 | C-15; C-18 | TST: malicious bundle fuzzing; INSP: key inventory of the transfer Desk |
 | ARCH-036 | Each deployment profile SHALL publish, in the key directory, a machine-readable "protection statement" (tiers enabled, escrow state, clearnet intake state, profile). Sources and the Source App SHALL be able to read it. | ADR-013; ADR-002 | THR-040; THR-035 | C-14; C-06 | TST: directory entry present and signed; DEMO: source UI displays it |
-| ARCH-037 | If a channel has zero eligible member epoch keys valid for today after the COI filter (or fewer than the channel's `min_recipients`, default 1), intake for that selection SHALL fail closed with a "temporarily unavailable" page or response. It SHALL NOT encrypt to other or fewer parties or to expired keys. | ADR-030; ADR-002 | THR-020; THR-046 | C-03; C-06; C-07 | TST: COI selection excluding all members yields the busy page and no stored envelope; TST: expired-key-only roster fails closed |
+| ARCH-037 | If no eligible Triage Set member has a member epoch key valid for today after the COI filter, intake for that selection SHALL fail closed and SHALL direct the source to the channel's alternative independent channel with a specific message. It SHALL NOT encrypt to other or fewer parties or to expired keys. Case creation SHALL require wraps for ≥ `min_recipients` (default 2) distinct members. | ADR-030; ADR-002; ADR-037(1); ADR-044(2); RVW-C-18; RVW-C-03 | THR-020; THR-046 | C-03; C-06; C-07; C-10 | TST: COI selection excluding all triage members yields the redirect page and no stored envelope; TST: expired-key-only Triage Set fails closed; TST: single-holder case creation refused |
 | ARCH-038 | Every envelope SHALL carry exactly 16 fixed-size anonymous HPKE recipient slots (configurable only upward as ADVANCED) in random order, with no cleartext recipient key IDs. The real recipient list (key IDs + directory tree head) SHALL be inside the AEAD payload, signed by the Tier V client or the sealer, and verified by Desk against C-14. | ADR-030; ADR-033; ADR-011; INC-14 | THR-046; THR-020; THR-011 | C-03; C-07; C-14; C-15 | TST: envelope conformance (slot count, size, no IDs); TST: Desk rejects an envelope whose signed recipient list contains a key absent from the directory; AUD: key-privacy assumption review |
-| ARCH-039 | Each channel member's Desk SHALL pre-publish signed Member Epoch Keys ≥ 4 epochs ahead. The health agent SHALL alert when any member's runway is < 14 days, and when a channel's runway (members with valid keys) would drop below `min_recipients`. | ADR-030 | THR-032; THR-020 | C-15; C-14; C-25 | TST: runway alert tests |
+| ARCH-039 | Each Triage Set member's Desk SHALL pre-publish signed Member Epoch Keys ≥ 4 epochs ahead (appended at the weekly publication slot). The health agent SHALL alert when any member's runway is < 14 days, and SHALL alert both the Channel Owner and OVERSIGHT when fewer than 2 Triage Set members would have valid keys within 14 days. | ADR-030; ADR-036(7); ADR-037; RVW-C-18 | THR-032; THR-020 | C-15; C-14; C-25 | TST: runway alert tests |
 | ARCH-040 | In EE-HA and GOV-ONPREM, the onion service private key MAY reside on at most 2 intake hosts, both listed in the Secret Placement Manifest and equally monitored. All other profiles SHALL hold exactly one online copy plus one offline encrypted backup. | ADR-032; ADR-028 | THR-044 | C-05; C-25 | TST: manifest check counts onion-key locations per profile |
-| ARCH-041 | The Erasure Key Vault SHALL run as a separate process and OS user on the core host, SHALL be excluded from routine backups, and SHALL keep its own backups ≤ 14 days. Case crypto-erasure SHALL destroy the case's Erasure Key first. | ADR-033; ADR-025; INC-55 | THR-017 | C-12; C-27 | TST: backup manifest check; restore test of an erased case from a routine backup fails after vault rollover |
-| ARCH-042 | Member Epoch Keys SHALL be retired only when their decrypt window has passed and every envelope of that channel and epoch is imported or rejected by two approvers. Pending envelopes older than 7 days SHALL escalate (content-free) to the channel's independent escalation role. | ADR-033 §2 | THR-020; THR-033 | C-10; C-14; C-15 | TST: suppression-by-waiting scenario (keys retained, escalation fired) |
-| ARCH-043 | Relay pull times SHALL NOT be persisted beyond day granularity in the Case DB, audit or job tables (the monotonic batch number is permitted). | ADR-033 §4; ADR-010 | THR-011 | C-09; C-12; C-24 | TST: post-import inspection of DB and audit rows |
+| ARCH-041 | The Erasure Key Vault SHALL run as a separate process and OS user on the core host, SHALL be excluded from routine and infrastructure-level backups (the latter by recorded attestation, otherwise disclosed in the protection statement), SHALL keep its own backups ≤ 14 days re-encrypted to the Backup Public Key, SHALL be replicated to the DR site within the HA RPO in EE-HA, SHALL use a physical TPM or HSM in HIGH/GOV, and every restore SHALL apply the signed erasure log before serving. Case crypto-erasure SHALL destroy the case's Erasure Key first. | ADR-033; ADR-025; ADR-044(4); INC-55; RVW-C-06; RVW-C-07 | THR-017 | C-12; C-27 | TST: backup manifest check; restore test of an erased case from a routine backup fails after vault rollover; restore-applies-erasure-log drill; DR-site vault failover drill |
+| ARCH-042 | Member Epoch Keys SHALL be retired only when their decrypt window has passed and every envelope of that channel and epoch is imported or rejected by two approvers. Pending envelopes older than 7 days SHALL escalate (content-free) to the channel's independent escalation role at most once per channel per 7 days; envelopes pending > 14 days SHALL be offered for dual-approved rejection, after which they are deleted. | ADR-033(2); ADR-038(6); RVW-A-20 | THR-020; THR-033 | C-10; C-14; C-15 | TST: suppression-by-waiting scenario (keys retained, escalation fired); all-dummy flood scenario (one escalation per week; keys retire after dual rejection) |
+| ARCH-043 | Relay pull times and intake arrival days SHALL NOT be persisted in the Case DB, audit or job tables; only the import slot date and the monotonic slot number are permitted. | ADR-033(4); ADR-010; ADR-038(1)/(3) | THR-011 | C-09; C-12; C-24 | TST: post-import inspection of DB and audit rows |
+| ARCH-044 | Every source-linked write in Z-CORE SHALL occur only in a fixed import slot and SHALL be committed once per slot at a fixed offset, so that Case DB WAL commit records, archived WAL, backups and C-13 object metadata reveal only the slot and not arrival times. | ADR-038(1); RVW-A-09; RVW-B-06 | THR-011; THR-017 | C-09; C-12; C-13; C-27 | TST: `pg_waldump` and backup inspection under Poisson arrivals; AT (30): timing-correlation audit over WAL, backups and object metadata |
+| ARCH-045 | Staff notifications SHALL be constant-schedule (one content-free message per subscribed staff member per day at a fixed time, sent regardless of activity) or disabled (HIGH/GOV default). No component SHALL send an event-driven notification. | ADR-038(2); ADR-017; RVW-A-19; RVW-B-05; RVW-C-02 | THR-028; THR-011 | C-23 | TST: send log identical on days with and without imports; AT (30): addressee-set independence test |
+| ARCH-046 | Tier W draft state SHALL follow ADR-034: drafts only in sealer RAM, staged parts only as ciphertext under RAM-only per-session keys in tmpfs, sealing to recipients only at finalization, one timer set (20 min idle, 2 h absolute), and a 3-word passphrase confirmation before the submission is finalized. | ADR-034; RVW-A-02; RVW-A-07; RVW-B-12; RVW-B-13 | THR-014; THR-034; THR-017 | C-06; C-07; C-08 | TST: disk image after draft/abandon/error flows contains no draft data; back-navigation COI test; interrupted S10 test |
+| ARCH-047 | Each channel SHALL have a Triage Set of ≥ 2 members with independent-body role labels. Only Triage Set members SHALL receive envelope slots, list or trial-decrypt intake, receive intake-related signals, and hold the Channel Identity Key (with OVERSIGHT). | ADR-037(1)/(2); ADR-036(1); RVW-B-02; RVW-B-04 | THR-020; THR-019 | C-10; C-14; C-22; C-15 | TST: non-triage member cannot list, fetch or open envelopes; CIK holder inventory |
+| ARCH-048 | Key Directory governance SHALL enforce: time-locked (3 days; GOV/HIGH 7 days), dual-approved additions, label changes and COI loosening with ≥ 1 independent approver; immediate removals; OVERSIGHT-certified role labels; a fixed weekly publication slot; ≥ 2 witnesses (≥ 1 external) in EE/GOV/MANAGED; an intake snapshot high-water mark; and the follow-up rule (original eligible set ∩ current members). | ADR-036; RVW-A-04; RVW-A-05; RVW-A-06; RVW-A-08; RVW-A-29; RVW-C-05 | THR-046; THR-020; THR-043 | C-07; C-08; C-14; C-15 | TST: governance and rollback test matrix (07 BE-059..BE-061, 09 DB-048/DB-049) |
+| ARCH-049 | Tier V reply retrieval SHALL be fetch-all over the complete published 30-day reply set with no authentication or per-mailbox state; the intake SHALL hold no Tier V account. | ADR-039; RVW-A-10; RVW-A-26 | THR-011; THR-015 | C-03; C-06; C-08 | TST: 08 API-040 |
+| ARCH-050 | The intake SHALL publish a signed running manifest and SHALL refuse to run trust-path services below the signed security floor or with packages outside the Platform Manifest; the design SHALL support ≥ 2 External Watchers comparing the manifest, static assets and CSP with the transparency log. | ADR-035(1); ADR-040; RVW-A-01; RVW-A-12; RVW-A-13 | THR-007; THR-024; THR-025 | C-06; C-07; C-25; C-14 | TST: 07 BE-067/BE-068; DEMO: watcher exercise publishing a detected mismatch |
+| ARCH-051 | IdP/SCIM/HR signals SHALL only suspend server-side authorization; case-key wraps SHALL be deleted only after dual control, a 7-day cooling-off and OVERSIGHT notice (except source-requested erasure or retention expiry), and never below 2 holders. Each channel member SHALL enrol ≥ 2 hardware authenticators. | ADR-044(1)/(2); RVW-C-03 | THR-020; THR-032 | C-10; C-21; C-22 | TST: 07 BE-065; 09 DB-050, DB-054 |
+| ARCH-052 | The intake database SHALL NOT be replicated in any profile; EE-HA intake failover SHALL be active/passive on shared-nothing hosts, and the source SHALL see "received" only after local `fsync`. | ADR-046(1); RVW-C-08 | THR-017 | C-05; C-08 | TST: `pg_params` on EE-HA; failover drill recovering pending envelopes from the failed node's disk |
+| ARCH-053 | Sources SHALL be able to choose delayed delivery (random 1–3 days); the intake SHALL hold such envelopes until their release day. | ADR-038(4); RVW-B-11 | THR-011 | C-06; C-07; C-08; C-03 | TST: 07 BE-062 |
+| ARCH-054 | Records, FOIA/ATIP, GDPR and eDiscovery searches SHALL be performed only in the Desk of an authorized member over cases that member can decrypt; Records Custodians SHALL receive only explicit, audited, time-bounded (≤ 90 days) case grants from the Triage Set; no server-side global search SHALL exist. | ADR-044(5); RVW-C-14 | THR-018; THR-019 | C-10; C-15; C-22 | TST: 08 API-045; 09 DB-051 |
+| ARCH-055 | Channels of type INDEPENDENT SHALL require independent-custody Desk devices for Triage Set members; enabling such a channel without them SHALL be a DANGEROUS configuration. | ADR-043; RVW-C-01; RVW-A-24 | THR-041; THR-019 | C-15; C-10; C-19 | TST: AP-10 refusal without custody records; INSP: custody status in the Admin UI |
 
 ## 16. Residual risks and limitations
 
 | # | Risk | Why it remains | Mitigation / documentation |
 |---|---|---|---|
-| R-1 | A live-compromised intake host (C-05/C-06/C-07) reads Tier W submissions and the passphrases of Tier W sources who log in during the compromise window. | Inherent to server-rendered no-JS intake (ADR-004). | Tier V recommended for high-risk sources. Honest statement shown on the Tier W page. Intake minimized and monitored. Assumes ASM for intake-host integrity monitoring. |
-| R-2 | End-to-end timing correlation by an adversary observing both the source's network and the intake host's Tor traffic (THR-003). | Tor does not defend against a global passive adversary. | Coarse time stored (ADR-010). Relay decoupling. No push. Guidance (05-SOURCE-OPSEC.md). |
-| R-3 | An excluded roster member who lists and trial-decrypts channel envelopes can observe that an envelope exists that it cannot open, and thus infer that it was excluded from a report on a given day. Servers no longer learn exclusions (ADR-033). | Channel-wide listing is required because servers cannot know recipients. | Desk hides unopenable envelopes. Listing is itself audited (CASE `intake_list`). COI-heavy channels should route to independent bodies. Open issue O-2. |
+| R-1 | A live-compromised or compelled intake host (C-05/C-06/C-07) reads Tier W submissions, drafts, and the passphrases, replies and COI ticks of Tier W sources who log in during the compromise window, and can note when a specific Tier W mailbox is opened. | Inherent to server-rendered no-JS intake (ADR-004, ADR-039). | Tier V recommended for high-risk sources. ADR-035(5) honesty statement on the Tier W page. §7.1 evidence (running manifest, External Watchers, operator statement, optional confidential VM, IR capture control) makes careless divergence detectable and deliberate modification a signed act, but does **not** prevent capture. Passphrase rotation (ADR-046(7)) bounds only past captures. |
+| R-2 | End-to-end timing correlation by an adversary observing both the source's network and the intake host's Tor traffic (THR-003); Tier W uploads are padded only to size buckets. | Tor does not defend against a global passive adversary. | Coarse time stored (ADR-010). Fixed import slots and optional delayed delivery decouple Z-CORE records from arrival (ADR-038). No push. Guidance (05-SOURCE-OPSEC.md). |
+| R-3 | (Partially fixed by ADR-037.) A **Triage Set** member whom the source ticked can observe an envelope it cannot open and infer that it was excluded from a report in that import slot. Non-triage members no longer list envelopes or receive intake signals. Servers do not learn exclusions (ADR-033), and case-level exclusions are blinded tags. | Triage members must list to trial-decrypt, because servers cannot know recipients. | Desk hides unopenable envelopes; Triage Sets are independent-body roles; chaff envelopes (RVW-A-18/B-04) are not adopted by any ADR (see O-2). |
 | R-4 | CE-SINGLE collapses zones onto one hypervisor. | Cost trade-off. | Warning in admin console and protection statement. Tier V still protects content. |
 | R-5 | PRIVATE-CLOUD and MANAGED providers can snapshot RAM (Tier W plaintext) and observe traffic volumes. | Provider has physical control (THR-030). | Tier V recommended. Documented in the protection statement. |
 | R-6 | A compromised Desk device exposes all cases its user can access. | Keys must be usable where decryption happens (ADR-007). | Hardware-bound unlock, case-scoped ACLs, device revocation (15-AUTHENTICATION-AUTHORIZATION.md). |
 | R-7 | Break-glass cannot un-share a case key after expiry. | Keys once delivered cannot be recalled. | Case re-key for new content after expiry; post-hoc review. |
-| R-8 | The relay link is a single choke point for availability. | Design choice (one-way pull). | Intake buffers ≥ 7 days at design load (34-PERFORMANCE-SCALABILITY.md); alerts on relay lag > 2 h. |
-| R-9 | Monitor push from intake gives an intake attacker a network path to the monitor collector. | Push is chosen to avoid monitor holding credentials into intake. | Collector is minimal (Rust, schema-validating), holds no secrets usable elsewhere (ADR-028). |
+| R-8 | The relay link is a single choke point for availability; fixed slots add up to one slot interval (6 h default, 24 h HIGH/GOV) plus any delayed-delivery hold to import latency. | Design choice (one-way pull, ADR-038). | Intake buffers ≥ 7 days at design load (34-PERFORMANCE-SCALABILITY.md); alert after 2 missed slots; auto-acknowledgement at intake covers the 7-day acknowledgement duty (14). |
+| R-9 | Monitor push from intake gives an intake attacker a network path to the monitor collector. | Push is chosen to avoid monitor holding credentials into intake. | Dedicated interface; collector has no clearnet egress; alert sender on a separate host; collector is minimal (Rust, schema-validating), holds no secrets usable elsewhere (ADR-028). |
+| R-10 | Slot identity remains: Z-CORE records, WAL and backups show in which fixed slot (hours) an envelope was imported, and follow-up slot dates remain visible to case members (intersection over many follow-ups against employer Tor logs, RVW-B-11). | Staff need dates; imports must happen at some time. | Slots fixed and identical every day; commit at a fixed offset; delayed delivery; HIGH shows ISO weeks; guidance to batch follow-ups (05). |
+| R-11 | Removals and revocations are published immediately, so their timing is visible in the public directory (RVW-A-29). | ADR-036(2) requires immediate effect for removals. | Weekly slot for all other entries; removals batched with routine changes where operationally possible. |
+| R-12 | Organisation-controlled recipient endpoints (MDM/EDR) can defeat Desk protections (ADR-043 honest residual). | Endpoint control is outside Candor. | Independent-custody devices required for INDEPENDENT channels (ARCH-055); custody status visible. |
+| R-13 | Vault exclusion from hypervisor/SAN backups rests on an attestation by the virtualization owner (RVW-C-06); vault replication to the DR site adds a copy to verify. | Candor cannot observe the virtualization layer. | Protection statement discloses a missing attestation; HIGH/GOV physical TPM/HSM; erasure log applied on every restore. |
+| R-14 | Staff login and Desk activity after the constant daily digest remain observable to corporate IT and the IdP (RVW-C-02). | Staff reactions are human and outside Candor's control. | Constant schedule removes the arrival signal from notifications; Desk update traffic goes via the core; guidance in 12/21. |
 
 ## 17. Open issues
 
 | # | Issue | Proposed resolution |
 |---|---|---|
 | O-1 | ADR-029 lists four token audiences. Machine-to-machine channels (relay, connector, fleet, SIEM gateway, health collector) use mTLS peer identity rather than tokens. | Amend ADR-029 to state that machine channels are identified by mTLS SAN and never accept user tokens (see 08-API.md O-1). |
-| O-2 | Excluded-member inference (R-3). | Evaluate per-member dummy traffic (every roster member receives indistinguishable decoy envelopes) or private information retrieval for listings. ADR candidate. |
-| O-3 | Intake Routing Key is a new key type not named in ADR-008. | Add it to the ADR-008 key hierarchy: X-Wing, generated on intake at install, public key in C-14, used only for reply routing. |
+| O-2 | Excluded-member inference (R-3). Partially resolved by ADR-037 (triage-first listing). | Chaff envelopes for Triage Sets remain an ADR candidate (RVW-A-18 item 2, RVW-B-04 item 1). |
+| O-3 | Resolved by ADR-046(12): the Intake Routing Key (and Connector Key) are recognized in 04. | — |
+| O-5 | ADR-038(1) fixes imports to slots but ADR-046(1) requires `fsync` before "received", so committed envelopes wait on the intake disk up to one slot (or longer with delayed delivery); intake-side ctime/WAL residue therefore persists (RVW-A-09 item 2 not adopted). | Accepted; revisit if an ADR allows tmpfs staging of committed envelopes with a battery-backed or replicated alternative. |
 | O-4 | Resolved by ADR-032: the onion key may be on ≤ 2 intake hosts in EE-HA and GOV-ONPREM (ARCH-040). | — |
 
 ### Open Issues for ADR revision
-- **ADR-008:** add the Intake Routing Key and Backup Key to the hierarchy (O-3).
+- **ADR-008:** add the Intake Routing Key and Backup Key to the hierarchy (O-3) — Resolved by ADR-046(12) (routing and connector keys).
 - **ADR-029:** machine audiences (O-1).
-- **ADR-030/033:** anonymous slots still let excluded roster members infer their exclusion (R-3, O-2).
+- **ADR-030/033:** anonymous slots still let excluded roster members infer their exclusion (R-3, O-2) — Partially resolved by ADR-037; chaff remains open.

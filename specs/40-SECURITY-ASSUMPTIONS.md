@@ -649,23 +649,29 @@ flowchart LR
 ## 10. Residual risks and limitations
 
 - **Class-N assumptions are the dominant residual risks for sources**: ASM-001, ASM-003, ASM-004, ASM-005, ASM-007, ASM-008, ASM-009, ASM-010, ASM-011, ASM-040. Candor can reduce exposure (no-JS UI, timing minimisation, guidance) but cannot verify them; research shows source behaviour and content-level identifiers defeat network anonymity more often than network attacks do (00-RESEARCH F-066..F-072).
-- **Tier W** protection depends on ASM-013 (no live intake compromise). A compelled or compromised operator can capture plaintext of Tier W submissions made while it controls intake; detection relies on ASM-036/ASM-116 and is after the fact.
+- **Tier W** protection depends on ASM-013 (no live intake compromise). A compelled or compromised operator can capture plaintext of Tier W submissions made while it controls intake, and the passphrase (hence replies and mailbox linkage) of any Tier W source who logs in. ASM-116 is operator-run and useless against a compelled operator; External Watchers (ASM-050) detect only untargeted modifications; the Operator Statement (ASM-056) is a signal; a confidential-VM sealer (ASM-052) is optional defence in depth. A careful targeted modification is not detectable by any specified control (RVW-A-01).
 - **CE-SINGLE** relies on ASM-015 (VM isolation on one host) for the intake/core split; this is weaker than separate hosts.
 - **Monitoring is not prevention**: K-09 and the transparency log make malicious deployments detectable, not impossible; a short-lived malicious deployment may capture Tier W submissions before detection.
 - **Collusion thresholds** (ASM-030, ASM-031, ASM-035, ASM-045) depend on organisational practice that Candor can check only through attestations and role-conflict rules.
 - **Time**: authenticated time sources can themselves be attacked; K-01 detects disagreement but not a coordinated shift of all sources.
-- **Toolchain trust** (ASM-038) is only partially addressed by reproducibility.
+- **Toolchain trust** (ASM-038) is only partially addressed by reproducibility; platform packages (ASM-059) are logged and pinned, not reviewed.
+- **Organisation as adversary** (ASM-043, ASM-053, ASM-054, ASM-057, ASM-058): the organisation that runs Candor controls endpoints, virtualization, backups, IdP and approver roles. Independent custody, backup-exclusion and approver independence are attestations and organisational facts that Candor can record and disclose but not enforce technically.
+- **KEM key privacy** (ASM-049) is a cryptographic assumption without an established analysis for the FIPS hybrid at the time of writing; if it fails, only the pre-import confidentiality of the excluded set is lost.
+- **Staff reactions** (ASM-061) remain observable by the organisation's IdP/SIEM/network regardless of Candor's own minimisation.
 
 ## 11. Open issues
 
-1. Define the exact HIGH-profile role-conflict matrix (ASM-045) in `15-AUTHENTICATION-AUTHORIZATION.md` and `32-OPERATIONS.md`.
-2. Choose witness operators and the independent monitor (ASM-110) — organisational, not technical; needs `36-OPEN-SOURCE-GOVERNANCE.md`.
-3. Decide authenticated time mechanism (NTS vs roughtime vs multi-source NTP) in `17-INFRASTRUCTURE.md`; K-01 thresholds may need tuning for air-gapped profiles (AIRGAP-RCP, GOV-ONPREM).
+1. Define the exact HIGH-profile role-conflict matrix (ASM-045) in `15-AUTHENTICATION-AUTHORIZATION.md` and `32-OPERATIONS.md`, including binding of `person_ref` to authenticator attestation (RVW-C-09).
+2. Choose witness operators, External Watcher organisations and the independent monitor (ASM-050, ASM-051, ASM-110, ASM-126) — organisational, not technical; needs `36-OPEN-SOURCE-GOVERNANCE.md`.
+3. Authenticated time: intake mechanism decided by ADR-036(6) (Tor consensus floor + Roughtime; ASM-055, K-17). Core/other hosts: NTS vs multi-source NTP remains for `17`; K-01 thresholds may need tuning for air-gapped profiles (AIRGAP-RCP, GOV-ONPREM).
+7. ASM-049 key-privacy analysis for the MLKEM1024-P384 hybrid combiner is outstanding (ASM-125); fallback is pure ML-KEM-1024 slots in the FIPS suite.
+8. ADR-036(5) requires a persistent tree-head pin in the Source App; this conflicts with minimal source-device residue (P-23). Propose an ADR amendment (`02` OI-08, `03` OI-10).
 4. ASM-104 VM generation-ID handling depends on hypervisor support (vmgenid); document fallback for platforms without it.
 5. The source-facing disclosure page (ASM-112) must be co-designed with `26-ACCESSIBILITY.md` (plain language, COGA) and translated.
 6. Tor Metrics figures and `vanguards` add-on status are UNVERIFIED (00-RESEARCH §12); ASM-001/ASM-003 wording may be refined when confirmed.
 
 ### Open Issues for ADR revision
-- **ADR-022** fixes TUF thresholds but not signer distribution or witness requirements. ASM-035 and ASM-036 need "≥2 organisations, ≥2 jurisdictions, no organisation holds ≥ threshold keys" and "≥2 witness cosignatures; ≥1 independent monitor before 1.0". Proposed: add these to ADR-022 (implemented here as ASM-109/ASM-110 pending ADR update).
-- **ADR-009** permits CE-SINGLE with VM separation. ASM-015 then carries the Z-INTAKE/Z-CORE boundary. Proposed: ADR-009 should require K-07 segmentation probes in CE-SINGLE as well and state the residual explicitly in source-facing disclosure when an instance runs CE-SINGLE (source cannot otherwise know).
-- **ADR-005 / ADR-006**: Tier W server-side Argon2id at 256 MiB per login creates an intake memory-exhaustion dependency on ASM-002 (PoW) and ADR-026 rate limits; see 00-RESEARCH §13.
+- **ADR-022** signer distribution and witnesses — **Resolved by ADR-040** (signers and builders across ≥ 2 organisations and ≥ 2 jurisdictions; emergency cooling ≥ 2 h with ≥ 2 signers from ≥ 2 organisations) **and ADR-036(5)** (≥ 2 external directory witnesses in EE/GOV/MANAGED). ASM-109/ASM-110 retained as implementing requirements.
+- **ADR-009** CE-SINGLE — **Partially resolved by ADR-046(6)** (CE-SINGLE default isolation = VMs; container-only = ADVANCED). Still proposed: K-07 segmentation probes in CE-SINGLE and a source-facing disclosure when an instance runs CE-SINGLE (PRD-070 covers the profile banner).
+- **ADR-005 / ADR-006** Argon2id memory — **Resolved by ADR-046(7)** (m=64 MiB, t=3, p=1; concurrency semaphore default 4 plus PoW; FIPS PBKDF2-HMAC-SHA-512 210,000 iterations).
+- **ADR-036(5)** persistent Source App pin vs device residue — open (see item 8 above).

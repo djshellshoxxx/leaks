@@ -1,5 +1,5 @@
 # 26 — Accessibility and Internationalization Specification
-Status: Draft v1.0 · Edition applicability: both (conformance target identical; EE adds third-party audit and formal ACR) · Owner: Accessibility & Localization team (with Source Safety content owners and Security Architecture)
+Status: Draft v1.1 (revision round 2: ADR-034..ADR-046) · Edition applicability: both (conformance target identical; EE adds third-party audit and formal ACR) · Owner: Accessibility & Localization team (with Source Safety content owners and Security Architecture)
 
 ## 1. Purpose and scope
 
@@ -31,7 +31,9 @@ It covers:
 | `25-COMPLIANCE.md` | ACR/VPAT deliverables (COMP-020), regime mapping |
 | `01-PRODUCT-REQUIREMENTS.md` | PRD-048 (≥ 10 locales incl. RTL at 1.0; language in URL path), PRD-051 (WCAG 2.2 AA + EN 301 549), §7.7 (EN/FR staff parity) |
 | `27-SECURE-DEVELOPMENT.md`, `28-SUPPLY-CHAIN.md` | CI gates; Weblate as a supply-chain input |
-| `DECISIONS.md` | ADR-003 (no fingerprinting), ADR-004 (no-JS Tier W), ADR-005 (EFF wordlist), ADR-010 (day dates), ADR-023 (no telemetry), ADR-026 (no CAPTCHA) |
+| `DECISIONS.md` | ADR-003 (no fingerprinting), ADR-004 (no-JS Tier W), ADR-005 (EFF wordlist), ADR-010 (day dates), ADR-023 (no telemetry), ADR-026 (no CAPTCHA); revision ADRs: ADR-034 (RAM-only Tier W drafts, 20 min idle / 2 h absolute, passphrase confirmation), ADR-038 §3 (day/ISO-week dates for staff), ADR-042 (OCR text layer produced inside the sandbox for accessibility of the pixel viewer; RVW-C-16) |
+| `10-FILE-EVIDENCE-PIPELINE.md` | OCR text layer and accessible text rendition of sanitized copies (§5.3, FILE-039) |
+| `15-AUTHENTICATION-AUTHORIZATION.md` | Staff authentication accommodations (§4.7) |
 
 ## 3. Conformance target and legal mapping
 
@@ -66,6 +68,8 @@ It covers:
 | C-37 | Static HTML (clearnet) | Same no-tracking rules | As C-06 |
 | C-03 Source App | Native UI (platform toolkit) | Must expose platform AT APIs; screen-capture exclusion must not block AT | Test with each platform's screen reader. Capture-exclusion flags do not affect accessibility APIs (verify per platform) |
 | C-15/C-19 Desk | Tauri 2 webview (WebView2 / WKWebView / WebKitGTK) | AT support varies by webview; screen-capture exclusion must not block screen magnifiers (Knowledge (unverified): some magnifiers use capture APIs) | Per-platform AT matrix. A policy option to disable capture exclusion for users of magnification software, as a per-user ADVANCED exception with audit |
+| C-15 CL-2 pixel viewer | Evidence is displayed as raw pixel frames from the C-17 sandbox; host AT cannot read pixels (RVW-C-16) | **Accessible text view** of the OCR text layer and accessible text rendition produced inside the sandbox (ADR-042; `10` FILE-039; `12` R06, RUI-062): native headings, lists, tables, page markers; bidirectional link between text and page region. Remaining gap: layout-only meaning, handwriting, images without text, OCR errors — declared as partial conformance in the ACR |
+| C-15 CL-3 original viewer | Original rendered inside a disposable VM; host AT cannot reach in-VM applications | Users of AT use the CL-2 text view; where the original's own structure is needed, a sighted colleague or an L3 station with local AT is the documented accommodation. Declared in the ACR |
 | C-34 EM UI | Server-rendered web app | — | Standard WCAG 2.2 AA |
 | Exports | Rasterized PDF/A-2b + OCR layer (`12` R08) | Rasterization removes structure | OCR text layer, plus a UTF-8 plain-text companion file of verified-redacted text, plus reading-order metadata. Documented as partial conformance for Cl. 10 |
 
@@ -85,9 +89,10 @@ It covers:
 | 1.4.12 Text Spacing | No clipping with line-height 1.5, paragraph spacing 2×, letter 0.12em, word 0.16em. No fixed-height text containers. | all |
 | 1.4.13 Content on Hover/Focus | Source UI: no tooltips. Desk: tooltips dismissible (Esc), hoverable, persistent. | C-15, C-19, C-34 |
 | 2.1.1 / 2.1.2 / 2.1.4 Keyboard | Full keyboard operation. No traps (including CL-3 viewer). Single-key shortcuts off by default and remappable (`12` §9). | all |
-| 2.2.1 Timing Adjustable | Source drafts: 24 h (≥ 20 h exception). Source signed-in session: CSS warning 5 min before, unlimited "Stay signed in". Desk auto-lock: 60 s warning with "Stay unlocked" (aria-live assertive). The user may adjust within the policy range, and lock never loses work. | C-06, C-15, C-19 |
+| 2.2.1 Timing Adjustable | **Accessibility decision AD-01 (ADR-034; RVW-A-02 item 4):** Tier W sessions (drafting and signed in) have an idle limit of 20 min and an absolute limit of 2 h, held only in server RAM. The idle limit conforms via **Extend**: a CSS-revealed warning 5 min before with a single-action "Stay" button usable an unlimited number of times within the absolute limit. The absolute 2 h limit is claimed under the **Essential exception** (a security time limit whose extension would defeat the protection of keeping drafts and derived keys in intake RAM only); it is warned 10 min in advance and stated in static text on every page. The v1.0 "20-hour exception" (24 h server-side drafts) is withdrawn. Desk auto-lock: 60 s warning with "Stay unlocked" (aria-live assertive); lock never loses work. | C-06, C-15, C-19 |
 | 2.2.2 Pause, Stop, Hide | No moving, blinking or auto-updating content in the source UI. Desk status updates are polite and non-moving. | all |
-| 2.2.5 Re-authenticating (AAA, adopted) | Draft-preserving re-authentication (`11` §5.6; `12` RUI-053). | C-06, C-15 |
+| 2.2.5 Re-authenticating (AAA, adopted) | Draft-preserving re-authentication: Desk fully (`12` RUI-053). Tier W: text posted after expiry is kept in RAM for 20 min and restored after login (`11` §5.6); unsent drafts are lost at the 2 h absolute limit or on browser close — documented partial conformance for this AAA criterion (AD-01). | C-06, C-15 |
+| 2.2.6 Timeouts (AAA, adopted) | Every Tier W page states: "For your safety, this session ends after 20 minutes without activity, and always after 2 hours. Anything not sent is then lost." | C-06 |
 | 2.3.1 / 2.3.3 | No flashing. No animation beyond ≤ 150 ms opacity fades in Desk, disabled under `prefers-reduced-motion`. | all |
 | 2.4.1 Bypass Blocks | Skip link; landmarks; Desk F6 region cycling. | all |
 | 2.4.2 Page Titled | Unique titles "{Mode} · {Step} · {Org} …" (source). Desk window title is fixed for privacy (`12` RUI-006). In-app view titles are announced via a heading and a live region on view change. | all |
@@ -117,10 +122,10 @@ Sources are often frightened, rushed and interrupted, and some read in a second 
 | Use clear and understandable content | Grade-8 English master (FK ≤ 8.0). CEFR B1 target for other languages. Short sentences. Active voice. No jargon without explanation: glossary `<details>` "What does this mean?" for Tor, bridge, metadata, passphrase, encryption. Examples of identifying details (GC-30). |
 | Help users avoid mistakes and correct them | Review before sending. Edit links per section. Non-blocking identity-hint notices. Errors that say how to fix. Undo where possible (discard draft before submit; remove identity before submit). |
 | Help users focus | No ads, animations, pop-ups or social proof. Warnings only at relevant moments (JIT; `05` §7). |
-| Ensure processes do not rely on memory | The passphrase is the unavoidable exception (ADR-005). Mitigations: shown as a numbered list and a one-line copy field; "spell out each word"; 10-box login; paste allowed; storage guidance offering paper or a password manager, not only memorization; no time pressure. Report answers persist in the draft. |
+| Ensure processes do not rely on memory | The passphrase is the unavoidable exception (ADR-005). Mitigations: shown as a numbered list and a one-line copy field; "spell out each word"; 10-box login; paste allowed in login and in the 3-word confirmation (S10c, WCAG 3.3.8: copying from where the source saved it is permitted; the confirmation is a check of the saved record, not a memory test); storage guidance offering paper or a password manager, not only memorization; no time pressure beyond the session limits. Report answers persist in the RAM draft for the session. |
 | Provide help and support | Help linked on every page. Guidance cards. The team can be asked questions through the mailbox after submission. |
 | Support adaptation and personalization | Works with browser zoom, text spacing, forced colors, reader views and user stylesheets. No CSS that blocks user overrides (`!important` avoided on text properties). |
-| Stress and interruption | Drafts survive 24 h in the same browser session. Calm tone. "You don't have to answer everything". Only one required question. |
+| Stress and interruption | Drafts survive interruptions of up to 20 min (with unlimited "Stay" within 2 h) in the same browser window; the limits are stated up front and before each step that can take long (files). Calm tone. "You don't have to answer everything". Only one required question. Passphrase confirmation (S10c) never blocks permanently: "Get a new passphrase" is always available. |
 
 ## 6. Keyboard-only use
 
@@ -149,7 +154,7 @@ Sources are often frightened, rushed and interrupted, and some read in a second 
 
 **Tor Browser caveat:**
 - Knowledge (unverified): Tor Browser has at times shipped with platform accessibility services disabled by default on some OSes for security reasons, and its fingerprinting protections (letterboxing, spoofed media queries such as `prefers-color-scheme`, font allow-lists) affect presentation.
-- Each release's AT test run records the Tor Browser version and any setting a user must change.
+- Each release's AT test run records the Tor Browser version and any setting a user must change, and the results are **published per release** on C-37 and in the ACR (RVW-C-16 item 4).
 - If a setting change is required, `05` guidance adds a card explaining it. The UI never requires lowering the security level (SOPS-035).
 
 ## 8. Visual design requirements
@@ -210,7 +215,7 @@ Users' **own** assistive technology is fully supported. CI accessibility scanner
 
 | Class | Examples | Review requirement |
 |---|---|---|
-| **Tier-0 critical** (`sec:critical tier0`) | Mode banners (`sui.mode.*`), S05b disclosure and confirmation, S04b concerns explanation (ADR-030), Tier W honesty statement (ADR-004), S10 passphrase texts, S13 consequences, CLEARNET "NOT ANONYMOUS", Desk SI-02/SI-03/SI-04 warnings | Translator + 2 independent native reviewers + back-translation checked by the content owner; **locale disabled on the affected surface if any Tier-0 string is missing or stale** |
+| **Tier-0 critical** (`sec:critical tier0`) | Mode banners (`sui.mode.*`), S05b disclosure and confirmation, CONFIDENTIAL consequence text, S04b concerns explanation and the ADR-037 §4 statement, Tier W honesty statements (ADR-004; ADR-035 §5 sentence), warning banners WB-1..WB-3 (`11` §5.2.1), the S03 "Checking these values does not protect…" sentence (ADR-036), S10/S10c passphrase texts, S11r rotation text, S13 consequences, CLEARNET "NOT ANONYMOUS", Desk SI-02/SI-03/SI-04 warnings, "Rendering — not evidence" label, E5 beacon/canary warning | Translator + 2 independent native reviewers + back-translation checked by the content owner; **locale disabled on the affected surface if any Tier-0 string is missing or stale** |
 | **Critical** (`sec:critical`) | GC-01..GC-38 guidance, S07 warnings, identity-hint notices, RO-01..RO-15 | Translator + 1 independent native reviewer + back-translation spot check (≥ 20 % of strings per release, 100 % for new cards); stale strings fall back per-string to the default language with the notice "This part is not yet available in {language}" |
 | **Legal** (`legal`) | Jurisdiction packs (`25`), rights text, anti-gag text | Translator + qualified legal reviewer for the jurisdiction |
 | **Standard** (`ui`) | Labels, navigation, admin UI | Translator + reviewer (can be the same team) |
@@ -281,8 +286,8 @@ ADR-005 fixes the EFF large English wordlist for all locales. The UI treats the 
 
 ### 13.3 AT matrix testing (per §7 cadence)
 Scripted task walkthroughs per AT and platform:
-- **Source:** new report (anonymous, no files); new report with files and S07; identity disclosure and reversal; save passphrase; return login (both layouts); reply; close mailbox; discard draft; leave.
-- **Desk:** triage; open case; read conversation; send reply with side-channel warning; view sanitized copy; open original (CL-3); redact via keyboard; export wizard; SLA dashboard; lock/unlock.
+- **Source:** new report (anonymous, no files); new report with files and S07; identity disclosure and reversal; save passphrase and complete the 3-word confirmation (S10/S10c) including "Get a new passphrase"; session-timeout warnings (idle "Stay" and absolute notice); return login (both layouts); change passphrase (S11r); reply with delayed delivery; close mailbox; discard draft; leave.
+- **Desk:** triage; open case; read conversation; send reply with side-channel warning; view sanitized copy and **read a scanned multi-page attachment through the CL-2 accessible text view**, including jumping between text and page region; open original (CL-3); redact via keyboard; export wizard including the beacon warning; SLA dashboard; lock/unlock.
 - **Admin:** approve enrollment; propose DANGEROUS change; run ceremony step; verify audit.
 
 Results record the AT version, browser or webview version, Tor Browser version and settings, pass/fail per step, and workarounds.
@@ -328,7 +333,7 @@ Results record the AT version, browser or webview version, Tor Browser version a
 | A11Y-008 | All functionality SHALL be keyboard-operable without traps. Single-key shortcuts SHALL be off by default and remappable. | WCAG 2.1.1, 2.1.2, 2.1.4; B-CO-28 | — | all UI | TST: keyboard traversal; DEMO |
 | A11Y-009 | Focus indicators SHALL be ≥ 3 px, ≥ 3:1 contrast, never removed, and never obscured by sticky or fixed content. | WCAG 2.4.7, 2.4.11, 2.4.13; B-CO-28 | — | all UI | TST; INSP |
 | A11Y-010 | Target sizes SHALL be ≥ 24×24 CSS px on all surfaces, and ≥ 44×44 for source UI primary controls. | WCAG 2.5.8; B-CO-28 | — | all UI | TST: layout audit script |
-| A11Y-011 | No time limit SHALL cause loss of entered data. Source drafts SHALL persist ≥ 20 h. Signed-in timeouts SHALL be warned ≥ 2 min in advance with a single-action extension. Desk lock SHALL warn 60 s in advance and preserve work. | WCAG 2.2.1, 2.2.5, 2.2.6; PRD §7.8; B-CO-28 | THR-032 | C-06, C-15, C-19 | TST: `11` SUI-011/SUI-012; `12` RUI-053 |
+| A11Y-011 | Time limits SHALL follow accessibility decision AD-01: Tier W idle limit (20 min) warned 5 min in advance with a single-action, unlimited "Stay" within the 2 h absolute limit; the absolute limit warned 10 min in advance and stated in static text on every page (Essential exception, ADR-034); text posted after expiry kept in RAM for 20 min and restored after login. Desk lock SHALL warn 60 s in advance and preserve work. The v1.0 "drafts persist ≥ 20 h" rule is withdrawn (amended, ADR-034). | WCAG 2.2.1, 2.2.5, 2.2.6; ADR-034; RVW-A-02; B-CO-28 | THR-032, THR-015 | C-06, C-15, C-19 | TST: `11` SUI-011/SUI-012/SUI-061; `12` RUI-053; DEMO: NVDA/Orca walkthrough of both warnings |
 | A11Y-012 | Source and staff authentication SHALL not require cognitive function tests. The source passphrase field SHALL allow paste and offer a one-field and a 10-box layout. There SHALL be no CAPTCHA on any surface. | WCAG 3.3.8; ADR-026; R6 §C | THR-034 | C-06, C-03, C-15, C-21 | TST; INSP |
 | A11Y-013 | Identity-purpose `autocomplete` tokens SHALL be used only on identity-disclosure fields and SHALL NOT appear on anonymous-mode fields. | WCAG 1.3.5; REQ-H-05; B-CO-28; INC-05 | THR-040 | C-06, C-03 | TST: template lint |
 | A11Y-014 | Help, Safety guide and "How this site protects you" SHALL appear in the same relative location and order on every source page. | WCAG 3.2.6; COGA; B-CO-28; B-CO-36 | THR-040 | C-06 | TST: DOM position check |
@@ -340,7 +345,7 @@ Results record the AT version, browser or webview version, Tor Browser version a
 | A11Y-020 | AT compatibility SHALL be tested per the §7 matrix and cadence. Results SHALL record AT, browser/webview and Tor Browser versions and any required settings. | B-SD-02 (Orca fixes); R6 §C | THR-040 | all UI | DEMO: AT test reports archived per release |
 | A11Y-021 | If any AT requires a Tor Browser setting change, `05` guidance SHALL document it. No guidance SHALL require lowering the Tor Browser security level. | SOPS-035; REQ-H-27; INC-27 | THR-008 | C-06 | INSP |
 | A11Y-022 | The questionnaire builder SHALL meet authoring-tool requirements (Section 508 §504 / EN 301 549 11.8): it SHALL require labels and help text, prevent inaccessible field constructions, and preview accessible output. | B-CO-32, B-CO-34 | — | C-19 | TST: builder rejects unlabeled fields; INSP |
-| A11Y-023 | Export packages SHALL include an OCR text layer and a UTF-8 plain-text companion of verified-redacted text. The ACR SHALL document partial Clause 10 conformance for rasterized outputs. | ADR-012; REQ-H-18; B-CO-34 | THR-029 | C-15, C-17 | TST: export contains text companion; redaction verifier also runs on the companion |
+| A11Y-023 | Export packages SHALL include an OCR text layer (produced inside the C-17 sandbox, ADR-042) and a UTF-8 plain-text companion of verified-redacted text. The ACR SHALL document partial Clause 10 conformance for rasterized outputs (amended). | ADR-012; REQ-H-18; B-CO-34 | THR-029 | C-15, C-17 | TST: export contains text companion; redaction verifier also runs on the companion |
 | A11Y-024 | The redaction workspace SHALL provide non-drag alternatives and a tabular redaction list editable without the canvas. | WCAG 2.5.7; `12` RUI-023; B-CO-28 | — | C-15 | TST; DEMO |
 | A11Y-025 | Screen-capture exclusion (Desk, App) SHALL be verified not to break screen readers. Where it breaks magnifiers, a per-user audited exception SHALL be available. | `12` RUI-038; WCAG 1.4.4; B-CO-28 | THR-041 | C-15, C-03 | DEMO: magnifier test per OS; INSP: exception audit event |
 | A11Y-026 | User testing with AT users (§13.4) SHALL be conducted before 1.0 and each major release, meeting the success criteria including zero critical safety errors. | REQ-H-16b; R6 §C; INC-16; B-CO-36 | THR-040, THR-041 | C-06, C-15 | DEMO: study report with metrics |
@@ -349,6 +354,13 @@ Results record the AT version, browser or webview version, Tor Browser version a
 | A11Y-029 | The Desk SHALL expose all controls through platform accessibility APIs (UIA, AX, AT-SPI), verified by accessibility-tree snapshot tests for key screens. | Section 508 §502 [B-CO-32]; EN 301 549 11.5 | — | C-15, C-19, C-03 | TST: a11y-tree snapshots |
 | A11Y-030 | Status messages in the Desk and Source App SHALL use `role="status"`/`aria-live="polite"`, and `assertive` only for lock-imminent and verification failures. | WCAG 4.1.3; B-CO-28 | — | C-15, C-03 | TST |
 | A11Y-031 | Accessibility conformance SHALL be a release gate: 0 known WCAG 2.2 AA failures at release on source surfaces. For staff surfaces, any exception SHALL be documented in the ACR with a fix date ≤ 90 days. | PRD SM-08; COMP-020; B-CO-28; B-CO-34 | THR-040 | all UI | INSP: release checklist |
+| A11Y-032 | The Desk CL-2 viewer SHALL provide an accessible text view of every sanitized copy, built from the OCR text layer and accessible text rendition produced inside the sandbox, exposing headings, lists, tables and page markers through platform accessibility APIs, with bidirectional navigation between text and page region. | ADR-042; RVW-C-16; Section 508 §502 [B-CO-32]; EN 301 549 11.5 [B-CO-34] | THR-041 | C-15, C-17 | TST: a11y-tree snapshot (UIA/AX/AT-SPI) of the text view for a 5-page scanned fixture; DEMO: NVDA, JAWS, VoiceOver and Orca users read and navigate it (§13.3) |
+| A11Y-033 | The ACR (Section 508 and EN 301 549 editions) SHALL declare partial conformance for (a) rasterized evidence where OCR cannot represent meaning (images, handwriting, layout-only meaning), (b) CL-3 originals, and (c) WCAG 2.2.5 for Tier W drafts at the absolute limit, each with the accommodation offered. | RVW-C-16; ADR-042; ADR-034; B-CO-32; B-CO-34 | THR-040 | all UI | INSP: ACR contains the three declarations |
+| A11Y-034 | The accessibility decision AD-01 (Tier W time limits) SHALL be recorded in the ACR and in the accessibility statement, and SHALL be re-reviewed whenever ADR-034 timers change. | ADR-034; WCAG 2.2.1; RVW-A-02 | THR-040 | C-06 | INSP: ACR/statement text present |
+| A11Y-035 | The passphrase confirmation (S10c) and rotation (S11r) screens SHALL allow paste, label each input with its word position, never echo the passphrase in errors, and always offer "Get a new passphrase". | WCAG 3.3.8; ADR-034; ADR-046 §7 | THR-034 | C-06, C-03 | TST: a11y assertions; DEMO: cognitive-group session (§13.4) |
+| A11Y-036 | Staff step-up authentication SHALL support a per-user, audited accommodation (PIV + PIN via reader, or a platform authenticator with user verification) with assertion windows of up to 180 s, as specified in `15-AUTHENTICATION-AUTHORIZATION.md` §4.7. | RVW-C-16 item 2; WCAG 2.2.1; Section 508 §502 | THR-022 | C-15, C-19, C-21 | TST: accommodation profile allows 180 s window and is audited; INSP: `15` cross-reference |
+| A11Y-037 | Tor Browser + AT test results (per §7 matrix) SHALL be published with each release on C-37 and in the ACR. | RVW-C-16 item 4; B-SD-02 | THR-040 | C-37 | INSP: release artefact present |
+| A11Y-038 | The "Rendering — not evidence" label, warning banners WB-1..WB-3 and the Desk custody/managed-endpoint banners SHALL be exposed as text in the accessibility tree (not only visually) and SHALL not be conveyed by colour alone. | ADR-042; ADR-035; ADR-043; WCAG 1.4.1, 1.3.1 | THR-040, THR-041 | C-06, C-15 | TST: a11y-tree assertions; grayscale screenshot review |
 | I18N-001 | All user-facing strings SHALL be externalized in Fluent catalogs with namespaced keys and class annotations (`tier0`, `sec:critical`, `legal`, `ui`). Hard-coded strings SHALL fail CI. | B-SD-02 (Weblate) | THR-040 | all UI | TST: hard-coded string detector |
 | I18N-002 | The translation platform SHALL be a self-hosted Weblate instance on infrastructure separate from builders, signing keys and production. It SHALL require 2FA, and SHALL NOT be able to push to release branches. | INC-37, INC-41; B-SD-02 | THR-024 | C-30 | INSP: infra review; TST: Weblate credentials lack push rights to protected branches |
 | I18N-003 | No third-party machine-translation service SHALL be connected. Self-hosted MT MAY suggest only `ui`-class strings. | INC-53; ADR-023 | THR-036, THR-040 | C-30 | INSP: Weblate config audit |
@@ -369,9 +381,10 @@ Results record the AT version, browser or webview version, Tor Browser version a
 ## 15. Residual risks and limitations
 
 1. **The no-JS Tier W UI cannot provide live announcements.** Screen-reader users get outcomes on page loads, and CSS-revealed timeout warnings may not be announced (`11` §15).
+1a. **Tier W drafts are lost** at the 2 h absolute limit, after 20 min idle, on browser close or server restart (ADR-034). Users who need more time (e.g., with cognitive or motor disabilities) may lose work; the limits are stated in advance and Tier V has no such limit (AD-01).
 2. **Tor Browser's anti-fingerprinting** (letterboxing, spoofed media queries, font restrictions) and possible accessibility defaults can degrade AT and visual adaptation. Candor cannot change them.
 3. **The 10-word English passphrase** is a memory and language burden for some users with cognitive disabilities and for non-English speakers.
-4. **Rasterized exports** have limited structural accessibility. Text companions mitigate this.
+4. **Rasterized exports and the pixel viewer** have limited structural accessibility. OCR text layers, accessible text renditions and text companions mitigate this; OCR errors and layout-only meaning remain (partial conformance, A11Y-033).
 5. **WebKitGTK/Orca accessibility for the Linux Desk** may lag other platforms (Knowledge (unverified)).
 6. **Back-translation and reviewer processes** reduce but cannot eliminate subtle mistranslations of safety guidance.
 7. **User testing with real whistleblowers is not possible.** Synthetic scenarios may not capture real stress.
@@ -382,6 +395,8 @@ Results record the AT version, browser or webview version, Tor Browser version a
 - **OI-26-2:** Validate language-specific readability formulas (French, Spanish, German) or rely on reviewer checklists only.
 - **OI-26-3:** Determine current Tor Browser behavior regarding platform accessibility services, per OS, and add a guidance card if needed.
 - **OI-26-4:** Define an accessible alternative for oral reporting (EU Directive Art 9(2)) for sources who cannot write easily. Candidates: staff-assisted intake (`14`) or Tier V voice capture with local transcription and review. Tier W cannot capture audio without JS.
+- **OI-26-5:** VDI as an accessibility accommodation for staff conflicts with ADR-043/`12` managed-endpoint rules for INDEPENDENT channels; the accommodation must use an independent-custody device with local AT (RVW-C-16; `15` OI-15-2).
+- **OI-26-6:** Localized passphrase wordlists remain open (see below; RVW-C-16 item 3). ADR-046 §7 did not change ADR-005's English list.
 
 ### Open Issues for ADR revision
-- **ADR-005 (EFF English wordlist for all locales):** This is a COGA and I18N burden: non-English sources must store and type 10 English words. Proposal: allow **per-locale curated wordlists** of ≥ 7,776 entries. Each list would be normalized (NFC, case-folded, diacritic-insensitive matching), screened for offensive and confusable words (as SecureDrop does per language, B-SD-17), and kept at ≥ 129 bits by using 10 words from lists ≥ 7,776. The passphrase would carry a list identifier (1 extra word or a fixed prefix) so login can detect the list. This spec conforms to ADR-005 until the ADR is revised.
+- **ADR-005 (EFF English wordlist for all locales):** This is a COGA and I18N burden: non-English sources must store and type 10 English words. Proposal: allow **per-locale curated wordlists** of ≥ 7,776 entries. Each list would be normalized (NFC, case-folded, diacritic-insensitive matching), screened for offensive and confusable words (as SecureDrop does per language, B-SD-17), and kept at ≥ 129 bits by using 10 words from lists ≥ 7,776. The passphrase would carry a list identifier (1 extra word or a fixed prefix) so login can detect the list. This spec conforms to ADR-005 until the ADR is revised. Status after revision round 2: **not resolved** by ADR-034..046 (ADR-046 §7 addressed KDF parameters and rotation only).

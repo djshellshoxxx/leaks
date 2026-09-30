@@ -13,7 +13,7 @@ Out of scope: file encryption format (see `04-CRYPTOGRAPHY.md`: age-style STREAM
 - WHAT: investigator endpoints (C-15/C-16) and case keys, and the source's identity as carried in file metadata.
 - FROM WHOM: a hostile uploader, including the organization under investigation submitting a weaponized or beaconing file; an adversary who later sees exported material.
 - ASSUMPTIONS (`40-SECURITY-ASSUMPTIONS.md`): ASM-015 (hypervisor/sandbox isolation), ASM-020 (evidence containment; checked by K-10), ASM-019 (recipient workstation integrity while unlocked), ASM-021 (recipients follow handling procedures), ASM-011 (content not uniquely identifying beyond what the source accepts); sandbox images current (≤30 days, FILE-017). Protections: 40 P-15, P-16.
-- RESIDUAL RISK: sandbox escapes (hypervisor/gVisor bugs), content-level fingerprints (canary traps, stylometry, visible watermarks) that no tool removes, and humans photographing screens.
+- RESIDUAL RISK: sandbox escapes (hypervisor bugs), content-level fingerprints (canary traps, stylometry, visible watermarks) that no tool removes, and humans photographing screens.
 
 ## 2. Context and dependencies
 
@@ -363,7 +363,7 @@ Exports are the principal path by which evidence leaves the protected environmen
 | Option | Security vs hostile file | Source-metadata protection | Evidentiary fidelity | Investigator usability | Hardware / ops cost | Default |
 |---|---|---|---|---|---|---|
 | L0 metadata only | Highest (no parsing) | n/a | none | very low | none | listing |
-| L1 pixel viewing copy | High (per-object microVM, pixels only) | High for embedded metadata; not for visible content | Medium (text via OCR; no vectors/links/formulas) | Good (fast, in-Desk) | Requires KVM for Firecracker; gVisor fallback | **Yes** |
+| L1 pixel viewing copy | High (per-object microVM, pixels only) | High for embedded metadata; not for visible content | Medium (text via OCR; no vectors/links/formulas) | Good (fast, in-Desk) | Requires a Tier 1/2 hardware-isolated substrate (§6.1); otherwise text-only | **Yes** |
 | L1 structural (mat2/qpdf) working copy | Medium (output still complex) | Medium (best-effort) | High (editable, searchable) | Good | same | on request |
 | L2 Qubes DispVM native | High (Xen, GUI isolation) | none (original) | Full | Medium (Qubes learning curve, 16–32 GB RAM, B-SD-05) | Qubes-capable hardware | recommended for HIGH profile |
 | L3 air-gapped station | Very high vs remote exfiltration; sneakernet risks (I-11 in R1: SVS air-gap accepted-risk) | none (original) | Full | Low (manual transfers) | Dedicated hardware + procedures | optional |
