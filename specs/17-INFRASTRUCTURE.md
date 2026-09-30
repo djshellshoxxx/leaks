@@ -48,16 +48,16 @@ Research basis:
 
 | Host role | Zone | Components | Holds secrets (see §4.9 and ADR-028) |
 |---|---|---|---|
-| H-INTAKE | Z-INTAKE | C-05, C-06, C-07, C-08 | Source onion service key; SSH-onion key; relay mTLS server key; per-deployment Argon2 salt |
-| H-PUB (EE-HA only) | Z-INTAKE | Onionbalance-style descriptor publisher for C-05 | Master onion identity key (only host holding it in EE-HA) |
-| H-CORE | Z-CORE | C-09, C-10, C-12, C-13, C-14, C-21, C-22, C-23, C-24 | Relay mTLS client key; staff-onion key; audit checkpoint key (or HSM handle); DB credentials; backup-agent signing key |
-| H-MON | Z-SOC | C-25; optional Tang server (§6.3); internal NTS/NTP relay; C-26 (EE) | Monitor mTLS client key; alert transport credentials; Tang keys |
+| H-INTAKE (`intake-gw` in `06-SYSTEM-ARCHITECTURE.md` §4.2) | Z-INTAKE | C-05, C-06, C-07, C-08 | Source onion service key; Intake Routing Key (TPM-sealed where available, `06-SYSTEM-ARCHITECTURE.md` §8); SSH-onion key (remote sites only); relay mTLS server key; per-deployment Argon2 salt; C-25 agent mTLS client key |
+| H-INTAKE-B (EE-HA/GOV-ONPREM only) | Z-INTAKE | Passive twin of H-INTAKE (active/passive, `21-ENTERPRISE.md` §5.2) | **Same** source onion key as H-INTAKE (≤ 2 hosts, ADR-032); intake-replication TLS key |
+| H-CORE (`core`) | Z-CORE | C-09, C-10, C-12, C-13, C-14, C-21, C-22, C-23, C-24; core tor instance for RCP-ONION (or a Z-CORE edge host, `16-TOR-I2P.md` NET-015) | Relay mTLS client key; RCP-ONION (staff) onion key; RCP-LAN server certificate key; audit checkpoint key (or HSM handle); DB credentials; backup-agent signing key |
+| H-MON (`monitor`) | Z-SOC | C-25 collector; health-probe tor client (`16-TOR-I2P.md`); optional Tang server (§6.3); NTP server; C-26 (EE) | Collector mTLS server key; alert transport credentials; Tang keys |
 | H-BAK | Z-BAK | C-27 backup store | WORM store credentials (store side); **no backup decryption keys** |
 | H-HV (CE-SINGLE only) | infra (C-39) | KVM/libvirt hypervisor hosting H-INTAKE, H-CORE and H-MON as VMs | Hypervisor SSH-onion key only |
 | H-HSM | Z-CORE/Z-ADM | C-29 | Non-exportable keys (§6.5) |
 | WS-RCP | Z-RCP | C-15, C-16, C-17 | Staff identity/encryption keys (hardware-wrapped), case keys in use |
 | WS-VIEW | Z-VIEW | C-18 | AIRGAP-RCP: staff keys (hardware-wrapped) |
-| WS-SYNC (AIRGAP-RCP) | Z-RCP | Candor Desk in sync-only mode | Staff-onion client credential; **no private decryption keys** |
+| WS-SYNC (AIRGAP-RCP; "transfer Desk" in `06-SYSTEM-ARCHITECTURE.md` §8.3) | Z-RCP | Candor Desk in sync-only mode | RCP-ONION client credential or RCP-LAN certificate; **no private decryption keys** |
 | WS-ADM | Z-ADM | C-19, C-20 | FIDO2 SSH credentials (on token); admin-onion client-auth keys (hardware-sealed) |
 
 ## 4. Network design and segmentation
@@ -68,14 +68,15 @@ The default addresses are an installer-editable example plan.
 
 | Segment | Purpose | Example addressing | Attached hosts | Routed to Internet? |
 |---|---|---|---|---|
-| N-INTAKE-EXT | H-INTAKE uplink. Used only by the tor process | DHCP/static public or NAT | H-INTAKE, H-PUB | Yes, egress only, tor UID only |
-| N-RELAY | Private point-to-point link: C-09 (core) → C-08/C-06 relay endpoint (intake) | 10.20.0.0/29 (intake .2, core .3) | H-INTAKE, H-CORE | No |
+| N-INTAKE-EXT | H-INTAKE uplink. Used only by the tor process | DHCP/static public or NAT | H-INTAKE, H-INTAKE-B | Yes, egress only, tor UID only |
+| N-RELAY | Private point-to-point link: C-09 (core) → C-08 relay export endpoint (intake, TCP 7443) | 10.20.0.0/29 (intake .2, intake-B .4, core .3) | H-INTAKE(-B), H-CORE | No |
+| N-INTAKE-REPL (EE-HA/GOV) | Intake A ↔ B PostgreSQL synchronous replication and fencing heartbeat | 10.21.0.0/30 | H-INTAKE, H-INTAKE-B | No |
 | N-CORE | Core internal: services ↔ PostgreSQL ↔ blob store | 10.40.0.0/24 | H-CORE (and cluster nodes in EE-HA) | No |
 | N-CORE-EGRESS | H-CORE uplink for tor (staff onion, updates) and, optionally, the SMTP relay and SIEM | NAT | H-CORE | Yes, allow-listed |
-| N-MGMT | Monitor pulls self-test results; time distribution; Tang | 10.30.0.0/28 (mon .5) | H-MON, H-INTAKE, H-CORE, H-BAK | No |
+| N-MGMT | Agents push self-test results to H-MON; time distribution; Tang; SSH from the admin workstation jump | 10.30.0.0/28 (mon .5, admin jump .9) | H-MON, H-INTAKE, H-CORE, H-BAK, WS-ADM (jump port) | No |
 | N-BAK | Backup push, core → store, write-only | 10.50.0.0/29 | H-CORE, H-BAK | No |
 | N-OOB | BMC/IPMI/iDRAC/iLO | 10.90.0.0/28 | BMCs only, plus one jump port in a locked rack | **Never**. Physically separate switch or unplugged |
-| N-STAFF-LAN (EE, ADVANCED) | Staff reach the desk-api over the internal network through `candor-edge` with mTLS | customer | WS-RCP → H-CORE edge | No |
+| N-RCP (RCP-LAN profiles) | Dedicated recipient VLAN or WireGuard: Desk API TCP 8443 mTLS; Admin API TCP 9443 mTLS on N-MGMT (`06-SYSTEM-ARCHITECTURE.md` §4.2) | customer | WS-RCP, WS-ADM → H-CORE | No |
 
 ### 4.2 Allowed-flow matrix
 
@@ -86,18 +87,21 @@ Only the flows below are allowed; everything else is denied. `→` means the con
 | F1 | Tor network → C-05 (via tor's own outbound circuits) | tor | Source access | No listener on any IP. Onion traffic arrives over tor's outbound OR connections |
 | F2 | C-05 tor → Tor relays | TCP any ORPort | Circuit building | Only `debian-tor` UID, only on N-INTAKE-EXT |
 | F3 | C-09 (H-CORE) → H-INTAKE:7443 | TCP, mTLS 1.3, pinned certificate | Pull sealed batches; push sealed replies and key-directory snapshots | ADR-009. No flow from intake to core, ever |
-| F4 | H-MON → H-INTAKE/H-CORE/H-BAK:9443 | TCP, mTLS 1.3 | Pull self-test results (allow-listed schema, `32-OPERATIONS.md` §6) | Monitor-initiated |
-| F5 | H-INTAKE/H-CORE/H-BAK → H-MON:4460/123 | NTS-KE + NTP | Time | Only to H-MON; H-MON itself uses NTS servers or GPS |
+| F4 | C-25 agent on H-INTAKE/H-CORE/H-BAK → H-MON:8514 | TCP, mTLS 1.3 | Push self-test results (allow-listed schema, `32-OPERATIONS.md` §6; `06-SYSTEM-ARCHITECTURE.md` §8.5) | Z-INTAKE → Z-SOC is permitted (ADR-009 forbids only Z-INTAKE → Z-CORE) |
+| F4b | H-MON tor client → source onion `/.well-known/candor/health` | tor | External availability probe (`16-TOR-I2P.md`) | Fixed-size static response |
+| F5 | H-INTAKE/H-CORE/H-BAK → H-MON:123 (+ NTS-KE 4460 where supported) | NTP/NTS | Time | Only to H-MON; H-MON itself uses NTS servers or GPS |
 | F6 | H-INTAKE/H-CORE → H-MON:7500 (Tang) | HTTP (Tang/JOSE; McCallum-Relyea exchange, key material not exposed) | Network-bound disk unlock at boot | Only when NBDE is enabled (§6.3) |
-| F7 | H-CORE → H-BAK:8443 | HTTPS S3-API with Object Lock, or append-only REST | Backup upload | Credentials can PUT but not DELETE or overwrite (`19-BACKUPS-DR.md`) |
+| F7 | H-CORE → H-BAK:443 (or :22 SFTP append-only) | HTTPS S3-API with Object Lock | Backup upload | Credentials can PUT but not DELETE or overwrite (`19-BACKUPS-DR.md`) |
 | F8 | H-CORE tor → Tor relays | TCP any ORPort | Staff onion (restricted discovery), update fetch via onion mirror | `debian-tor` UID only |
 | F9 | H-CORE C-23 → customer SMTP relay:587 | TCP STARTTLS, certificate pinned | Content-free notifications (ADR-017) | Optional. Alternatively over tor |
 | F10 | H-MON → alert sink (SMTP over tor / Matrix webhook over tor) | tor | Content-free alerts | Alerts never include source data (`32-OPERATIONS.md`) |
 | F11 | H-CORE C-26 → customer SIEM (EE) | TLS syslog/HTTPS | Scrubbed SECURITY/SYSTEM events (ADR-016, ADR-018) | Never from H-INTAKE |
-| F12 | WS-ADM → H-* SSH | SSH over restricted-discovery onion → loopback sshd | Administration | No SSH on any network interface in CE. EE MAY use N-MGMT jump host (ADVANCED) |
-| F13 | WS-RCP (Candor Desk, embedded Arti) → H-CORE staff onion | tor | desk-api/admin-api | Default staff access path (STAFF-ONION) |
+| F12 | WS-ADM (jump port on N-MGMT) → H-*:22 | SSH (FIDO2 `sk-` keys) on the management interface only | Host administration (`06-SYSTEM-ARCHITECTURE.md` §8.4) | Remote sites: SSH over a restricted-discovery onion to loopback sshd instead |
+| F13 | WS-RCP (Candor Desk) → H-CORE | RCP-ONION: tor to the client-auth onion; RCP-LAN: TCP 8443 mTLS on N-RCP | desk-api | Per-profile default in §4.6 |
+| F13b | WS-ADM → H-CORE | Separate admin onion, or TCP 9443 mTLS on N-MGMT | admin-api | — |
 | F14 | H-INTAKE tor/apt → Debian and Candor onion mirrors | tor | OS and Candor updates | Via tor only; see §4.5 |
 | F15 | H-HV (CE-SINGLE) → Tor relays | tor | Hypervisor updates and SSH onion | Hypervisor has **no IP** on br-relay or br-intake |
+| F16 | H-INTAKE ↔ H-INTAKE-B (EE-HA/GOV) | PostgreSQL streaming replication over TLS; fencing heartbeat | Intake store sync replica (`21-ENTERPRISE.md` §5.2) | N-INTAKE-REPL only; see `34-PERFORMANCE-SCALABILITY.md` §7 for observer analysis |
 
 ```mermaid
 flowchart LR
@@ -130,8 +134,8 @@ flowchart LR
   end
   S --> T --> C05
   D --> T --> SO --> C10
-  C25 -->|F4 pull| RL
-  C25 -->|F4 pull| C10
+  ZINTAKE -->|F4 agent push| C25
+  ZCORE -->|F4 agent push| C25
   C10 -->|F7 write-only| C27
 ```
 

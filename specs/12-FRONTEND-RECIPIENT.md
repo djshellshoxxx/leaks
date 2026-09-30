@@ -26,10 +26,13 @@ The Desk admin mode is specified in `13-FRONTEND-ADMIN.md`.
 - untrusted evidence is never parsed outside the containment environment C-17/C-18 (ADR-012);
 - report content leaves the Desk only through an explicit, redaction-verified, audited Export Package (ADR-018).
 
-This protects sources and case content against recipient operational mistakes (THR-041), hostile files (THR-023), onward leakage (THR-029) and excess insider access (THR-019, THR-020). It assumes:
-- the recipient workstation OS (C-16) is not compromised;
-- the hardware unlock token is held by the user;
-- C-17 isolation holds.
+This protects sources and case content against recipient operational mistakes (THR-041), hostile files (THR-023), onward leakage (THR-029) and excess insider access (THR-019, THR-020). It implements protections P-08, P-10, P-11, P-12, P-15, P-16 and P-20 of `40-SECURITY-ASSUMPTIONS.md`. It assumes:
+- the recipient workstation OS (C-16) is not compromised while unlocked (ASM-019);
+- the hardware unlock token is held by the user and keeps keys non-exportable (ASM-028);
+- C-17 isolation holds (ASM-015, ASM-020);
+- recipients follow handling procedures for actions the UI cannot enforce (ASM-021);
+- Identity Custodians do not collude (ASM-031);
+- channel membership signing keys are not jointly compromised (ASM-033).
 
 It cannot stop a malicious authorized recipient from reading, photographing or retyping content they can legitimately view (§14).
 
@@ -46,6 +49,8 @@ It cannot stop a malicious authorized recipient from reading, photographing or r
 | `32-OPERATIONS.md` | Human-factor controls (HUM-*), configuration classes |
 | `05-SOURCE-OPSEC.md` | Promises made to sources that this UI must honor (SOPS-033, SOPS-041) |
 | `26-ACCESSIBILITY.md` | WCAG 2.2 AA / EN 301 549 clause 11 for Desk |
+| `40-SECURITY-ASSUMPTIONS.md` | P-08, P-10, P-11, P-12, P-15, P-16, P-20; ASM-015, -019, -020, -021, -028, -031, -033; checks ASM-111 (proof verification and gossip), ASM-116 (running-binary hash warning), ASM-117 (containment probe), ASM-122 (case key-holder warnings) |
+| `DECISIONS.md` ADR-030 | Per-member epoch keys; envelope header lists recipient key IDs; COI filter before wrapping |
 
 ## 3. Design principles
 
@@ -91,7 +96,8 @@ It cannot stop a malicious authorized recipient from reading, photographing or r
 | OS full-disk encryption on | block if off (config) |
 | OS screen lock ≤ 10 min | warn |
 | Desk version current per TUF metadata | block if older than the security-fix window (33) |
-| C-17 available | warn (CL-3 disabled) |
+| C-17 containment probe passed (ASM-117: no network route, no key-material mount, fresh disk) | block all attachment viewing (CL-2/CL-3) until it passes; text (CL-1) still available |
+| Running trust-path binaries match the transparency log (ASM-116 signed statement from C-25) | blocking warning |
 | System clock within ±5 min of the signed key-directory timestamp (THR-043) | warn |
 | Key-directory consistency | block on split-view detection |
 
@@ -122,6 +128,7 @@ It cannot stop a malicious authorized recipient from reading, photographing or r
 | SLA | Next due (e.g., "Acknowledge by 2026-10-07") |
 | Status | New / Triaged / Spam-held |
 
+- **Recipient-set check (ADR-030):** on import, Desk verifies that the envelope header's recipient key IDs match eligible member epoch keys in the Key Directory (C-14, with inclusion and consistency proofs, ASM-111). Any unknown or extra recipient slot (other than padding dummies) raises a SECURITY alert, and the envelope is shown as "Recipient set could not be verified — do not accept". The Inbox also shows "Encrypted to: {n} members" and, for the case lead, the role labels.
 - **Actions** (row menu and keyboard):
   - **Open preview** (text answers at CL-1);
   - **Accept as case**: creates the case, re-wraps content keys into a new Case Key for the assigned members after COI exclusion (ADR-008, ADR-015);
@@ -467,6 +474,10 @@ All functionality is operable by keyboard (WCAG 2.1.1). There are no keyboard tr
 | RUI-052 | Inbox triage actions SHALL include Accept, Route (with reason), Hold as spam/abuse, and Assign, each producing a CASE audit event. | ADR-026; ADR-016 | THR-033 | C-15, C-10 | TST |
 | RUI-053 | Unsent reply text SHALL survive auto-lock in memory under the session key and be restored after unlock. | WCAG 2.2.5 (adopted); COGA | — | C-15 | TST |
 | RUI-054 | The Desk SHALL NOT expose any function that returns source metadata beyond the §R02/§R03 fields, including in debug or support modes, and support bundles SHALL be scrubbed of content and tokens. | REQ-H-26, REQ-H-56 (INC-56) | THR-027, THR-016 | C-15, C-36 | TST: support bundle canary scrub test |
+| RUI-055 | On import, the Desk SHALL verify each envelope's recipient key IDs against eligible member epoch keys in C-14 (inclusion and consistency proofs), SHALL treat any unexplained recipient as a SECURITY alert, and SHALL block acceptance of that envelope. | ADR-030; INC-14; INC-62; ASM-111 | THR-046 | C-15, C-14 | TST: malicious-server harness inserts an extra recipient slot → alert + block |
+| RUI-056 | Attachment viewing (CL-2, CL-3) SHALL be disabled until the C-17 containment probe (ASM-117) passes at Desk start and daily. The status bar SHALL show the probe result. | ASM-117; ADR-012 | THR-023 | C-15, C-17 | TST: probe failure fixture (network route present) → viewing disabled |
+| RUI-057 | The Desk SHALL display a blocking warning when C-25's signed statement reports running trust-path binary hashes absent from the transparency log for the current release. | ASM-116; INC-28 | THR-025, THR-007 | C-15, C-25 | TST: fixture with unknown hash → warning |
+| RUI-058 | The case Members panel SHALL warn when fewer than two members hold active keys, and SHALL require explicit acknowledgement of permanent loss before removing the last key holder. | ASM-122; ADR-013 | THR-042 | C-15, C-10 | TST |
 
 ## 14. Residual risks and limitations
 

@@ -108,7 +108,7 @@ SSDF v1.1 groups practices as PO (Prepare the Organization), PS (Protect the Sof
 | **PW.4.2** Create and maintain well-secured in-house components | `candor-core`, `candor-safefs`, `candor-log`, `candor-time` shared crates with T0/T1 owners | Crate ownership | SDL-030 |
 | **PW.4.4** Verify acquired components remain secure | Daily advisory scan against SBOM (ST-010); maintainer-change alerts (28) | CI job history | 28 |
 | **PW.5.1** Follow secure coding practices | §12 coding standards, enforced by lints | Lint configs | SDL-020..SDL-036 |
-| **PW.6.1** Use compiler/build features that improve security | Release profile: `overflow-checks = true`, `-D warnings`, PIE/RELRO/stack protector for any C, `-C force-frame-pointers` off in release; `panic = "abort"` only in C-07 sealer (fail closed, no core dump) | `Cargo.toml` profiles checked by ST-007 | SDL-024, SDL-041 |
+| **PW.6.1** Use compiler/build features that improve security | Release profile: `overflow-checks = true`, `-D warnings`, PIE/full RELRO/stack protector for any C code; `panic = "abort"` only in C-07 sealer (fail closed, no core dump) | `Cargo.toml` profiles checked by ST-007 | SDL-024, SDL-041 |
 | **PW.6.2** Determine which compiler/build features to use | Hardening flags list reviewed every Rust edition/major toolchain bump | Toolchain review record | SDL-041 |
 | **PW.7.1** Decide whether to do code review/analysis | Always, tiered (§11) | Branch protection | SDL-014 |
 | **PW.7.2** Perform code review/analysis | Human review + SAST (Semgrep, CodeQL, clippy) + custom rules | SARIF archive | SDL-014..SDL-018 |
@@ -330,7 +330,7 @@ Changes to: logging/metrics/tracing schema; timestamps; ID generation (e.g. a sw
 | Area | Rule | Enforcement |
 |---|---|---|
 | Randomness | Only `candor_core::rng` (OS `getrandom`); no other RNG crates or seeded PRNGs in non-test code (INC-50/51) | ST-013 lint |
-| Filesystem | Only `candor-safefs` (openat2 `RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS`, content-addressed names) for any externally influenced name; `std::fs` with dynamic paths, `Path::join` on external input, `tar::Archive::unpack`, `zip::ZipArchive::extract` banned (ADR-027) | ST-005 lint |
+| Filesystem | Only `candor-safefs` (openat2 `RESOLVE_BENEATH` + `RESOLVE_NO_SYMLINKS`, content-addressed names) for any externally influenced name; `std::fs` with dynamic paths, `Path::join` on external input, `tar::Archive::unpack`, `zip::ZipArchive::extract` banned (ADR-027) | ST-005 lint |
 | Logging | Only the typed `candor-log` event API; `println!`, `eprintln!`, `log::*!`/`tracing::*!` with free-form fields banned in T0/T1 (ADR-016) | ST-006 lint |
 | HTTP routes | Registered only through the route registry with `authz = …` and `audience = …` declarations (ADR-029) | ST-004 lint |
 | HTTP clients | `candor-http` wrapper: redirects disabled, proxy-from-env disabled, cookie store disabled, pinned endpoint; lesson from CVE-2026-49996 [B-SD-36] | ST-008 Semgrep rule; ST-092 |

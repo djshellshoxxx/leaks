@@ -12,7 +12,15 @@ Research shows that the largest risks to sources are not in the network layer. T
 
 In scope: C-06, C-03, C-37 (Clearnet Information Site) and the guidance-related content of C-38. Out of scope: onion and network configuration (`16-TOR-I2P.md`), cryptography (`04-CRYPTOGRAPHY.md`), server-side metadata policy (`03-PRIVACY-ANONYMITY.md`), the file pipeline (`10-FILE-EVIDENCE-PIPELINE.md`), and screen-level UI design (`11-FRONTEND-SOURCE.md`).
 
-**Protection statement.** The guidance *reduces* the chance that a source is identified through their own device, network, files, words or behavior (THR-002, THR-004, THR-009, THR-010, THR-011, THR-034, THR-048). It protects against the most likely adversary, the source's own employer (R4 §1, adversary A), and partly against national-level observers (adversary B). It assumes the source reads and follows it, uses a device the adversary does not control, and runs a current Tor Browser. Residual risk remains high where the candidate set is small, whatever the guidance says (§11). The assumptions still need to be mapped to `ASM-*` identifiers in `40-SECURITY-ASSUMPTIONS.md` (§12, Open issue OI-05-1).
+**Protection statement.** The guidance *reduces* the chance that a source is identified through their own device, network, files, words or behavior (THR-002, THR-004, THR-009, THR-010, THR-011, THR-034, THR-048). It protects against the most likely adversary, the source's own employer (R4 §1, adversary A), and partly against national-level observers (adversary B). It supports protections P-02 (network identity vs observers), P-16 (metadata removal), P-19 (timing minimisation) and P-23 (source-device residue) in `40-SECURITY-ASSUMPTIONS.md`. It assumes:
+- the source uses a proxy-enforcing Tor client (ASM-004);
+- the source's device is not compromised (ASM-008);
+- the source follows core guidance (ASM-009);
+- the passphrase stays confidential (ASM-010);
+- the content is not itself uniquely identifying beyond what the source accepts (ASM-011);
+- the source's observable anonymity set is larger than one (ASM-007).
+
+Residual risk remains high where the candidate set is small, whatever the guidance says (§11).
 
 ## 2. Context and dependencies
 
@@ -25,6 +33,7 @@ In scope: C-06, C-03, C-37 (Clearnet Information Site) and the guidance-related 
 | `12-FRONTEND-RECIPIENT.md` | Shows recipients the source's answer to "how many people know" (§8.7) and bans authorship-similarity tools |
 | `16-TOR-I2P.md` | Onion service, PoW, bridges context; outage behavior |
 | `26-ACCESSIBILITY.md` | Plain-language rules, translation review of security-critical strings, and comprehension-test protocol |
+| `40-SECURITY-ASSUMPTIONS.md` | P-02, P-16, P-19, P-23; ASM-004, ASM-007..ASM-011; ASM-112 (the "What protects you and what does not" page, implemented by GC-01 on S03) |
 | `25-COMPLIANCE.md` | Jurisdiction content packs (rights, external channels, anti-gag text) inserted into GC-03 and GC-37 |
 | `30-ANONYMITY-TESTING.md` | Forensic-residue tests of the source flow (Tor Browser, Tails) |
 
@@ -102,7 +111,7 @@ In scope: C-06, C-03, C-37 (Clearnet Information Site) and the guidance-related 
 >
 > **When you use this website** *(Tier W only)*: your report is locked (encrypted) on our server as soon as it arrives. If someone had secretly taken control of the server at that moment, they could read it. The Candor app locks your report on your own device before sending, which avoids this.
 >
-> **Who reads reports:** {channel_recipient_description}. {recovery_escrow_statement}
+> **Who reads reports:** {channel_recipient_description}. You can tick people your report is about, and they will not get a key to open it. {recovery_escrow_statement}
 
 `{recovery_escrow_statement}` is either "No one outside the listed team can unlock reports." or "A backup key is split between {quorum_holders}. {k} of them together could unlock reports." (ADR-013).
 
@@ -351,7 +360,8 @@ In scope: C-06, C-03, C-37 (Clearnet Information Site) and the guidance-related 
 |---|---|---|
 | S01 Landing | GC-01 summary; "Don't use a work device or work network" (from GC-04/GC-09) in the first viewport; JS-on warning (§8.2) | GC-01..GC-07 |
 | S02 Safety Check | Checklist of NORMAL essentials (8 items, §7.1); track self-selection (§4.2) | All cards, grouped A–I; HIGH in `<details>` |
-| S03 Anonymity Status | Mode, tier, escrow, recipients (GC-01 dynamic parts) | GC-38 |
+| S03 Anonymity Status | Mode, tier, escrow, recipient role labels (GC-01 dynamic parts); ASM-112 "What protects you and what does not" list | GC-38 |
+| S04b "Is your report about any of these people?" (ADR-030) | Plain explanation that ticked roles get no key; empty by default | GC-30 |
 | S05 Questionnaire | Beside long-text fields: "Keep it factual; don't paste into AI tools" | GC-16, GC-30, GC-31 |
 | S06 Attach Evidence | "File names are replaced by default"; "Describe or retype when you can" | GC-22..GC-29 |
 | S07 Metadata Warning | Per-file-type risk list (§7.2) | GC-22..GC-29 |
@@ -488,6 +498,8 @@ Key messages: **K1** don't use work devices or networks; **K2** use Tor Browser 
 | SOPS-042 | The Source UI SHALL provide the Safety Check essentials (§7.1) as a non-interactive list with no data collection. | GP-1, GP-5 | THR-016 | C-06 | TST: S02 contains no `<input>` except navigation |
 | SOPS-043 | Guidance card string keys SHALL be versioned. Each release SHALL publish a changelog of `sops.*` changes for translators and auditors. | B-SD-02 | THR-040 | C-06 | INSP: release artifact present |
 | SOPS-044 | Clearnet-intake deployments (C-38) SHALL show a reduced guidance set that begins with "This form is NOT ANONYMOUS" and links the onion option where the channel offers one. | ADR-002 | THR-040 | C-38 | TST: C-38 template check; INSP |
+| SOPS-045 | GC-01 (with S03) SHALL implement the ASM-112 page "What protects you and what does not", covering in plain language the source-facing consequences of ASM-001, ASM-004..ASM-011 and ASM-013 (Tier W), and SHALL be re-reviewed whenever those assumptions change. | ASM-112; ADR-004 | THR-040 | C-06, C-03 | INSP: per-release mapping table (assumption → sentence) signed by the privacy lead |
+| SOPS-046 | GC-01 SHALL state that sources can keep people their report concerns from receiving any key (ADR-030 checklist), and that if no one eligible is left, they will be pointed to an independent channel. | ADR-030; INC-22 | THR-020, THR-040 | C-06 | INSP: copy review |
 
 ## 11. Residual risks and limitations
 
@@ -504,7 +516,7 @@ Key messages: **K1** don't use work devices or networks; **K2** use Tor Browser 
 
 ## 12. Open issues
 
-- **OI-05-1:** Map the §1 protection-statement assumptions (source uses an uncompromised personal device; current Tor Browser; follows guidance) to `ASM-*` IDs once `40-SECURITY-ASSUMPTIONS.md` exists.
+- **OI-05-1:** (Resolved) The protection statement now cites P-02, P-16, P-19, P-23 and ASM-004, ASM-007..ASM-011.
 - **OI-05-2:** Validate the Flesch-Kincaid thresholds against real translated text. Grade metrics do not transfer across languages (see `26-ACCESSIBILITY.md` I18N rules).
 - **OI-05-3:** Decide whether Tier V should offer **optional local LLM paraphrasing** (an on-device model, no network). The evidence is bimodal [B-AN-39]. Model size and trust issues apply. Currently excluded (SOPS-019).
 - **OI-05-4:** Research whether a CoverDrop-style cover-traffic channel (R4 §6; B-GL-22) could remove "Tor use is a signal" for employer networks in EE deployments (R-COVER-01, R2 §10).
