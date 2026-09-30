@@ -8,7 +8,7 @@ Specifies how long every class of data is kept, how organizations configure rete
 **Protection statement.**
 - WHAT: confidentiality of reports, evidence and source-linked metadata after their retention ends.
 - FROM WHOM: later attackers or compelling parties who obtain storage media, backups or snapshots (THR-017, THR-031, THR-030, THR-026); insiders who would keep or restore deleted cases (THR-018).
-- ASSUMPTIONS: keys are destroyed in all copies (NIST SP 800-88r2 crypto-erase precondition, B-CR-33); the Erasure Key Vault (§6.2) is not backed up beyond its bounded backup window; member devices sync within the device-offline limit or are revoked; plaintext never reached persistent media (no swap, tmpfs disposables; B-CR-33 caveat) (to be registered in `40-SECURITY-ASSUMPTIONS.md`).
+- ASSUMPTIONS: keys are destroyed in all copies (NIST SP 800-88r2 crypto-erase precondition, B-CR-33); the Erasure Key Vault (§6.2) is not backed up beyond its bounded backup window; member devices sync within the device-offline limit or are revoked; plaintext never reached persistent media (no swap, tmpfs disposables; B-CR-33 caveat). Registered as ASM-027 (key erasure effective), ASM-047 (backup operators do not hold member unlock factors), ASM-029 (HSM integrity), ASM-019 (recipient workstation integrity) in `40-SECURITY-ASSUMPTIONS.md`. Protection: 40 P-18.
 - RESIDUAL RISK: exported copies, copies on lost/unsynced devices, human notes, and plaintext that reached swap or journals cannot be reached by crypto-erase.
 
 ## 2. Context and dependencies
@@ -276,7 +276,7 @@ Tier W deletion requires login (C-07 verifies passphrase); Tier V signs the dele
 1. OI-35-1: Confirm jurisdiction retention defaults (CNIL référentiel durations, EDPS guidance, state/agency schedules) with `25-COMPLIANCE.md`; current defaults are generic.
 2. OI-35-2: EKV implementation on CE-SINGLE (TPM availability on commodity/VM hosts); fallback to an offline-key-sealed file with documented weaker guarantees.
 3. OI-35-3: Whether `D-21` staff account data retention aligns with employment-law retention in each jurisdiction.
-4. OI-35-4: Assumption IDs (key-copy completeness, EKV backup exclusion, device sync) to be registered in `40-SECURITY-ASSUMPTIONS.md`.
+4. OI-35-4: ASM-027 should reference the Erasure Key Vault backup exclusion (DEL-002/003) and device-sync revocation (RET-013) as its monitoring method.
 
 ### Open Issues for ADR revision
 

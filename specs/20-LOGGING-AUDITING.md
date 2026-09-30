@@ -8,7 +8,7 @@ Defines the privacy-preserving audit and logging architecture (ADR-016): event c
 **Protection statement.**
 - WHAT: source anonymity and report confidentiality against leakage through logs, metrics, traces and crash data; integrity of the record of staff actions.
 - FROM WHOM: anyone who later obtains logs (hosting provider, SIEM operators, vendor support, attackers, legal compulsion — THR-016, THR-026, THR-030); insiders who would alter logs to hide misuse (THR-018, THR-037).
-- ASSUMPTIONS: the typed logging API is the only log path in trust-path code (enforced by CI); the external witness is operated independently of the instance operator; host OS log configuration is applied by the installer and verified by C-25 (to be registered in `40-SECURITY-ASSUMPTIONS.md`).
+- ASSUMPTIONS (`40-SECURITY-ASSUMPTIONS.md`): ASM-048 (audit witness honest; K-12), ASM-044 (administrators trusted for availability, not confidentiality), ASM-017 (hosting provider does not covertly inspect memory), ASM-041 (clocks within tolerance), ASM-037 (honest reviewer per trust-path change, for the typed-API/schema gate); host log configuration verified by C-25 (LOG-018). Protections: 40 P-01, P-17, P-19.
 - RESIDUAL RISK: third-party components (kernel, tor, PostgreSQL) may emit unexpected messages; exact timestamps of staff actions can correlate with submission windows; a compromised host can log anything in real time regardless of configuration.
 
 Guiding rule: **log staff actions richly, source activity never.** Accountability applies to people with power over reports (INC-22, INC-68); sources get none of it (REQ-H-60).
@@ -381,7 +381,7 @@ Legal hold (35) can extend CASE retention for held cases.
 1. OI-20-1: Choose witness protocol (Sigsum witness API vs a Candor-specific cosigning service) with `28-SUPPLY-CHAIN.md` (which uses Sigsum/Rekor for releases).
 2. OI-20-2: Tor `LogTimeGranularity` semantics and Arti equivalents need confirmation against current tor/Arti manuals (currently Knowledge (unverified)).
 3. OI-20-3: Whether SIEM should receive enterprise usernames or only pseudonymous UserRefs; privacy of investigators vs SOC usability.
-4. OI-20-4: Assumption IDs (typed-API exclusivity, witness independence, installer verification) to be registered in `40-SECURITY-ASSUMPTIONS.md`.
+4. OI-20-4: Propose adding the LOG-018 logging-configuration self-test to the automated checks table (§8, K-nn) of `40-SECURITY-ASSUMPTIONS.md`.
 
 ### Open Issues for ADR revision
 

@@ -12,7 +12,7 @@ Out of scope: file encryption format (see `04-CRYPTOGRAPHY.md`: age-style STREAM
 **Protection statement.**
 - WHAT: investigator endpoints (C-15/C-16) and case keys, and the source's identity as carried in file metadata.
 - FROM WHOM: a hostile uploader, including the organization under investigation submitting a weaponized or beaconing file; an adversary who later sees exported material.
-- ASSUMPTIONS: hypervisor/sandbox isolation holds for L1/L2 (to be registered in `40-SECURITY-ASSUMPTIONS.md` as the "viewer isolation" assumption); sandbox images are current (≤30 days); investigators follow export rules.
+- ASSUMPTIONS (`40-SECURITY-ASSUMPTIONS.md`): ASM-015 (hypervisor/sandbox isolation), ASM-020 (evidence containment; checked by K-10), ASM-019 (recipient workstation integrity while unlocked), ASM-021 (recipients follow handling procedures), ASM-011 (content not uniquely identifying beyond what the source accepts); sandbox images current (≤30 days, FILE-017). Protections: 40 P-15, P-16.
 - RESIDUAL RISK: sandbox escapes (hypervisor/gVisor bugs), content-level fingerprints (canary traps, stylometry, visible watermarks) that no tool removes, and humans photographing screens.
 
 ## 2. Context and dependencies
@@ -408,7 +408,7 @@ Exports are the principal path by which evidence leaves the protected environmen
 1. OI-10-1: Decide whether to embed the upstream Dangerzone container image (licence AGPL-3.0, signed updates since v0.10.0) or maintain our own equivalent image; needs `28-SUPPLY-CHAIN.md` decision.
 2. OI-10-2: macOS and Windows Desk hosts lack Firecracker; define the L1 substrate there (Apple Virtualization.framework / Hyper-V isolated VMs) and whether they meet L1 or a reduced "L1-R" level.
 3. OI-10-3: Local speech-to-text (EE) for transcripts must run in L1; model supply-chain review pending.
-4. OI-10-4: Assumption IDs for viewer isolation and sandbox freshness must be registered in `40-SECURITY-ASSUMPTIONS.md`.
+4. OI-10-4: Sandbox-image freshness (FILE-017) is not yet a named assumption in `40-SECURITY-ASSUMPTIONS.md`; propose adding it under ASM-020 monitoring (K-10).
 
 ### Open Issues for ADR revision
 

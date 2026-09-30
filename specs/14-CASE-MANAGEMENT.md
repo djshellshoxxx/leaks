@@ -8,7 +8,7 @@ Specifies the lifecycle of a report from intake to deletion: intake, classificat
 **Protection statement.**
 - WHAT: the report's existence, content and handling integrity; the source's identity; persons concerned.
 - FROM WHOM: persons named in or implicated by a report, including executives, board members, HR, compliance, security staff and system administrators (THR-020); malicious or negligent investigators (THR-019); administrators (THR-018).
-- ASSUMPTIONS: at least one independent body (ombudsman, audit committee, external counsel, IG) is configured and its members' devices are not controlled by the accused; the COI map is maintained; the Z-CORE clock is trustworthy within ±5 min (THR-043); the external audit witness is operated outside the accused's control (to be registered in `40-SECURITY-ASSUMPTIONS.md`).
+- ASSUMPTIONS (`40-SECURITY-ASSUMPTIONS.md`): ASM-043 (operator independence where the organisation is the adversary), ASM-045 (personnel vetting and separation of duties), ASM-033 (channel membership signing keys not jointly compromised), ASM-041 (clocks within tolerance), ASM-048 (audit witness honest), ASM-022 (case key availability); at least one independent body is configured and the COI map is maintained. Protections: 40 P-10, P-17, P-20, P-27.
 - RESIDUAL RISK: a sufficiently senior accused who controls *all* configured independent bodies, the hosting, and the witness can still suppress a report; social pressure on investigators; COI not declared by the source or detected by triage.
 
 ## 2. Context and dependencies
@@ -393,7 +393,7 @@ KPIs (ISO 37002 cl. 9): volume, % acknowledged within SLA, median days to acknow
 1. OI-14-1: Whether `category_class` should ever be server-visible; alternatively evaluate category-dependent SLA/routing client-side at import (costs: server cannot enforce).
 2. OI-14-2: Manager-chain COI (EE) needs a directory attribute feed; CE must rely on manual entry.
 3. OI-14-3: Source-visible status values may leak case outcome to someone who seizes the source's passphrase (THR-034); decide default granularity with `05-SOURCE-OPSEC.md`.
-4. OI-14-4: Assumption IDs (independent body integrity, clock trust, witness independence) to be registered in `40-SECURITY-ASSUMPTIONS.md`.
+4. OI-14-4: "At least one independent body exists and is not captured" is only partly covered by ASM-043/ASM-045; propose a dedicated assumption in `40-SECURITY-ASSUMPTIONS.md`.
 
 ### Open Issues for ADR revision
 
