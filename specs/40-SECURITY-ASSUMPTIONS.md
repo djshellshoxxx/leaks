@@ -1,5 +1,5 @@
 # 40 — Security Assumptions Register
-Status: Draft v1.1 (revision round 2: ADR-034..046, REVIEW-A/B/C; disposition in `process/DISP-G1.md`) · Edition applicability: both (CE / EE; edition-specific notes inline) · Owner: Security Architecture
+Status: Draft v1.2 (round-3 consistency pass: ADR-047; revision round 2: ADR-034..046, REVIEW-A/B/C; disposition in `process/DISP-G1.md`) · Edition applicability: both (CE / EE; edition-specific notes inline) · Owner: Security Architecture
 
 ## 1. Purpose and scope
 
@@ -226,7 +226,7 @@ Out of scope: threat enumeration (`02-THREAT-MODEL.md`), control design (owning 
 - Statement: When an epoch private key, case key wrapping, Erasure Key or object key is destroyed, no recoverable copy remains: private key material is never written to swap, core dumps, logs, backups or VM snapshots, all wrappings are enumerated and destroyed, and the Erasure Key Vault is absent from infrastructure-level backups (ASM-054).
 - Protections: P-07, P-18.
 - If violated: Forward secrecy of intake and crypto-erasure deletion fail silently.
-- Monitoring / verification: Key-inventory reconciliation after destruction (signed deletion receipt, 35); backup-content inventory test (restore without member keys yields nothing, INC-55); swap/core checks (ASM-118). Evidence: F-096, F-097; B-CR-33.
+- Monitoring / verification: Key-inventory reconciliation after destruction (signed deletion receipt and deletion verification per `35` DEL-020); backup-content inventory test (restore without member keys yields nothing, INC-55); swap/core checks (ASM-118); Desk case-key caches purged on the next sync via the erasure log (ASM-064). Evidence: F-096, F-097; B-CR-33.
 - Owner: CRY, INF · Class: C/P · Threats: THR-013, THR-017.
 
 ### 4.6 Keys, hardware and custody
@@ -411,7 +411,7 @@ Out of scope: threat enumeration (`02-THREAT-MODEL.md`), control design (owning 
 - Statement: Where the Sealer runs in an AMD SEV-SNP or Intel TDX confidential VM (ADR-035(3)), the TEE vendor's attestation root is not compromised or compelled, firmware is patched against known attacks, and no side channel exploitable by the adversary in question exists; the attestation report binds the sealer measurement to a logged release and is verified by Desk and External Watchers.
 - Protections: P-32 (defence in depth only).
 - If violated: A modified sealer can present a valid-looking attestation or leak memory via side channels. TEEs have a record of side-channel breaks; this assumption is **never presented to sources as a guarantee** and no rating in `02` credits it.
-- Monitoring / verification: Attestation verification by Desk and watchers (ASM-128); TCB-version floor tracking by CRY/INF. Evidence: ADR-035(3); RVW-A-01; THR-123.
+- Monitoring / verification: Attestation verification by Desk and watchers (ASM-128); evidence refreshed at least every 24 h and treated as absent when older (ADR-047(4); K-20); TCB-version floor tracking by CRY/INF. Evidence: ADR-035(3); ADR-047(4); RVW-A-01; THR-123. Audit dependency: 37 A15/A16/A17 rely on this assumption's side-channel limits (DISP-G8).
 - Owner: INF, CRY · Class: A · Threats: THR-014, THR-123, THR-141.
 
 **ASM-053 — Independent-custody recipient devices (INDEPENDENT channels).**
@@ -431,8 +431,8 @@ Out of scope: threat enumeration (`02-THREAT-MODEL.md`), control design (owning 
 **ASM-055 — Independent intake time sources.**
 - Statement: The adversary does not control both the Tor directory authorities' signed consensus (`valid-after`, used as a time floor) and the Roughtime servers used by the intake; Z-CORE-supplied time is never the sole source (ADR-036(6)).
 - Protections: P-33, P-07, P-27.
-- If violated: A stale Key Directory snapshot can be kept "fresh" so that sealing continues to removed members (THR-132).
-- Monitoring / verification: K-17 (disagreement between Tor consensus, Roughtime and host clock > 2 h fails closed); snapshot high-water mark. Evidence: ADR-036(6); RVW-A-04.
+- If violated: A stale Key Directory snapshot can be kept "fresh" so that sealing continues to removed members (THR-132) — bounded to 7 days by the snapshot age limit only if the host clock is right; with a controlled clock the bound falls back to the witness/Desk checks.
+- Monitoring / verification: K-17 (disagreement between Tor consensus, Roughtime and host clock > 2 h fails closed); snapshot high-water mark; refusal to seal to snapshots whose newest checkpoint is > 7 days old (ADR-047(4), K-20). Evidence: ADR-036(6); ADR-047(4); RVW-A-04.
 - Owner: NET, INF · Class: C · Threats: THR-132, THR-043.
 
 **ASM-056 — Operator Statement signers include an independent role; the statement is only a signal.**
@@ -477,6 +477,43 @@ Out of scope: threat enumeration (`02-THREAT-MODEL.md`), control design (owning 
 - Monitoring / verification: Staff-reaction correlation drill in `30` (`02` TM-019); SIEM export schema (`20`). Evidence: RVW-B-31, RVW-C-02, RVW-A-19.
 - Owner: SOC, OPR · Class: P / N · Threats: THR-129.
 
+### 4.11 Assumptions added in the round-3 consistency pass (ADR-047)
+
+**ASM-062 — Chaff is indistinguishable from real envelopes without K41.**
+- Statement: Chaff envelopes (ADR-047(3); `04` §12.7) are indistinguishable from real envelopes to anyone without a MEK private key or the Chaff Disposition Key K41: slot blocks are indistinguishable under KEM key privacy (ASM-049), the size distribution of chaff approximates that of real submissions below the chaff bucket maximum, the write process remains Poisson while a channel's real rate is below the chaff rate, and K41's private half never leaves the core host.
+- Protections: P-10 (excluded Triage Set members cannot infer an exclusion from one failed trial decryption), P-19 (intake disk order and times reflect the chaff schedule), P-35.
+- If violated: An excluded Triage Set member (or an intake-disk forensic examiner) can separate real from chaff envelopes and recovers the r2 residual (exclusion inference; arrival order on the intake disk). Content confidentiality is unaffected.
+- Monitoring / verification: Statistical indistinguishability and Poisson goodness-of-fit tests in CI and in `30` drills (K-21); Secret Placement Manifest check that K41 is absent from intake hosts (K-05). Evidence: ADR-047(3); RVW-B-04; RVW-A-09; RVW-A-18.
+- Owner: CRY, ANO · Class: A / C · Threats: THR-110, THR-011, THR-020.
+
+**ASM-063 — Source App vault protects on-device state only while locked.**
+- Statement: The Source App's fixed-size encrypted vault (ADR-047(1); `04` §11.8) is unlocked only while the source uses the app; the device is not compromised while unlocked; flash storage wear-levelling copies of older vault generations are protected by the same passphrase-derived key; the passphrase keeps its ≈ 128-bit entropy.
+- Protections: P-23.
+- If violated: A device seized or compromised while unlocked exposes the organisation's address, directory pin and mailbox list; the app's presence is visible in any case.
+- Monitoring / verification: Not observable by Candor; file-system diff tests of used vs unused vaults (`04` CRYPTO-071); guidance `05` GC-44. Evidence: ADR-047(1); B-GL-27.
+- Owner: SRC, CRY · Class: N · Threats: THR-048, THR-138.
+
+**ASM-064 — Desk case-key caches are purged via the erasure log.**
+- Statement: Member Desks that cache case keys (ADR-047(7)) sync often enough that erased cases are purged from caches soon after erasure, their keystores remain sealed by hardware-bound keys (ASM-028), and re-wraps after vault restore/loss are dual-approved and cannot resurrect a case listed in the erasure log.
+- Protections: P-18, P-36.
+- If violated: An erased case remains decryptable on an unsynced or compromised Desk; the ≤ 14-day backup bound holds for servers but not for that endpoint.
+- Monitoring / verification: K-13 extension: C-10 reports Desks that have not synced for > 14 days to OVERSIGHT; vault-restore drill (`19`). Evidence: ADR-047(7); RVW-C-07.
+- Owner: RCP, CRY · Class: P · Threats: THR-017, THR-042, THR-117.
+
+**ASM-065 — Per-locale wordlists are reviewed and uniformly sampled.**
+- Statement: Every shipped wordlist meets `04` §11.1 (size N ≥ 2,048, uniqueness after NFKC normalization, no separators, ≥ 2 native-speaker reviews) and passphrases are sampled uniformly with `ceil(128 / log2(N))` words (ADR-047(6)).
+- Protections: confidentiality of replies and `prefs_ct` under passphrase-derived source keys (`04` §11.2); P-03.
+- If violated: Effective passphrase entropy drops (duplicates after normalization, biased lists), weakening `lookup_tag` against offline guessing.
+- Monitoring / verification: CI list lint and signed list hashes in the 39 constants registry. Evidence: ADR-047(6); ADR-005.
+- Owner: CRY, SUX · Class: C · Threats: THR-034, THR-100.
+
+**ASM-066 — MANAGED customer holds the audit export key.**
+- Statement: In the MANAGED profile the customer generates and keeps the Audit Export Key K42 on customer-controlled hardware and does not share it with the vendor (ADR-047(10)).
+- Protections: P-09 (vendor cannot read exported audit contents).
+- If violated: The vendor (or a party compelling it) can read audit exports of that customer.
+- Monitoring / verification: AUDIT_EXPORT_KEY entry co-signed by a customer OVERSIGHT member; key-generation ceremony record. Evidence: ADR-047(10); RVW-B-19.
+- Owner: OPR (customer) · Class: P · Threats: THR-141, THR-027.
+
 ## 5. Protection catalogue
 
 Each protection states WHAT is protected and FROM WHOM (DECISIONS.md §0).
@@ -517,6 +554,8 @@ Each protection states WHAT is protected and FROM WHOM (DECISIONS.md §0).
 | P-32 | Intake integrity evidence (detection/signal, not prevention) | Knowledge that the intake was modified or captured | Compelled or compromised operator — untargeted modifications only (ADR-035) |
 | P-33 | Recipient-set governance | Who can decrypt future reports; COI exclusions | Accused members, management, compelled key-admins (ADR-036, ADR-037) |
 | P-34 | Independent-custody recipient endpoints | Desk memory, screen and binaries of INDEPENDENT-channel Triage Set members | The operating organisation's endpoint administrators (ADR-043) |
+| P-35 | Exclusion non-inference by chaff | Whether a pending unopenable envelope implies an exclusion; intake-disk arrival order | Excluded Triage Set members; intake-disk forensic examiners (ADR-047(3)) |
+| P-36 | Metadata erasure and vault-loss continuity | Sensitive case metadata in backups; access to cases after vault loss | Later backup holders; availability loss (ADR-047(7)/(8)) |
 
 ## 6. Protection → assumptions required
 
@@ -533,7 +572,7 @@ Each protection states WHAT is protected and FROM WHOM (DECISIONS.md §0).
 | P-07 Intake forward secrecy | ASM-014, ASM-023, ASM-026, ASM-027, ASM-033, ASM-041 | ASM-027 | Envelopes decryptable by holder of undeleted epoch key |
 | P-08 Recipient private keys | ASM-019, ASM-023, ASM-025, ASM-028, ASM-053 (INDEPENDENT channels) | ASM-019 / ASM-053 | Other members' keys unaffected; exposure bounded by that member's ACL |
 | P-09 Admin has no content access | ASM-015, ASM-016, ASM-034, ASM-035, ASM-036, ASM-043, ASM-044, ASM-045 | ASM-036, ASM-043 | Admin still lacks keys for past content; future Tier W plaintext at risk |
-| P-10 COI exclusion | ASM-019, ASM-033, ASM-045, ASM-049, ASM-053, ASM-057 | ASM-057 | Excluded user still lacks keys unless membership forged; before import servers cannot tell who was excluded only under ASM-049 |
+| P-10 COI exclusion | ASM-019, ASM-033, ASM-045, ASM-049, ASM-053, ASM-057, ASM-062 | ASM-057 | Excluded user still lacks keys unless membership forged; before import servers cannot tell who was excluded only under ASM-049 |
 | P-11 Sealed identity | ASM-019, ASM-021, ASM-024, ASM-031, ASM-043, ASM-045 | ASM-031 | Unseal is audited and visible to oversight |
 | P-12 No hidden recipients | ASM-012, ASM-024, ASM-025, ASM-026, ASM-033, ASM-036, ASM-051, ASM-055 | ASM-036 / ASM-051 | Clients still display recipient list (manual detection); Desk recipient-list check at import |
 | P-13 Release/update integrity | ASM-029, ASM-034, ASM-035, ASM-036, ASM-037, ASM-038, ASM-039, ASM-041, ASM-042 | ASM-035 + ASM-036 | Reproducibility still detects single-builder compromise; log still makes malicious release public |
@@ -541,12 +580,12 @@ Each protection states WHAT is protected and FROM WHOM (DECISIONS.md §0).
 | P-15 Evidence containment | ASM-015, ASM-019, ASM-020 | ASM-020 | Keys not present in sandbox; endpoint compromise bounded to viewer session if ASM-015 holds |
 | P-16 Metadata removal | ASM-011, ASM-020, ASM-021 | ASM-011 | Embedded metadata removed; content-level marks remain |
 | P-17 Audit tamper evidence | ASM-024, ASM-029, ASM-041, ASM-048 | ASM-048 | Tampering detectable up to last honest checkpoint |
-| P-18 Crypto-erasure deletion | ASM-027, ASM-029, ASM-030, ASM-047, ASM-054 | ASM-054 | None for copies that retained keys; metadata of disposed cases persists in backups until expiry regardless |
-| P-19 Timing minimisation | ASM-007, ASM-009, ASM-041, ASM-046, ASM-061 | ASM-009 / ASM-061 | Stored timing at import-slot/day granularity regardless; follow-up slot dates and staff reactions may still correlate |
+| P-18 Crypto-erasure deletion | ASM-027, ASM-029, ASM-030, ASM-047, ASM-054, ASM-064 | ASM-054 | None for copies that retained keys; `case_meta` follows the ≤ 14-day bound (ADR-047(8)); other cleartext metadata of disposed cases persists in backups until expiry regardless |
+| P-19 Timing minimisation | ASM-007, ASM-009, ASM-041, ASM-046, ASM-061, ASM-062 | ASM-009 / ASM-061 | Stored timing at import-slot/day granularity regardless; follow-up dates only inside the encrypted case record (ADR-047(2)); staff reactions may still correlate |
 | P-20 Content-free notifications | ASM-046 | ASM-046 | Notifications contain no case data in any case |
 | P-21 DoS resistance | ASM-002, ASM-015 | ASM-002 | Standby onion; no unsafe fallback (ADR-002) |
 | P-22 Onion authenticity | ASM-006, ASM-032 | ASM-006 | Phishing onion cannot decrypt past submissions |
-| P-23 Source-device residue | ASM-004, ASM-008, ASM-009 | ASM-008 | None if device compromised |
+| P-23 Source-device residue | ASM-004, ASM-008, ASM-009, ASM-063 | ASM-008 | None if device compromised; app presence visible in any case |
 | P-24 Phishing-resistant staff auth | ASM-019, ASM-028, ASM-041 | ASM-028 | Server-side session binding still limits token replay |
 | P-25 Tenant isolation (EE) | ASM-015, ASM-018, ASM-024 | ASM-018 | Content encrypted to per-tenant channel keys |
 | P-26 Recovery Quorum safety | ASM-029, ASM-030, ASM-045 | ASM-030 | Quorum enablement visible to sources |
@@ -558,6 +597,8 @@ Each protection states WHAT is protected and FROM WHOM (DECISIONS.md §0).
 | P-32 Intake integrity evidence | ASM-050, ASM-052 (optional), ASM-056, ASM-058 | ASM-050 | Targeted/memory-only modification undetected in any case |
 | P-33 Recipient-set governance | ASM-033, ASM-049, ASM-051, ASM-055, ASM-057, ASM-058 | ASM-058 | Changes are logged, time-locked and visible even if approvers collude |
 | P-34 Independent-custody endpoints | ASM-028, ASM-053 | ASM-053 | None for that member once the organisation controls the endpoint |
+| P-35 Exclusion non-inference by chaff | ASM-049, ASM-057, ASM-062 | ASM-062 | Triage-first still confines the signal to Triage Set members (ADR-037) |
+| P-36 Metadata erasure / vault-loss continuity | ASM-027, ASM-054, ASM-064 | ASM-054 / ASM-064 | Content still needs member keys; unsynced Desks keep erased cases until they sync |
 
 ## 7. Assumption lifecycle and change control
 
@@ -603,6 +644,8 @@ flowchart LR
 | K-17 | ASM-055 (C-07/C-08 host) | Host clock vs signed Tor consensus `valid-after` floor and Roughtime; snapshot high-water mark monotonic | 10 min; every snapshot | Fail closed (no sealing) if skew > 2 h or rollback; SECURITY alert |
 | K-18 | ASM-053 (C-19, C-15) | Custody status of each INDEPENDENT-channel Triage Set device recorded; Desk-reported release digest matches log | Daily; Desk start | Channel enablement DANGEROUS without custody; console and source-visible status |
 | K-19 | ASM-049 (CI) | Formal-model property "recipient-set anonymity" and KEM key-privacy review record present for each enabled suite | Each release | Release blocked |
+| K-20 | ASM-055, ASM-052 (C-07, C-03, C-15) | Newest checkpoint of the applied snapshot ≤ 7 days old (alert at > 24 h); Confidential-VM attestation evidence ≤ 24 h old (ADR-047(4)) | Every seal; hourly | Fail closed for sealing (> 7 d); Desk treats stale attestation as absent |
+| K-21 | ASM-062 (CI, `30`) | Chaff vs real classifier at chance; inter-commit Poisson goodness-of-fit; K41 absent from intake hosts | Each release; daily (K41 placement) | Release blocked; SECURITY alert on placement violation |
 
 ## 9. Requirements
 
@@ -645,6 +688,8 @@ flowchart LR
 | ASM-135 | Source-facing guidance SHALL name the project onion service and independent mirrors as the primary Source App source and state that app-store installs are account-linked; the organisation's clearnet site SHALL NOT host the App. | ADR-041; RVW-A-14 | THR-138 | C-06, C-37 | INSP: copy review; TST: C-37 hosts no binaries |
 | ASM-136 | The organisation-as-adversary review (`02` TM-017) SHALL record, per deployment, the status of ASM-053, ASM-054, ASM-057 and ASM-058, and unresolved items SHALL be disclosed in the Operator Statement. | ADR-043; ADR-044; ADR-045; RVW-C-01; RVW-C-09 | THR-126, THR-128, THR-130, THR-139 | C-19, C-14 | INSP: review record; TST: statement contains unresolved-item section |
 | ASM-137 | Class-N and Class-A assumptions added in revision round 2 (ASM-049..ASM-061) SHALL be reflected in the source-facing page of ASM-112 where they affect sources (ASM-049 not; ASM-050/052/056 as "signals, not guarantees"; ASM-053 as custody status; ASM-054 as conditional deletion; ASM-060 as acquisition guidance). | DECISIONS §0; ADR-035(5) | THR-040 | C-06 | INSP: copy review against this register |
+| ASM-138 | The assumptions added for ADR-047 (ASM-062..ASM-066) SHALL be enforced by checks K-20 and K-21, and the constants they depend on (`KD_SNAPSHOT_MAX_AGE` = 7 days, `ATTEST_MAX_AGE` = 24 h, `CHAFF_MEAN_INTERVAL` = 2 h, `VAULT_SIZE`, chaff bucket distributions, wordlist hashes) SHALL be read from the 39 constants registry. | ADR-047(4)/(3)/(6), ADR-047(11) | THR-132, THR-110, THR-034 | C-25, C-07, C-03 | TST: spec-constant lint (ST-167); K-20/K-21 test cases |
+| ASM-139 | ASM-063 and ASM-064 SHALL be reflected on the ASM-112 source page and in staff onboarding respectively: the vault hides the organisation but not the app; Desks must sync regularly for erasure to reach cached keys. | ADR-047(1)/(7) | THR-048, THR-017 | C-06, C-15 | INSP: page and onboarding review |
 
 ## 10. Residual risks and limitations
 
@@ -665,7 +710,7 @@ flowchart LR
 2. Choose witness operators, External Watcher organisations and the independent monitor (ASM-050, ASM-051, ASM-110, ASM-126) — organisational, not technical; needs `36-OPEN-SOURCE-GOVERNANCE.md`.
 3. Authenticated time: intake mechanism decided by ADR-036(6) (Tor consensus floor + Roughtime; ASM-055, K-17). Core/other hosts: NTS vs multi-source NTP remains for `17`; K-01 thresholds may need tuning for air-gapped profiles (AIRGAP-RCP, GOV-ONPREM).
 7. ASM-049 key-privacy analysis for the MLKEM1024-P384 hybrid combiner is outstanding (ASM-125); fallback is pure ML-KEM-1024 slots in the FIPS suite.
-8. ADR-036(5) requires a persistent tree-head pin in the Source App; this conflicts with minimal source-device residue (P-23). Propose an ADR amendment (`02` OI-08, `03` OI-10).
+8. (Resolved by ADR-047(1)) The persistent tree-head pin lives only inside the fixed-size encrypted vault (ASM-063); residual: app presence.
 4. ASM-104 VM generation-ID handling depends on hypervisor support (vmgenid); document fallback for platforms without it.
 5. The source-facing disclosure page (ASM-112) must be co-designed with `26-ACCESSIBILITY.md` (plain language, COGA) and translated.
 6. Tor Metrics figures and `vanguards` add-on status are UNVERIFIED (00-RESEARCH §12); ASM-001/ASM-003 wording may be refined when confirmed.
@@ -674,4 +719,4 @@ flowchart LR
 - **ADR-022** signer distribution and witnesses — **Resolved by ADR-040** (signers and builders across ≥ 2 organisations and ≥ 2 jurisdictions; emergency cooling ≥ 2 h with ≥ 2 signers from ≥ 2 organisations) **and ADR-036(5)** (≥ 2 external directory witnesses in EE/GOV/MANAGED). ASM-109/ASM-110 retained as implementing requirements.
 - **ADR-009** CE-SINGLE — **Partially resolved by ADR-046(6)** (CE-SINGLE default isolation = VMs; container-only = ADVANCED). Still proposed: K-07 segmentation probes in CE-SINGLE and a source-facing disclosure when an instance runs CE-SINGLE (PRD-070 covers the profile banner).
 - **ADR-005 / ADR-006** Argon2id memory — **Resolved by ADR-046(7)** (m=64 MiB, t=3, p=1; concurrency semaphore default 4 plus PoW; FIPS PBKDF2-HMAC-SHA-512 210,000 iterations).
-- **ADR-036(5)** persistent Source App pin vs device residue — open (see item 8 above).
+- **ADR-036(5)** persistent Source App pin vs device residue — **Resolved by ADR-047(1)** (item 8).

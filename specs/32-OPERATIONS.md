@@ -1,6 +1,6 @@
 # 32 — Operations, Human-Factor Controls and Configuration Classification
 
-Status: Draft v1.1 (revision round 2: ADR-034..046) · Edition applicability: both (EE-only items marked) · Owner: Operations & Security Team
+Status: Draft v1.2 (final consistency pass: ADR-047, cross-document requests) · previously v1.1 (revision round 2: ADR-034..046) · Edition applicability: both (EE-only items marked) · Owner: Operations & Security Team
 
 ## 1. Purpose and scope
 
@@ -237,6 +237,9 @@ Dual controls that remain single-person with notice (listed in the Operator Stat
 | `keys.epoch_runway` | core | For each channel: at least `min_recipients` (default 2) eligible Triage Set member epoch keys valid for the next N days (ADR-030, ADR-037) | key directory | hourly | per channel: {≥14 d, 7–14 d, 1–7 d, 0} | <14 d WARN to Channel Owner **and OVERSIGHT** (RVW-C-18); <7 d repeated daily; 0 → intake for that channel fails closed and sources are directed to the independent route (F5) |
 | `keys.holder_loss` | core | Number of members of a channel who lost key access (suspension, device revocation) in the last 7 days, as a threshold state | authz state | hourly | {0–1, ≥ 2} | ≥ 2 → PB-15 alert to OVERSIGHT (IR-037) |
 | `keys.availability` | intake, core | Intake Routing Key unsealable; Erasure Key Vault readable and integrity-checked (ADR-033(3)); EE-HA: DR vault replica lag ≤ 15 min; backup public keys present; audit signing key usable; HSM reachable (no fallback key present, ADR-046(2)) | local ops (sign/verify test) | hourly | OK/FAIL | FAIL → per FAIL table |
+| `intake.chaff` (ADR-047(3)) | intake | Chaff writer running for every channel; configured mean interval within the allowed range; long-run write rate per channel within ±20 % of the configured rate over 7 days (rate only, never per-envelope data) | sealer state | daily | OK/FAIL | FAIL → alert; excluded-member masking degraded |
+| `kd.snapshot_age` (ADR-047(4)) | intake | Age of the accepted Key Directory snapshot by the independent time floor, as a band {< 3 d, 3–7 d, > 7 d (sealing refused)}; CVM profile: attestation evidence age {≤ 24 h, > 24 h} | sealer state | hourly | OK/WARN/FAIL | WARN at ≥ 3 d; FAIL → PB-22 (`31-INCIDENT-RESPONSE.md`) |
+| `intake.deletion_list` (ADR-047(9)) | core | The Z-CORE replica of the signed intake deletion list was refreshed at the last import slot and its chain verifies | C-09 state | per slot | OK/FAIL | FAIL → alert; intake restore would be blocked |
 | `certs.expiry` | all | mTLS certificates (relay, agent, RCP-LAN) | parse | daily | bucket {>30 d, 7–30 d, <7 d, expired} | <7 d WARN; expired FAIL |
 | `perm.secrets` | all | Secret file owner/mode per manifest | stat | 15 min | OK/FAIL | FAIL → alert |
 | `secret.placement` | all | ADR-028 manifest equality | scan (`18-DEPLOYMENT.md` §15) | 5 min light / daily full | OK/FAIL | FAIL → `secret.placement_violation`; forbidden item → intake stop (DEP-024) |
@@ -280,7 +283,9 @@ Classes:
 - **DANGEROUS**: materially weakens source protection. It requires dual approval DC-09 (SYS_ADMIN + SECURITY_OFFICER, OVERSIGHT notified, `15-AUTHENTICATION-AUTHORIZATION.md`). Where it affects sources, it is disclosed on the source interface and in the key directory. Where marked ⏱, it auto-reverts after 90 days (or the stated period). The config checker exits 20 without valid approval.
 - **FIXED**: not configurable. Listed so that operators know it cannot be changed.
 
-Only these labels exist (ADR-046(6)). The former label "WEAKENING" used in some v1.0 documents is **DANGEROUS** (DC-09) everywhere.
+Only these labels exist (ADR-046(6)). Timers of the removed draft store (`T_DRAFT`, `T_SAVED_CRED`, `T_IDLE_AUTH`, `T_ABS_AUTH`) no longer exist; Tier W uses the single ADR-034 timer set (20 min idle, 2 h absolute), which is FIXED.
+
+**Fleet-settable keys (ADR-045; `21-ENTERPRISE.md` ENT-008):** only `update.window`, `selftest.schedule`, `telemetry` (to off only) and tighten-only SYSTEM/SECURITY log verbosity and log retention. Every other row is local-only; a Fleet bundle containing any other key is refused. The former label "WEAKENING" used in some v1.0 documents is **DANGEROUS** (DC-09) everywhere.
 
 - **ATTESTED** (not a class, a verification mode): for knobs Candor cannot observe from inside the guest, the SAFE state is established by a signed attestation of the owning team, re-signed yearly (CFG-008). A missing or expired attestation counts as DANGEROUS.
 
@@ -294,17 +299,29 @@ Only these labels exist (ADR-046(6)). The former label "WEAKENING" used in some 
 | `intake.tier_w.enabled` | on; **off** for MANAGED high-risk tenants (`18-DEPLOYMENT.md` DEP-042) | off (Tier V only); on for MANAGED high-risk tenants with OVERSIGHT acceptance | — | — | "Tier V only removes server-side plaintext exposure but excludes sources without the Source App." |
 | `intake.js_required` | false | — | — | true (ADR-004) | — |
 | `intake.max_submission_size` | profile default (`34-PERFORMANCE-SCALABILITY.md` §4) | up to the profile hard max | — | above the hard max | "Larger uploads take longer over Tor and increase exposure time and storage use." |
+| `intake.tierw_staging_bytes` | 8 GiB (`07-BACKEND.md` §7.3; sizing 34 §8.2) | 1–64 GiB, ≤ 50 % of intake RAM | — | staging on persistent storage (ADR-034) | "Smaller staging refuses large Tier W uploads sooner; larger staging needs RAM." |
+| `intake.tier_w.draft_quota` | 2 GiB per draft (34 §8.2) | 256 MiB – 4 GiB | — | — | "Per-draft share of the tmpfs staging area." |
+| `intake.login_floor` (`T_LOGIN_FLOOR`) | 3 s (08, 11) | 3–10 s (SAFE to raise) | — | < 2 s | "Lower floors let response time reveal whether a passphrase exists." |
+| `evidence.dual_render` | on in HIGH, off otherwise (10) | on | — | — | "Runs Stage 1 twice for divergence detection; doubles viewer time." |
 | `intake.rate_limits` | defaults (ADR-026) | tuned values within ±50% | disabled | — | "Without limits, one party can exhaust intake capacity (THR-032/033)." |
 | `intake.resumable_uploads` (Tier V) | on, within one Source App session only (ADR-046(4); 08 canonical) | off | — | cross-session resume; any resume for Tier W | "Off: interrupted large uploads restart from zero." |
 | `intake.upload_session_ttl` (Tier V) | 24 h (ADR-046(4)) | 1–23 h | — | > 24 h | "Longer TTL keeps partial-upload records (which link the reconnections of one upload to each other) for longer (THR-047)." |
 | `intake.passphrase_multi_report` | off (one passphrase per report, ADR-005) | on | — | — | "Lets a source link several reports under one passphrase; increases linkability if the passphrase is compromised." |
-| `intake.min_recipients` per channel | 2 (ADR-044(2)) | 3–16; or 1 (not for INDEPENDENT channels) | 1 on an INDEPENDENT channel | 0 | "With 1, a single device loss or reimaging makes envelopes unreadable (no escrow) and a single absence blocks intake (RVW-C-03)." |
+| `intake.min_recipients` per channel | 2 (ADR-044(2)) | 3–16 | 1 (any channel; aligned with `07-BACKEND.md` §7.3 `channel.<id>.min_recipients`) | 0 | "With 1, a single device loss or reimaging makes envelopes unreadable (no escrow) and a single absence blocks intake (RVW-C-03)." |
 | `intake.coi_checklist` | shown, none preselected (ADR-030) | hidden | — | — | "Hidden: sources cannot exclude accused roles themselves; only the pre-configured COI map applies." |
-| `relay.import_schedule` (replaces v1.0 `relay.pull_interval`) | 4×/day at fixed local times (HIGH/GOV: 1×/day) (ADR-038(1)) | 1–6×/day at fixed times | event-driven or interval-based pulls (the v1.0 15 ± 10 min design) | — | "Imports that follow arrivals put arrival-derived times into the case DB WAL, backups and blob metadata (RVW-A-09, RVW-B-06)." |
-| `intake.delayed_delivery` | offered to sources (random 1–3 days, ADR-038(4)) | not offered | — | — | "Not offering it removes the source's option to decouple arrival from submission." |
+| `relay.import_slots` (v1.1 `relay.import_schedule`; replaces v1.0 `relay.pull_interval`) | 4 fixed local times per day (HIGH/GOV: 1) (ADR-038(1); `07-BACKEND.md` §7.3) | fewer slots (SAFE to reduce); more slots up to 4 in HIGH/GOV (ADVANCED) | — | event-driven or interval-based pulls (the v1.0 15 ± 10 min design); more than 4 slots/day | "Each extra slot narrows the import window that WAL, blob times and backups reveal (default 4 slots ≈ 6 h; 1 slot = the day)." |
+| `relay.slot_commit_offset` | 20 min (`07-BACKEND.md` §7.3) | 5–60 min | — | commit at processing end | "Too short an offset lets commit times reflect batch processing duration (`SYSTEM:relay_slot_overrun`)." |
+| `intake.delayed_delivery.enabled` | offered to sources (random 1–3 days, ADR-038(4)) | not offered | — | — | "Not offering it removes the source's option to decouple arrival from submission." |
+| `intake.chaff.mean_interval` (ADR-047(3)) | 2 h per channel (Poisson) | 15 min – < 2 h (more chaff, more intake storage; SAFE to lower per `07-BACKEND.md`) | — | chaff disabled; mean interval > 2 h; activity-dependent chaff | "Chaff hides which intake envelopes are real and makes failed trial decryption routine for triage members; lowering the interval costs storage (34)." |
+| `intake.chaff.followup_share` | 0.3 (`07-BACKEND.md` §7.3) | 0.1–0.5 | — | — | "Share of chaff shaped like follow-ups; must match the observed real mix." |
+| `intake.passphrase.wordlists` (ADR-047(6)) | EFF large list (EN, 10 words) plus every shipped, reviewed per-locale list, selected by the page locale | restrict to a subset of shipped lists | — | unreviewed or operator-supplied lists; any list giving < 128 bits; storing the wordlist language server-side | "Offering fewer locales can push sources to a language they misread, increasing lost passphrases." |
+| `intake.kd_snapshot_max_age` (ADR-047(4)) | 7 days | 1–6 days (more fail-closed outages) | — | > 7 days; sealing without a verified snapshot | "The sealer refuses to seal to an older roster; shorter values close channels sooner when Z-CORE or witnesses are unavailable." |
+| `intake.sealer_attestation_max_age` (CVM profile, ADR-047(4)) | 24 h | 1–23 h | — | > 24 h | "Stale attestation evidence is treated as absent." |
+| `intake.identified_mode` (ADR-047(5)) | offered on onion channels: the source may choose to identify; identity goes only to the Sealed Identity Store; banner changes | not offered on a channel | — | identity fields on ANONYMOUS pages without the mode switch; identity sealed to case keys | "Not offering it forces identifying sources to C-38 or out-of-band contact." |
 | Timestamp granularity (source actions) | — | — | — | day only (ADR-010) | — |
 | Read receipts / presence / push to sources | — | — | — | off (ADR-010, ADR-017) | — |
 | `notify.mode` | constant-schedule daily digest at a fixed time, sent every day (ADR-038(2)); **off** (Desk badge only) for HIGH | off | event-driven (hourly or per-event) digests | content in notifications (ADR-017) | "Event-driven notifications reveal report arrival day and hour to the mail/chat operator and, via staff reactions, to IT (THR-028, THR-129)." |
+| `notify.daily_time` | one fixed local time (default 08:47, `07-BACKEND.md` §7.3) | another fixed time | — | per-event or per-channel send times | "Changing it often reveals nothing; a time tied to import slots would." |
 | `notify.transport` | none, or SMTP with pinned certificate | Matrix/Teams webhook over tor | plaintext SMTP / unpinned TLS | — | "Unpinned or plaintext transport exposes notification timing and staff addresses." |
 | Web/tor access logs | off | — | — | on (ADR-016) | — |
 | `ir.diagnostic_mode` | off | — | on ⏱ 24 h (allow-listed fields) | debug logging on Z-INTAKE | "Adds diagnostic SYSTEM fields during incidents; never request data." |
@@ -312,7 +329,7 @@ Only these labels exist (ADR-046(6)). The former label "WEAKENING" used in some 
 | `siem.export` (C-26, EE) | off | on (allow-listed events) | — | custom fields beyond the allow-list | "Scrubbed SECURITY/SYSTEM events leave Candor; reviewers outside Candor see staff activity." |
 | `telemetry` | off (ADR-023) | on (TEL schema, previewable) | — | source-side telemetry | "Sends fixed-schema instance statistics to the configured collector." |
 | `recovery_quorum` | off (CE/EE, ADR-013); **on** for GOV with independent custodians (ADR-044(3)) | — | on in CE/EE (k-of-n, published in the key directory); off in GOV (with records-officer determination) | — | "k trustees acting together can decrypt all cases wrapped to the quorum. Visible to sources." |
-| `case.min_key_holders` | 2 | 1 | — | 0 | "With a single key holder, loss of one device loses the case (no escrow)." |
+| `case.min_key_holders` | 2 (ADR-044(2)) | — | 1 | 0 | "With a single key holder, loss of one device loses the case (no escrow)." |
 | `retention.*` | per `35-DATA-RETENTION-DELETION.md` | longer within legal limits | indefinite | — | "Longer retention increases exposure under seizure or compulsion (THR-017/026)." |
 | `backup.retention_days` | 35 | 36–365 | > 365 | — | "Deleted data persists in backups until expiry." |
 | `backup.online_restore_test_key` | off | on (EE) | — | — | "A backup decryption key exists online on the restore host." |
@@ -342,8 +359,17 @@ Only these labels exist (ADR-046(6)). The former label "WEAKENING" used in some 
 | `edr.sample_upload_candor_paths` | off | — | on | — | "EDR vendors receive submitted files or decrypted content (IR-027)." |
 | `metrics.k_threshold` | k = 10, one calendar month minimum, per `24-LICENSING-BUSINESS-MODEL.md` §TEL (ADR-046(5)) | higher k or longer period | — | k < 10; periods shorter than a month; medians/ratios/percentiles for cells < k | "Small cells can identify sources (THR-039)." |
 | `keydir.external_witness` | on (if available) | off | — | — | "Without an external witness, split-view attacks on the key directory are harder to detect." |
+| `kd.roster_timelock_days` | 3 (GOV/HIGH: 7) (ADR-036(2)) | higher (SAFE to raise) | — | below the profile default | "Shorter time-locks give members and OVERSIGHT less time to object to a hidden recipient." |
+| `kd.publication_slot` | weekly, Monday 02:40 UTC (ADR-036(7)) | another fixed weekly slot | — | event-driven publication | "Publication at activity time would reveal staff key and roster activity." |
+| `desk.case_key_cache` (ADR-047(7)) | on, hardware-sealed, purged per erasure log | — | — | off; cache not hardware-sealed; cache export | "Required for vault recovery (19 §11.2); cached keys lengthen exposure on seized unlocked devices." |
+| `case.metadata_erasure` (ADR-047(8)) | on: category/title/custom fields under the Erasure-Key-derived key | — | — | off | — |
+| `intake.deletion_list` (ADR-047(9)) | on: signed, replicated to Z-CORE every import slot, applied before any restored intake opens | — | — | off; opening a restored intake without a verified list (first install excepted) | — |
+| `audit.export_key` (MANAGED, ADR-047(10)) | customer-held audit export key | — | — | vendor-held key; unencrypted audit export | "The vendor could read audit contents." |
 | `intake.physical.intrusion_action` | poweroff | alert-only | — | — | "Alert-only keeps a possibly tampered intake host running." |
 | `updates.auto_security` | on (0–72 h random delay) | manual (≤ 14 days) | — | running below the signed security floor (ADR-040; units refuse to start) | "Unpatched intake exposes sources to known exploits." |
+| `update.window` (fleet-settable) | Sun 03:00 ± 60 min | another weekly window | — | a window that defers past a security-floor `effective_day` (33 §4.1) | "Only the timing of installation within the floor's installation window changes." |
+| `update.desk_direct_vendor_mirror` | false (Desk fetches only via Z-CORE's update proxy, 33 §15.1) | true | — | — | "The vendor mirror learns Desk IP addresses and update times." |
+| `selftest.schedule` (fleet-settable) | daily fixed time + event checks (§5) | other fixed time | — | disabling daily self-test | — |
 | Fleet Manager policy (EE, ADR-045) | local-only for all keys except an allow-list (update window, self-test schedule, telemetry off) | — | — | Fleet Manager disabling intake, lowering security floors, changing routing, or changing availability-affecting keys (`intake.min_recipients`, `authz.break_glass`, `backup.retention_days`) without the customer's independent role | — |
 | `update.offline.max_age_days` | 30 | 31–90 | > 90 | — | "Stale offline metadata may miss revocations." |
 | `vendor.remote_access` | off | on, two-person, time-bound, customer-logged | standing access | — | "The vendor can operate the hosts during sessions." |
@@ -388,6 +414,7 @@ Command: `candorctl support-bundle create --preview --out bundle.tar.age`. For C
 | Quarterly | RT-1 + RT-2 restore and canary decrypt (all profiles) | SYS_ADMIN + custodians + canary recipient | `19-BACKUPS-DR.md` §7 |
 | Quarterly | Tamper-seal inspection with photos (two people) | SYS_ADMIN + SECURITY_OFFICER | `17-INFRASTRUCTURE.md` §6.4 |
 | Quarterly | Access review (membership, grants, roles, break-glass) | CHANNEL_OWNERs, SECURITY_OFFICER, OVERSIGHT | §4.4 |
+| Quarterly | C-37 hosting re-attestation (no CDN/analytics, logs ≤ 24 h, placement for D1/D2 and INDEPENDENT channels) and ATTESTED infrastructure rows due for renewal | SECURITY_OFFICER + web owner | `17-INFRASTRUCTURE.md` §4.11; OPS-017 |
 | Quarterly (twice yearly in small-organisation mode) | IR tabletop | IR Lead | `31-INCIDENT-RESPONSE.md` §10 |
 | Quarterly | RT-6 quorum-reachability drill | SECURITY_OFFICER + custodians | `19-BACKUPS-DR.md` §7 |
 | Quarterly | Check C-37 guidance against `05-SOURCE-OPSEC.md`; verify C-37 has no third-party resources | Communications + SECURITY_OFFICER | §3.1 |
@@ -438,6 +465,8 @@ Command: `candorctl support-bundle create --preview --out bundle.tar.age`. For C
 | OPS-013 | The self-test SHALL run `integrity.platform_manifest`, `update.security_floor` and `integrity.running_manifest` per §5.2; any FAIL on H-INTAKE SHALL stop intake (F13/F17). | ADR-040; ADR-035(1); RVW-A-12; RVW-A-13 | THR-024, THR-025, THR-137 | C-25, C-33 | TST: off-manifest package, version below floor and modified static asset each → FAIL and intake stopped |
 | OPS-014 | The Operator Statement SHALL be renewed at most every 30 days by its quorum (≥ 1 independent role); `governance.operator_statement` SHALL warn at 25 days and the lapse banner SHALL be shown to sources after 30 days without operator action. | ADR-035(2); RVW-A-01 | THR-135, THR-026 | C-14, C-25, C-06 | TST: time-travel to day 31 → banner shown on Tier W pages and flagged by the Source App |
 | OPS-015 | `keys.holder_loss` SHALL alert OVERSIGHT when ≥ 2 members of a channel lose key access within 7 days (PB-15). | ADR-044(1); RVW-C-03 | THR-128 | C-25, C-22 | TST: two simulated suspensions → OVERSIGHT alert |
+| OPS-016 | The self-test SHALL include the ADR-047 checks `intake.chaff`, `kd.snapshot_age` and `intake.deletion_list` of §5.2, reporting only bands and states (no per-envelope or per-mailbox data). | ADR-047(3); ADR-047(4); ADR-047(9); ADR-016 | THR-020, THR-046, THR-017 | C-25 | TST: fixtures for each state; AT: canary suite confirms no per-envelope fields |
+| OPS-017 | The quarterly review SHALL re-attest the Clearnet Information Site (C-37) hosting record (`17-INFRASTRUCTURE.md` §4.11, `18-DEPLOYMENT.md` §8.2). | RVW-A-23; RVW-C-20; RVW-B-17 | THR-036, THR-020 | C-37, C-19 | INSP: quarterly review record |
 | HUM-013 | Small-organisation mode (§4.5) SHALL be enforced automatically below 4 distinct persons: an external OVERSIGHT holder is mandatory, it replaces the second approver of the listed dual controls, and "Reduced separation of duties" SHALL be displayed to admins and in the Operator Statement. | ADR-045; RVW-C-09 | THR-139, THR-018 | C-22, C-19, C-14 | TST: 3-person enrolment → mode active, approvals routed to the external holder, statement text present |
 | HUM-014 | Triage Set members of INDEPENDENT channels SHALL use independent-custody devices per §4.6, with custody status recorded, re-attested yearly and shown in the Admin UI; enabling such a channel otherwise SHALL be DANGEROUS and disclosed to sources. | ADR-043; RVW-C-01 | THR-126 | C-15, C-16, C-22 | TST: channel enablement with a managed device → checker exit 20; INSP: custody records |
 | HUM-015 | Break-glass SHALL require, before execution, at least one approver from an independent role outside the legal and management chain; only counsel tagged `external` counts as independent. | ADR-045; RVW-C-10 | THR-019, THR-020, THR-018 | C-22 | TST: break-glass approved by two internal counsel → refused |
@@ -445,6 +474,7 @@ Command: `candorctl support-bundle create --preview --out bundle.tar.age`. For C
 | CFG-008 | Guest-invisible infrastructure knobs (§7 ATTESTED rows) SHALL be covered by signed attestations of the owning teams, re-signed yearly, shown in the configuration digest and data-flow report; a missing or expired attestation SHALL be treated as DANGEROUS by the configuration checker. | RVW-C-06; RVW-C-12; ADR-044(4) | THR-130, THR-003, THR-035 | C-19, C-25 | TST: expired attestation → checker exit 20 and `attest.infrastructure` DANGEROUS |
 | CFG-009 | The EE Fleet Manager SHALL be able to set only the allow-listed keys of §7; it SHALL NOT disable intake, lower security floors, change routing, or change availability-affecting keys without approval by the customer's independent role. | ADR-045; RVW-C-13; RVW-A-13 | THR-113, THR-137, THR-020 | C-34, C-19 | TST: fleet bundle setting `intake.min_recipients=16` or `authz.break_glass=disabled` → rejected locally and logged |
 | CFG-010 | Configuration classes SHALL be only SAFE DEFAULT, ADVANCED, DANGEROUS and FIXED (with ATTESTED as a verification mode); no other label SHALL appear in the config schema, UI or checker. | ADR-046(6); RVW-B-08 | THR-035 | C-19 | TST: CI schema lint rejects unknown class labels |
+| CFG-011 | The ADR-047 controls SHALL be classified as in §7: chaff cannot be disabled or slowed below 1 per 2 h per channel; Key Directory snapshot age > 7 days and attestation age > 24 h are not configurable; the Desk case-key cache, per-case metadata erasure and the intake deletion list are FIXED on; the MANAGED audit export key is customer-held; only reviewed wordlists giving ≥ 128 bits may be enabled. | ADR-047 | THR-020, THR-046, THR-017, THR-027, THR-034 | C-07, C-08, C-15, C-19, C-24 | TST: config schema rejects each forbidden value; 29 ST-120 coverage |
 
 ## 11. Residual risks and limitations
 

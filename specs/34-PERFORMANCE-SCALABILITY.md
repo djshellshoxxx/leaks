@@ -1,6 +1,6 @@
 # 34 — Performance, Scalability, High Availability and Safe Failure Behavior
 
-Status: Draft v1.1 (revision round 2: ADR-034..046) · Edition applicability: both (HA sections EE) · Owner: Platform Engineering / Performance
+Status: Draft v1.2 (final consistency pass: ADR-047, cross-document requests) · previously v1.1 (revision round 2: ADR-034..046) · Edition applicability: both (HA sections EE) · Owner: Platform Engineering / Performance
 
 ## 1. Purpose and scope
 
@@ -201,7 +201,9 @@ HA adds copies, links and control planes. Each is a potential observer or seizur
 | New envelopes/day sustained (crisis burst) | 100 | 500 | 1,000 | 1,000 |
 | Page P95 server time (excluding Tor) | ≤ 300 ms | ≤ 200 ms | ≤ 200 ms | ≤ 200 ms |
 | Sealer throughput (Tier W streaming) | ≥ 50 MiB/s | ≥ 200 MiB/s | ≥ 200 MiB/s | ≥ 200 MiB/s |
-| Relay import per fixed slot (core; ADR-038(1)) | All pending envelopes whose release day has come, in successive batches of ≤ 500 objects / 2 GiB (`07-BACKEND.md`), completed within 60 min of the slot start; ≥ 2,000 objects / 16 GiB per slot | same | same | same |
+| Relay import per fixed slot (core; ADR-038(1)) | All pending envelopes whose release day has come, in successive batches of ≤ 500 objects / 2 GiB (`07-BACKEND.md`), processing completed within `relay.slot_commit_offset` (default 20 min, `07-BACKEND.md` §7.3) so that the commit time equals slot start + offset; an overrun commits immediately afterwards and raises `SYSTEM:relay_slot_overrun`; capacity ≥ 2,000 objects / 16 GiB per slot (chaff pulled and discarded in the same pass, ADR-047(3)) | same | same | same |
+| Import slot latency (arrival → visible to Triage Set) | ≤ one slot interval (default 6 h; HIGH/GOV 24 h) + offset; delayed delivery adds 1–3 days | same | same | same |
+| Fetch-all retrieval per Tier V check (ADR-039) | full 30-day reply page set; target ≤ 64 MiB per check (see §8.2 and OI-5) | same | same | same |
 | Concurrent Desk sessions | 10 | 30 | 300 | 300 |
 | Desk case list P95 | ≤ 1 s | ≤ 1 s | ≤ 1.5 s | ≤ 1.5 s |
 
@@ -209,9 +211,12 @@ HA adds copies, links and control planes. Each is a potential observer or seizur
 
 | Resource | Formula | Example (EE crisis) |
 |---|---|---|
-| Intake spool (DR-007, 7-day backlog + 3-day delayed delivery) | `(7 + 3) × burst_envelopes_per_day × mean_padded_size + pending_upload_cap` | 10 × 1,000 × 12 MiB + 256 GiB ≈ 373 GiB → provision 500 GiB |
+| Intake spool (DR-007, 7-day backlog + 3-day delayed delivery + chaff) | `(7 + 3) × (burst_envelopes_per_day × mean_padded_size + channels × (24 h / chaff_mean_interval) × mean_chaff_padded_size) + pending_upload_cap`; chaff size distribution per `04-CRYPTOGRAPHY.md`/`07-BACKEND.md` (ADR-047(3)) | 10 × (1,000 × 12 MiB + 20 × 12 × 12 MiB) + 256 GiB ≈ 401 GiB → provision 500 GiB |
+| Relay volume per slot incl. chaff | `real_per_slot + channels × (slot_interval / chaff_mean_interval) × mean_chaff_padded_size` | 20 channels × 3 chaff × 12 MiB ≈ 0.7 GiB extra per 6-h slot |
+| Fetch-all bandwidth (ADR-039) | `Tier V checks/day × reply_page_set_size`; page set = 30 days of padded replies | EE: 1,000 checks × 64 MiB ≈ 62 GiB/day over the onion service; above the target, page compaction is required (OI-5) |
+| Intake deletion list replica (ADR-047(9)) | fixed-size padded blob per slot | ≤ 1 MiB per slot at 10,000 entries |
 | Reply pages (ADR-039) | `30 days × replies_per_day × padded_reply_size`, served from disk as fixed-size pages | EE: 30 × 500 × 64 KiB ≈ 1 GiB |
-| Intake RAM | `4 GiB base + semaphore (4) × 64 MiB (Argon2id) + sealer sessions × 16 MiB (drafts and session state, ADR-034) + Tier W staging cap (§4) + web sessions × 64 KiB` | EE: 4 + 0.25 + 1 + 16 + 0.13 ≈ 21.4 GiB → 32 GiB. CE-SINGLE intake VM: 4 + 0.25 + 0.25 + 4 ≈ 8.5 GiB → 10 GiB (`18-DEPLOYMENT.md` §4.1 VM sizes to be read with this) |
+| Intake RAM | `4 GiB base + semaphore (4) × 64 MiB (Argon2id) + sealer sessions × 16 MiB (drafts and session state, ADR-034) + Tier W staging cap `intake.tierw_staging_bytes` (§4; per draft ≤ `intake.tier_w.draft_quota`, default 2 GiB) + web sessions × 64 KiB` | EE: 4 + 0.25 + 1 + 16 + 0.13 ≈ 21.4 GiB → 32 GiB. CE-SINGLE intake VM: 4 + 0.25 + 0.25 + 4 ≈ 8.5 GiB → 10 GiB (`18-DEPLOYMENT.md` §4.1 VM sizes to be read with this) |
 | Core blob store / year | `reports_per_year × mean_padded × (1 + derivative_factor 1.5)` | 5,000 × 12 MiB × 2.5 ≈ 147 GiB/yr |
 | Case DB / year | `reports_per_year × 2 MiB` (records, messages, audit) | ≈ 10 GiB/yr |
 | Backups (T1, 35 days) | `nightly_full × 35 (padded) + 96 WAL bundles/day × 64 MiB × 14` | e.g., 160 GiB × 1.25 × 35 + 84 GiB ≈ 7 TiB (dedup-free by design) → EE provisions ≥ 10 TiB |
@@ -267,6 +272,9 @@ Principles:
 | F17 | **Below security floor** (installed trust-path version < signed `min_secure_version`, ADR-040) | `update.security_floor` | Yes | Affected trust-path units refuse to start; intake closed until an allowed version is installed. Neither local policy nor the Fleet Manager can defer this (ADR-045) | Unreachable onion or unavailable page | FAIL alert | Starting the old version "until the window"; disabling the floor check | Install the current release (`18-DEPLOYMENT.md` §11) |
 | F18 | **EE licence expired** (RVW-C-24) | Licence module | No | Safety-relevant automation keeps full function: HA fencing and failover, SSO bridge login, SIEM export, Fleet check-in within its allow-list. Only configuration changes of EE modules are frozen (`24-LICENSING-BUSINESS-MODEL.md`) | Normal | Admin banner | Stopping fencing/failover (split-brain risk) or locking staff out | Renew; nothing else required |
 | F19 | **Tier W staging full** (sealer tmpfs at the §4 cap) | Sealer | Yes | New Tier W uploads get the padded busy page before any body byte is read; open sessions continue | Busy page | WARN | Spilling staged parts to disk; raising the cap beyond RAM; accepting unpadded parts | Wait for sessions to submit or expire; resize RAM |
+| F21 | **Chaff writer fault** (ADR-047(3)): the sealer cannot keep the configured chaff schedule for a channel | `intake.chaff` self-test (`32-OPERATIONS.md` §5.2); sealer supervisor | Yes (real envelopes become distinguishable) | The channel stops accepting new submissions (unavailable page before reading bodies) until the chaff schedule resumes; login and reply reading continue | Unavailable page | FAIL alert | Accepting submissions without chaff; writing burst chaff afterwards to "catch up" | Restart the sealer; check storage (F6) |
+| F22 | **Stale Key Directory snapshot or attestation** (ADR-047(4)): snapshot older than 7 days by the independent time floor; CVM evidence older than 24 h | `kd.snapshot_age` | Yes | Channel sealing refused (as F5); PB-22 | Unavailable page (identical to other causes, AT-093) | FAIL alert | Sealing to the stale snapshot; backdating a snapshot | Relay/directory/witness fix; fresh attestation |
+| F23 | **No verifiable intake deletion list at restore** (ADR-047(9)) | Restore tool | Yes | Restored intake stays closed | Unreachable onion | FAIL alert | Opening without applying deletions | Push the Z-CORE replica (`19-BACKUPS-DR.md` DR-P1); dual-approved override only at first install |
 | F20 | **Argon2id semaphore saturated** | Sealer | Partly | Queue ≤ 32, wait ≤ 30 s, then the padded busy page (with the §6 randomization); KDF parameters unchanged | Busy page | WARN if saturation occurs below 10× design peak (sizing error) | Lowering Argon2id parameters; per-account lockout | PoW scales; add CPU/RAM |
 
 ```mermaid
@@ -319,9 +327,11 @@ flowchart TD
 | PERF-020 | No intake store replication of any kind (synchronous or asynchronous, same-site or cross-site) SHALL exist in any profile; every intake SHALL run `wal_level=minimal`, `max_wal_senders=0`, no WAL archiving and `track_commit_timestamp=off`. | ADR-046(1); RVW-C-08 | THR-011, THR-003, THR-015 | C-08 | TST: `pg_params` health check on every intake; checker rejects replication settings |
 | PERF-021 | The Erasure Key Vault replica to the DR site (EE-HA) SHALL travel only inside the padded fixed-cadence 15-min replication bundles (O7) and SHALL apply erasures on receipt. | ADR-044(4); RVW-C-07 | THR-011, THR-017 | C-12 | TST: identical bundle cadence and sizes for idle vs burst; erasure visible on the replica within 15 min |
 | PERF-022 | Relay imports SHALL run only at the fixed import slots (ADR-038(1)); a missed slot SHALL NOT be compensated by an unscheduled pull. | ADR-038(1); RVW-A-09; RVW-B-06 | THR-011 | C-09 | TST: link outage across a slot → next import at the following slot only; import commit times equal slot times |
+| PERF-023 | Intake spool, relay slot capacity and core import SHALL be sized to include chaff at the configured rate per channel (ADR-047(3)) using the §8.2 formulas, and the relay SHALL finish each slot within `relay.slot_commit_offset`. | ADR-047(3); ADR-038(1); DR-007 | THR-032, THR-011 | C-08, C-09 | TST: LT-1 and LT-4 with chaff enabled at 15 min and 2 h means |
 | FAIL-015 | Trust-path units SHALL refuse to start below the signed security floor (F17); no local or Fleet policy SHALL override this. | ADR-040; ADR-045 | THR-025, THR-137 | C-05, C-06, C-07, C-10, C-33 | TST: install a below-floor version → units do not start; Fleet policy attempting deferral rejected |
 | FAIL-016 | EE licence expiry (F18) SHALL NOT stop HA fencing/failover, SSO bridge login or SIEM export; only EE configuration changes SHALL be frozen. | RVW-C-24 | THR-032, THR-042 | C-35, C-39 | TST: expired licence + node failure → failover completes; staff log in via SSO |
 | FAIL-017 | A sealer restart or Tier W session expiry SHALL zeroize drafts and staging keys, SHALL NOT persist any draft to disk, and returning sources SHALL be told that the unsent draft was lost. | ADR-034; RVW-A-02 | THR-015, THR-048 | C-07, C-06 | TST: restart the sealer during a draft → no canary on disk; message shown on next page load |
+| FAIL-018 | A chaff writer fault on a channel SHALL stop new submissions on that channel (F21), a Key Directory snapshot older than 7 days or CVM attestation older than 24 h SHALL stop sealing (F22), and a restored intake without a verifiable deletion list SHALL stay closed (F23); none of these SHALL fall back to a less protective mode. | ADR-047(3); ADR-047(4); ADR-047(9) | THR-020, THR-046, THR-017 | C-07, C-08 | TST: fault injection per row; 29 ST-168, ST-172, ST-174 |
 
 ## 11. Residual risks and limitations
 
@@ -342,4 +352,5 @@ flowchart TD
 2. **Attachment ceiling mismatch.** Resolved by ADR-046(4): 4 GiB per file in standard profiles; 16 GiB only in EE profiles with the `08-API.md` chunk count raised to 2,048.
 3. Tor performance planning numbers should be replaced with measurements from the reference lab and from the live Tor network (`30-ANONYMITY-TESTING.md`).
 4. Evaluate whether incremental padded blob backup sets (ADVANCED in §8.2) should become the EE default.
-5. Reply-page size and compaction for fetch-all retrieval (ADR-039) at EE scale need measurement; the planning figure in §3.1 is an estimate.
+5. Reply-page size and compaction for fetch-all retrieval (ADR-039) at EE scale need measurement; the §8.2 example (≈ 62 GiB/day at 1,000 checks) shows that page sets above the 64 MiB target need compaction or per-channel page sets, which must not reveal the mailbox checked (`08-API.md`).
+6. Chaff envelope size distribution (ADR-047(3)) drives spool and relay sizing; the §8.2 example assumes chaff matches the real padded-size mean.

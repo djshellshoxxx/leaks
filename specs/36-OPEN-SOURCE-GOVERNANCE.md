@@ -1,5 +1,5 @@
 # 36 — Open-Source Governance
-Status: Draft v1.1 (revision round 2: ADR-035, ADR-036, ADR-040) · Edition applicability: both · Owner: Candor Foundation Board / Technical Steering Committee
+Status: Draft v1.2 (final consistency pass: ADR-047, cross-document requests) · previously v1.1 (revision round 2: ADR-035, ADR-036, ADR-040) · Edition applicability: both · Owner: Candor Foundation Board / Technical Steering Committee
 
 ## 1. Purpose and scope
 
@@ -276,7 +276,8 @@ External Watchers fetch each watched onion service over Tor and compare served s
 
 - The registry (watcher/witness identity, jurisdiction, keys, endpoints reachable over Tor) is signed by the registry key (§12) and delegated in TUF as a `watchers` role, so installers, Desks and the Source App obtain it through the same verified update path.
 - The Source App embeds the witness/monitor key set and endpoints (not a tenant checkpoint) and fetches the latest cosigned checkpoint from ≥ 1 witness over Tor before sealing (`04-CRYPTOGRAPHY.md`, `11-FRONTEND-SOURCE.md`; cross-document request).
-- `candorctl tuf init` can compare the root hash with ≥ 2 registered monitor endpoints over Tor (`33-RELEASE-UPDATE-SECURITY.md`; cross-document request).
+- `candorctl tuf init` compares the root hash with ≥ 2 registered monitor endpoints over Tor (`33-RELEASE-UPDATE-SECURITY.md` UPD-025).
+- The Source App keeps the fetched checkpoint pin only inside its encrypted vault (ADR-047(1)).
 
 ### 15.4 Duties and publication
 
@@ -295,6 +296,16 @@ External Watchers fetch each watched onion service over Tor and compare served s
 - Watchers and witnesses are paid from a Foundation-administered pool, not directly by the watched operator, so no single operator can defund its watchers; EE vendors and MANAGED operators contribute to the pool as a trademark-licence condition.
 - A watcher that stops publishing for 7 days is flagged in the registry; instances relying on it are alerted to enrol another.
 - Standard Operator Statement text (ADR-035(2)) is published and versioned by the Foundation so that deviations are mechanically detectable.
+
+### 15.6 Builder B, mirrors, monitors and wordlist reviewers (selection)
+
+| Programme | Selection and rules |
+|---|---|
+| **Builder B** (28 §8.2) | Selected by the TSC with Watcher and Witness Council concurrence from organisations meeting §15.2 independence; seat, operators and hosting in a jurisdiction different from Builder A's; no administrator shared with Builder A; written agreement covering continuity (≥ 12 months notice) and a named standby builder; re-evaluated yearly and on any jurisdiction change (§3.4) |
+| **Independent Source App mirrors** (33 §15.3; 28 SCM-069) | ≥ 2 mirrors run by organisations other than the project and other than any operator, ≥ 1 reachable as an onion service; byte-identical to the project distribution (checked daily by watchers); no download logging beyond aggregate counts; listed in the `watchers` registry |
+| **Platform Manifest re-derivation monitors** (ADR-040; 28 §5.4) | ≥ 2 registered monitors independently re-derive each release's Platform Manifest from the pinned Debian snapshot and the Tor Project repository and publish match/mismatch before the release's cooling window ends; a mismatch is a release blocker under 27 SG-27 |
+| **External witnesses and External Watchers** | Per §15.2–§15.5 |
+| **Wordlist reviewers** (ADR-047(6)) | Each per-locale passphrase wordlist is reviewed by ≥ 2 native speakers not employed by the same organisation, for unambiguous, non-offensive words; the review record is signed and shipped with the list (28 SCM-071); the list size fixes the word count `ceil(128 / log2(list_size))` |
 
 ## 16. Project transparency and compelled-modification statements (RVW-A-01, RVW-B-19)
 
@@ -345,6 +356,9 @@ External Watchers fetch each watched onion service over Tor and compare served s
 | OSG-034 | Watchers and witnesses SHALL be funded from a Foundation-administered pool, not directly by the watched operator; before 1.0 GA the programme SHALL have ≥ 5 watchers and ≥ 3 witnesses spanning ≥ 3 jurisdictions, open to CE operators at no cost. | ADR-035(1); RVW-A-01 | THR-026 | C-30 | INSP: registry statistics; AUD: financial statement |
 | OSG-035 | The Foundation SHALL publish and version the standard Operator Statement text; watchers SHALL flag statements that deviate from it or are older than 30 days. | ADR-035(2) | THR-026, THR-040 | C-14, C-25 | TST: watcher statement-diff check |
 | OSG-036 | Every 30 days the Foundation SHALL publish a project statement signed by ≥ 3 release signers from ≥ 2 jurisdictions (no compelled modification, targeted build, compelled signing or registry change), and every 6 months the Foundation and each trademark licensee SHALL publish a per-jurisdiction transparency report. | ADR-035(2); RVW-A-01; RVW-B-19 | THR-026, THR-025 | C-30, C-32 | INSP: publication history; TST: monitor flags lapse |
+| OSG-037 | Builder B SHALL be selected, contracted and re-evaluated per §15.6 (different organisation and jurisdiction from Builder A, no shared administrators, named standby builder). | ADR-040; RVW-A-16 | THR-024, THR-026 | C-31 | INSP: selection record and agreement; AUD: yearly re-evaluation |
+| OSG-038 | The project SHALL maintain ≥ 2 independent Source App mirrors (≥ 1 onion) and ≥ 2 Platform Manifest re-derivation monitors registered in the `watchers` role, with daily byte-identity checks of mirrors and per-release manifest re-derivation. | ADR-041; ADR-040; RVW-A-14; RVW-A-12 | THR-025, THR-007 | C-33, C-32 | TST: watcher mirror-identity job; INSP: monitor publications per release |
+| OSG-039 | Every shipped passphrase wordlist SHALL have a signed review by ≥ 2 independent native speakers per §15.6 before release. | ADR-047(6) | THR-034 | C-30 | INSP: review records; TST: 29 ST-177 |
 
 ## 18. Residual risks and limitations
 

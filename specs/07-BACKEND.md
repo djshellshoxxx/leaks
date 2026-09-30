@@ -559,7 +559,7 @@ FROM c WHERE job.job_id = c.job_id RETURNING job.*;
 | `epoch.length_days` | 1–14 | 7 | ADVANCED |
 | `channel.<id>.min_recipients` (minimum case-key holders) | 2–16; 1 only as DANGEROUS | 2 (ADR-044(2)) | raising SAFE; lowering to 1 DANGEROUS |
 | `channel.<id>.alternative_channel_id` | channel ID | required for ANONYMOUS channels | ADVANCED (ADR-037(1)) |
-| `envelope.recipient_slots` | 16, 32, 64 | 16 | ADVANCED (increase only; ADR-030) |
+| `envelope.recipient_slots` | 16 (fixed) | 16 | not configurable in v1: ADR-033(1) fixes exactly 16 slots (r3 consistency fix; the r2 "increase only" option is withdrawn) |
 | `channel.<id>.roster_names_visible` | bool | false (role labels only) | ADVANCED |
 | `epoch.decrypt_window_days` | epoch..28 | 14 | DANGEROUS if > 14 |
 | `retention.default_days` | 30–3650 | 365 | ADVANCED |

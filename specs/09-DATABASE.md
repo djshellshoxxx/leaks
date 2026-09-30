@@ -649,7 +649,7 @@ Source-requested erasure and retention expiry use `crypto_erase_case` and bypass
 | Column | Type | Ct | Class | Notes |
 |---|---|---|---|---|
 | outbox_id | uuid PK; tenant_id | | SYS | |
-| routing_ct | bytea (≤ 2 KiB) | **yes** | SS | Mailbox ID sealed to the Intake Routing Key (06 §8.2) |
+| routing_ct | bytea (≤ 2 KiB) | **yes** | SS | `{mailbox_id, reply_seq}` sealed to the Intake Routing Key (04 §9.9; 06 §8.2) |
 | reply_ct | bytea (≤ 70,000) | **yes** | CT | |
 | state | enum(queued, pushed) | | SYS | |
 | queued_day | date | | WF | |
