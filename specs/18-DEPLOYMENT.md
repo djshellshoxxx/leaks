@@ -1,6 +1,6 @@
 # 18 — Deployment Profiles, Packaging, Installation, Upgrade and Recovery
 
-Status: Draft v1.1 (revision round 2: ADR-034..046) · Edition applicability: both (CE profiles CE-SINGLE, CE-HARDENED; EE/GOV profiles marked) · Owner: Platform Engineering / Release Engineering
+Status: Draft v1.2 (final consistency pass: ADR-047, cross-document requests) · previously v1.1 (revision round 2: ADR-034..046) · Edition applicability: both (CE profiles CE-SINGLE, CE-HARDENED; EE/GOV profiles marked) · Owner: Platform Engineering / Release Engineering
 
 ## 1. Purpose and scope
 
@@ -20,7 +20,8 @@ Infrastructure baselines that the installer applies are in `17-INFRASTRUCTURE.md
 |---|---|
 | ADR-009, 019, 021, 022, 024, 028 | Binding: intake/core separation; Debian 13 + signed .deb primary; multi-tenancy limits; TUF updates; profiles; secret manifest |
 | ADR-035, 038, 040, 043, 044, 045, 046 (revision round 2) | External Watchers and Operator Statement; fixed import slots and constant-schedule notifications; Platform Manifest and security floors; independent-custody devices; vault DR and backup exclusion, `min_recipients` 2, GOV Recovery Quorum default; small-organisation mode and Fleet limits; no intake replication, no HSM fallback, per-zone update paths, config labels, CE-SINGLE VM default |
-| `17-INFRASTRUCTURE.md` | Host roles (H-*), segments (N-*), flows (F1–F15), FDE unlock modes (U1–U7), hosting-provider analysis |
+| ADR-047 (final round) | Chaff envelopes (intake spool sizing), Key Directory/attestation freshness, intake deletion list applied on restore (§13), Desk re-wrap after vault loss (§13), MANAGED customer-held audit key and verifier (§4.8, §8.1) |
+| `17-INFRASTRUCTURE.md` | Host roles (H-*, including H-ALERT `alert-relay`, r3), segments (N-*), flows (F1–F16, F5b, F10a), FDE unlock modes (U1–U7), hosting-provider analysis, C-37 hosting (§4.11) |
 | `19-BACKUPS-DR.md` | Backup sets (BS-*), RPO/RTO |
 | `21-ENTERPRISE.md` | HA orchestration module (EE, ADR-020) |
 | `22-GOVERNMENT.md` | GOV-ONPREM specifics |
@@ -43,7 +44,7 @@ Research lessons applied:
 
 | Profile | Edition | Hosts (minimum) | Z-INTAKE isolation | Z-CORE platform | K8s allowed | HSM | Default FDE unlock (`17-INFRASTRUCTURE.md` §6.3) | Staff path |
 |---|---|---|---|---|---|---|---|---|
-| CE-SINGLE | CE | 1 physical (3 VMs) | Separate VM (container split = ADVANCED) | VM | No | No (TPM2) | U3 (or U2 ADVANCED) | RCP-ONION |
+| CE-SINGLE | CE | 1 physical (3 VMs; + optional `alert-relay` VM when alerts are enabled) | Separate VM (container split = ADVANCED) | VM | No | No (TPM2) | U3 (or U2 ADVANCED) | RCP-ONION |
 | CE-HARDENED | CE | 3 physical + off-site Tang | Dedicated host | Dedicated host | No | Optional | U4 | RCP-ONION |
 | EE-ONPREM | EE | 4 hosts/VM hosts (intake physical) | Dedicated host | VMs on dedicated virtualization | No | Optional (recommended) | U4 | RCP-LAN (RCP-ONION allowed) |
 | EE-HA | EE | ≥ 9 | 2 dedicated intake hosts, active/passive, shared-nothing (no DB replication, ADR-046(1)), same onion key (ADR-032) | Dedicated K8s cluster or VM cluster | Z-CORE only | Yes (pair; no fallback keys, ADR-046(2)) | U4 (Tang ×2 sites) | RCP-LAN (RCP-ONION allowed) |
@@ -63,7 +64,7 @@ In every profile, devices of INDEPENDENT-channel members (ADR-043) use RCP-ONION
 | THREAT MODEL | **Designed against:** remote attackers (web exploitation of C-06); database/disk theft of a powered-off host; curious non-technical insiders without admin credentials; legal compulsion of the operator for stored data (yields ciphertext and metadata only; `17-INFRASTRUCTURE.md` §8). **Not designed against:** a hypervisor/host-kernel compromise, which reaches both zones; a live-seized host (Tier W in-flight plaintext); an adversary controlling the site network (THR-002/003); a determined physical attacker with repeated access. **A malicious SYS_ADMIN is not detectable** in this profile: H-MON runs on the same hypervisor the admin controls, so attestation and the self-test give no independent evidence (RVW-C-09). High-risk channels on CE-SINGLE SHOULD be Tier V only. Suitable for low/moderate-risk organizations (ADR-021 classification); organisations with fewer than 4 distinct enrolled persons run in small-organisation mode (§8.1, ADR-045) |
 | ADVANTAGES | One machine; about 1 hour to install with `candor-setup`; low cost; all CE cryptographic protections identical to other profiles (ADR-020); VM separation (the CE-SINGLE default, ADR-046(6); container-only separation is ADVANCED) keeps the ADR-009 pull model |
 | DISADVANTAGES | Single point of failure (no failover); the hypervisor is shared trust; H-MON on the same host cannot independently detect host compromise; a Tang server on the same host is meaningless (hence U3) |
-| MINIMUM HARDWARE | 1 × x86-64 server or workstation-class machine: 8 cores with VT-x/AMD-V + IOMMU, 32 GiB ECC RAM (non-ECC allowed with warning), 2 × 1 TB NVMe (RAID1 under LUKS), TPM 2.0, UEFI Secure Boot, 1–2 NICs, UPS. VMs: `intake` 2 vCPU/10 GiB (includes the 4 GiB Tier W staging tmpfs, ADR-034; `34-PERFORMANCE-SCALABILITY.md` §8.2)/64 GiB + spool per 34; `core` 4 vCPU/12 GiB/500 GiB; `mon` 1 vCPU/2 GiB/20 GiB. Backup: 2 × 2 TB external SSDs (rotating, one off-site). Staff: ≥ 2 recipient workstations (`min_recipients` 2, ADR-044(2)), 1 admin workstation (MAY be a separate OS account on a recipient workstation with a separate hardware key: CFG ADVANCED), 2 hardware authenticators per person (primary + stored backup, ADR-044(2)) |
+| MINIMUM HARDWARE | 1 × x86-64 server or workstation-class machine: 8 cores with VT-x/AMD-V + IOMMU, 32 GiB ECC RAM (non-ECC allowed with warning), 2 × 1 TB NVMe (RAID1 under LUKS), TPM 2.0, UEFI Secure Boot, 1–2 NICs, UPS. VMs: `intake` 2 vCPU/10 GiB (includes the 4 GiB Tier W staging tmpfs, ADR-034; `34-PERFORMANCE-SCALABILITY.md` §8.2)/64 GiB + spool per 34; `core` 4 vCPU/12 GiB/500 GiB, with the Erasure Key Vault on a **separate virtual disk** (`/var/lib/candor/ekv`, excluded from any hypervisor snapshot; `17-INFRASTRUCTURE.md` §5.7); `mon` 1 vCPU/2 GiB/20 GiB (no uplink); optional `alert-relay` 1 vCPU/1 GiB/8 GiB (own uplink, no `br-mgmt` port; `17-INFRASTRUCTURE.md` §3). The intake spool includes chaff envelopes (ADR-047(3); `34-PERFORMANCE-SCALABILITY.md`); the Tier W staging tmpfs is mounted at `/run/candor/staging`. Backup: 2 × 2 TB external SSDs (rotating, one off-site). Staff: ≥ 2 recipient workstations (`min_recipients` 2, ADR-044(2)), 1 admin workstation (MAY be a separate OS account on a recipient workstation with a separate hardware key: CFG ADVANCED), 2 hardware authenticators per person (primary + stored backup, ADR-044(2)) |
 | NETWORK DESIGN | Host NIC → site router/firewall. `br-ext` carries the intake and core VM uplinks (egress tor only, `17-INFRASTRUCTURE.md` §4.3–4.4). `br-relay` is an L2-only link between core and intake; the host has no IP. `br-mgmt` carries mon ↔ intake/core. No inbound port forwarding is required (onion services only). Uplink independence per `17-INFRASTRUCTURE.md` §4.10 |
 | FAILOVER | None. Documented RTO via restore to replacement hardware (`19-BACKUPS-DR.md` RPO/RTO table). An outage shows sources the onion unreachable (fail closed; no clearnet fallback, ADR-002) |
 | BACKUPS | Nightly BS-CORE and BS-INTAKE to a rotating encrypted external disk (H-BAK role played by the disk). BS-SECRETS written once at install and after each key rotation to 2 offline media (`19-BACKUPS-DR.md`) |
@@ -77,9 +78,9 @@ In every profile, devices of INDEPENDENT-channel members (ADR-043) use RCP-ONION
 | THREAT MODEL | Everything in CE-SINGLE, plus: kernel/hypervisor escape from intake to core (separate hardware); seizure of the server room without the Tang site (U4); independent monitoring by H-MON (attestation, `17-INFRASTRUCTURE.md` §5.6); higher-risk organizations (newsrooms, NGOs) similar to SecureDrop's app/monitor split [B-SD-04]. **Not designed against:** live seizure of H-INTAKE; provider-level network observation of the uplink; coerced admin with FIDO2 |
 | ADVANTAGES | Physical zone separation (ADR-009); unattended reboot with FDE (U4), which closes the gap left open in SecureDrop [B-SD-13]; independent monitor; optional air-gapped viewing (AIRGAP-RCP) |
 | DISADVANTAGES | 3 hosts + off-site Tang to maintain; more hardware cost; still no automatic failover |
-| MINIMUM HARDWARE | H-INTAKE: 4 cores, 16 GiB ECC (includes the 8 GiB Tier W staging tmpfs), 2 × 512 GB NVMe RAID1, TPM2, 2 NICs (ext0, relay0) + mgmt0. H-CORE: 8 cores, 32 GiB ECC, 2 × 2 TB NVMe RAID1, TPM2, NICs relay0, mgmt0, bak0, egress0. H-MON: 2 cores, 4 GiB, 128 GB SSD, TPM2 (a mini-PC is acceptable). Off-site Tang: a small fanless device in a different building. H-BAK: 4 TB NAS/server running an S3-compatible store with Object Lock (compliance mode), plus 2 offline rotation disks. Optional managed switch with VLANs, or direct cables for relay0/bak0. Optional C-18 air-gapped station |
+| MINIMUM HARDWARE | H-INTAKE: 4 cores, 16 GiB ECC (includes the 8 GiB Tier W staging tmpfs), 2 × 512 GB NVMe RAID1, TPM2, 2 NICs (ext0, relay0) + mgmt0. H-CORE: 8 cores, 32 GiB ECC, 2 × 2 TB NVMe RAID1, TPM2, NICs relay0, mgmt0, bak0, egress0. H-MON: 2 cores, 4 GiB, 128 GB SSD, TPM2 (a mini-PC is acceptable), **no Internet uplink**. H-ALERT (`alert-relay`, r3): a separate small device or VM with its own uplink and a direct link to H-MON (N-ALERT) only; required if alerts or the external onion probe are used. H-CORE: the Erasure Key Vault on a dedicated LUKS volume on the host's physical TPM. Off-site Tang: a small fanless device in a different building. H-BAK: 4 TB NAS/server running an S3-compatible store with Object Lock (compliance mode), plus 2 offline rotation disks. Optional managed switch with VLANs, or direct cables for relay0/bak0. Optional C-18 air-gapped station |
 | NETWORK DESIGN | Per `17-INFRASTRUCTURE.md` §4.1: separate physical links for N-RELAY and N-BAK (direct cables recommended), N-MGMT via a small unmanaged switch, N-OOB disconnected. H-INTAKE on an independent uplink line where possible |
-| FAILOVER | Cold spare: one pre-installed H-INTAKE spare with no secrets, stored sealed. Promotion restores BS-SECRETS (onion key) + BS-INTAKE (`19-BACKUPS-DR.md` DR-P2), keeping the same onion address. H-CORE: restore to spare hardware |
+| FAILOVER | Cold spare: one pre-installed H-INTAKE spare with no secrets, stored sealed. Promotion restores BS-SECRETS (onion key) + BS-INTAKE and applies the merged deletion list (`19-BACKUPS-DR.md` DR-P1), keeping the same onion address. H-CORE: restore to spare hardware |
 | BACKUPS | BS-CORE nightly (full) + WAL archive every 15 min (fixed-size segments, 19 §5.3) to H-BAK (WORM). Weekly copy to offline disk, rotated off-site. BS-INTAKE nightly. BS-SECRETS on change |
 | KEY MANAGEMENT | As CE-SINGLE, but signing keys in each host's TPM2. Optional USB HSM for the audit and directory keys. IRK 2-of-3 (default) or 3-of-5. Tang keys on H-MON + off-site device, rotated yearly |
 | OPERATIONAL COMPLEXITY | Medium (3/5). About 4 h/week; Linux-competent admin; quarterly seal inspection and restore test |
@@ -105,7 +106,7 @@ In every profile, devices of INDEPENDENT-channel members (ADR-043) use RCP-ONION
 | THREAT MODEL | As EE-ONPREM, with availability objectives (THR-032, THR-042). Explicitly accounts for the **extra observers introduced by HA** (listed in `34-PERFORMANCE-SCALABILITY.md` §7): core replication links, extra copies of the onion keys, K8s control plane, mesh sidecars. The intake has **no** replication link (ADR-046(1)) |
 | ADVANTAGES | Intake service survives a single-host failure (new submissions continue on the passive host; see FAILOVER for what is not carried over); core survives node/zone failure; rolling upgrades with a short source-visible switchover |
 | DISADVANTAGES | More hosts means more seizure targets and more observers; the onion key exists on 2 hosts (ADR-032 doubles THR-044 exposure); K8s adds cluster-admin as a super-role; highest complexity |
-| MINIMUM HARDWARE | Z-INTAKE: H-INTAKE (active) + H-INTAKE-B (passive), each as CE-HARDENED H-INTAKE, in separate racks with separate power; **shared-nothing** (each host its own intake store; no PostgreSQL replication, ADR-046(1)); a direct-cable heartbeat link N-INTAKE-HB; a fencing device (switched PDU or BMC on N-OOB) for STONITH. DR site: an intake VM **without** onion key until DR is declared. Z-CORE: dedicated K8s (3 control-plane + 3 workers, 8 vCPU/32 GiB each) **or** VM cluster; PostgreSQL 3-node (Patroni-class) on dedicated VMs outside K8s (recommended) or as a StatefulSet; blob store 4-node erasure-coded S3-compatible on-prem. H-MON × 2. HSM pair. H-BAK at 2 sites. Tang × 2 sites |
+| MINIMUM HARDWARE | Z-INTAKE: H-INTAKE (active) + H-INTAKE-B (passive), each as CE-HARDENED H-INTAKE, in separate racks with separate power; **shared-nothing** (each host its own intake store; no PostgreSQL replication, ADR-046(1)); a direct-cable heartbeat link N-INTAKE-HB; a fencing device (switched PDU or BMC on N-OOB) for STONITH. DR site: an intake VM **without** onion key until DR is declared. Z-CORE: dedicated K8s (3 control-plane + 3 workers, 8 vCPU/32 GiB each) **or** VM cluster; PostgreSQL 3-node (Patroni-class) on dedicated VMs outside K8s (recommended) or as a StatefulSet; blob store 4-node erasure-coded S3-compatible on-prem. H-MON × 2 (no uplink) + H-ALERT × 2. HSM pair. H-BAK at 2 sites. Tang × 2 sites |
 | NETWORK DESIGN | Only the active intake's tor instance publishes descriptors. The passive host's tor is stopped (same onion key, ADR-032; active/active descriptor aggregation is deferred per `21-ENTERPRISE.md` §5.2 and `16-TOR-I2P.md`). Both intake hosts sit on the same site with independent uplinks from the same independent provider (a second site adds a second uplink observer; ADVANCED). N-INTAKE-HB carries only the fixed-size heartbeat (observer analysis in `34-PERFORMANCE-SCALABILITY.md` §7). C-09 pulls from the active intake, and after a failover also from the recovered former active until its queue is empty. K8s: dedicated cluster, NetworkPolicies default-deny, no service-mesh access logs, staff Desk API behind an L4 passthrough LB with logging off (`21-ENTERPRISE.md` HA-004) |
 | FAILOVER | **Unplanned intake failover:** health probe every 10 s; 3 consecutive failures → fence (STONITH) the active → start the passive (tor start, descriptor publish) on its own store. Target intake RTO ≤ 10 min (single value across 18, 19 and 21; RVW-C-19); sources with a cached old descriptor may fail until they refetch. A source sees "received" only after local fsync on the host that accepted it (ADR-046(1)); envelopes and account records on the failed host are **not lost but unavailable** until its disk is recovered, after which C-09 pulls them. Source accounts created on the failed host since the passive's last seeding cannot log in on the passive until then (the source UI states "your mailbox is temporarily unavailable; do not create a new one unless advised"). **Planned switchover** (upgrades, maintenance): stop-transfer-start at the start of an import slot: the active stops accepting, C-09 pulls all pending envelopes, then pulls an encrypted store export (BS-INTAKE format) and restores it to the passive over the relay (core-initiated, never intake-to-intake), then the passive publishes (source-visible unavailability ≤ 10 min). Core: Patroni failover ≤ 30 s; K8s rescheduling. Site DR: onion key restored from BS-SECRETS under IRK quorum; the Erasure Key Vault is replicated to the DR core within the core RPO (ADR-044(4), `19-BACKUPS-DR.md` §6.1) |
 | BACKUPS | WAL archiving every 15 min with fixed-size segments; nightly base backup; WORM at 2 sites; offline monthly copy |
@@ -163,9 +164,9 @@ In every profile, devices of INDEPENDENT-channel members (ADR-043) use RCP-ONION
 | DISADVANTAGES | Trust in vendor operations; vendor is a legal target; vendor sees metadata across customers (aggregated risk); onion key custody by vendor |
 | MINIMUM HARDWARE | Per customer: dedicated H-INTAKE (VM on vendor dedicated hosts, or physical for high-risk customers) with its own onion key (ADR-021); dedicated Z-CORE VMs and dedicated PostgreSQL instance; per-customer backup bucket and per-customer backup KEK. Shared: Fleet Manager C-34 (opaque instance IDs, ADR-022), monitoring backplane receiving only allow-listed self-test results |
 | NETWORK DESIGN | Per customer: separate VLAN/VPC, separate tor instances, separate relay links; no cross-customer routes. Vendor ops access via two-person SSH certificates with a **customer-visible access log** (EE feature, `21-ENTERPRISE.md`), whose hash chain is anchored to a **customer-controlled witness** within 15 min so that the vendor cannot rewrite it (RVW-C-21) |
-| INDEPENDENT VERIFICATION (RVW-C-21, ADR-035) | (1) ≥ 2 External Watchers, at least one outside the vendor's jurisdiction, compare served static assets and the Sealer's running manifest with the transparency log (ADR-035(1)). (2) The confidential-VM Sealer profile (`17-INFRASTRUCTURE.md` §5.9) is RECOMMENDED for high-risk tenants; its attestation report is verified by the **customer's own** Desks at import, not by vendor-run H-MON. (3) The quorum-signed Operator Statement (ADR-035(2)) includes ≥ 1 customer-side independent signer. (4) For tenants classified high-risk (`21-ENTERPRISE.md` §6.3), `intake.tier_w.enabled` defaults to **off** (Tier V only) unless the customer's OVERSIGHT records an acceptance of the Tier W residual |
+| INDEPENDENT VERIFICATION (RVW-C-21, ADR-035) | (1) ≥ 2 External Watchers, at least one outside the vendor's jurisdiction, compare served static assets and the Sealer's running manifest with the transparency log (ADR-035(1)). (2) The confidential-VM Sealer profile (`17-INFRASTRUCTURE.md` §5.9) is RECOMMENDED for high-risk tenants; its attestation report is verified by the **customer's own** Desks at import, not by vendor-run H-MON. (3) The quorum-signed Operator Statement (ADR-035(2)) includes ≥ 1 customer-side independent signer. (4) For tenants classified high-risk (`21-ENTERPRISE.md` §6.3), `intake.tier_w.enabled` defaults to **off** (Tier V only) unless the customer's OVERSIGHT records an acceptance of the Tier W residual. (5) A **customer-held attestation verifier** (`17-INFRASTRUCTURE.md` §5.6, INFRA-046) receives the intake's PCR quotes and CVM evidence (≤ 24 h old, ADR-047(4)) and alerts the customer's OVERSIGHT; vendor-run H-MON is not the only verifier |
 | FAILOVER | As EE-HA or EE-ONPREM per contract tier |
-| BACKUPS | Per-customer encrypted sets; the backup KEK is IRK-split with at least one custodian at the customer (so the vendor alone cannot decrypt backups; configurable), WORM at 2 vendor sites |
+| BACKUPS | Per-customer encrypted sets; the backup KEK is IRK-split with at least one custodian at the customer (so the vendor alone cannot decrypt backups; configurable), WORM at 2 vendor sites. Audit exports are encrypted to a **customer-held audit export key** (ADR-047(10)); the vendor stores but cannot read them |
 | KEY MANAGEMENT | Customer holds recipient keys and the optional Recovery Quorum. Vendor holds onion keys (per customer), integrity keys in per-customer HSM partitions. The customer can **export** its instance (BS-SECRETS + data) to self-host (portability; no lock-in of onion address) |
 | OPERATIONAL COMPLEXITY | Low for the customer (1.5/5); high for the vendor. The customer still performs recipient-side duties (Desk weekly, custody of its IRK share, Operator Statement co-signature, OVERSIGHT tasks) |
 
@@ -338,7 +339,7 @@ Goal: a non-specialist completes a secure installation in about 60 minutes with 
 
 Output:
 - the onion address;
-- a printable "publish this" sheet for the Clearnet Information Site (C-37) with Onion-Location and guidance text;
+- a printable "publish this" sheet for the Clearnet Information Site (C-37) with Onion-Location and guidance text, and the **first-contact publication checklist** (§8.2);
 - the self-test result;
 - the next steps.
 
@@ -353,7 +354,26 @@ Intake stays closed (`candorctl site go-live` refuses) until:
 4. The non-identification policy is confirmed (HUM-009).
 5. The first Operator Statement (ADR-035(2)) is signed and published; for EE/GOV/MANAGED, ≥ 2 External Watchers (≥ 1 outside the operator's jurisdiction) are registered (ADR-035(1)).
 6. Where Z-CORE runs on virtualization or storage Candor cannot inspect, the Erasure Key Vault exclusion attestation is recorded (`17-INFRASTRUCTURE.md` INFRA-037).
-7. INDEPENDENT channels: Triage Set members' devices have recorded independent-custody status (ADR-043); otherwise the channel cannot be enabled without a DANGEROUS approval.
+7. INDEPENDENT channels: Triage Set members' devices have recorded independent-custody status (ADR-043); otherwise the channel cannot be enabled without a DANGEROUS approval (dual approval incl. OVERSIGHT, disclosed in the configuration digest).
+8. ANONYMOUS channels publish role labels only; publishing a member's personal name in a channel descriptor is DANGEROUS (`14-CASE-MANAGEMENT.md` ROUTE-002; `32-OPERATIONS.md` §7).
+9. The first-contact publication checklist (§8.2) is recorded, including the C-37 hosting record.
+10. MANAGED: the customer-held attestation verifier is registered and has verified at least one quote, and the customer-held audit export key is enrolled (ADR-047(10); `17-INFRASTRUCTURE.md` INFRA-046).
+11. The intake has received a Key Directory snapshot no older than 7 days by its independent time floor (ADR-047(4)); otherwise sealing is refused anyway.
+
+### 8.2 First-contact publication checklist (`05-SOURCE-OPSEC.md` §8.14, SOPS-055; RVW-B-17)
+
+Printed by every installer and recorded (tick list, signed by the channel owner) by `candorctl site record-publication`:
+
+| # | Item |
+|---|---|
+| 1 | Publish the onion address **offline** first: posters, printed cards, payslip inserts, QR codes on printed material |
+| 2 | On intranets, publish it only as **non-hyperlinked** text with "Don't open this at work. Copy it into Tor Browser at home." Never as a clickable link, never in e-mail signatures or tracked newsletters |
+| 3 | C-37 shows GC-43 and the GC-04/GC-05 stop line in its first viewport (`05-SOURCE-OPSEC.md`); verified by the `c37-check` snapshot (`17-INFRASTRUCTURE.md` INFRA-042) |
+| 4 | C-37 hosting per `17-INFRASTRUCTURE.md` §4.11: no third-party CDN, proxy, analytics or embedded resources; logs off or ≤ 24 h aggregate; outside the organisation's web stack for D1/D2 tenants and INDEPENDENT channels. The project's neutral multi-organisation directory domain is an option |
+| 5 | C-37 does not host the Source App; it links to the project distribution over Tor (ADR-041) |
+| 6 | Channel descriptors of ANONYMOUS channels show role labels only; personal names are DANGEROUS (§8.1 gate 8) |
+
+The C-37 hosting record (item 4) is re-attested in the quarterly review (`32-OPERATIONS.md`).
 
 ## 9. Infrastructure as Code
 
@@ -519,9 +539,10 @@ set -euo pipefail
 # New host prepared per §7.3; role package installed; NOT yet initialised with new keys
 candorctl host init --role intake --site /root/candor-site.toml --restore
 candorctl restore secrets --set BS-SECRETS --from /media/candor-offline-A --irk-quorum   # prompts for 2 of 3 IRK shares
-candorctl restore data --set BS-INTAKE --latest --apply-tombstones   # re-applies source-initiated deletions (19 §11, RVW-A-28)
+candorctl restore data --set BS-INTAKE --latest --apply-deletion-list   # BS-INTAKE = source_account, deletion_tombstone, intake_meta only (19 §3)
 candorctl fde bind --mode tpm2+tang --tang http://10.30.0.5:7500 --tang http://<OFFSITE_TANG>:7500 --sss-threshold 2
 candorctl relay pair --print-fingerprint
+candorctl relay push-deletion-list --wait        # C-09 pushes the newest Z-CORE replica (ADR-047(9)); intake merges and applies it; intake stays closed until verified
 candorctl secrets verify --host intake
 candorctl selftest run --host intake --wait
 ```
@@ -534,7 +555,8 @@ candorctl host init --role core --site /root/candor-site.toml --restore
 candorctl restore secrets --set BS-SECRETS --from /media/candor-offline-A --irk-quorum --items ekv-vmk,rcp-onion
 candorctl restore data --set BS-CORE --latest --wal-until "<T0 or latest>"
 candorctl restore data --set BS-ERASURE --paired-with BS-CORE --apply-erasure-log   # destroys vault keys of every case in the signed erasure log
-candorctl ekv verify --report-missing                                             # lists cases needing Desk re-wrap (19 §11 DR-P2)
+candorctl ekv verify --report-missing                                             # lists cases needing Desk re-wrap (19 §11.2)
+candorctl ekv rewrap open --cases @missing --window 7d                            # dual approval; holders' Desks re-create wraps and K_meta fields (ADR-047(7))
 candorctl selftest run --host core --wait
 ```
 
@@ -649,7 +671,9 @@ forbidden_everywhere:
 | Backup KEK private / IRK shares | — | — | — | — | — | — | ✔ only |
 | WORM store root credentials | — | — | — | ✔ | — | — | sealed envelope |
 | Tang keys | — | — | ✔ | — | — | — | off-site Tang |
-| Staff private keys, member epoch private keys, case keys | — | — | — | — | — | ✔ | (Quorum if enabled) |
+| Staff private keys, member epoch private keys, case keys | — | — | — | — | — | ✔ (case keys also in the hardware-sealed Desk cache, ADR-047(7)) | (Quorum if enabled) |
+
+H-ALERT (`alert-relay`, r3) holds only its alert-pull mTLS client key and alert transport credentials (manifest role `alert-relay`); it holds no onion key, no collector key and nothing listed for H-MON. H-MON holds no alert transport credentials any more.
 
 ## 16. Requirements
 
@@ -698,6 +722,10 @@ forbidden_everywhere:
 | DEP-041 | EE-HA intake failover SHALL be active/passive shared-nothing: unplanned failover starts the passive on its own store after fencing; planned switchover SHALL use stop-transfer-start through the core-initiated relay; the source SHALL see "received" only after local fsync; the documented intake RTO SHALL be ≤ 10 min in 18, 19 and 21. | ADR-046(1); RVW-C-08; RVW-C-19 | THR-032, THR-011 | C-05, C-08, C-09 | TST: LT-6 (`34-PERFORMANCE-SCALABILITY.md`) plus a planned-switchover test showing no envelope loss and no intake-to-intake connection |
 | DEP-042 | MANAGED SHALL anchor the customer-visible access log to a customer-controlled witness within 15 min, SHALL support customer-side verification of the confidential-VM Sealer attestation and running manifest, SHALL register ≥ 2 External Watchers (≥ 1 outside the vendor's jurisdiction), and SHALL default `intake.tier_w.enabled` to off for high-risk tenants. | ADR-035; RVW-C-21; RVW-B-19 | THR-027, THR-026, THR-135 | C-34, C-36, C-06, C-07 | TST: log rewrite detected by the customer witness; DEMO: customer Desk rejects a mismatching attestation; INSP: tenant defaults |
 | DEP-043 | GOV-ONPREM SHALL enable the Organization Recovery Quorum by default with custodians from independent roles, disclosed on the landing page; disabling it SHALL require a recorded determination by the agency records officer. | ADR-044(3); RVW-C-14 | THR-117, THR-128 | C-28, C-19 | TST: GOV profile default; INSP: determination record when disabled |
+| DEP-044 | Installers SHALL print, and go-live SHALL require the recorded completion of, the first-contact publication checklist of §8.2 (offline publication, non-hyperlinked intranet text, C-37 first viewport and hosting), with the C-37 hosting record re-attested quarterly. | RVW-B-17; RVW-A-23; ADR-041 | THR-002, THR-036 | C-19, C-37 | INSP: checklist record; TST: go-live refuses without it |
+| DEP-045 | Publishing personal names of members for ANONYMOUS channels, and enabling an INDEPENDENT channel whose Triage Set lacks recorded independent custody, SHALL each be DANGEROUS (dual approval with OVERSIGHT, disclosed in the configuration digest). | ADR-043; RVW-B-32; ADR-046(6) | THR-020, THR-019 | C-19, C-14 | TST: config checker classes; go-live gate test |
+| DEP-046 | Every profile that enables alerts SHALL deploy H-ALERT separately from H-MON; H-MON SHALL have no uplink. | RVW-A-23; `17-INFRASTRUCTURE.md` INFRA-032, INFRA-043 | THR-104, THR-016 | C-25 | TST: `candorctl check` rule `mon.no_uplink`; INSP: site file |
+| DEP-047 | Intake restore SHALL apply BS-INTAKE's deletion list and the pushed Z-CORE replica before opening; core restore SHALL use the dual-approved Desk re-wrap for missing Erasure Keys (`19-BACKUPS-DR.md` §11, §11.2). | ADR-047(7); ADR-047(9) | THR-017, THR-042 | C-08, C-09, C-10 | TST: DEP-036 runbook lab executes both paths |
 
 ## 17. Residual risks and limitations
 

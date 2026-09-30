@@ -1,6 +1,6 @@
 # 31 — Incident Response
 
-Status: Draft v1.1 (revision round 2: ADR-034..046) · Edition applicability: both (vendor PSIRT duties apply to the Candor project and EE vendor; operator duties apply to every deployment) · Owner: Security Team (operator IR) / Candor PSIRT (vendor IR)
+Status: Draft v1.2 (final consistency pass: ADR-047, cross-document requests) · previously v1.1 (revision round 2: ADR-034..046) · Edition applicability: both (vendor PSIRT duties apply to the Candor project and EE vendor; operator duties apply to every deployment) · Owner: Security Team (operator IR) / Candor PSIRT (vendor IR)
 
 ## 1. Purpose and scope
 
@@ -34,6 +34,8 @@ This document defines incident response (IR) for Candor deployments and for the 
 | PB-18 | Recipient endpoint tampering by the organisation (MDM/EDR/IRM/VDI) |
 | PB-19 | Leadership-implicated incident (organisation as adversary) |
 | PB-20 | Notification-transport or SIEM-sink compromise |
+| PB-21 | Erasure Key Vault loss or tampering (ADR-047(7)) |
+| PB-22 | Key Directory freshness or attestation failure (channel fail-closed, ADR-047(4)) |
 
 Disaster-recovery mechanics are in `19-BACKUPS-DR.md` (DR-P*). Seizure yields are in `17-INFRASTRUCTURE.md` §8. Release and update mechanics are in `33-RELEASE-UPDATE-SECURITY.md`.
 
@@ -82,7 +84,7 @@ Research basis:
 |---|---|---|---|
 | IR Lead | Security team member on the IR rota | Declares the incident, sets severity, owns the timeline, approves evidence capture | Must not be a channel member of an affected case (avoids content bias) |
 | Platform Admin(s) | Candor admins (≥ 2) | Execute containment and rotation with `candorctl ir …` | An admin implicated in PB-06 is replaced by the Emergency Admin set |
-| Emergency Admin set | Persons appointed by OVERSIGHT (not by the admin chain), with hardware tokens sealed in a two-person safe; defined as a named role in `15-AUTHENTICATION-AUTHORIZATION.md` (cross-document request; v1.0 referred to an undefined "break-glass admin set") | Take over platform administration in PB-06 and PB-19 | Must not report to an implicated person |
+| Emergency Admin set | Persons appointed by OVERSIGHT (not by the admin chain), with hardware tokens sealed in a two-person safe; defined as the platform break-glass admin set in `15-AUTHENTICATION-AUTHORIZATION.md` §5.6 (v1.0 referred to an undefined "break-glass admin set") | Take over platform administration in PB-06 and PB-19 | Must not report to an implicated person |
 | Independent Approver | Channel OVERSIGHT, the GOV inspector general's designated independent official, or an external ombudsman/counsel (ADR-035(4), ADR-045); never a person in the management or legal reporting line of the organisation | Co-approves E-MEM of H-INTAKE and E-NET captures; holds one share of every intake capture key; receives the capture evidence precondition (§6.1) | Anyone named in the COI map for affected cases |
 | Channel Owner(s) | Recipients owning affected channels | Decide on SSN-ACCOUNT notices; case-level containment; any content-dependent assessment | COI list applies |
 | DPO / Privacy | Data protection officer | Breach-risk assessment; regulator and data-subject notification decisions | — |
@@ -140,7 +142,9 @@ Any incident involving a possible link between a person and a report is at least
 - **Chain of custody**: every artifact gets a signed custody record containing SHA-256 and BLAKE3, capture tool version, operator identities (two), and UTC time of the **staff action**. Custody records are appended to the SECURITY audit stream (THR-037).
 - **Do not enable debug or verbose logging** on Z-INTAKE during IR. Allowed alternative: `ir diagnostic mode`, which adds only allow-listed SYSTEM fields (process states, resource counters, error codes) and never request data, circuit IDs, timestamps finer than the incident window, or payloads. It auto-expires after 24 h.
 - **No new timestamps of source actions** may be derived: do not correlate intake store `received_epoch_day` with host-level artifacts (for example filesystem inode times) to reconstruct exact submission times. Where filesystem timestamps are already present in an image, the analyst SHALL NOT extract them for data paths (analysis-tool profile excludes `/var/lib/candor/intake/**` timestamp extraction).
+- **Chaff in intake images** (ADR-047(3)): intake store images contain chaff envelopes indistinguishable from real ones. Analysts SHALL NOT attempt to separate them or to count submissions from envelopes; affected-window assessments use days and import slots only.
 - **Vendor support**: support bundles follow `32-OPERATIONS.md` §8 scrubbing. Vendors never receive E-MEM, E-INTAKE, E-CASE or E-SRC.
+- **MANAGED** (ADR-047(10)): audit exports are encrypted to the customer-held audit export key, so the vendor's IR team cannot read them; the customer's IR Lead decrypts the needed audit extracts and shares only scrubbed findings with the vendor. Intake memory/packet capture on a vendor-operated intake requires the customer's independent approver as in §3 item 7, and the capture is encrypted to custodians that include a customer-side holder.
 - **Destruction**: at incident close + legal hold release, evidence is crypto-erased (destroy the IEK-wrapped DEKs) and destruction is recorded.
 
 ### 6.3 IR tooling (`candorctl ir`)
@@ -238,7 +242,7 @@ Common first steps for every playbook: (1) `candorctl ir declare`; (2) staff the
 | PRESERVE | E-SYS; E-HOST/E-INTAKE disk images; E-MEM-CORE if useful; E-MEM of intake **only** with DPO + Independent Approver approval, the evidence precondition and a published INCIDENT_NOTICE (§6.1). Freeze config. Export self-test, attestation, Platform Manifest and External Watcher history. Record T0 candidates |
 | NOTIFY | DPO; Channel Owners. If Tier W exposure is possible, SSN-GLOBAL `compromise-intake-window` with day-granular window [T0, containment]. Candor PSIRT if a product vulnerability is suspected (vendor → CRA if actively exploited). Customers/tenants (MANAGED) |
 | ROTATE | Intake: new source onion key (PB-10 procedure), SSH-onion keys, relay mTLS pair, Argon2 deployment salt (forces nothing on sources; new accounts only), monitor credentials. Core: RCP-ONION keys and client-auth keys or RCP-LAN certificates (re-enroll Desks), audit/directory signing keys if not in an HSM, backup-agent key, DB credentials, WORM agent credentials. Verify key-directory consistency: every channel/recipient key entry must carry valid Channel Identity signatures. Invalid entries mean THR-046 (key substitution), and affected channels must be re-verified by members |
-| RECOVER | DR-P4 (`19-BACKUPS-DR.md`): rebuild from clean media; restore pre-T0 sets; new golden PCRs; self-test; reopen intake; publish the resolution notice |
+| RECOVER | DR-P4 (`19-BACKUPS-DR.md`): rebuild from clean media; restore pre-T0 sets; apply the erasure log (core) and the merged intake deletion list (intake, ADR-047(9)) before serving; Desk re-wrap for missing Erasure Keys (`19-BACKUPS-DR.md` §11.2); new golden PCRs; self-test; reopen intake; publish the resolution notice |
 | LESSONS | Root-cause advisory (FPF-style detail [B-SD-20]); a regression test for each finding (R1 R-AUDIT-1); update this playbook |
 
 ### PB-03 Database stolen
@@ -462,6 +466,30 @@ PRESERVE: how the key left its boundary (manifest scan, attestation, device fore
 | RECOVER | Re-enable with pinned transport over tor |
 | LESSONS | Whether staff event export should be day-granular only (`20-LOGGING-AUDITING.md`) |
 
+### PB-21 Erasure Key Vault loss or tampering (ADR-047(7), ADR-044(4))
+
+| Phase | Actions |
+|---|---|
+| DETECT | `ekv verify` failures (AEAD mismatch against DB rows); vault volume missing or unmountable; K33 unseal failure after hardware change; RT-5/RT-7 findings; unexpected infrastructure-level copy of the vault (INFRA-037 attestation invalidated) |
+| CONTAIN | Stop serving EK-layered wraps (F5d); `candorctl ir freeze-config`; if tampering is suspected (keys substituted or deleted by an attacker), treat as PB-02 for Z-CORE in parallel |
+| PRESERVE | Vault volume image (encrypted to IEK); `ekv verify --report-missing` output (case IDs only); BS-ERASURE/BS-ERASELOG chain status |
+| NOTIFY | SECURITY_OFFICER, OVERSIGHT, Channel Owners (content-free: "case opening paused"); DPO if an infrastructure copy of the vault exists (the 14-day deletion bound failed; `35-DATA-RETENTION-DELETION.md` conditional statement) |
+| ROTATE | New K33; new Erasure Keys for every case in the missing list (never re-use a restored key for a missing case) |
+| RECOVER | DR-P10, then the dual-approved Desk re-wrap of `19-BACKUPS-DR.md` §11.2: erasure log applied first on server and Desks; holders re-create inner wraps and metadata fields; other holders verify; cases without a surviving holder go to DR-P6 |
+| LESSONS | Vault replication/backup cadence; key-holder dispersion; whether an infrastructure backup exclusion was honoured |
+
+### PB-22 Key Directory freshness or attestation failure (ADR-047(4))
+
+| Phase | Actions |
+|---|---|
+| DETECT | SYSTEM `kd_snapshot_stale` from the intake (snapshot older than 7 days by the independent time floor); Tier V clients or watchers report stale snapshots; confidential-VM attestation evidence older than 24 h; channels showing "temporarily unavailable" |
+| CONTAIN | Nothing to relax: sealing stays refused (fail closed); never push an unsigned or backdated snapshot and never disable the check. Determine the cause: relay outage, Z-CORE freeze (possible suppression, THR-020), witness cosignature shortage, time-source attack on the intake (THR-043), TEE failure |
+| PRESERVE | Relay and directory publication logs (SYSTEM), witness responses, intake time-floor records (consensus `valid-after`, Roughtime responses) |
+| NOTIFY | OVERSIGHT (a withheld directory can be suppression); Channel Owners; sources via SSN-GLOBAL if the outage exceeds 24 h, pointing to each channel's `independent_route` |
+| ROTATE | Only if the cause is a compromise (then per PB-02/PB-11) |
+| RECOVER | Publish a fresh, witness-cosigned snapshot at the next publication opportunity (an out-of-slot publication is allowed only for recovery and is recorded); confirm sealing resumes; for TEE failure, restart the sealer VM and verify fresh attestation |
+| LESSONS | Relay redundancy; witness availability; whether suppression was attempted (escalate to PB-19 if leadership-implicated) |
+
 ## 10. Exercises
 
 | Exercise | Frequency | Scope |
@@ -511,6 +539,10 @@ PRESERVE: how the key left its boundary (manifest scan, attestation, device fore
 | IR-035 | Breach scoping for persons concerned SHALL be performed by case members in their Desks via signed federated searches with completeness tracking, and SHALL never use a server-side global search. | ADR-044(5); RVW-C-14; B-CO-09 | THR-019, THR-016 | C-15, C-10 | DEMO: tabletop producing a completeness report; INSP: no server-side search route (AUTHZ-006) |
 | IR-036 | In small-organisation mode, the IR roles SHALL be staffed per §4.1, the Independent Approver role SHALL be held by the external OVERSIGHT party and SHALL NOT be waived, and the combined roles SHALL be disclosed in the Operator Statement. | ADR-045; RVW-C-09; RVW-C-22 | THR-139, THR-127 | C-19 | INSP: role register; TST: capture tool refuses when Independent Approver = IR Lead |
 | IR-037 | PB-15 SHALL be triggered when two or more members of a channel lose key access (device revocation, reimaging, suspension) within 7 days; during PB-15 no wrap deletion SHALL be executed except at the personal request of the holder. | ADR-044(1); RVW-C-03 | THR-128, THR-020 | C-22, C-25 | TST: simulated mass suspension → PB-15 alert to OVERSIGHT; pending wrap deletions blocked |
+| IR-038 | Every recovery of Z-INTAKE in any playbook SHALL apply the merged intake deletion list (BS-INTAKE copy plus the newest Z-CORE replica) before the intake serves sources, and every Z-CORE recovery SHALL apply the erasure log before serving and use only the dual-approved Desk re-wrap for missing Erasure Keys (PB-21). | ADR-047(7); ADR-047(9); ADR-044(4); RVW-A-28 | THR-017, THR-042 | C-08, C-09, C-10 | TST: 29 ST-174, ST-175; DEMO: technical drill |
+| IR-039 | A stale Key Directory snapshot or stale attestation SHALL be handled by PB-22 without relaxing the fail-closed sealing rule; any out-of-slot recovery publication SHALL be recorded and reported to OVERSIGHT. | ADR-047(4); ADR-036(6); ADR-036(7) | THR-020, THR-043, THR-046 | C-07, C-09, C-14 | TST: 29 ST-172; DEMO: tabletop |
+| IR-040 | IR analysis SHALL NOT attempt to distinguish chaff from real envelopes or derive submission counts or times from intake images. | ADR-047(3); ADR-010 | THR-011, THR-016 | C-08 | INSP: IR report review; TST: `candorctl ir` offers no envelope-count tooling |
+| IR-041 | In MANAGED, audit data used in IR SHALL be decrypted only by the customer with its customer-held audit export key, and intake memory/packet captures SHALL be encrypted to custodians including a customer-side holder. | ADR-047(10); ADR-035(4); RVW-C-21 | THR-027, THR-026 | C-24, C-36 | INSP: MANAGED IR runbook; TST: vendor-side decrypt of an audit export fails (29 ST-176) |
 
 ## 12. Residual risks and limitations
 
@@ -529,4 +561,4 @@ PRESERVE: how the key left its boundary (manifest scan, attestation, device fore
 2. The SSN template catalog needs translation and a legal review per jurisdiction pack (`26-ACCESSIBILITY.md`, `25-COMPLIANCE.md`).
 3. Warrant canary: resolved by ADR-035(2) (quorum-signed Operator Statement every 30 days; absence shown to sources). Legal review per jurisdiction remains with `25-COMPLIANCE.md`.
 4. A remote-wipe signal for Candor Desk (PB-05) needs a design in `12-FRONTEND-RECIPIENT.md` that cannot be abused by a compromised server to destroy evidence (ADR-027 malicious-server model).
-5. The INCIDENT_NOTICE entry type and its cosignature format must be defined in `04-CRYPTOGRAPHY.md` (key-directory entry types); the Emergency Admin role in `15-AUTHENTICATION-AUTHORIZATION.md`; the federated records/persons-concerned search in `35-DATA-RETENTION-DELETION.md` / `12-FRONTEND-RECIPIENT.md` (cross-document requests).
+5. The INCIDENT_NOTICE entry type and its cosignature format are owned by `04-CRYPTOGRAPHY.md` (key-directory entry types); the Emergency Admin (break-glass) set by `15-AUTHENTICATION-AUTHORIZATION.md` §5.6; the federated records/persons-concerned search by `35-DATA-RETENTION-DELETION.md` / `12-FRONTEND-RECIPIENT.md`. This document follows their final text.

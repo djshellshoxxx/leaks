@@ -1,5 +1,5 @@
 # 10 — File & Evidence Pipeline
-Status: Draft v1.1 (revision round 2: ADR-034..ADR-046) · Edition applicability: both (CE and EE identical protections; EE adds L2/L3 fleet tooling only) · Owner: Evidence & Containment team
+Status: Draft v1.2 (final consistency round: ADR-047) · Edition applicability: both (CE and EE identical protections; EE adds L2/L3 fleet tooling only) · Owner: Evidence & Containment team
 
 ## 1. Purpose and scope
 
@@ -21,6 +21,7 @@ Out of scope: file encryption format (see `04-CRYPTOGRAPHY.md`: age-style STREAM
 |---|---|
 | `DECISIONS.md` ADR-004, 007, 008, 010, 011, 012, 018, 025, 027 | binding decisions |
 | `DECISIONS.md` revision ADRs | ADR-034 (Tier W attachment staging under a per-session RAM key; final seal at Submit), ADR-038 (import slots; padded Tier W uploads; day/week display), ADR-042 (Desk platform tiers; hostile-string rendering; "rendering — not evidence"; OCR text layer), ADR-043 (independent-custody devices), ADR-045 (independent approver principle), ADR-046 §4 (upload protocol canonical in 08; per-file cap 4 GiB standard, 16 GiB EE) |
+| `DECISIONS.md` final round | ADR-047(2) (follow-up import dates only inside the encrypted case record: evidence `received_day` of follow-up attachments is never cleartext), ADR-047(3) (chaff envelopes never open on any Desk, so their parts never reach C-15 evidence handling or C-17; C-10 deletes them at their hold slot), ADR-047(7) (C-15 unwraps per-object DEKs with case keys from its hardware-sealed case-key cache; erasure-log purge also removes locally cached derivatives), ADR-047(8) (per-case metadata erasure) |
 | `04-CRYPTOGRAPHY.md` | STREAM format, per-object DEKs, case-key wrapping, signatures |
 | `06-SYSTEM-ARCHITECTURE.md` | zone model Z-VIEW, C-15/C-17/C-18 placement |
 | `11-FRONTEND-SOURCE.md` | source upload UX, Tier V scrubbing UI (§11 here specifies behaviour) |
@@ -77,7 +78,7 @@ Rule: nothing ever overwrites an evidence object. "Edit", "redact", "OCR", "extr
 | `external_refs` | list of ≤ 256 entries `{kind, value ≤ 2,048 bytes}` | hosts/URLs/UNC paths found by Stage 0/1 (§12 H3); display as inert plain text only; carried into Export Package manifests (§15 E9) |
 | `source_manifest_hash` | 32 bytes or null | SHA-256 the source client/sealer computed before encryption (§5.2) |
 | `manifest_match` | enum MATCH, MISMATCH, ABSENT | MISMATCH → case alert + evidence flagged `INTEGRITY_FAIL` |
-| `received_day` | date (UTC) | The **import slot date** (ADR-038 §1, §3), not a source-action time; for follow-up attachments, only the slot date of that import. Displayed to staff at day granularity (standard) or ISO week (HIGH) (ADR-038 §3) |
+| `received_day` | date (UTC) | The **import slot date** (ADR-038 §1, §3), not a source-action time; for follow-up attachments, only the slot date of that import, which exists only in this encrypted record (the cleartext case row keeps only `last_import_month`, ADR-047(2)). Displayed to staff at day granularity (standard) or ISO week (HIGH) (ADR-038 §3) |
 | `import_batch` | u64 | import slot number (ADR-010, ADR-038 §1) |
 | `derived_from` | list of `evid_id` | empty for ORIGINAL |
 | `xform_id` | string or null | null for ORIGINAL |
@@ -421,6 +422,7 @@ Exports are the principal path by which evidence leaves the protected environmen
 | EVID-008 | All evidence processing events (import, open at level Lx, transform, export, delete) SHALL emit CASE-class audit events containing only `evid_id`, case pseudonym, operation, containment level, actor and outcome, without filenames, hashes, sizes or types. | ADR-016 | THR-038; THR-016 | C-15; C-24 | TST: event schema test; canary filename absent from audit sink |
 | EVID-009 | The system SHALL support the full pipeline on the CE reference Desk hardware (x86-64 with KVM, 16 GB RAM) with median VIEWING_COPY time ≤ 30 s for a 20-page office document. | Design | — | C-17 | DEMO: benchmark on reference hardware per release |
 | EVID-010 | The sanitization regression corpus (formats, canaries, exploits-as-available, bombs, polyglots, beacons) SHALL run in CI for every sandbox image release, and a release SHALL be blocked on any regression. | R5 D.3 item 7; B-CR-56 | THR-023; THR-009 | C-17; C-31 | TST: CI job `sandbox-corpus`; AUD: annual review of corpus coverage (see `37-SECURITY-AUDIT-PLAN.md`) |
+| EVID-011 | On every erasure-log sync, C-15 SHALL purge all locally cached derivatives, OCR text, metadata reports, search-index entries and DEKs of each listed case before any other operation, and C-17 SHALL hold no evidence state beyond a single disposable job (ADR-047(7)). | ADR-047(7); ADR-025; ADR-033(3) | THR-017 | C-15; C-17 | TST: erase case with cached derivatives → next sync leaves no file, index entry or keystore record for it (forensic diff) |
 | FILE-037 | The Desk SHALL determine its platform tier (§6.1) at start and daily, SHALL use only the tier's hardware-isolated substrate for L1, and SHALL record the tier in every transformation record. | ADR-042; RVW-A-15 item 1 | THR-023 | C-15; C-17 | TST: containment probe suite on Linux/KVM, Qubes, Windows Hyper-V and macOS VZ reference hosts (no NIC, no shared FS, no clipboard, no device passthrough); tier recorded |
 | FILE-038 | On a host without a Tier 1/2 substrate, or when the containment probe fails, the Desk SHALL permit only CL-0/CL-1 text (answers, messages, and existing OCR text/accessible renditions of sanitized derivatives), SHALL NOT generate derivatives or display pixels, and SHALL NOT open originals except via the L3/L4 AIRGAP flow. | ADR-042; RVW-A-15 | THR-023 | C-15 | TST: gVisor-only and VDI fixtures → viewer and "Open original" disabled with reason; text preview available |
 | FILE-039 | Every pixel-reconstructed VIEWING_COPY SHALL carry an OCR text layer and a separate accessible text rendition produced inside the Stage 2 sandbox; no OCR SHALL run on the Desk host. | ADR-042; RVW-C-16; Section 508 §502 [B-CO-32] | THR-023 | C-17; C-15 | TST: every viewing copy in the corpus has a non-empty text layer (where text exists) and an OCR_TEXT object; Desk dependency check has no OCR library |
@@ -457,4 +459,4 @@ Exports are the principal path by which evidence leaves the protected environmen
 ### Open Issues for ADR revision
 
 - **ADR-012 wording ("Decryption and parsing only in C-17").** This spec conforms by performing decryption of attachment bytes in C-17 Stage 0/1 using a single per-object DEK unwrapped by C-15. C-15 still necessarily unwraps the per-object DEK (a decryption operation on key material). Proposed clarification: "Attachment *content* is decrypted and parsed only in C-17; C-15 unwraps per-object DEKs and passes one DEK per disposable job; case keys never enter C-17."
-- **ADR-025 interaction.** Evidence DEK wraps are backed up with the case database; erasure propagation to backups depends on the mechanism proposed in `35-DATA-RETENTION-DELETION.md` (Open Issues for ADR revision).
+- **ADR-025 interaction.** Resolved by ADR-033(3) and ADR-047(7)/(8): evidence DEKs are wrapped under the case key, whose stored wraps are layered under the per-case Erasure Key; destroying the Erasure Key makes backed-up DEK wraps and case metadata unreadable once vault backups age out (≤ 14 days, `35-DATA-RETENTION-DELETION.md`). Desk-local caches and derivatives are purged on the next erasure-log sync.

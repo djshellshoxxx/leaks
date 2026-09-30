@@ -1,5 +1,5 @@
 # 25 — Compliance Layer and Control Mapping
-Status: Draft v1.1 (revision round 2: ADR-034..046) · Edition applicability: both (CE: mapping and starter packs; EE: certified packs, evidence automation) · Owner: Compliance Engineering (with Legal)
+Status: Draft v1.2 (final consistency pass: ADR-047, cross-document requests) · previously v1.1 (revision round 2: ADR-034..046) · Edition applicability: both (CE: mapping and starter packs; EE: certified packs, evidence automation) · Owner: Compliance Engineering (with Legal)
 
 ## 1. Purpose and scope
 
@@ -81,8 +81,8 @@ Legend:
 | Art 9(2) oral reporting and meetings | Staff-entered reports with `channel_of_origin`; meeting-request workflow; voice upload (best-effort distortion labelled) | Staff the phone line | Workflow configuration |
 | Art 11 external channels (3 or 6 months) | Justified-extension flag | Authority procedures | SLA report |
 | Art 12(1),(4) integrity; forward without modification | Immutable originals with hashes (ADR-012); Export Package with hash manifest | Forward promptly | Custody records; manifest |
-| Art 16 identity confidentiality; notice before disclosure | Sealed Identity Store and unseal workflow with notice/deferral (ADR-014) | Legal-basis decisions | Unseal audit events |
-| Art 17 purge irrelevant data | "Mark irrelevant → purge" action (crypto-erasure, ADR-025); DEL-*. The ≤ 14-day backup bound holds **only** if infrastructure backups exclude the Erasure Key Vault (ADR-044(4); HA-018) | Triage decisions; attest backup exclusion | Deletion audit (content-free); backup-exclusion attestation |
+| Art 16 identity confidentiality; notice before disclosure | Sealed Identity Store and unseal workflow with notice/deferral (ADR-014), including identities given in IDENTIFIED mode over the onion service (ADR-047(5)) | Legal-basis decisions | Unseal audit events |
+| Art 17 purge irrelevant data | "Mark irrelevant → purge" action (crypto-erasure, ADR-025, which since ADR-047(8) also removes category, title and custom fields from backups within the same bound); DEL-*. The ≤ 14-day backup bound holds **only** if infrastructure backups exclude the Erasure Key Vault (ADR-044(4); HA-018) | Triage decisions; attest backup exclusion | Deletion audit (content-free); backup-exclusion attestation |
 | Art 18 records; transcripts with reporter check | Case register; transcript review via mailbox; see §6.1 for what retention is technically feasible | Retention policy | Register export; retention configuration; records-feasibility statement (COMP-027) |
 | Art 22 persons concerned | Confidentiality flags on subjects; COI | Subject-rights process | AUTHZ tests |
 | Art 27 statistics | Statistics export under the 24 §TEL regime (EE regulator mode) | Report to authority | Statistics report |
@@ -96,7 +96,7 @@ Legend:
 | Art 14(5)(b) deferred notice to persons concerned | Deferred-notice timer with reason | Decide deferral | Case audit (CASE class) |
 | Art 15, 15(4), 23 access and restrictions | Locating personal data is done by Desk-local search over cases the searcher can decrypt, by an authorized member or a Records Custodian with Triage-Set grants; there is no server-side search (ADR-044(5); ENT-045). DSAR restriction workflow (CE F23) | Apply national restrictions; ensure a Records Custodian is granted all in-scope cases | DSAR decision log; completeness report |
 | Art 25 privacy by design and default | No third-party resources; no telemetry by default (ADR-023); no IP logging | Keep defaults | CSP and header test reports; telemetry status |
-| Art 28 processor | MANAGED DPA template; subprocessor register; compelled-disclosure inventory incl. live capabilities (ENT-025) | Sign the DPA | DPA; subprocessor list; inventory |
+| Art 28 processor | MANAGED DPA template; subprocessor register; compelled-disclosure inventory incl. live capabilities (ENT-025); MANAGED audit exports encrypted to a customer-held key the vendor cannot read (ADR-047(10), ENT-043) | Sign the DPA | DPA; subprocessor list; inventory |
 | Art 30 ROPA | ROPA generator from the data model | Complete and maintain | ROPA export |
 | Art 32 security | CRYPTO-*, AUTH-*, BAK-*, ST- tests | Operate securely | Audit reports; test reports |
 | Art 33/34 breach notification (72 h) | IR runbook with an identity-exposure severity class (IR-*); scoping of affected **persons concerned** (accused, witnesses) is performed by case members in their Desks, because servers cannot read content (COMP-028) | Notify; keep case members reachable within 72 h | IR records; scoping attestation |
@@ -186,14 +186,15 @@ Published per release as part of the EE evidence set (COMP-026). It states where
 | Control / expectation | Conventional implementation (not used on Z-INTAKE) | Candor alternative | Residual stated in the SSP |
 |---|---|---|---|
 | Authorization boundary vs Tor | Authorize all interconnections | Tor is an **external anonymity overlay outside the boundary**; the boundary starts at C-05; content confidentiality rests on HPKE/AEAD (FIPS profile), not on Tor | Tor primitives are not FIPS-validated; Tier W plaintext crosses Tor before FIPS encryption (GOV-028 preselects Tier W off in FIPS-mandated deployments) |
-| SI-3 malicious code protection | EDR with kernel memory scanning and cloud upload | Candor-built on-host integrity and malware scanner with offline signatures via TUF, results in the C-25 schema only (per `17-INFRASTRUCTURE.md`); Platform Manifest verification (ADR-040) | Signature coverage lags commercial EDR |
+| SI-3, SI-7 malicious code protection and integrity | EDR with kernel memory scanning and cloud upload | **Candor integrity scanner** `candorctl integrity-scan` (`17-INFRASTRUCTURE.md` §5.8: files vs Platform Manifest and release digests, unit/AppArmor set, Secret Placement Manifest; signed pass/fail through the C-25 schema only), measured boot and attestation (17 §5.6), Platform Manifest verification (ADR-040) | Integrity-based detection only; no behavioural or signature-based malware coverage comparable to commercial EDR |
 | SI-4 system monitoring; AU-2/AU-12 event logging | Log forwarder shipping all access logs | ADR-016 classes; C-25 self-test; SECURITY/SYSTEM events via the scrubbed C-26 path; no access logs by design | Source-side events are deliberately not logged (SOURCE-SENSITIVE class) |
 | AU-6 review | SOC review of full logs | SOC review of coarsened staff events (ENT-047) and health bands | SOC cannot investigate individual source sessions |
 | RA-5 vulnerability scanning | Authenticated network scanner on the host | Authenticated package inventory via `candorctl` against the SBOM and advisory feeds; security floor (ADR-040) | No active network scanning of intake |
 | IR-6 incident reporting indicators | IP-based indicators | Indicators are hashes, release digests and configuration findings; source IPs never exist | Some reporting forms expect IPs |
+| SC-7, SC-8 boundary for Desk↔Core over RCP-ONION (GOV-032) | TLS termination at an authorized boundary device | The Desk API runs an **inner mutually authenticated TLS 1.3 session with CANDOR-FIPS-1 suites** end-to-end between Candor Desk and C-10 inside the onion stream; the restricted-discovery onion (RCP-ONION) is an anonymity overlay **outside** the cryptographic boundary, like the source-side Tor layer (`17-INFRASTRUCTURE.md` §4.6). SSP boundary text: "Tor/onion transport is an external overlay; the FIPS-validated module protects all Desk↔Core data in transit via the inner TLS session; no data relies on Tor cryptography for confidentiality or integrity." | Onion-layer primitives are not FIPS-validated; traffic analysis of the overlay is out of the FIPS claim |
 | Guest-invisible infrastructure (port mirroring, LUN/hypervisor snapshots, BMC console logging) | Not addressed | Signed attestations by owning teams (GOV-035; HA-018) | Attestations can be false |
 
-### 5.8 Revision controls (ADR-034..ADR-046) mapping summary
+### 5.8 Revision controls (ADR-034..ADR-047) mapping summary
 
 | ADR | Control | Primary frameworks supported |
 |---|---|---|
@@ -210,6 +211,7 @@ Published per release as part of the EE evidence set (COMP-026). It states where
 | **ADR-044** | Key-access continuity; GOV Recovery Quorum; vault DR and backup exclusion; Desk-local records search | CP-9, CP-10, MP-6, SC-12; GDPR Art 15, 17; records law (§6.1) |
 | **ADR-045** | Organisation-as-adversary controls; small-organisation mode | AC-5; ISO 37002 5 |
 | **ADR-046** | Consistency fixes (single metrics regime, config labels, update paths, KDF) | CM-6; GDPR Art 5; EU Art 27 |
+| **ADR-047** | Source App encrypted vault; follow-up dates only encrypted; chaff envelopes; 7-day Key Directory / 24 h attestation freshness; IDENTIFIED over onion (identity to Sealed Identity Store); per-locale wordlists; Desk case-key cache and re-wrap; per-case metadata erasure; intake deletion list on restore; MANAGED customer-held audit export key; constants registry | GDPR Art 5(1)(c)(e), 17, 25, 28, 32; EU Art 9(1)(a), 16; CP-9, CP-10, SC-12, SC-28, AU-9; SI-7; ISO 37002 8.3 |
 
 ## 6. Control mapping: records, accessibility, procurement, residency, privacy
 
@@ -325,7 +327,7 @@ Manifest fields:
 | COMP-022 | Advisory legal clocks (SOX 180-day, DOJ 120-day, FCA seal) SHALL be labelled "advisory reminder, not legal advice" in UI. | R6 WB-40; B-CO-17 | THR-040 | C-15 | INSP |
 | COMP-023 | The generated data-flow report SHALL list every zone, component, data category, retention and observer (including HA observers from `21-ENTERPRISE.md` §5.4 and the integrations of §8.1), the IdP as staff-timing observer where SSO is used, recipient-device custody status, and every customer attestation for guest-invisible infrastructure settings (GOV-035, HA-018). | B-CO-09 (Art 30); ADR-016; ADR-043; ADR-044(4); RVW-C-12 | THR-035 | C-19 | TST: report includes all deployed roles and attestation fields |
 | COMP-024 | Referral Export Packages SHALL carry the original's hash so that the receiving body can verify the report was not modified. | B-CO-02 (Art 12(4)); ADR-012 | THR-037 | C-15 | TST |
-| COMP-025 | Every control introduced by ADR-034..ADR-046 SHALL appear in at least one mapping row (§4–§6, §5.8), and the traceability tool SHALL fail if an ADR-034..046 control has no mapping. | ADR-034..ADR-046; RVW-B-29(f) | THR-035 | C-30 | TST: doc parser (`39-REQUIREMENTS-TRACEABILITY.md`) |
+| COMP-025 | (amended r3) Every control introduced by ADR-034..ADR-047 SHALL appear in at least one mapping row (§4–§6, §5.8), and the traceability tool SHALL fail if an ADR-034..047 control has no mapping. | ADR-034..ADR-047; RVW-B-29(f) | THR-035 | C-30 | TST: doc parser (`39-REQUIREMENTS-TRACEABILITY.md`) |
 | COMP-026 | EE SHALL publish per release the §5.7 control-tailoring and boundary annex in SSP-ready form (OSCAL where applicable). | RVW-C-12; RVW-C-15; B-CO-40; B-CO-43 | THR-016, THR-035 | C-19 | TST: OSCAL schema validation; INSP |
 | COMP-027 | The platform SHALL generate a per-deployment records-feasibility statement from live configuration, stating for each §6.1 obligation whether it is feasible and the limiting condition (e.g., Recovery Quorum disabled, vault backup-exclusion attestation missing, no Records Custodian). | ADR-044; RVW-C-14; RVW-C-06 | THR-042, THR-017, THR-040 | C-19 | TST: generator output changes with each condition fixture |
 | COMP-028 | The IR runbook and Desk SHALL support breach scoping for persons concerned (Art 33/34): case members run a Desk-local query for the affected data categories and return content-free per-case attestations, tracked for completeness against the 72 h clock. | B-CO-09 (Art 33, 34); RVW-C-14; RVW-C-22 | THR-015, THR-019 | C-15, C-10 | DEMO: tabletop; TST: attestation tracking |

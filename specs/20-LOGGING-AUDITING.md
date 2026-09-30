@@ -1,5 +1,5 @@
 # 20 — Logging and Auditing
-Status: Draft v1.1 (round-2 revision: ADR-037, 038, 045, 046) · Edition applicability: both (CE: full audit architecture, local witness option; EE: SIEM export gateway C-26, WORM export, managed witness) · Owner: Audit & Observability team
+Status: Draft v1.2 (final consistency round: ADR-047; round 2: ADR-037, 038, 045, 046) · Edition applicability: both (CE: full audit architecture, local witness option; EE: SIEM export gateway C-26, WORM export, managed witness) · Owner: Audit & Observability team
 
 ## 1. Purpose and scope
 
@@ -97,11 +97,13 @@ Payload fields not listed are forbidden. Types: `CaseRef` (pseudonymous case ID)
 | `audit.checkpoint_signed` | stream, seq_range, root |
 | `audit.witness_cosigned` / `audit.witness_failed` | witness_id, checkpoint_seq |
 | `audit.verification_failed` | stream, seq, failure_code |
-| `audit.exported` | stream, seq_range, destination_class, approvers |
+| `audit.exported` | stream, seq_range, destination_class, approvers, recipient_key_fingerprint (in MANAGED always the customer-held audit export key, ADR-047(10)) |
 | `secret.placement_violation` | host_role, secret_kind (ADR-028) |
 | `selftest.logging_violation` | host_role, check_code (e.g., TOR_LOG_ENABLED, ACCESS_LOG_PRESENT, JOURNAL_PERSISTENT) |
 | `update.applied` / `update.rejected` | component, version, reason_code |
-| `backup.completed` / `backup.restore_performed` | backup_id, scope |
+| `backup.completed` / `backup.restore_performed` | backup_id, scope, erasure_log_applied (bool), intake_deletion_list_applied (bool) (ADR-044(4), ADR-047(9)); both SHALL be true before a restored store serves |
+| `platform.mismatch` | component, expected_manifest_hash_prefix, reason_code (BELOW_FLOOR, MANIFEST_MISMATCH) (ADR-040; `07` BE-067) |
+| `ekv.rewrap_opened` / `ekv.rewrap_closed` | affected_case_bucket (1, 2–9, 10–99, ≥ 100), approvers (ADR-047(7); `19` vault-loss procedure) |
 | `tenant.created` / `tenant.deleted` (EE) | tenant |
 
 ### 5.2 CASE events
@@ -112,11 +114,11 @@ Payload fields not listed are forbidden. Types: `CaseRef` (pseudonymous case ID)
 | `case.envelope_rejected` | pending-envelope bucket, approvers (DC-12, ADR-038(6)); `ts` date-only |
 | `case.state_changed` | CaseRef, from_state, to_state |
 | `case.assigned` / `case.member_added` / `case.member_removed` / `case.member_suspended` | CaseRef, target UserRef, relation, reason_code (`REMOVED` for every removal/suspension cause incl. COI, revocation and request; `EXPIRED` for temporary-grant expiry) — COI is never distinguishable (ADR-037(3)) |
-| `case.wrap_delete_scheduled` / `case.wrap_delete_executed` | CaseRef, target UserRef, approvers, execute_after (DC-15, ADR-044(1)) |
+| `case.wrap_deletion_requested` / `case.wrap_deletion_approved` / `case.wrap_deletion_executed` | CaseRef, target UserRef, approvers, not_before_day (DC-15, ADR-044(1); `08-API.md` DA-49); generic, no reason field. Names aligned with 08 (round-2 names `case.wrap_delete_scheduled`/`_executed` withdrawn) |
 | `case.rekeyed` | CaseRef, key_generation |
 | `case.coi_attested` | CaseRef, attester UserRef |
 | `case.coi_tags_updated` | CaseRef (no count: tag sets are padded to 8, ADR-037(3); no identities) |
-| `case.coi_integrity_alert` | CaseRef, detail_code (WRAP_FOR_EXCLUDED_TAG) — raised by a member Desk; no identity |
+| `case.coi_wrap_violation` | CaseRef, detail_code (WRAP_FOR_EXCLUDED_TAG, WRAP_SET_NOT_ACL) — raised by a member Desk on sync (`04` §9.11; `19` re-wrap step 6); no identity. Replaces the round-2 name `case.coi_integrity_alert` |
 | `case.sla_reminder` / `case.sla_breached` / `case.sla_extended` / `case.sla_paused` / `case.sla_resumed` | CaseRef, timer_id, due_date |
 | `case.canary_escalated` | CaseRef or pending-envelope bucket, trigger_code (C1–C5); `ts` date-only (system actor) |
 | `case.dismiss_requested` / `case.dismiss_approved` / `case.closure_approved` / `case.reopened` / `case.referred` | CaseRef, reason_code, approver |
@@ -134,6 +136,9 @@ Payload fields not listed are forbidden. Types: `CaseRef` (pseudonymous case ID)
 | `case.disposed` | CaseRef, receipt_id |
 | `case.data_purged` | CaseRef, reason_code (EU_ART17_IRRELEVANT) |
 | `oversight.opened` | CaseRef, mode |
+| `case.rewrapped_after_vault_loss` | CaseRef, approvers (ADR-047(7)); no key IDs, no member list |
+| `case.identity_request_refused` | CaseRef, requester UserRef, refusal_code (NO_LEGAL_BASIS, NOT_NECESSARY, COI, SCOPE) (`32-OPERATIONS.md` OI-1; ADR-014) |
+| `records.search_performed` | query_hash, legal_basis_code, case_count_bucket; no terms (`12` R15, ADR-044(5)) |
 | `channel.membership_changed` / `coi_map.changed` / `sla_pack.changed` | channel_id, approvers, policy_hash, effective_date (ADR-036(2) time lock) |
 
 `case.imported` note: `received_day` and `import_slot_date` are already server-known (ADR-010, ADR-038(1)); the event carries no batch number and its `ts` is the date only, so the audit stream does not reproduce the relay timeline. The round-1 field `import_batch_bucket` is removed.
@@ -145,7 +150,8 @@ Payload fields not listed are forbidden. Types: `CaseRef` (pseudonymous case ID)
 | `sys.service_started` / `sys.service_stopped` / `sys.service_crashed` | service, version, exit_code (no core dump, no backtrace content) |
 | `sys.health` | service, status, check_code |
 | `sys.capacity` | resource (disk/mem/queue), percent_bucket (10% steps) |
-| `sys.relay_daily` | date, slots_ok, slots_failed — one event per UTC day, emitted at a fixed time; no per-pull event, no arrival count or indicator (replaces round-1 `sys.relay_pull`, RVW-B-06) |
+| `sys.relay_daily` | date, slots_ok, slots_failed, slots_overrun — one event per UTC day, emitted at a fixed time; no per-pull event, no arrival count or indicator; chaff and real envelopes are not distinguished or counted (replaces round-1 `sys.relay_pull`, RVW-B-06) |
+| `sys.relay_slot_overrun` | date, slot_index — emitted by C-09 when an import slot's processing overran `relay.slot_commit_offset` (`07` §relay step 9); `ts` date-only; never exported to SIEM or support bundles (its occurrence is volume-influenced) |
 | `sys.tor_status` | bootstrap_percent, onion_published (bool), pow_enabled (bool) |
 | `sys.job` | job_kind (RETENTION, EPOCH_ROTATE, CHECKPOINT, BACKUP), outcome |
 | `sys.clock` | drift_ms_bucket, source_count |
@@ -157,12 +163,57 @@ All release rules for these counters are those of `24-LICENSING-BUSINESS-MODEL.m
 
 | Counter | Granularity stored | Release |
 |---|---|---|
-| `submissions_received` per channel | per `received_day` in C-08 ephemeral state; aggregated to calendar month in C-24; per-day values never leave C-08 and are deleted after monthly aggregation | 24 §TEL (including its per-channel rule) |
-| `source_logins` (Tier W only; Tier V retrieval is fetch-all and unauthenticated, ADR-039) | month total per instance | 24 §TEL; never per channel |
-| `replies_delivered` | month total per instance | 24 §TEL |
-| `intake.coi_exhausted` | month total per instance | 24 §TEL (14 ROUTE-021) |
+| `submissions` per channel | `counter_month` in C-08 (current and previous month only; `09-DATABASE.md`); incremented only for real envelopes, never for chaff (ADR-047(3)) | 24 §TEL via RL-09 (including its per-channel rule) |
+| `accounts_created` | `counter_month` per channel | 24 §TEL via RL-09 |
+| `account_deletions` | `counter_month` per channel | 24 §TEL via RL-09 |
+| `source_logins`, `replies_delivered`, `submissions_received` | WITHDRAWN (final round, aligned with 07/08/09: no login or follow-up counters exist; round-2 names replaced by the three names above) | — |
+| `intake.coi_exhausted` | month total per instance (C-10) | 24 §TEL (14 ROUTE-021) |
 | abuse/flood detectors | raw values evaluated inside C-24/C-25 only | emit only `sys.health` threshold events and the global daily health band (24 §TEL); never exported as counts |
 | `pow_difficulty_level` | daily max | SYSTEM class (not source-linked), global daily band only in exports |
+
+### 5.5 Name alignment with `08-API.md`, `07-BACKEND.md`, `09-DATABASE.md` and `19-BACKUPS-DR.md` (final round)
+
+This catalog is canonical for event type names. The short names in the "Audit" column of 08 and in 07/19 are emission aliases that C-24 maps to the canonical type below; no alias creates a new field. Aliases not listed here are a CI failure (`candor-lint` event-name check, LOG-024).
+
+| Alias (08 `CLASS:name`, 07, 19) | Canonical type (this document) |
+|---|---|
+| CASE:`case_created`, CASE:`intake_triaged` | `case.imported` (`ts` date-only) |
+| CASE:`case_read` | `case.opened` |
+| CASE:`case_transition` | `case.state_changed` |
+| CASE:`case_rekeyed` | `case.rekeyed` |
+| CASE:`member_added` / CASE:`member_removed` | `case.member_added` / `case.member_removed` (`reason_code=REMOVED` for every removal cause) |
+| CASE:`wrap_deletion_requested` (+ `_approved`, `_executed`) | `case.wrap_deletion_requested` / `_approved` / `_executed` |
+| CASE:`intake_rejected` | `case.envelope_rejected` |
+| CASE:`intake_list`, CASE:`intake_read`, CASE:`intake_part_read` | `intake.listed` / `intake.envelope_read` (Triage Set actor; channel_id only; no envelope count, no per-envelope outcome, so failed trial decryptions and chaff leave no trace) |
+| CASE:`eligibility_computed` | `case.eligibility_computed` (CaseRef or channel_id; no counts, no user list) |
+| CASE:`case_list`, CASE:`evidence_list`, SEC:`user_list` | `case.listed` / `evidence.listed` / `user.listed` (actor, scope only) |
+| CASE:`evidence_read` / CASE:`evidence_removed` | `evidence.opened` / `evidence.deleted` |
+| CASE:`export_approval` / CASE:`export_delivered` / CASE:`export_downloaded`, CASE:`export_fetched` | `evidence.export_approved` / `evidence.exported` / `evidence.export_fetched` |
+| CASE:`identity_unseal_requested` / `_approved` / CASE:`identity_unsealed` | `identity.unseal_requested` / `identity.unseal_approved` / `identity.unsealed` |
+| CASE:`legal_hold_placed` / `legal_hold_released` | `legalhold.set` / `legalhold.released` |
+| CASE:`deletion_requested` / CASE:`deletion_approved` | `case.disposal_requested` / `case.disposal_approved` (then `case.disposed`) |
+| CASE:`records_read` | `records.case_read` (CaseRef; grant via `case.member_added` relation `records`) |
+| CASE:`reply_queued` | `case.message_sent` |
+| CASE:`breakglass_key_wrapped` | `breakglass.key_wrapped` |
+| CASE:`audit_viewed`, SEC:`audit_viewed` | `audit.viewed` (stream, seq_range) |
+| SEC:`login_ok`, SEC:`admin_login_*`, SEC:`logout`, SEC:`stepup`, SEC:`token_refresh` | `auth.login_succeeded`/`auth.login_failed` (audience), `auth.logout`, `auth.stepup_*`, `auth.token_refreshed` (never exported) |
+| SEC:`user_invited` / SEC:`user_disabled` | `user.created` / `user.suspended` (source MANUAL/SCIM/IDP; `cause=directory` for SCIM/HR/IdP, `15` AUTH-024) |
+| SEC:`role_assigned` / SEC:`role_revoked` | `role.assigned` / `role.revoked` |
+| SEC:`device_enroll_requested` / SEC:`device_approved` / SEC:`device_revoked` | `device.enroll_requested` / `device.enrolled` / `device.revoked` |
+| SEC:`channel_*`, SEC:`channel_roster_changed`, SEC:`coi_map_changed`, SEC:`workflow_published` | `channel.config_changed`, `channel.membership_changed`, `coi_map.changed`, `cfg.workflow_published` |
+| SEC:`config_applied` / `config_approved` / `config_cancelled`, SEC:`notif_settings_changed`, SEC:`retention_policy_*`, SEC:`recovery_quorum_change` | `cfg.changed` / `approval.granted` / `cfg.change_cancelled`; DANGEROUS keys additionally `cfg.dangerous_*` |
+| SEC:`kd_append`, SEC:`member_epoch_keys_published` / SEC:`kd_snapshot_rejected` / SEC:`epoch_destroy_ack` | `keydir.entry_published` / `keydir.snapshot_rejected` / `keydir.epoch_destroyed` |
+| SEC:`onion_rotation` | `onion.rotated` |
+| SEC:`aggregate_viewed` | `metrics.aggregate_viewed` (report_id; no values) |
+| SEC:`support_bundle_created` | `support.bundle_created` |
+| SEC:`backup_run`, SEC:`update_*` | `backup.completed`, `update.*` |
+| SEC:`breakglass_*` | `breakglass.*` |
+| SECURITY:`platform_mismatch` (07) | `platform.mismatch` |
+| SYSTEM:`relay_slot_overrun` (07) | `sys.relay_slot_overrun` |
+| `coi_wrap_violation` (19), `case.coi_integrity_alert` (round 2) | `case.coi_wrap_violation` |
+| `ekv_rewrap_opened` (19) | `ekv.rewrap_opened` |
+
+New canonical types introduced by this table carry only the fields named in the table plus the §4 envelope. **Chaff (ADR-047(3))** produces no event of any kind: its import and its deletion by C-10 at the hold slot (`09-DATABASE.md` DB-059) are silent, and no SECURITY, CASE or SYSTEM event, counter or health band distinguishes chaff from real envelopes.
 
 ## 6. Prohibited fields and data
 
@@ -244,7 +295,7 @@ flowchart LR
 |---|---|---|
 | Who opened which case/evidence, when, at which containment level | `case.opened`, `evidence.opened` | pseudonymous CaseRef/EvidRef; no content, names, hashes |
 | Who exported what, with whose approval | `evidence.exported`, `approval.*` | counts and destination classes only |
-| Were COI rules followed | `case.coi_attested`, `case.coi_tags_updated`, `case.coi_integrity_alert`, `case.member_*` | no persons-concerned identities; removals never labelled COI (P-16) |
+| Were COI rules followed | `case.coi_attested`, `case.coi_tags_updated`, `case.coi_wrap_violation`, `case.member_*` | no persons-concerned identities; removals never labelled COI (P-16) |
 | Was anyone's identity unsealed and why | `identity.unseal_*` | legal basis codes; no identity |
 | Did someone read many cases unusually (LOVEINT-style) | anomaly rules over `case.opened` rates per user (e.g., > 3× 30-day median or > 20 distinct cases/day) → alert to OVERSIGHT (REQ-H-69) | operates on staff events only |
 | Was a report suppressed | SLA/canary events, state changes, witness-checked continuity | no content |
@@ -315,9 +366,7 @@ Legal hold (35) can extend CASE retention for held cases.
 - Only SECURITY and SYSTEM events may be exported; CASE events never leave C-24 except through audit export (dual control DC-10) to an encrypted file for an auditor.
 - C-26 applies an allow-list per event type (below); it drops all other fields and events, re-serializes to the SIEM format (JSON/CEF/Syslog RFC 5424 over mTLS), and signs batches.
 
-| Event type | Exported fields |
-|---|---|
-Staff-event coarsening (RVW-B-31, RVW-C-02; resolves OI-20-3): `actor` is exported as a pseudonym `HMAC(K_siem, UserRef)` truncated to 64 bits (`K_siem` per destination, rotated yearly); `ts` of `auth.*`, `user.*`, `role.*`, `authz.denied` is truncated to the UTC **date** by default (hour = ADVANCED, exact = DANGEROUS); enterprise username mapping is DANGEROUS.
+Staff-event coarsening (RVW-B-31, RVW-C-02; resolves OI-20-3): `actor` is exported as a pseudonym `HMAC(K_siem, UserRef)` truncated to 64 bits (`K_siem` per destination, rotated yearly); `ts` of `auth.*`, `user.*`, `role.*`, `authz.denied` is truncated to the UTC **date** by default (hour = ADVANCED, exact = DANGEROUS); in the HIGH and GOV profiles precision finer than one hour is not available and exports are always batched once daily (03 META-035); enterprise username mapping is DANGEROUS.
 
 | Event type | Exported fields |
 |---|---|
@@ -390,6 +439,10 @@ Staff-event coarsening (RVW-B-31, RVW-C-02; resolves OI-20-3): `actor` is export
 | LOG-022 | SIEM export of staff events SHALL use per-destination pseudonymous actors and date-only timestamps by default, batched once daily at a fixed time, with no `operation_class`, no break-glass CaseRef or time, no Z-INTAKE-derived capacity and SYSTEM data only as global daily health bands. | RVW-B-31; RVW-C-02; ADR-046(5) | THR-011; THR-038; THR-016 | C-26 | TST: C-26 replay output inspected for time precision, pseudonyms and batch cadence |
 | LOG-023 | Candor Desk SHALL disable OS and webview crash reporting and dump upload for its processes (e.g., Windows Error Reporting LocalDumps/consent, WebView2 crash reporter, macOS ReportCrash), and SHALL set non-dumpable process flags where the OS supports them. | RVW-C-11; REQ-H-58 | THR-016; THR-013 | C-15 | TST: induced Desk and webview crash with canary content; no dump leaves the host or persists |
 | AUD-016 | In MANAGED deployments at least one audit witness SHALL be controlled by the customer (not the vendor) and SHALL cosign within 15 min. | RVW-C-21; ADR-024 | THR-026; THR-027; THR-037 | C-24 | TST: vendor-only witness configuration rejected in MANAGED profile |
+| LOG-024 | Event type names SHALL be those of §5; every emission alias in 07/08/19 SHALL map to a canonical type via §5.5, checked in CI (unknown alias → build failure). | ADR-016; ADR-047 (final-round alignment) | THR-038 | C-24 | TST: `candor-lint` event-name check over the 08 audit column and the emitters |
+| LOG-025 | Chaff envelopes SHALL NOT produce any event, counter increment, health-band change or support-bundle entry, and intake counters SHALL be `submissions`, `accounts_created` and `account_deletions` only. | ADR-047(3); ADR-046(5); RVW-B-04 | THR-110; THR-039 | C-08, C-09, C-10, C-24 | TST: chaff-only fixture month → event streams and counters identical to an idle month |
+| AUD-017 | In the MANAGED profile, audit exports SHALL be encrypted only to the customer-held audit export key (ADR-047(10)); the vendor SHALL hold no key that decrypts them, and `audit.exported` SHALL record the recipient key fingerprint. | ADR-047(10); RVW-C-21; RVW-B-19 | THR-026; THR-027 | C-24 | TST: MANAGED export with an added vendor recipient → refused; decryption with vendor keys fails |
+| AUD-018 | Every restore of the core or intake stores SHALL emit `backup.restore_performed` with `erasure_log_applied` and `intake_deletion_list_applied` true before the restored store serves; otherwise the service SHALL NOT start. | ADR-044(4); ADR-047(9) | THR-017 | C-24, C-27 | TST: restore drill with the deletion list withheld → service refuses to start |
 
 ## 16. Residual risks and limitations
 

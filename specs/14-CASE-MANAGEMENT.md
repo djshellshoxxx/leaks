@@ -1,5 +1,5 @@
 # 14 — Case Management
-Status: Draft v1.1 (round-2 revision: ADR-034..046) · Edition applicability: both (CE: full workflow, SLA engine, triage-first COI routing, anti-suppression; EE adds rule designer, multi-jurisdiction calendar packs, regulator exports) · Owner: Case Workflow team
+Status: Draft v1.2 (final consistency round: ADR-047) · Edition applicability: both (CE: full workflow, SLA engine, triage-first COI routing, anti-suppression; EE adds rule designer, multi-jurisdiction calendar packs, regulator exports) · Owner: Case Workflow team
 
 ## 1. Purpose and scope
 
@@ -15,7 +15,7 @@ Specifies the lifecycle of a report from intake to deletion: intake, classificat
 
 | Doc | Relationship |
 |---|---|
-| `DECISIONS.md` ADR-005, 008, 009, 010, 013, 014, 015, 016, 017, 018, 025, 030, 033, 036, 037, 038, 043, 044, 045, 046 | binding |
+| `DECISIONS.md` ADR-005, 008, 009, 010, 013, 014, 015, 016, 017, 018, 025, 030, 033, 036, 037, 038, 043, 044, 045, 046, **047** (final round: (2) follow-up dates encrypted, (3) chaff, (5) IDENTIFIED over onion, (7) Desk case-key cache, (8) per-case metadata erasure) | binding |
 | `10-FILE-EVIDENCE-PIPELINE.md` | evidence objects, transformations, exports |
 | `15-AUTHENTICATION-AUTHORIZATION.md` | roles (incl. RECORDS_CUSTODIAN, Triage Set relation), dual control, break-glass, wrap-deletion cooling-off |
 | `20-LOGGING-AUDITING.md` | CASE-class events (date-only import events, no COI reason codes) |
@@ -39,13 +39,15 @@ Server-visible (C-12, cleartext; minimal; exact schema in `09-DATABASE.md`):
 | `tenant_id`, `channel_id` | channel choice is inherent to routing (residual §16) |
 | `state`, `flags` | §4 |
 | `received_day` | UTC date recorded by the intake at arrival (ADR-010); for delayed delivery (ADR-038(4)) the release date |
-| `import_slot_date` | UTC date of the fixed relay import slot (ADR-038(1)); never a time of day, never a batch time |
+| `import_slot_date` | UTC date of the fixed relay import slot of the **initial** report (ADR-038(1)); never a time of day, never a batch time. `case.received_date` shown to staff = this date |
+| `last_import_month` | `YYYY-MM` of the most recent follow-up import (ADR-047(2)); the only cleartext trace of follow-ups. Follow-up import dates are stored only inside the encrypted case record |
+| metadata ciphertexts | category label, case title and tenant-defined custom fields that C-10 must read for workflow, stored only as Record AEAD ciphertext under `K_meta` derived from the case's Erasure Key inside the vault (ADR-047(8); `04-CRYPTOGRAPHY.md` §9.10a); unreadable in DB and backup copies once the Erasure Key is destroyed and vault backups have aged out (≤ 14 days) |
 | SLA timer rows | anchor dates, due dates, status, `timer_id` |
 | ACL rows | user IDs and relation of current members |
 | COI exclusion tags | exactly 8 blinded tags per case, `HMAC(K_case_excl, user_id)` with `K_case_excl = HKDF(case_key, "candor/coi-excl/v1")`, real tags padded with random tags (ADR-037(3)); no user ID, role, source enum or reason stored in cleartext |
 | approval records, legal-hold reference, retention class | |
 
-Removed from the server-visible set by this revision: envelope recipient key IDs (none exist in cleartext, ADR-033(1)); `import_batch` and any batch time (ADR-033(4), ADR-038(1)); cleartext COI exclusion rows (ADR-037(3)); `last_staff_activity_day` (the OVERSIGHT register derives "days since last staff activity" at computation time from CASE audit events and does not store it per case, RVW-B-33(b)); per-case lists of follow-up days (ADR-038(3)).
+Removed from the server-visible set by this revision: envelope recipient key IDs (none exist in cleartext, ADR-033(1)); `import_batch` and any batch time (ADR-033(4), ADR-038(1)); cleartext COI exclusion rows (ADR-037(3)); `last_staff_activity_day` (the OVERSIGHT register derives "days since last staff activity" at computation time from CASE audit events and does not store it per case, RVW-B-33(b)); per-case lists of follow-up days and any cleartext follow-up import date (ADR-038(3), ADR-047(2)); cleartext category/title/custom-field columns (now `K_meta` ciphertext, ADR-047(8)).
 
 Encrypted case record (case key; see `04-CRYPTOGRAPHY.md`): report text, questionnaire answers, category (fine-grained and `category_class` for ANONYMOUS reports), persons concerned, the source's COI ticks and their origin (source selection / COI map / triage finding), detriment-risk assessment, investigation plan, notes, evidence records (10 §4), custody log (§10), decision, remediation actions, source messages and each message's day (or ISO week, §11).
 
@@ -57,7 +59,7 @@ Encrypted case record (case key; see `04-CRYPTOGRAPHY.md`): report text, questio
 
 | State | Meaning | ISO 37002 | Who sees content |
 |---|---|---|---|
-| `PENDING_IMPORT` | Envelope(s) pulled by C-09 at a fixed import slot but not yet imported by a Triage Set Desk; server knows only the channel, `received_day` and `import_slot_date` (no recipient identities: anonymous slots, ADR-033(1)) | 8.1 | nobody (ciphertext) |
+| `PENDING_IMPORT` | Envelope(s) pulled by C-09 at a fixed import slot but not yet imported by a Triage Set Desk; server knows only the channel, `received_day` and `import_slot_date` (no recipient identities: anonymous slots, ADR-033(1)). Chaff envelopes (ADR-047(3)) are listed like real ones but never become cases: C-10 deletes them at their hold slot using the core-held Chaff Disposition Key, without a distinguishing event (`04-CRYPTOGRAPHY.md` §12.7; `09-DATABASE.md` DB-059), and they are not counted anywhere | 8.1 | nobody (ciphertext) |
 | `NEW` | Imported by a Triage Set member; case key created and wrapped to the eligible Triage Set members only | 8.1 | eligible Triage Set |
 | `TRIAGE` | Classification, scope, detriment-risk assessment, COI check, decision on further investigators | 8.2 | Triage Set |
 | `ASSESSMENT` | Assigned case lead decides whether and how to investigate | 8.2 | case members |
@@ -71,7 +73,7 @@ Encrypted case record (case key; see `04-CRYPTOGRAPHY.md`): report text, questio
 | `RETAINED` | Closed/dismissed, awaiting disposal date (may carry `LEGAL_HOLD`) | 7.5 | per retention policy |
 | `DISPOSED` | Crypto-erased; tombstone only | 7.5 | nobody |
 
-Overlay flags (not states): `LEGAL_HOLD`, `SEALED_MATTER` (e.g., qui tam seal), `IDENTITY_SEALED` (ADR-014), `COI_ALERT`, `CANARY_ESCALATED`, `SLA_BREACH`, `BREAK_GLASS_ACTIVE`, `HIGH_DETRIMENT_RISK`, `RESTRICTED_OVERSIGHT` (§9.5), `HOLDER_SUSPENDED` (§8.5).
+Overlay flags (not states): `LEGAL_HOLD`, `SEALED_MATTER` (e.g., qui tam seal), `IDENTITY_SEALED` (ADR-014), `COI_ALERT`, `CANARY_ESCALATED`, `SLA_BREACH`, `BREAK_GLASS_ACTIVE`, `HIGH_DETRIMENT_RISK`, `RESTRICTED_OVERSIGHT` (§9.5), `HOLDER_SUSPENDED` (§8.5), `EK_MISSING` (§9.6, ADR-047(7)).
 
 ### 4.2 Transitions
 
@@ -238,7 +240,10 @@ Case key wrapping to U happens only after (1)–(6) pass. Each case SHALL have �
 - **Member Epoch Keys (ADR-030):** each Triage Set member's Desk pre-publishes signed X-Wing epoch keys (7-day epoch, 14-day decrypt window, 4 epochs ahead) in C-14, at the channel's fixed weekly publication slot (ADR-036(7)).
 - **Eligible Triage Set (ETS):** Triage Set members minus members whose role labels the source ticked in the COI checklist, minus members excluded by the tenant COI map for flags the source set. The filter runs in the Tier V client or in C-07 (Tier W) in RAM, **before** wrapping. The envelope content key is wrapped **only** to ETS members' current MEKs. Excluded members and all non-triage members hold no key that decrypts the envelope, even with full database access.
 - **Recipient slots (ADR-033(1)):** the cleartext envelope header carries exactly 16 fixed-size anonymous HPKE slots (real + dummy, randomly ordered) and **no recipient key IDs**. The authoritative recipient list (key IDs + directory tree head) is inside the AEAD-protected payload, signed by the Tier V client or the sealer, and is verified by the importing Desk against C-14.
-- **Fail closed:** if the ETS is empty, the source is shown the channel's declared **independent alternative channel** (a channel whose Triage Set cannot be fully excluded by the same ticks) and external-reporting information (EU Art 9(1)(g)); the envelope is never encrypted to fewer or other parties than the policy requires (ROUTE-004, ROUTE-021).
+- **Fail closed:** if the ETS is empty, the source is shown the channel's declared **independent alternative channel** (`independent_route`: a channel whose Triage Set cannot be fully excluded by the same ticks; listed first on `11` S04b-X) and external-reporting information (EU Art 9(1)(g)); the envelope is never encrypted to fewer or other parties than the policy requires (ROUTE-004, ROUTE-021). The same `independent_route` is named in the follow-up fail-closed text (§8.6) and in COI-exhaustion handling at triage: if the Triage Set finds that every member able to investigate is conflicted, it routes the case to `independent_route` (re-wrap by a Triage Set Desk, §4.2 route transition) and the `intake.coi_exhausted` counter is incremented (ROUTE-021; released only under 24 §TEL).
+- **Chaff and trial decryption (ADR-047(3)):** the Intake Sealer writes format-identical undecryptable chaff envelopes at a constant Poisson rate into the same store. A Triage Set member's Desk therefore routinely fails to open pending envelopes, so a failed trial decryption does not tell a member that they were excluded; Desks neither list nor count envelopes they cannot open (`12` RUI-075). Chaff is deleted by C-10 at its hold slot (before any 14-day DC-12 eligibility) and never enters DC-12 rejection, SLA timers, metrics or the OVERSIGHT register.
+- **Channel population (RVW-B-10):** every channel declares a `population_estimate` (people who could plausibly use it). Channels with an estimate < 50 are shown in admin, SOC and metrics views only inside a declared channel group (24 TEL-016). For ANONYMOUS-mode channels, `routing_visible` questionnaire fields are prohibited unless the field is an enumeration in which every value has a declared population ≥ 50 (21 ENT-007); such values are stored only inside the encrypted case record.
+- **EE rule sets (21 ENT-003):** EE routing rule sets are signed declarative data evaluated by the AGPL rule evaluator in the Triage Set member's Desk at import (together with `routing_visible` values and category rules, ROUTE-022), after COI exclusions; the server never evaluates rules over report content.
 - **Wider access after triage (ADR-037(2)):** only a Triage Set member's Desk wraps the case key to further investigators, after its COI assessment. Non-triage members never list, receive notifications for, or trial-decrypt intake envelopes, and channel dashboards for non-triage roles show no intake counts.
 - **COI map:** signed tenant policy (ROUTE-008, ROUTE-019) mapping *subject role* → *excluded role labels* → *suggested alternative channel*. Published in C-14 inside the channel descriptor. Loosening changes are time-locked (§8.8).
 
@@ -279,7 +284,7 @@ The relational subject "Source's direct manager" of the round-1 template is **re
 1. On import, the Triage Set Desk reads the source's ticks and the COI-map exclusions from inside the envelope, computes `HMAC(K_case_excl, user_id)` for every excluded user, and stores the tags padded to 8 (ADR-037(3)). Members so excluded can never be added (ROUTE-012).
 2. The Triage Set records `persons_concerned` (encrypted) and checks reporting-line conflicts using HR data held outside Candor or by the triage member (ADR-037(2)). Candor does **not** ingest SCIM `manager` chains for automatic exclusion (15).
 3. Additional exclusions (named persons, self-declared recusals) are added as blinded tags by the Triage Set Desk; C-22 checks candidate grantees blindly: the granting Desk supplies the candidate's tag, C-22 tests set membership (ADR-037(3)).
-4. Every member Desk verifies on each sync that no wrap exists for a user whose tag is in the set and raises a SECURITY alert (`case.coi_integrity_alert`, no identity) otherwise.
+4. Every member Desk verifies on each sync that no wrap exists for a user whose tag is in the set and raises a SECURITY alert (`case.coi_wrap_violation`, no identity) otherwise.
 5. If a current case member is found to be conflicted, the Triage Set suspends them (§8.5).
 6. Only after (1)–(5) does a Triage Set Desk wrap the case key (ADR-008) to further investigators (§7).
 
@@ -291,7 +296,7 @@ On exclusion or revocation of member X from case C:
 3. **Wrap deletion** (irreversible) requires dual control (DC-15, 15), a 7-day cooling-off and a content-free OVERSIGHT notice, except for source-requested erasure and retention-expiry disposal (35). SCIM/HR/IdP-driven changes can only suspend (15 AUTH-012).
 4. A removal that would leave fewer than 2 key holders is blocked until a replacement wrap exists.
 5. Events: `case.member_removed` with `reason_code=REMOVED` for every cause (COI, revocation and request are not distinguished, ADR-037(3)); `case.rekeyed`.
-6. X's Desk receives a revocation tombstone and purges cached case material on next sync.
+6. X's Desk receives a revocation tombstone and purges its case-key cache entry (ADR-047(7)) and cached case material on next sync.
 
 ### 8.6 Follow-up sealing rule (ADR-036(4))
 
@@ -362,6 +367,7 @@ Epoch-key interaction (ADR-033(2), ADR-038(6)): Member Epoch private keys are no
 
 - C-10 warns the Triage Set content-free when all key holders of a case share the same `site` attribute (`case.key_holder_site_diversity`, RVW-C-19) or when a case has fewer than 2 unsuspended key holders.
 - Channel epoch-key runway alerts (fewer than 2 eligible Triage Set MEKs valid for the next 14 days) go to the channel owner **and** OVERSIGHT (RVW-C-18).
+- **Desk case-key cache and vault loss (ADR-047(7)):** each key holder's Desk keeps a hardware-sealed cache of the case keys it is authorized for (`04-CRYPTOGRAPHY.md` §9.10) and applies the signed erasure log on every sync (erased cases purged locally). After an Erasure Key Vault restore or loss, C-10 flags affected cases `ek_missing` (overlay flag, no content) and creates a fresh Erasure Key; any current holder's Desk re-creates the wraps and metadata ciphertexts from its cache with a second holder or OVERSIGHT approving (`12` §4.3 R16), emitting `case.rewrapped_after_vault_loss` (content-free). A case with no remaining cached holder is treated as lost (records-law note in 35).
 
 ## 10. Chain of custody
 
@@ -397,6 +403,7 @@ Staff-action `ts` inside the encrypted custody log may be exact (ADR-046(11)); I
 - Staff messages are signed by the case (channel identity) — individual staff names are not shown to sources unless configured.
 - Oral reports and meetings (EU Art 9(2), 18(2)–(4)): transcript/minutes stored as TRANSCRIPT evidence; the source can review and confirm via mailbox; confirmation recorded.
 - **Self-identification in a message (RVW-B-15):** when a member records that a source message contains identifying self-disclosure, the Desk immediately seals the passage to the Identity Custodians (ADR-014), replaces it in the case copy with "[identity sealed]", re-encrypts, excludes it from export templates, and sets the mode label to "CONFIDENTIAL (identity seen by case team)" if any member already opened the message. The mailbox notice tells the source which role labels have seen it.
+- **IDENTIFIED mode, including over the onion (ADR-047(5)):** the identity block goes to the Sealed Identity Store (ADR-014) exactly as for CONFIDENTIAL. Because the source chose to be named to the handlers, the case lead requests release through the normal unseal flow (`12` R11) with the legal basis `SOURCE_CONSENT_IDENTIFIED` pre-filled and no source-notice deferral; the two-custodian approval of ADR-014 still applies, and the case header shows the IDENTIFIED mode badge.
 - **Mailbox-closed signal (RVW-B-26):** a source's mailbox deletion reaches the case only as "mailbox closed during ISO week W", released by the intake after a uniformly random 3–21 day delay (35 §9).
 - **Intermediary mode (optional, RVW-B-23):** for channels flagged HIGH, the tenant MAY require that non-triage investigators work from a Triage-Set-written **Case Brief** (paraphrased, encrypted) instead of the source's raw text and files, which stay with the Triage Set.
 
@@ -482,12 +489,17 @@ Metrics are computed by C-10 from server-visible fields plus values that case le
 | ROUTE-014 | (amended) Triage Set Desks SHALL pre-publish Member Epoch Keys at least 4 epochs ahead at the channel's weekly publication slot, and C-10 SHALL warn per CASE-038 when fewer than 2 eligible Triage Set MEKs will be valid within 14 days. | ADR-030; ADR-036(7) | THR-032 | C-15; C-10; C-23 | TST: expiring-key fixture triggers warning 14 days ahead to owner and OVERSIGHT |
 | ROUTE-015 | Each channel SHALL define a Triage Set of ≥ 2 members holding independent-body role labels (or channel owner + OVERSIGHT where none exist); only Triage Set members SHALL publish MEKs for the channel, and the Channel Identity Key SHALL be held only by the Triage Set and OVERSIGHT. | ADR-037(1); ADR-036(1); RVW-B-02; RVW-A-05 | THR-020; THR-046 | C-14; C-15; C-22 | TST: channel activation with < 2 triage members rejected; MEK publication by non-triage member rejected; CIK wrap list = Triage Set ∪ OVERSIGHT |
 | ROUTE-016 | Non-triage members SHALL NOT list, receive notifications about, fetch slot blocks of, or trial-decrypt intake envelopes, and SHALL see no intake counts for the channel. | ADR-037(2); RVW-B-04; RVW-A-18 | THR-020 | C-10; C-15; C-22 | TST: non-triage Desk API calls for pending envelopes return 403; dashboards show no intake counts |
-| ROUTE-017 | COI exclusions SHALL be stored only as exactly 8 blinded tags per case (`HMAC(K_case_excl, user_id)`, random padding), C-22 SHALL check candidate grantees by blind membership test, and every member Desk SHALL verify on sync that no wrap exists for an excluded user and raise `case.coi_integrity_alert` otherwise. | ADR-037(3); RVW-B-01 | THR-020; THR-015; THR-038 | C-12; C-15; C-22 | TST: DB dump contains no cleartext excluded IDs and always 8 tags; planted wrap for excluded user raises alert |
+| ROUTE-017 | COI exclusions SHALL be stored only as exactly 8 blinded tags per case (`HMAC(K_case_excl, user_id)`, random padding), C-22 SHALL check candidate grantees by blind membership test, and every member Desk SHALL verify on sync that no wrap exists for an excluded user and raise `case.coi_wrap_violation` otherwise. | ADR-037(3); RVW-B-01 | THR-020; THR-015; THR-038 | C-12; C-15; C-22 | TST: DB dump contains no cleartext excluded IDs and always 8 tags; planted wrap for excluded user raises alert |
 | ROUTE-018 | Follow-up messages SHALL be sealed only to members in the original report's eligible Triage Set who are still Triage Set members; later members SHALL obtain access only through an audited case-key wrap by the Triage Set, and importing Desks SHALL reject follow-ups whose inner recipient list is not a subset of that intersection. | ADR-036(4); RVW-A-06 | THR-020; THR-046 | C-03; C-07; C-15 | TST: member added after the original report holds no follow-up slot; follow-up with superset recipient list raises alert |
 | ROUTE-019 | Roster additions, Triage Set additions, role-label changes and COI-map loosening SHALL take effect for sealing only after a 72 h time lock (GOV/HIGH: 7 days) from log inclusion; removals and tightening SHALL take effect immediately. | ADR-036(2); RVW-A-05; RVW-C-05 | THR-046; THR-020 | C-14; C-07; C-03; C-10 | TST: sealer ignores a pending addition until lock expiry; removal effective at next snapshot |
 | ROUTE-020 | Channel directory publications (MEKs, roster and label changes) SHALL be batched to a fixed weekly publication slot and SHALL carry day-only dates. | ADR-036(7); RVW-A-29; RVW-B-32 | THR-011; THR-020 | C-14; C-15 | TST: directory append times fall only in weekly slot; entry dates have no time component |
 | ROUTE-021 | Each channel SHALL declare an independent alternative channel whose Triage Set cannot be fully excluded by the same COI ticks, shown to the source when the ETS is empty; C-10 SHALL maintain an `intake.coi_exhausted` counter released only under 24 §TEL. | ADR-037(1); RVW-C-18 | THR-020; THR-032 | C-10; C-14; C-06; C-03 | TST: channel activation without alternative rejected; exhausted-selection fixture shows alternative |
 | ROUTE-022 | Category-dependent routing for ANONYMOUS reports SHALL be evaluated in the Triage Set Desk at import, never by server-side rules over a cleartext category. | RVW-B-10; ADR-037(2) | THR-015; THR-039 | C-15; C-10 | TST: server rule engine rejects category rules on ANONYMOUS channels |
+| CASE-040 | Follow-up import dates SHALL be stored only inside the encrypted case record; the cleartext case row SHALL carry only `import_slot_date` of the initial report and `last_import_month`. | ADR-047(2); RVW-B-11 | THR-011; THR-015 | C-10; C-12 | TST (30 AT-081): DB/backup dump after 5 follow-ups on different days shows only month granularity |
+| CASE-041 | Category label, case title and custom fields that C-10 must read SHALL be stored only as `K_meta` ciphertext derived from the case Erasure Key (ADR-047(8)); after Erasure Key destruction they SHALL be unreadable in DB and backup copies within the ≤ 14-day vault-backup bound. | ADR-047(8); RVW-B-21; ADR-033(3) | THR-017; THR-015 | C-10; C-12 | TST: erase case → DB and restored backup show ciphertext only; after 14 days no vault backup can open it |
+| CASE-042 | Chaff envelopes SHALL never become cases, SHALL be excluded from DC-12 rejection, SLA timers, metrics and registers, and Desks SHALL treat unopenable pending envelopes as normal (no list, count or alert). | ADR-047(3); RVW-B-04; RVW-A-18 | THR-020; THR-110 | C-10; C-15 | TST: chaff fixture → no case, no counter change; excluded member's Desk state identical to non-excluded |
+| CASE-043 | After an Erasure Key Vault restore or loss, affected cases SHALL be flagged `EK_MISSING` and restored only by dual-approved Desk re-wrap from a holder's cached case key with key confirmation; cases without any cached holder SHALL be reported as lost. | ADR-047(7); ADR-044(4); RVW-C-07 | THR-042 | C-10; C-15 | DEMO: vault-loss drill (19) restores all cases with a cached holder; audit shows content-free events |
+| CASE-044 | Each channel SHALL declare `population_estimate`; channels < 50 SHALL appear only in channel groups in admin, SOC and metrics views, and ANONYMOUS-mode channels SHALL NOT use `routing_visible` fields except enumerations whose every value has population ≥ 50. | RVW-B-10; 21 ENT-007; 24 TEL-016 | THR-039; THR-015 | C-10; C-19 | TST: channel config with population 20 → absent as own dimension; non-compliant `routing_visible` field rejected |
 
 ## 16. Residual risks and limitations
 
@@ -509,7 +521,7 @@ Metrics are computed by C-10 from server-visible fields plus values that case le
 2. OI-14-2: Resolved by ADR-037(2): no automated manager-chain COI; reporting-line checks by the Triage Set using HR data held outside Candor.
 3. OI-14-3: Source-visible status values may leak case outcome to someone who seizes the source's passphrase (THR-034); decide default granularity with `05-SOURCE-OPSEC.md`.
 4. OI-14-4: "At least one independent body exists and is not captured" is only partly covered by ASM-043/ASM-045; propose a dedicated assumption in `40-SECURITY-ASSUMPTIONS.md` covering the Triage Set.
-5. OI-14-5: Chaff envelopes (RVW-B-04 fix 1, RVW-A-18 fix 2) are not adopted by ADR-037/038; with triage-first routing the excluded-member oracle is limited to Triage Set members. Revisit if Triage Sets are large.
+5. OI-14-5: Resolved by ADR-047(3): chaff envelopes adopted (§8.1); failed trial decryption is normal for Triage Set members. The post-import ACL inference (§16 item 1) remains.
 
 ### Open Issues for ADR revision
 

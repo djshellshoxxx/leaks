@@ -1,5 +1,5 @@
 # 26 — Accessibility and Internationalization Specification
-Status: Draft v1.1 (revision round 2: ADR-034..ADR-046) · Edition applicability: both (conformance target identical; EE adds third-party audit and formal ACR) · Owner: Accessibility & Localization team (with Source Safety content owners and Security Architecture)
+Status: Draft v1.2 (final consistency round: ADR-047) · Edition applicability: both (conformance target identical; EE adds third-party audit and formal ACR) · Owner: Accessibility & Localization team (with Source Safety content owners and Security Architecture)
 
 ## 1. Purpose and scope
 
@@ -31,7 +31,7 @@ It covers:
 | `25-COMPLIANCE.md` | ACR/VPAT deliverables (COMP-020), regime mapping |
 | `01-PRODUCT-REQUIREMENTS.md` | PRD-048 (≥ 10 locales incl. RTL at 1.0; language in URL path), PRD-051 (WCAG 2.2 AA + EN 301 549), §7.7 (EN/FR staff parity) |
 | `27-SECURE-DEVELOPMENT.md`, `28-SUPPLY-CHAIN.md` | CI gates; Weblate as a supply-chain input |
-| `DECISIONS.md` | ADR-003 (no fingerprinting), ADR-004 (no-JS Tier W), ADR-005 (EFF wordlist), ADR-010 (day dates), ADR-023 (no telemetry), ADR-026 (no CAPTCHA); revision ADRs: ADR-034 (RAM-only Tier W drafts, 20 min idle / 2 h absolute, passphrase confirmation), ADR-038 §3 (day/ISO-week dates for staff), ADR-042 (OCR text layer produced inside the sandbox for accessibility of the pixel viewer; RVW-C-16) |
+| `DECISIONS.md` | ADR-003 (no fingerprinting), ADR-004 (no-JS Tier W), ADR-005 (EFF wordlist; per-locale wordlists permitted by ADR-047(6)), ADR-010 (day dates), ADR-023 (no telemetry), ADR-026 (no CAPTCHA); revision ADRs: ADR-034 (RAM-only Tier W drafts, 20 min idle / 2 h absolute, passphrase confirmation), ADR-038 §3 (day/ISO-week dates for staff), ADR-042 (OCR text layer produced inside the sandbox for accessibility of the pixel viewer; RVW-C-16) |
 | `10-FILE-EVIDENCE-PIPELINE.md` | OCR text layer and accessible text rendition of sanitized copies (§5.3, FILE-039) |
 | `15-AUTHENTICATION-AUTHORIZATION.md` | Staff authentication accommodations (§4.7) |
 
@@ -101,13 +101,13 @@ It covers:
 | 2.5.3 Label in Name | Visible label text is at the start of each accessible name (speech input). | all |
 | 2.5.7 Dragging Movements | Redaction box drawing has keyboard and coordinate alternatives (`12` R07). No other drag-only interactions. | C-15 |
 | 2.5.8 Target Size (Min) | ≥ 24×24 CSS px everywhere. Source UI primary controls ≥ 44×44. | all |
-| 3.1.1 / 3.1.2 Language of Page/Parts | `<html lang>` per locale. The passphrase is `lang="en"`. User-generated content has no `lang` (unknown) but gets `dir="auto"`. | all |
+| 3.1.1 / 3.1.2 Language of Page/Parts | `<html lang>` per locale. The passphrase carries the `lang` of its wordlist (EN for the default EFF list; ADR-047(6)). User-generated content has no `lang` (unknown) but gets `dir="auto"`. | all |
 | 3.2.3 / 3.2.4 Consistent Navigation / Identification | Same footer order; same labels for the same functions across pages and locales. | all |
 | 3.2.6 Consistent Help | Help, Safety guide and "How this site protects you" links are in the same place on every source page. Desk Guide in the same nav position. | C-06, C-15 |
 | 3.3.1 / 3.3.3 Error Identification / Suggestion | Error summary + inline messages that say how to fix the error. | all |
 | 3.3.4 Error Prevention | S08 Review before submit; S13 and admin DANGEROUS confirmations; export wizard review. | C-06, C-15, C-19 |
 | 3.3.7 Redundant Entry | Draft retains all answers. Review reuses answers. Recipients never re-enter case data. | all |
-| 3.3.8 Accessible Authentication (Min) | Source passphrase: paste allowed, one-field or 10-box layout, no transcription tests, no CAPTCHA (ADR-026). Staff: WebAuthn hardware keys and PIN (no cognitive test). | C-06, C-03, C-15 |
+| 3.3.8 Accessible Authentication (Min) | Source passphrase: paste allowed, one-field or `n`-box layout (10 for the default list, ADR-047(6)), no transcription tests, no CAPTCHA (ADR-026). Staff: WebAuthn hardware keys and PIN (no cognitive test). | C-06, C-03, C-15 |
 | 4.1.2 Name, Role, Value | Native controls. ARIA only where native is impossible (Desk grids), following the ARIA Authoring Practices patterns. | all |
 | 4.1.3 Status Messages | Tier W: results are new pages with `<h1>` stating the outcome; the error summary receives focus. Desk/App: `role="status"`/`aria-live`. | all |
 
@@ -262,8 +262,12 @@ flowchart LR
 - Other languages: CEFR B1 target, checked by the native reviewer using the plain-language checklist (short sentences, common words, active voice). An automated formula is used where a validated one exists for the language (e.g., Kandel-Moles for French, Knowledge (unverified)).
 - Comprehension studies (`05` §9) include ≥ 2 non-English locales per major release.
 
-### 12.7 Passphrase wordlist
-ADR-005 fixes the EFF large English wordlist for all locales. The UI treats the passphrase as English text (`lang="en"`, LTR) and provides a spelled-out view. The accessibility and memorability impact for non-English speakers is an open ADR issue (§16).
+### 12.7 Passphrase wordlists (ADR-047(6))
+ADR-047(6) permits per-locale wordlists; the EFF large English list (7,776 words, 10 words) remains the default and fallback.
+- **Admission of a locale list** (release-blocking gate, owned by the localization lead with a native-speaker reviewer and the security team): (1) every word is unambiguous in the language (no homophones, no words differing only by diacritics or case after normalization, no two words with a common 3-letter prefix where feasible, B-SD-17 practice); (2) no offensive, political, religious, sexual or distressing words (reviewed by ≥ 2 native speakers); (3) words of 3–9 characters, common vocabulary (CEFR ≤ B2); (4) the word count is `n = ceil(128 / log2(list_size))`, so entropy ≥ 128 bits (for example 10 words for 7,776 entries, 11 words for 4,096 entries); (5) every word is stable under the ADR-047(6) normalization (NFKC, lowercase, single spaces), and no two words collide after it. The review record (reviewers, date, list hash) ships with the signed release; unreviewed lists cannot be enabled (`13` AUI-038).
+- **Rendering:** the passphrase is LTR in a `<bdi dir="ltr">` isolate with the list's `lang`, including in RTL layouts; the spelled-out view uses the list's script.
+- **Privacy:** the wordlist language is not stored server-side and is not a separate login field; login validation tries the enabled lists (`11` S11), so a source's language is not recorded by the choice of list.
+- **Accessibility effect:** sources type words in their own language, which removes the foreign-language memory burden; the number of words may rise for smaller lists (stated on S10 as "{n} words").
 
 ## 13. Testing plan
 
@@ -334,7 +338,7 @@ Results record the AT version, browser or webview version, Tor Browser version a
 | A11Y-009 | Focus indicators SHALL be ≥ 3 px, ≥ 3:1 contrast, never removed, and never obscured by sticky or fixed content. | WCAG 2.4.7, 2.4.11, 2.4.13; B-CO-28 | — | all UI | TST; INSP |
 | A11Y-010 | Target sizes SHALL be ≥ 24×24 CSS px on all surfaces, and ≥ 44×44 for source UI primary controls. | WCAG 2.5.8; B-CO-28 | — | all UI | TST: layout audit script |
 | A11Y-011 | Time limits SHALL follow accessibility decision AD-01: Tier W idle limit (20 min) warned 5 min in advance with a single-action, unlimited "Stay" within the 2 h absolute limit; the absolute limit warned 10 min in advance and stated in static text on every page (Essential exception, ADR-034); text posted after expiry kept in RAM for 20 min and restored after login. Desk lock SHALL warn 60 s in advance and preserve work. The v1.0 "drafts persist ≥ 20 h" rule is withdrawn (amended, ADR-034). | WCAG 2.2.1, 2.2.5, 2.2.6; ADR-034; RVW-A-02; B-CO-28 | THR-032, THR-015 | C-06, C-15, C-19 | TST: `11` SUI-011/SUI-012/SUI-061; `12` RUI-053; DEMO: NVDA/Orca walkthrough of both warnings |
-| A11Y-012 | Source and staff authentication SHALL not require cognitive function tests. The source passphrase field SHALL allow paste and offer a one-field and a 10-box layout. There SHALL be no CAPTCHA on any surface. | WCAG 3.3.8; ADR-026; R6 §C | THR-034 | C-06, C-03, C-15, C-21 | TST; INSP |
+| A11Y-012 | Source and staff authentication SHALL not require cognitive function tests. The source passphrase field SHALL allow paste and offer a one-field and an `n`-box layout (10 for the default list; amended, ADR-047(6)). There SHALL be no CAPTCHA on any surface. | WCAG 3.3.8; ADR-026; R6 §C | THR-034 | C-06, C-03, C-15, C-21 | TST; INSP |
 | A11Y-013 | Identity-purpose `autocomplete` tokens SHALL be used only on identity-disclosure fields and SHALL NOT appear on anonymous-mode fields. | WCAG 1.3.5; REQ-H-05; B-CO-28; INC-05 | THR-040 | C-06, C-03 | TST: template lint |
 | A11Y-014 | Help, Safety guide and "How this site protects you" SHALL appear in the same relative location and order on every source page. | WCAG 3.2.6; COGA; B-CO-28; B-CO-36 | THR-040 | C-06 | TST: DOM position check |
 | A11Y-015 | Data entered earlier SHALL NOT be requested again in the same process (drafts, review reuse). | WCAG 3.3.7; B-CO-28 | — | C-06, C-15 | TST |
@@ -377,13 +381,14 @@ Results record the AT version, browser or webview version, Tor Browser version a
 | I18N-014 | Comprehension studies (`05` §9) SHALL include ≥ 2 non-English locales, including 1 RTL locale, per major release. | REQ-H-16b; INC-16 | THR-040 | C-06 | DEMO: study report |
 | I18N-015 | Plurals, gender and grammatical variants SHALL use Fluent selectors. String concatenation for sentences SHALL be prohibited. | Design | — | all UI | TST: lint |
 | I18N-016 | Translator and reviewer identities for Tier-0 and `sec:critical` approvals SHALL be recorded in the release manifest, and changes to approved strings SHALL be attributable. | INC-40 (contributor changes) | THR-024 | C-30 | INSP |
+| I18N-017 | A locale passphrase wordlist SHALL be enabled only after the §12.7 admission review (unambiguous, non-offensive words; `n = ceil(128 / log2(list_size))`; collision-free under NFKC/lowercase/single-space normalization), with the review record and list hash shipped in the signed release; the list language SHALL NOT be stored server-side. | ADR-047(6); ADR-005; B-SD-17 | THR-034; THR-011 | C-06, C-03 | TST: CI computes entropy and normalization collisions per list; INSP: review record present for every enabled list; DB grep for list language = 0 |
 
 ## 15. Residual risks and limitations
 
 1. **The no-JS Tier W UI cannot provide live announcements.** Screen-reader users get outcomes on page loads, and CSS-revealed timeout warnings may not be announced (`11` §15).
 1a. **Tier W drafts are lost** at the 2 h absolute limit, after 20 min idle, on browser close or server restart (ADR-034). Users who need more time (e.g., with cognitive or motor disabilities) may lose work; the limits are stated in advance and Tier V has no such limit (AD-01).
 2. **Tor Browser's anti-fingerprinting** (letterboxing, spoofed media queries, font restrictions) and possible accessibility defaults can degrade AT and visual adaptation. Candor cannot change them.
-3. **The 10-word English passphrase** is a memory and language burden for some users with cognitive disabilities and for non-English speakers.
+3. **The passphrase** (10 words for the default list; `n` words for a smaller locale list) remains a memory burden for some users with cognitive disabilities. Per-locale lists (ADR-047(6)) remove the foreign-language burden only for locales with a reviewed list.
 4. **Rasterized exports and the pixel viewer** have limited structural accessibility. OCR text layers, accessible text renditions and text companions mitigate this; OCR errors and layout-only meaning remain (partial conformance, A11Y-033).
 5. **WebKitGTK/Orca accessibility for the Linux Desk** may lag other platforms (Knowledge (unverified)).
 6. **Back-translation and reviewer processes** reduce but cannot eliminate subtle mistranslations of safety guidance.
@@ -396,7 +401,7 @@ Results record the AT version, browser or webview version, Tor Browser version a
 - **OI-26-3:** Determine current Tor Browser behavior regarding platform accessibility services, per OS, and add a guidance card if needed.
 - **OI-26-4:** Define an accessible alternative for oral reporting (EU Directive Art 9(2)) for sources who cannot write easily. Candidates: staff-assisted intake (`14`) or Tier V voice capture with local transcription and review. Tier W cannot capture audio without JS.
 - **OI-26-5:** VDI as an accessibility accommodation for staff conflicts with ADR-043/`12` managed-endpoint rules for INDEPENDENT channels; the accommodation must use an independent-custody device with local AT (RVW-C-16; `15` OI-15-2).
-- **OI-26-6:** Localized passphrase wordlists remain open (see below; RVW-C-16 item 3). ADR-046 §7 did not change ADR-005's English list.
+- **OI-26-6:** Resolved by ADR-047(6) (per-locale reviewed wordlists, §12.7, I18N-017). Remaining: select and review the first locale lists for the 1.0 locale set (OI-26-1).
 
 ### Open Issues for ADR revision
-- **ADR-005 (EFF English wordlist for all locales):** This is a COGA and I18N burden: non-English sources must store and type 10 English words. Proposal: allow **per-locale curated wordlists** of ≥ 7,776 entries. Each list would be normalized (NFC, case-folded, diacritic-insensitive matching), screened for offensive and confusable words (as SecureDrop does per language, B-SD-17), and kept at ≥ 129 bits by using 10 words from lists ≥ 7,776. The passphrase would carry a list identifier (1 extra word or a fixed prefix) so login can detect the list. This spec conforms to ADR-005 until the ADR is revised. Status after revision round 2: **not resolved** by ADR-034..046 (ADR-046 §7 addressed KDF parameters and rotation only).
+- **ADR-005 (EFF English wordlist for all locales):** Resolved by ADR-047(6). The adopted design differs from this document's round-2 proposal: normalization is NFKC + lowercase + single spaces (not diacritic-insensitive), the word count is `ceil(128 / log2(list_size))`, and the passphrase carries no list identifier (the language is not stored server-side).

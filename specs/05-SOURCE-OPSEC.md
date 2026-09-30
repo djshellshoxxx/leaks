@@ -1,5 +1,5 @@
 # 05 — Source Operational Security Specification
-Status: Draft v1.1 (revision round 2: ADR-034..ADR-046) · Edition applicability: both (CE and EE identical — source protections are never edition-gated, ADR-020) · Owner: Source Safety & Content Design team (with Security Architecture review)
+Status: Draft v1.2 (round-3 consistency pass: ADR-047; revision round 2: ADR-034..ADR-046) · Edition applicability: both (CE and EE identical — source protections are never edition-gated, ADR-020) · Owner: Source Safety & Content Design team (with Security Architecture review)
 
 ## 1. Purpose and scope
 
@@ -176,7 +176,7 @@ The v1.0 sentence "No one outside the listed team can unlock reports" is withdra
 **GC-38 Website or app?** — `sops.tier`
 > You can use this **website** in Tor Browser, or the **Candor app**.
 > - **The website** needs nothing installed. But our server encrypts your report after it arrives. If the intake server is compromised or legally compelled while you use the website (no-JavaScript) version, what you type, and your passphrase when you log in, can be captured.
-> - **The app** encrypts your report on your own device before sending, checks that it is talking to the right team, checks for replies without telling the server which mailbox is yours, and can clean hidden data from photos and documents. But an installed app is a sign that you used it if someone searches your device.
+> - **The app** encrypts your report on your own device before sending, checks that it is talking to the right team, checks for replies without telling the server which mailbox is yours, and can clean hidden data from photos and documents. It keeps everything it remembers — which organization, its address, and its safety checks — locked inside one encrypted file that your passphrase opens; that file looks the same whether or not you ever sent a report. But the installed app itself is a sign that you may have used it if someone searches your device.
 >
 > **Getting the app.** Download it in Tor Browser from the Candor project's address: {project_onion_address_text}. {org} does not offer the app on its own website. App stores (such as Google Play or the Apple App Store) keep a record that your account downloaded it. On iPhone and iPad the app is only in the App Store. **Never install it on a phone or computer your employer manages**, including a phone with a work profile.
 >
@@ -341,7 +341,7 @@ The v1.0 sentence "No one outside the listed team can unlock reports" is withdra
 ### I. After you send your report
 
 **GC-32 Keep your passphrase safe** — `sops.passphrase`
-> Before your report is sent, you get a **passphrase of 10 words**, and you type 3 of them to show you kept it. It is the only way to read replies and add information. **No one can reset it or send it to you again**, not us and not the team.
+> Before your report is sent, you get a **passphrase of {passphrase_word_count} words**, and you type 3 of them to show you kept it. It is the only way to read replies and add information. **No one can reset it or send it to you again**, not us and not the team.
 > - Write it on paper and keep it somewhere private, away from work things. Or save it in a password manager on a personal device that doesn't sync to a work account.
 > - Don't keep it in email, notes apps, photos, chats or cloud documents.
 > - Don't share it. Anyone who has it can read replies and write as you.
@@ -364,6 +364,8 @@ The v1.0 sentence "No one outside the listed team can unlock reports" is withdra
 > *Higher risk:* If someone knows roughly when a report arrived, they may compare that with who was off work, who used Tor, or who opened files. **Our systems keep only the day your report is picked up, not the time, and the team sees only {date_granularity_short}.** But your own network, your device, and anyone watching this site's network can record the exact time. Choose the delay. Consider also waiting some days after gathering information before you send.
 
 `{date_granularity_short}` is "the day" or "the week" (ADR-038 §3).
+
+`{passphrase_word_count}` is 10 for the default English list and `ceil(128 / log2(list size))` for the list of the chosen language (ADR-047(6)); the language list you choose is not stored by the service. Letter case, extra spaces and different forms of the same letter do not matter when you type it (NFKC normalization, ADR-047(6)).
 
 **GC-35 If your device is taken or searched** — `sops.seizure`
 > If your device is taken or searched, or you are asked to hand it over:
@@ -399,6 +401,14 @@ The v1.0 sentence "No one outside the listed team can unlock reports" is withdra
 **GC-42 Warnings on this site** — `sops.warnings` (ADR-035)
 > The people who run this service publish a signed statement every month saying the service has not been secretly changed or ordered to watch users. If this site shows a warning that the statement is missing or out of date, or shows an incident notice, stop and think before you continue. A missing statement can be harmless, and people can be forced to publish false statements, so it is a signal, not a guarantee. On the website, the warning is shown by the same server it is about, so a server under someone else's control could hide it. The Candor app checks the statement by itself.
 
+**GC-44 What the app keeps on your device** — `sops.appvault` (ADR-047(1))
+> The Candor app creates one locked file as soon as it is installed, before you use it. Everything the app remembers — the organization's address, its safety checks and your mailbox list — is kept only inside that file, and only your passphrase opens it. The file has the same size whether or not you ever sent anything, and a wrong passphrase looks the same as an empty app. This does **not** hide that the app is installed. If you remove the app's data, the app replaces the file with an empty one of the same size.
+>
+> *Higher risk:* Phones and USB sticks can keep old copies of files. If your device could be searched, use the desktop app on Tails, where nothing stays after you shut down.
+
+**GC-45 If you choose to give your name** — `sops.identified` (ADR-047(5), ADR-014)
+> You can choose to tell the team who you are, also through this site. Your name and contact details are then locked away separately and are opened only by the named identity custodians under strict rules; the case team works with the report without seeing them unless you agree or the law requires it. The banner at the top of the page changes to show that you have identified yourself. Using Tor Browser still hides your internet connection, but it no longer makes you anonymous to the organization.
+
 **GC-43 Finding this site safely** — `sops.firstcontact` (RVW-B-17)
 > Find this site's address without using a work device or work network. If you saw the address on a poster, card or intranet page, write it down and type it into Tor Browser later, at home. Don't click a "speak up" or "report a concern" link on a work computer: visiting that page from work can be recorded, and that record can be compared with when a report arrives.
 
@@ -431,7 +441,7 @@ The v1.0 sentence "No one outside the listed team can unlock reports" is withdra
 5. I have not pasted anything into AI tools, translators or grammar checkers. (GC-16)
 6. I will describe or retype information rather than send files when I can. (GC-22..GC-26)
 7. I have not printed documents to send. (GC-20)
-8. I am ready to keep a 10-word passphrase safe. (GC-32)
+8. I am ready to keep a {passphrase_word_count}-word passphrase safe. (GC-32)
 
 These are **plain list items, not checkboxes** (no form data is sent). A single "Continue" link follows. No item is enforced.
 
@@ -510,7 +520,7 @@ Key messages: **K1** don't use work devices or networks; **K2** use Tor Browser 
 
 | ID | Requirement | Evidence | Threats | Component | Verification |
 |---|---|---|---|---|---|
-| SOPS-001 | The Source UI SHALL include Guidance Cards GC-01..GC-43 with the §6 English master text as normative content. Wording changes SHALL pass the §9 accuracy and legal checks before release. | REQ-H-16b (INC-16); INC-31; B-SD-04 | THR-002, THR-009, THR-010, THR-048 | C-06, C-03 | INSP: content diff review per release; DEMO: §9 comprehension study |
+| SOPS-001 | The Source UI SHALL include Guidance Cards GC-01..GC-45 with the §6 English master text as normative content. Wording changes SHALL pass the §9 accuracy and legal checks before release. | REQ-H-16b (INC-16); INC-31; B-SD-04 | THR-002, THR-009, THR-010, THR-048 | C-06, C-03 | INSP: content diff review per release; DEMO: §9 comprehension study |
 | SOPS-002 | Guidance SHALL present NORMAL-RISK text by default and HIGH-RISK additions inside native `<details>` elements in the same HTML response. The track choice SHALL NOT be transmitted to or inferable by the server (no distinct URL, request, cookie or form field). | INC-03; ADR-003 | THR-001, THR-016 | C-06 | TST: e2e `sops-track-no-request` asserts identical request sequence whether or not `<details>` are opened |
 | SOPS-003 | NORMAL-RISK English strings SHALL score Flesch-Kincaid grade ≤ 8.0 and HIGH-RISK strings ≤ 10.0, enforced in CI. | B-CO-36; REQ-H-16b | THR-040 | C-06, C-03 | TST: CI job `sops-readability` |
 | SOPS-004 | The UI SHALL place guidance according to the §7 placement map, including the first-viewport "don't use a work device or work network" statement on S01. | REQ-H-31 (INC-31); REQ-H-16b | THR-002, THR-048 | C-06, C-03 | INSP: screen-by-screen checklist; TST: snapshot test for S01 first viewport at 320×568 and 1280×800 |
@@ -568,6 +578,9 @@ Key messages: **K1** don't use work devices or networks; **K2** use Tor Browser 
 | SOPS-056 | GC-41 (phone-only) SHALL be reachable from S01, S02 and C-37, with the iOS caveat. | RVW-B-28; R4 §3.3 | THR-002, THR-048 | C-06, C-37 | INSP |
 | SOPS-057 | GC-42 SHALL explain operator-statement and incident-notice warnings, including that a Tier W server can hide them and that they are signals, not guarantees. | ADR-035 §2, §4 | THR-025, THR-040 | C-06, C-03 | INSP |
 | SOPS-058 | The GC-32 and GC-35 texts SHALL describe passphrase change (ADR-046 §7) and its Tier W limit (both passphrases pass through the server). | ADR-046 §7; RVW-A-03 | THR-034 | C-06, C-03 | INSP |
+| SOPS-059 | The Source UI SHALL include GC-44 on the app download/acquisition path (S02, C-37) and in the Source App's first-run screen, stating that app data is kept only in a fixed-size encrypted vault and that the app's presence remains visible. | ADR-047(1); B-GL-27 | THR-048; THR-138 | C-03, C-06, C-37 | INSP: Tier-0 string review; TST: 04 CRYPTO-071 behaviour matches the text |
+| SOPS-060 | When a source selects IDENTIFIED mode (including over the onion service), the UI SHALL show GC-45 and change the mode banner before any identity field is shown. | ADR-047(5); ADR-002; ADR-014 | THR-040; THR-115 | C-06, C-03 | DEMO: usability test of mode banner; INSP |
+| SOPS-061 | GC-32 SHALL render `{passphrase_word_count}` from the selected wordlist (ADR-047(6)) and SHALL NOT state a fixed word count elsewhere; the wordlist language SHALL NOT be sent to or stored by the server beyond the session. | ADR-047(6); RVW-C-16 | THR-034 | C-06, C-03, C-07 | INSP: string binding CI (SOPS-047 mechanism) |
 
 ## 11. Residual risks and limitations
 
@@ -587,6 +600,8 @@ Key messages: **K1** don't use work devices or networks; **K2** use Tor Browser 
 14. **App acquisition** (ADR-041): on iOS there is no store-independent option; app-store records are compellable.
 15. **Harvest-now-decrypt-later** (ADR-046 §8): recorded Tier W sessions may be decrypted in future; mitigated only by Tier V.
 16. **Warning banners in Tier W** are rendered by the server they describe and can be suppressed by a compromised server (GC-42).
+17. **Source App presence** (ADR-047(1)): the fixed-size vault hides whether and for which organization the app was used, but not that it is installed; flash storage may keep earlier vault generations; a device seized while the app is unlocked exposes the vault contents (GC-44).
+18. **Identified reports over the onion** (ADR-047(5)): Tor hides the connection, not the identity the source chose to give; identity protection then rests on the Sealed Identity Store and custodian rules (ADR-014).
 
 ## 12. Open issues
 
@@ -594,7 +609,7 @@ Key messages: **K1** don't use work devices or networks; **K2** use Tor Browser 
 - **OI-05-2:** Validate the Flesch-Kincaid thresholds against real translated text. Grade metrics do not transfer across languages (see `26-ACCESSIBILITY.md` I18N rules).
 - **OI-05-3:** Decide whether Tier V should offer **optional local LLM paraphrasing** (an on-device model, no network). The evidence is bimodal [B-AN-39]. Model size and trust issues apply. Currently excluded (SOPS-019).
 - **OI-05-4:** Research whether a CoverDrop-style cover-traffic channel (R4 §6; B-GL-22) could remove "Tor use is a signal" for employer networks in EE deployments (R-COVER-01, R2 §10).
-- **OI-05-5:** Localized passphrase wordlists (see `26-ACCESSIBILITY.md` Open issues; ADR-005 fixes the EFF English list). GC-32 usability for non-English speakers is a concern (also RVW-C-16).
+- **OI-05-5:** (Resolved by ADR-047(6)) Per-locale wordlists are permitted with ≥ 128-bit passphrases (`{passphrase_word_count}`) and NFKC normalization (04 §11.1, §11.3). Remaining: per-language comprehension testing of GC-32 (26).
 - **OI-05-6:** Passphrase length. RVW-B-27 proposes 7 words by default (10 for HIGH). ADR-046 §7 keeps ≈129 bits (10 words) and adds rotation; this document conforms. Rejected here for conflict with ADR-005/ADR-046.
 
 ### Open Issues for ADR revision

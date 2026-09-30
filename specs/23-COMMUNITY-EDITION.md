@@ -1,5 +1,5 @@
 # 23 — Community Edition (CE) and Small Business Secure Profile
-Status: Draft v1.1 (revision round 2: ADR-034..046) · Edition applicability: CE (parity statements cover EE) · Owner: Core Product team
+Status: Draft v1.2 (final consistency pass: ADR-047) · previously v1.1 (revision round 2: ADR-034..046) · Edition applicability: CE (parity statements cover EE) · Owner: Core Product team
 
 ## 1. Purpose and scope
 
@@ -18,7 +18,7 @@ This document also defines the **Small Business Secure Profile (SMB)**. SMB is a
 
 | Topic | Document |
 |---|---|
-| Binding decisions | `DECISIONS.md` §2, ADR-001..046 (ADR-034..046 supersede conflicting earlier text) |
+| Binding decisions | `DECISIONS.md` §2, ADR-001..047 (ADR-034..047 supersede conflicting earlier text) |
 | EE feature boundary | `21-ENTERPRISE.md` |
 | Licensing and Edition Charter | `24-LICENSING-BUSINESS-MODEL.md` |
 | Profiles CE-SINGLE and CE-HARDENED | `18-DEPLOYMENT.md` |
@@ -73,8 +73,9 @@ This document also defines the **Small Business Secure Profile (SMB)**. SMB is a
 | F37 | Records-search support | Desk-local search over cases the member can decrypt; Records Custodian grants from the Triage Set; no server-side global search (ADR-044(5)). | 12, 35 |
 | F38 | Platform integrity | Pinned snapshot mirror, TUF-signed Platform Manifest verified by self-test, signed security floor (ADR-040); Z-INTAKE updates via the project onion mirror over Tor, Z-CORE via an egress-restricted HTTPS mirror (ADR-046(3)). | 28, 33 |
 | F39 | Small-organisation mode | External OVERSIGHT party, "reduced separation of duties" disclosure (ADR-045); see §4.4. | 23 |
+| F40 | ADR-047 protections | Source App fixed-size encrypted vault; follow-up dates only in the encrypted case record; chaff envelopes; 7-day Key Directory and 24 h attestation freshness; IDENTIFIED mode over the onion service; per-locale passphrase wordlists (≥ 128 bits); Desk case-key cache and re-wrap after vault loss; per-case metadata erasure; signed intake deletion list applied on every intake restore. | 04, 05, 11, 19 |
 
-All protections introduced by ADR-034..ADR-046 are CE features (Charter test T1/T2, `21-ENTERPRISE.md` §3); none is gated by an EE entitlement.
+All protections introduced by ADR-034..ADR-047 are CE features (Charter test T1/T2, `21-ENTERPRISE.md` §3); none is gated by an EE entitlement.
 
 CE does **not** include the EE items listed in `21-ENTERPRISE.md` §4, classes S and V:
 - HA orchestration;
@@ -95,7 +96,7 @@ CE does **not** include the EE items listed in `21-ENTERPRISE.md` §4, classes S
 
 - **Target:** organizations of 50–500 workers subject to EU Art 8(3) or similar (B-CO-02), with 1–3 designated recipients and no in-house security team.
 - **Constraint:** SMB **SHALL NOT** relax any anonymity, crypto or logging default. It changes how defaults are *delivered and operated*, not what they are. Separation of duties is **not** a configuration default the checker can see (RVW-C-09); where the organisation cannot staff it, SMB states the reduction honestly and adds an external party (§4.4).
-- **Operator realism:** the organisation needs a named competent operator for the `18-DEPLOYMENT.md` operational load budget. Where it has none, MANAGED by an independent operator or a consortium instance is the recommended path (RVW-C-17).
+- **Operator realism:** the organisation needs a named competent operator for the `18-DEPLOYMENT.md` §4.9 Operational Load Budget (CE-SINGLE small-organisation row: ~12 h/month). Where it has none, MANAGED by an independent operator or a consortium instance is the recommended path (RVW-C-17).
 
 ### 4.2 Components
 
@@ -122,7 +123,7 @@ CE does **not** include the EE items listed in `21-ENTERPRISE.md` §4, classes S
 
 ### 4.4 Small-organisation mode (ADR-045; RVW-C-09)
 
-Trigger: fewer than 4 distinct enrolled natural persons (distinctness per `15-AUTHENTICATION-AUTHORIZATION.md` person binding; accounts sharing an authenticator identity count as one person). The checker enforces the mode; it cannot be switched off while the trigger holds.
+Trigger: fewer than 4 distinct enrolled natural persons (distinctness per `15-AUTHENTICATION-AUTHORIZATION.md` person binding and AUTHZ-027 small-organisation substitutions; operational rules in `32-OPERATIONS.md` §4.5; staffing per the Operational Load Budget, `18-DEPLOYMENT.md` §4.9; accounts sharing an authenticator identity count as one person). The checker enforces the mode; it cannot be switched off while the trigger holds.
 
 | Dual control that needs distinct persons | In small-organisation mode |
 |---|---|
@@ -162,6 +163,7 @@ Honest limits: in CE-SINGLE (and in small-organisation mode generally) a malicio
 | Key-access continuity rules, `min_recipients` = 2 | ✓ | ✓ | Yes (ADR-044) |
 | Platform Manifest, security floor | ✓ | ✓ | Yes (ADR-040) |
 | Small-organisation mode | ✓ | ✓ | Yes (ADR-045) |
+| ADR-047 protections (F40) | ✓ | ✓ | Yes (ADR-047) |
 | Legal hold (per case, sealed matter) | ✓ | ✓ plus matter-level holds | Yes |
 | Crypto-erasure deletion | ✓ | ✓ | Yes |
 | Retention engine | Per channel | Plus schedule import, disposition review | Yes. EE adds records-law tooling. |
@@ -185,7 +187,7 @@ Honest limits: in CE-SINGLE (and in small-organisation mode generally) a malicio
 
 | ID | Requirement | Evidence | Threats | Component | Verification |
 |---|---|---|---|---|---|
-| CE-001 | CE SHALL include every Trust Path component and every protection listed in §3 F01–F39, including every protection introduced by ADR-034..ADR-046. A release SHALL fail if any CE build lacks a protection present in EE. | ADR-020; ADR-034..ADR-046; B-CO-60 | THR-024 | C-30, C-31 | TST: edition feature-parity test comparing protection manifests (manifest lists each ADR-034..046 protection); AUD |
+| CE-001 | CE SHALL include every Trust Path component and every protection listed in §3 F01–F40, including every protection introduced by ADR-034..ADR-046. A release SHALL fail if any CE build lacks a protection present in EE. | ADR-020; ADR-034..ADR-046; B-CO-60 | THR-024 | C-30, C-31 | TST: edition feature-parity test comparing protection manifests (manifest lists each ADR-034..046 protection); AUD |
 | CE-002 | CE and EE SHALL build Trust Path binaries from the same source tree and same reproducible recipe. The Trust Path artifact hashes SHALL be identical across editions. | ADR-022; REQ-H-14 | THR-024, THR-025 | C-31, C-32 | TST: cross-edition hash comparison |
 | CE-003 | CE SHALL support unlimited channels in one organization, each with its own channel keys and optional separate onion service. | ADR-008 | THR-045 | C-10, C-05 | TST |
 | CE-004 | CE SHALL implement COI routing basics: triage-first wrapping to a Triage Set of ≥ 2 independent-role members, source-flagged role exclusions, blinded COI tags, the COI map, fail-closed redirect to an alternative independent channel, category→audit-committee rules and break-glass with dual authorization including an independent-role approver. | ADR-015; ADR-037; ADR-045; INC-22; B-CO-69 | THR-020 | C-22, C-10, C-15 | TST: COI test suite (shared with EE) incl. excluded-member inference test (30) |
@@ -203,7 +205,7 @@ Honest limits: in CE-SINGLE (and in small-organisation mode generally) a malicio
 | CE-016 | CE SHALL warn continuously in Desk admin when any active case has fewer than 2 active key holders. | ADR-013 | THR-042 | C-15, C-19 | TST |
 | CE-017 | CE documentation SHALL state that CE is not CJIS-, FedRAMP- or PBMM-assessed. | B-CO-46; B-CO-43; B-CO-48 | THR-035 | C-30 | INSP |
 | CE-018 | CE landing pages and Desk SHALL display the Operator Statement status and SHALL support registration with External Watchers and Key Directory witnesses from the `36-OPEN-SOURCE-GOVERNANCE.md` registry without any EE entitlement. | ADR-035(1)(2); ADR-036(5); RVW-A-01; RVW-A-08 | THR-007, THR-026, THR-046 | C-06, C-14, C-15 | TST: expired statement banner; TST: watcher/witness enrolment in CE build |
-| SMB-001 | The SMB profile SHALL NOT change any default of ADR-001..ADR-046. A CI test SHALL compare the effective security configuration of SMB against CE-SINGLE and CE-HARDENED. Only the documented operational deltas (update automation, backup k=2-of-3, wizard, small-organisation mode external party) SHALL differ. | ADR-020; ADR-045 | THR-035 | C-19 | TST: `smb-config-diff` |
+| SMB-001 | The SMB profile SHALL NOT change any default of ADR-001..ADR-047. A CI test SHALL compare the effective security configuration of SMB against CE-SINGLE and CE-HARDENED. Only the documented operational deltas (update automation, backup k=2-of-3, wizard, small-organisation mode external party) SHALL differ. | ADR-020; ADR-045 | THR-035 | C-19 | TST: `smb-config-diff` |
 | SMB-002 | `candor-setup` SHALL verify release signatures against a pinned fingerprint and a transparency-log inclusion proof before installing. It SHALL NOT fetch keys by TOFU. | B-GL-41; REQ-H-48; REQ-H-52 | THR-024, THR-025 | C-19, C-32 | ST: tampered installer and substituted key |
 | SMB-003 | `candor-setup` SHALL refuse to finish until every ANONYMOUS channel has a Triage Set of ≥ 2 enrolled members (≥ 1 of them external where the organisation has only one internal recipient), each with ≥ 2 hardware authenticators, and a second distinct admin or external co-signer is enrolled. The single-recipient acknowledgment path is withdrawn. | ADR-044(2); ADR-037(1); ADR-045; RVW-C-03; RVW-C-09 | THR-042, THR-020, THR-018 | C-19 | TST: setup blocks with one recipient or one admin |
 | SMB-004 | SMB automatic updates SHALL apply security releases within 24 h and feature releases in a weekly window with ±60 min random offset, using distribution-signed kernels (no offline per-kernel signing, ADR-040). Z-INTAKE SHALL fetch via the project onion mirror over Tor and Z-CORE via an egress-restricted HTTPS mirror (ADR-046(3)), with no instance identifier. | ADR-022; ADR-023; ADR-040; ADR-046(3); RVW-C-17 | THR-025, THR-036 | C-33, C-19 | TST: update client network capture per zone; TST: unattended kernel update reboots without a token |

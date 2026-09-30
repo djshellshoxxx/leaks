@@ -1,6 +1,6 @@
 # 09 — Database Design (Intake Store C-08 and Case DB C-12)
 
-Status: Draft v1.1 (revision round 2: ADR-034..046) · Edition applicability: both (EE-only objects marked **EE**) · Owner: Backend team (data)
+Status: Draft v1.2 (round-3 consistency pass: ADR-047; revision round 2: ADR-034..046) · Edition applicability: both (EE-only objects marked **EE**) · Owner: Backend team (data)
 
 ## 1. Purpose and scope
 
@@ -52,7 +52,7 @@ flowchart LR
     SA["source_account"] --- ENV["envelope"]
     ENV --- EP["envelope_part"]
     RP["reply (published set; Tier W rows also keyed to account)"] -.- SA
-    TS["deletion_tombstone"]
+    TS["deletion_list (signed)"]
     UP["upload (Tier V)"] -.->|"bound at commit"| ENV
   end
   ENV == "relay pull: new ID, intake ID dropped" ==> IE
@@ -119,7 +119,7 @@ Readers for all intake tables: the `candor_istore` PG role (used only by `candor
 | locator_hash | bytea(32) UNIQUE | | SS | `SHA-256(locator)`; locator derived from the passphrase seed (04-CRYPTOGRAPHY.md) |
 | auth_pk | bytea(32) | | SS | Ed25519 source auth public key (the "verifier") |
 | xwing_pk | bytea(1216) | | SS | Reply encryption key |
-| prefs_ct | bytea (≤ 4096) | **yes** | SS | Encrypted to `xwing_pk`: COI selection, language, and the **original eligible set** (member identity key IDs of the first report's recipients) used by the follow-up sealing rule (ADR-036(4); 07 BE-052) |
+| prefs_ct | bytea (≤ 4096) | **yes** | SS | AEAD under `K_prefs` (04-CRYPTOGRAPHY.md §11.4): `kdf_version`, per-report `mailbox_id`, the **original eligible set** used by the follow-up sealing rule (ADR-036(4); 07 BE-052), roster version, UI preferences. It SHALL NOT contain the source's COI ticks (RVW-A-03) or the wordlist/UI language (ADR-047(6)). |
 | activity_month | date | | SS | First day of the UTC month in which an envelope or reply was last stored for the account (RVW-B-11: coarsened from day to month). Updated only on envelope commit or reply arrival, never on login (ADR-010: no "last seen"). Used for `inactive_purge`. |
 | quota_bucket | smallint | | SS | Upload quota consumed **today only**. Reset to 0 by the daily `quota_reset` job; no history is kept (ADR-038(3)). |
 
@@ -157,11 +157,14 @@ WITHDRAWN (ADR-034): columns `state` and `created_day`. Accounts are never store
 | header_ct | bytea (≤ 8 KiB) | **yes** | CT | Contains exactly 16 fixed-size anonymous HPKE recipient slots, randomly ordered, with **no key IDs** (ADR-033 §1). The real recipient list is inside the AEAD payload. |
 | manifest_ct | bytea (≤ 64 KiB) | **yes** | CT | |
 | header_sha256 | bytea(32) | | SYS | Relay ack digest |
+| disposition_ct | bytea (fixed: Nenc + 48 B) | **yes** | CT | Chaff marker (ADR-047(3); 04-CRYPTOGRAPHY.md §12.7): HPKE to the core-held Chaff Disposition Key K41, present on **every** row (real and chaff) with identical size. The intake cannot open it. |
 | received_date | date | | SS | ADR-010. Used only to derive the sealing epoch and for intake retention; never sent to Z-CORE (the relay receives `epoch_index`, 08-API.md RL-02) |
-| release_day | date | | SS | Optional **delayed delivery** (ADR-038(4)): `received_date` + U{1,2,3} days when the source chose it, else `received_date`. The relay claims only envelopes with `release_day` ≤ today. |
+| release_day | date | | SS | Optional **delayed delivery** (ADR-038(4)): `received_date` + U{1,2,3} days when the source chose it, else `received_date`. Source signal envelopes (04-CRYPTOGRAPHY.md §13.4 kinds 2/3): C4 "no response" escalation + U{1,2,3} days; mailbox-closed signal + U{3..21} days (14 CASE-017/CASE-035; RVW-B-26). The relay claims only envelopes with `release_day` ≤ today. |
 | batch_no | bigint NULL | | SYS | Set at claim |
 
 WITHDRAWN: columns `kind` (RVW-B-11; the Desk learns initial/follow-up from the decrypted manifest) and `tier` (ADR-039; RVW-A-26).
+
+**Chaff rows (ADR-047(3)):** the Intake Sealer inserts chaff envelopes (rows, parts and blobs) at a constant Poisson rate (default mean 1 per 2 h per channel) through the same `COMMIT_ENVELOPE` path, with `source_account_id` NULL, `release_day = received_date` and blob sizes from the fixed chaff distribution. No column, index, sequence gap or counter distinguishes chaff from real rows; `counter_month` counts only real envelopes (incremented in sealer RAM). Chaff is claimed and relayed like any envelope.
 | state | enum(sealed, claimed) | | SYS | |
 
 **`envelope_part`** — CT — Retention: until relayed
@@ -184,16 +187,25 @@ WITHDRAWN: columns `kind` (RVW-B-11; the Desk learns initial/follow-up from the 
 | available_day | date | | SS | Day granularity |
 | slot | smallint NULL | | SS | Tier W only: position 0–31 in the fixed mailbox (08-API.md §3.8) |
 
-No `fetched`, `read`, `last_accessed`, access count or per-mailbox history column exists (ADR-010, ADR-039). Replies whose routing resolves to a tombstoned account are dropped on arrival.
+No `fetched`, `read`, `last_accessed`, access count or per-mailbox history column exists (ADR-010, ADR-039). Replies whose routing resolves to an account or mailbox listed in `deletion_list`, or whose hash is listed, account are dropped on arrival.
 
-**`deletion_tombstone`** (RVW-A-28) — SS — Retention: 14 days (the BS-INTAKE backup window)
+**`deletion_tombstone`** — WITHDRAWN (ADR-047(9)); superseded by `deletion_list`.
+
+**`deletion_list`** (signed intake deletion list; ADR-047(9); RVW-A-28) — SS — Retention: entries are kept 35 days (longer than the 14-day BS-INTAKE window and the Z-CORE copy's replication lag) and pruned only after the relay has acknowledged them
 
 | Column | Type | Ct | Class | Notes |
 |---|---|---|---|---|
-| tomb_hash | bytea(32) PK | | SS | `SHA-256("candor-tomb-v1" ‖ locator_hash)` of a deleted Tier W account |
-| expires_day | date | | SYS | Deletion day + 14 |
+| seq | bigint PK | | SYS | Monotonic; gaps are a verification failure |
+| kind | enum(account, mailbox, reply) | | SS | |
+| del_hash | bytea(32) | | SS | `SHA-256("candor/v1/intake/del" ‖ tenant_id ‖ locator_hash / mailbox_id / reply object_hash)` (04-CRYPTOGRAPHY.md §18.6) |
+| del_day | date | | SS | Day of the deletion |
+| prev_hash | bytea(32) | | SEC | Hash chain |
+| sig | bytea(64) | | SEC | Ed25519 by the intake batch signing key K31 |
+| relayed | bool | | SYS | Set when the relay acknowledges the Z-CORE copy |
 
-Tombstones are included in the intake snapshot and applied immediately after any restore (07-BACKEND.md BE-074), so a source-deleted account does not reappear.
+- Written in the same transaction as the source-initiated deletion (`ACCOUNT_DELETE`, `MAILBOX_DELETE`, reply deletion; 08-API.md SW-15/SA-*).
+- Copied to Z-CORE (`core.intake_deletion_list`, §5.2.7) at every import slot; included in every intake snapshot.
+- **Restore rule:** any intake restore (BS-INTAKE, EE-HA failover to a recovered node) SHALL obtain the newest list — the Z-CORE copy if newer than the local one — verify the chain and signatures, and delete every listed account, mailbox and reply **before** C-06 serves requests (07 BE-074). Replies whose hash is listed are never re-pushed by C-09 and are dropped on arrival.
 
 **`directory_snapshot`**, **`config_bundle`** — SEC — Retention: current + previous version
 
@@ -212,8 +224,8 @@ Tombstones are included in the intake snapshot and applied immediately after any
 |---|---|---|---|---|
 | month | date | | SS | First day of the UTC calendar month |
 | channel_id | uuid | | WF | |
-| name | enum(submissions, accounts_created, account_deletions) | | SYS | No tier, follow-up or login counters |
-| value | integer | | SS | Exported once, after the month closes. Suppression, complementary suppression and the rule for channels with < 3 cases/month follow 24 §TEL (k = 10) |
+| name | enum(submissions_received, accounts_created, account_deletions) | | SYS | No tier, follow-up or login counters |
+| value | integer | | SS | Real envelopes only (chaff is never counted, ADR-047(3)). Exported once, after the month closes. Suppression, complementary suppression and the rule for channels with < 3 cases/month follow 24 §TEL (k = 10) |
 
 **`job_local`** — SYS — like the Case DB `job` but **without any timestamp column** (L11): `run_after_day date`, `schedule enum(daily, monthly)`; intraday scheduling is done in RAM. Retention: 7 days after completion.
 
@@ -356,7 +368,7 @@ Readers legend (PostgreSQL roles, §10):
 
 #### 5.2.3 Import (relay output)
 
-**`import_envelope`** — CT/SS — Readers: relay (INSERT, only during a fixed import slot, §8), case (active **Triage Set** members of the envelope's channel only, via RLS §6.3; they trial-decrypt the anonymous slots, ADR-037(2)), worker; Retention: `imported` → row kept for case lifetime with `header_digest` nulled after 24 h (ADR-039) and part blobs deleted after DEK re-wrap into the case; `rejected` (dual-approved) → row and blobs deleted immediately, leaving only the audit event (ADR-038(6)). There is **no automatic expiry**: pending envelopes block retirement of that epoch's keys (ADR-033(2)) until imported or rejected; envelopes pending > 14 days are offered to the Triage Set for dual-approved rejection.
+**`import_envelope`** — CT/SS — Readers: relay (INSERT, only during a fixed import slot, §8), case (active **Triage Set** members of the envelope's channel only, via RLS §6.3; they trial-decrypt the anonymous slots, ADR-037(2)), worker; Retention: `imported` → row kept for case lifetime with `header_digest` nulled after 24 h (ADR-039), **`import_date` nulled in the same transaction that links the row to a case** (the date is kept only inside the encrypted case record, ADR-047(2)), and part blobs deleted after DEK re-wrap into the case; **chaff** (ADR-047(3)) → row and blobs deleted by C-10 at the derived hold slot (1–8 import slots after import, 04-CRYPTOGRAPHY.md §12.7), with no audit event distinguishing it from other disposals and no chaff count stored; `rejected` (dual-approved) → row and blobs deleted immediately, leaving only the audit event (ADR-038(6)). There is **no automatic expiry**: pending envelopes block retirement of that epoch's keys (ADR-033(2)) until imported or rejected; envelopes pending > 14 days are offered to the Triage Set for dual-approved rejection.
 
 | Column | Type | Ct | Class | Notes |
 |---|---|---|---|---|
@@ -365,7 +377,8 @@ Readers legend (PostgreSQL roles, §10):
 | header_ct | bytea | **yes** | CT | 16 anonymous slots; no recipient key IDs anywhere in cleartext (ADR-033) |
 | manifest_ct | bytea | **yes** | CT | Signed real-recipient list (key IDs + directory tree head) is inside |
 | header_digest | bytea(32) NULL UNIQUE | | SYS | Idempotency; nulled 24 h after insert (ADR-039; BE-013) |
-| import_date | date | | SS | UTC date of the **fixed import slot** in which the relay imported the envelope (ADR-038(1)/(3)). The intake arrival day is never stored in Z-CORE. |
+| import_date | date NULL | | SS | UTC date of the **fixed import slot** in which the relay imported the envelope (ADR-038(1)/(3)); needed only while pending (MEK retirement, 14-day rejection). Set to NULL when the envelope is linked to a case (ADR-047(2)). The intake arrival day is never stored in Z-CORE. |
+| disposition_ct | bytea (fixed) | **yes** | CT | Copied from the intake (§5.1); opened by C-10 only at the derived hold slot (K41, 04-CRYPTOGRAPHY.md §12.7); nulled at import or deletion |
 | epoch_index | int | | SYS | Sealing epoch reported by the intake (08-API.md RL-02); gates Member Epoch Key retirement |
 | import_batch_no | bigint | | SYS | Monotonic slot number; no pull time stored (ADR-033(4)) |
 
@@ -394,7 +407,8 @@ WITHDRAWN: `kind` (RVW-B-11) and `received_date` (replaced by `import_date`, ADR
 | workflow_def_id, workflow_version | uuid, int | | WF | |
 | state | text (FK to workflow state) | | WF | |
 | priority | smallint | | WF | |
-| received_date | date | | SS | `import_date` of the earliest envelope (fixed-slot date, ADR-038); the only import-related date on the case. SLA anchor. Shown to staff at day granularity (standard) or ISO week (HIGH), ADR-038(3) |
+| received_date | date | | SS | `import_date` of the initial envelope (fixed-slot date, ADR-038); SLA anchor. Shown to staff at day granularity (standard) or ISO week (HIGH), ADR-038(3) |
+| last_import_month | date | | SS | First day of the UTC month of the most recent envelope (initial or follow-up) linked to the case (ADR-047(2)); the only cleartext trace of follow-up activity. Follow-up import dates are stored **only inside `record_ct`** (case key). |
 | opened_day, closed_day | date | | WF | |
 | record_ct | bytea (≤ 256 KiB) | **yes** | CT | Title, summary, labels, staff times (07 §12) |
 | key_epoch | int | | SEC | Current case-key epoch |
@@ -402,6 +416,16 @@ WITHDRAWN: `kind` (RVW-B-11) and `received_date` (replaced by `import_date`, ADR
 | deletion_due_day | date NULL | | WF | |
 | legal_hold | bool (derived by trigger from `legal_hold`) | | WF | |
 | version | bigint | | SYS | |
+
+**`case_meta`** (per-case metadata under the Erasure Key; ADR-047(8); RVW-B-21 item 2) — WF/CT — Readers: case (ACL), worker (via C-10 only; plaintext obtained from `candor-ekv` `META_OPEN`); Retention: case lifetime; destroyed with the case's Erasure Key
+
+| Column | Type | Ct | Class | Notes |
+|---|---|---|---|---|
+| case_id, column_id | PK; tenant_id | | WF | `column_id` ∈ {category_class (only where server-visible, 14 §3), routing_visible field n (21 ENT-007), case_label} |
+| meta_ct | bytea (256 B buckets, ≤ 4 KiB) | **yes** | CT | Record AEAD under `K_meta = HKDF(EK_case, case_id, "candor/v1/ek-meta")`, computed only inside `candor-ekv` (04-CRYPTOGRAPHY.md §9.10a) |
+| row_version | bigint | | SYS | Bound in the AAD |
+
+- No other table holds these values in cleartext (schema-lint L16). This is server-readable by design (C-10 decrypts through the vault for SLA and routing rules); the protection is that DB and backup copies become unreadable when the EK is destroyed and vault backups expire (≤ 14 days).
 
 **`submission`** (import envelope ↔ case) — SS/WF — Readers: case (ACL); Retention: case lifetime
 
@@ -467,7 +491,7 @@ Member removal reasons are **not** stored; the audit event uses a generic reason
 | case_id | uuid | | WF | |
 | direction | enum(from_source, to_source) | | SS | |
 | import_envelope_id | uuid NULL | | SS | Set for `from_source` |
-| day | date | | SS | For `from_source`: the `import_date` (fixed-slot date) of the carrying envelope, never an arrival day (ADR-038(3)); for `to_source`: reply queued day. No per-case list of source activity days exists beyond these slot dates |
+| day | date NULL | | SS | For `from_source`: **NULL** — the import slot date of a follow-up is stored only inside the encrypted case record (ADR-047(2); RVW-B-11); for `to_source`: reply queued day (staff activity). No cleartext per-case list of source activity days exists |
 | blob_id | uuid NULL | **yes** | CT | Imported message stream |
 | dek_wrap_ct | bytea NULL | **yes** | CT | Envelope DEK re-wrapped under the case key |
 | body_ct | bytea NULL | **yes** | CT | Staff replies (copy for case history) |
@@ -629,6 +653,15 @@ Source-requested erasure and retention expiry use `crypto_erase_case` and bypass
 | reply_ct | bytea (≤ 70,000) | **yes** | CT | |
 | state | enum(queued, pushed) | | SYS | |
 | queued_day | date | | WF | |
+
+**`intake_deletion_list`** (Z-CORE copy of the signed intake deletion list; ADR-047(9)) — SS — Readers: relay (INSERT), worker, backup; Retention: 35 days after `del_day`
+
+| Column | Type | Class | Notes |
+|---|---|---|---|
+| intake_id, seq | PK; tenant_id | SYS | Same `seq`, `kind`, `del_hash`, `del_day`, `prev_hash`, `sig` as the intake table (§5.1) |
+| kind, del_hash, del_day, prev_hash, sig | as §5.1 | SS/SEC | Verified by the relay (chain + K31 signature) before insert |
+
+- Written only during import slots (§8). Pushed back to an intake that restores from BS-INTAKE or fails over (07 BE-074); `reply_outbox` rows whose REPLY hash is listed are deleted instead of pushed.
 
 **`export_package`** — CT/WF — Readers: case (creator, approvers, lead), connector (via the export router: own packages only); Retention: blob deleted on delivery or after 7 days; row case lifetime
 
@@ -797,16 +830,18 @@ The EK is **not** a content key. EK plus DB still requires a member's or quorum'
 - Operations:
   - `CREATE(case_id)` → EK handle;
   - `WRAP(case_id, inner)` and `UNWRAP(case_id, outer)`, where AEAD happens inside `candor-ekv` so the EK never leaves the process;
+  - `META_SEAL(case_id, column_id, row_version, pt)` / `META_OPEN(…)`: Record AEAD under `K_meta = HKDF(EK, case_id, "candor/v1/ek-meta")` for `case_meta` (ADR-047(8); 04-CRYPTOGRAPHY.md §9.10a); K_meta never leaves the process;
+  - `REKEY_MISSING(case_id)`: after a vault restore or loss, creates a fresh EK for a case marked `ek_missing` so that an authorized Desk can re-create the outer-layer wraps and `case_meta` ciphertexts from its hardware-sealed case-key cache (dual-approved; ADR-047(7); 04-CRYPTOGRAPHY.md §9.10);
   - `DESTROY(case_id)`: overwrite the record, compact, then `fsync`;
   - `EXPORT_BACKUP`: every active EK and the erasure log are re-encrypted under a fresh per-backup data key that is encrypted to the offline Backup Public Key (19-BACKUPS-DR.md). Records are **not** exported sealed under the VMK, so a vault backup is restorable on replacement hardware with the offline backup key quorum (RVW-C-07).
 
 **Backups:**
 - **Excluded from routine backups** (19-BACKUPS-DR.md). The vault has its own backup stream, encrypted to the Backup Key, with a hard retention of ≤ 14 days (rolling daily generations; older generations deleted by the backup store's lifecycle rule, verified weekly).
-- Restore of a vault backup older than 14 days is impossible by construction. EE-HA replication to the DR site (above) removes site loss as a cause. A disaster that destroys the running vault, its replicas and all vault backups loses case access unless member Desks re-wrap (19-BACKUPS-DR.md owns that procedure). The design accepts this residual availability risk in favor of erasure.
+- Restore of a vault backup older than 14 days is impossible by construction. EE-HA replication to the DR site (above) removes site loss as a cause. A disaster that destroys the running vault, its replicas and all vault backups — or a restore from a vault backup older than some cases — loses case access for the affected cases unless an authorized member Desk re-wraps from its case-key cache (ADR-047(7); 04 §9.10; 19-BACKUPS-DR.md owns the drill). Desk caches purge every case in the erasure log on each sync, so re-wrap cannot resurrect an erased case. The design accepts this residual availability risk in favor of erasure.
 
 **Erasure sequence** (`crypto_erase_case`):
 1. Check legal hold.
-2. `DESTROY(case_id)` in the vault.
+2. Append to the erasure log, then `DESTROY(case_id)` in the vault (this also makes every `case_meta` ciphertext of the case unreadable, including copies in routine backups once vault backups expire).
 3. Delete `case_key_wrap` rows.
 4. Delete blobs and rows.
 5. Append `(tenant_id, case_id, erased_day)` to the erasure log.
@@ -925,6 +960,9 @@ The `schema-lint` test runs in CI against the migrated schema and at service sta
 | L13 No draft tables | No intake table stores draft text, identity blocks, passphrases or staged parts (ADR-034). Table names matching `(?i)draft` are forbidden in the intake DB. |
 | L14 Blinded COI | No table in `core` combines a `case_id` column with a user-reference column and a COI meaning: `coi_excl_tag` has exactly the columns in §5.2.4; column names matching `(?i)coi.*(user\|reason\|source)` are forbidden outside `coi_registry` (ADR-037(3)). |
 | L15 No quota or counter history | Intake counters exist only as `counter_month` (current and previous month) and `source_account.quota_bucket` (today only); no per-day counter table exists in the intake DB (ADR-038(3), ADR-046(5)). |
+| L16 Metadata erasure | The columns listed for `case_meta` (§5.2.4: server-visible `category_class`, `routing_visible` values, case label) exist in `core` only as `case_meta.meta_ct`; column names matching `(?i)(category\|routing_visible\|custom_field\|title\|label)` with a non-`bytea` type are forbidden in `core` outside catalog tables (`coi_category`, workflow/label catalogs) (ADR-047(8)). |
+| L17 No cleartext follow-up dates | `message.day` is NULL for `from_source` rows (CHECK constraint); `import_envelope.import_date` is NULL for every row with `state = imported` (CHECK); no other `core` column stores an envelope date except `case.received_date` and `case.last_import_month` (ADR-047(2)). |
+| L18 Chaff indistinguishability | No column, enum value or index on `envelope`, `import_envelope` or their part tables names or encodes chaff (`(?i)(chaff\|decoy\|dummy)` forbidden) (ADR-047(3)). |
 
 Database parameters and write schedules that could record exact times of source-linked writes are fixed:
 - `track_commit_timestamp = off` (both DBs).
@@ -935,6 +973,22 @@ Database parameters and write schedules that could record exact times of source-
   - backups (19-BACKUPS-DR.md) therefore reveal only the slot, not arrival time.
   Reply pushes and directory snapshots do not create source-linked rows in Z-CORE.
   Residual: which slot an envelope was imported in (hours, not days) is visible; with delayed delivery (ADR-038(4)) the slot is decoupled from the arrival day as well.
+
+### 8.1 Cleartext field allow-list per envelope and import row (ADR-047; consumed by 30 AT-079 and 03 §10)
+
+Every field not listed below is ciphertext (`*_ct`) or absent. The `schema-lint` compares the migrated schema with this list.
+
+| Row | Cleartext fields (class) | Notes |
+|---|---|---|
+| Intake `envelope` (real and chaff identical) | `envelope_ref` (SS, random), `channel_id` (WF), `source_account_id` (SS; Tier W real envelopes only, else NULL), `header_sha256` (SYS), `received_date` (SS, day), `release_day` (SS, day), `batch_no` (SYS), `state` (SYS) | `header_ct`, `manifest_ct`, `disposition_ct` ciphertext |
+| Intake `envelope_part` | `envelope_ref`, `part_no`, `blob_id`, `padded_size` (bucket) | |
+| Intake `reply` | `reply_ref`, `source_account_id` (Tier W mailboxes only), `size_bucket`, `available_day`, `slot` (Tier W) | **Stored reply↔account mapping exists only for Tier W** (server-side inbox, ADR-039). For Tier V there is none: Tier V replies have `source_account_id = NULL` and are identified only inside ciphertext; fetch-all serves every reply to everyone (30 AT-020). |
+| Relay wire (RL-02) | `ref`, `channel_id`, `epoch_index`, `padded_size`, `sha256`, `disposition_ct` (opaque) | `received_date` and `release_day` never leave Z-INTAKE |
+| Core `import_envelope` | `import_envelope_id` (new random), `channel_id`, `import_date` (NULL once imported), `epoch_index`, `import_batch_no` (slot number, no time), `state`, `rejected_by`, `escalated_date`, `header_digest` (≤ 24 h) | chaff rows identical until deleted |
+| Core `import_envelope_part` | ids, `blob_id`, `padded_size` | |
+| Core `case` (source-linked subset) | `received_date` (initial slot date), `last_import_month` | follow-up dates only in `record_ct` (ADR-047(2)); category/labels only in `case_meta` (ADR-047(8)) |
+| Core `submission` | `case_id`, `import_envelope_id`, `seq` | |
+| Core `message` (`from_source`) | `message_id`, `case_id`, `direction`, `import_envelope_id`, `size_bucket`; `day` = NULL | |
 
 ## 9. Correlation analysis: can two records be linked?
 
@@ -980,7 +1034,7 @@ Database parameters and write schedules that could record exact times of source-
 | Deletion | Crypto-erasure is the primary control (ADR-025). Autovacuum aggressive on intake tables (`autovacuum_vacuum_scale_factor = 0.01`); `VACUUM` after bulk deletes. Row versions may persist on disk until page reuse (§12). | same |
 | Connection limits | `max_connections = 40` | `max_connections = 200` (EE-HA tuned in 34-PERFORMANCE-SCALABILITY.md) |
 | Replication | **none in any profile** (ADR-046(1); RVW-C-08). EE-HA intake failover is active/passive on shared-nothing hosts: envelopes pending on a failed node are recovered when its disk is recovered; the source sees "received" only after local `fsync`. | EE-HA synchronous standby over mTLS. The standby carries the same ciphertext and RLS; no logical replication to non-Candor systems. |
-| Backups | Encrypted snapshot pulled by relay (06 §8.6): `source_account`, `deletion_tombstone`, `intake_meta` only; no envelopes, no replies | `pg_basebackup` + WAL via `candor-backup`, encrypted to the Backup Key; the erasure log is applied before serving after any restore (§5.6) |
+| Backups | Encrypted snapshot pulled by relay (06 §8.6): `source_account`, `deletion_list`, `intake_meta` only; no envelopes, no replies | `pg_basebackup` + WAL via `candor-backup`, encrypted to the Backup Key; the erasure log is applied before serving after any restore (§5.6) |
 
 ## 11. Migration strategy
 
@@ -1059,9 +1113,15 @@ Database parameters and write schedules that could record exact times of source-
 | DB-050 | `case_key_wrap` rows SHALL be deleted only by case crypto-erasure (retention expiry or source-requested erasure) or by an executed `wrap_deletion_request` with dual control, a 7-day cooling-off and a recorded OVERSIGHT notice. Execution SHALL be blocked while it would leave fewer than `min_recipients` (default 2) wrap holders. SCIM/HR/IdP changes SHALL only set `case_member.state = suspended`. | ADR-044(1)/(2); RVW-C-03 | THR-020; THR-032 | C-12; C-22 | TST: SCIM deactivation leaves wraps intact; deletion before day 7 refused; last-two-holders test |
 | DB-051 | Records Custodian access SHALL exist only as `case_member` rows with `via = records_grant`, granted by a Triage Set member, with mandatory `valid_until_day` ≤ 90 days. No server-side cross-case search index or full-text column SHALL exist. | ADR-044(5); RVW-C-14 | THR-018; THR-019 | C-12 | TST: grant without expiry rejected; expiry job revokes; schema has no `tsvector`/search columns |
 | DB-052 | The Erasure Key Vault SHALL be replicated to the DR site within the HA RPO (EE-HA), SHALL export backups re-encrypted to the Backup Public Key (not VMK-sealed), SHALL keep a signed erasure log that every restore applies before serving, SHALL be on a physical TPM or HSM in HIGH/GOV profiles, and SHALL be excluded from infrastructure-level backups by recorded attestation. | ADR-044(4); RVW-C-06; RVW-C-07 | THR-017; THR-031 | C-12; C-27; C-29 | TST: restore of a pre-erasure Case DB backup followed by service start shows the erased case absent; vault restore on replacement hardware in a drill; INSP: attestation record; DEMO: DR-site vault failover |
-| DB-053 | Deleted Tier W accounts SHALL leave a `deletion_tombstone` for 14 days, included in the intake snapshot and applied after any restore; replies routed to a tombstoned account SHALL be dropped. | RVW-A-28; ADR-025 | THR-017 | C-08 | TST: delete account, restore older snapshot, verify account absent and re-pushed reply dropped |
+| DB-053 | WITHDRAWN (ADR-047(9)): replaced by DB-058 (signed intake deletion list). Former text: deleted Tier W accounts leave a `deletion_tombstone` for 14 days, applied after restore. | RVW-A-28; ADR-025 | THR-017 | C-08 | — (withdrawn) |
 | DB-054 | A channel member SHALL NOT become `active` unless the user has ≥ 2 active hardware authenticators (primary + backup). | ADR-044(2); RVW-C-03 | THR-032; THR-020 | C-12; C-21 | TST: activation with one credential refused |
 | DB-055 | Intake SOURCE-SENSITIVE counters SHALL be stored only per calendar month (`counter_month`) and exported once after month close under the 24 §TEL regime. | ADR-046(5); RVW-B-07; RVW-B-09 | THR-039 | C-08; C-09 | TST: no per-day counter table; export before month close refused |
+| DB-056 | Follow-up import dates SHALL be stored only inside the encrypted case record: `import_envelope.import_date` SHALL be NULL once the envelope is linked to a case, `message.day` SHALL be NULL for `from_source` rows, and the cleartext case row SHALL carry only `received_date` (initial) and `last_import_month` (lint L17). | ADR-047(2); RVW-B-11 | THR-134; THR-011 | C-12, C-10 | TST: schema-lint L17 and CHECK constraints; DB dump after follow-ups contains no follow-up day; AT-081 (30) |
+| DB-057 | Server-visible sensitive case metadata (`category_class`, `routing_visible` values, case label) SHALL be stored only in `case_meta.meta_ct` under `K_meta` derived from the case's Erasure Key inside `candor-ekv` (lint L16). | ADR-047(8); RVW-B-21 | THR-017; THR-130 | C-12, C-10 | TST: lint L16; erase case, restore backup after vault-backup expiry → `meta_ct` undecryptable |
+| DB-058 | Source-initiated account, mailbox and reply deletions SHALL be recorded in the signed, hash-chained `deletion_list` in the same transaction, copied to `core.intake_deletion_list` at every import slot, retained 35 days, and applied (newest verified copy) before an intake restore serves requests; listed replies SHALL never be re-pushed. | ADR-047(9); RVW-A-28 | THR-017 | C-08, C-09, C-12 | TST: delete → restore 13-day-old BS-INTAKE → listed account and replies absent before first request; chain gap or bad signature → restore halts |
+| DB-059 | Every intake and import envelope row SHALL carry a fixed-size `disposition_ct`; chaff rows SHALL be indistinguishable in schema, sizes and write path from real rows (lint L18), SHALL NOT be counted in `counter_month`, and SHALL be deleted by C-10 at the derived hold slot without a distinguishing audit event. | ADR-047(3); RVW-B-04 | THR-110; THR-011 | C-08, C-12, C-10 | TST: lint L18; classifier over DB dumps without K41 performs at chance; counters exclude chaff |
+| DB-060 | The cleartext fields of intake envelope, reply, relay-wire and import rows SHALL be exactly those of §8.1; any other cleartext column SHALL fail `schema-lint`. | ADR-047; ADR-038; ADR-039 | THR-015; THR-011 | C-08, C-12 | TST: `schema-lint` diff against §8.1; AT-079 (30) |
+| DB-061 | `prefs_ct` SHALL contain only the fields of 04-CRYPTOGRAPHY.md §11.4 and SHALL NOT contain the source's COI ticks or the wordlist/UI language. | ADR-047(6); ADR-036(4); RVW-A-03 | THR-020; THR-034 | C-08, C-07 | TST: decrypted-vector schema test (04 KEY-061) |
 
 ## 13. Residual risks and limitations
 
@@ -1069,7 +1129,9 @@ Database parameters and write schedules that could record exact times of source-
 - **PostgreSQL deletes:** PostgreSQL does not securely erase deleted tuples. Deleted ciphertext may persist in pages or backups. Confidentiality relies on crypto-erasure of case keys (ADR-025). Envelopes never imported become undecryptable once Member Epoch Keys are destroyed.
 - **Excluded members and envelope listings (partially fixed):** since ADR-037 only Triage Set members list envelopes. A Triage Set member whom the source ticked can still observe an envelope it cannot open and infer that it was excluded from a report on that slot date. Desk hides such envelopes, but a modified client does not. See 06-SYSTEM-ARCHITECTURE.md R-3.
 - **Core WAL, blob and backup times (fixed by ADR-038(1)):** import commits occur only at the fixed slot commit time; residual timing is the slot identity (hours). If a slot overruns its commit offset, the commit time reflects processing duration, which correlates weakly with batch volume; overruns are alerted (`relay_slot_overrun`) and the offset is sized per 34-PERFORMANCE-SCALABILITY.md.
-- **Follow-up day sequences (partially fixed):** each follow-up still produces a `message` row with its slot date, visible to case members and core DB holders. Slot dates and optional delayed delivery blur, but do not remove, an intersection attack over many follow-ups against an employer holding Tor-usage logs (RVW-B-11). HIGH shows ISO weeks to staff; the DB still stores slot dates.
+- **Follow-up day sequences (fixed for the DB view by ADR-047(2)):** follow-up slot dates exist only inside `record_ct` (case key); a core-DB or backup holder sees only `received_date` and `last_import_month`. Case members still see the dates (day or ISO week, HIGH), so an insider with Tor-usage logs can still attempt an intersection attack (RVW-B-11). Pending envelopes carry `import_date` until import (≤ days).
+- **Chaff (ADR-047(3)):** chaff rows reach the Case DB and are deleted 1–8 slots later; C-10 (holder of K41) learns which were chaff. A core-DB snapshot taken between import and discard cannot distinguish them.
+- **Metadata erasure (ADR-047(8)):** `case_meta` is server-readable while the case lives; only post-erasure backup copies are protected.
 - **Blinded COI tags:** a live Z-CORE attacker who also controls a member Desk (holding the case key) can compute tags for candidate users. Case members legitimately know who the report concerns.
 - **Joint compromise:** a joint compromise of the core DB and the intake routing key links cases to source accounts. Source accounts carry no identity, but linkage across a source's cases becomes possible (only if the source reused one passphrase for several reports, which is not the default; ADR-005).
 - **RLS limits:** RLS depends on correct context setting in the connection wrapper. A bug there fails closed (error), but a policy bug could over-expose rows. The two-tenant harness and ACL SQL tests reduce but do not eliminate this.

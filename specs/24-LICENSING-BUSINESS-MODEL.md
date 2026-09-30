@@ -1,5 +1,5 @@
 # 24 — Licensing, Business Model, Edition Charter and Telemetry
-Status: Draft v1.1 (round-2 revision: ADR-031, 035, 045, 046) · Edition applicability: both · Owner: Governance & Product Leadership (with Legal)
+Status: Draft v1.2 (final consistency round: ADR-047; round 2: ADR-031, 035, 045, 046) · Edition applicability: both · Owner: Governance & Product Leadership (with Legal)
 
 ## 1. Purpose and scope
 
@@ -215,7 +215,7 @@ Consequences and mitigations:
 
 ## 9. §TEL — Canonical metrics regime (ADR-046 §5)
 
-This section is the **single source of truth** for every aggregate derived from case, intake or source-derived data, for every audience (ADR-046(5); resolves RVW-B-07, RVW-B-08, RVW-B-09). Other documents (`03-PRIVACY-ANONYMITY.md` §12, `09-DATABASE.md`, `13-FRONTEND-ADMIN.md`, `14-CASE-MANAGEMENT.md` §14, `20-LOGGING-AUDITING.md` §5.4/§13, `21-ENTERPRISE.md`, `23-COMMUNITY-EDITION.md`, `30-ANONYMITY-TESTING.md`, `32-OPERATIONS.md`) SHALL reference "24 §TEL" and SHALL NOT restate or vary its parameters. The parameters are also published as the machine-readable file `spec/constants/tel.yaml` for the spec-constant lint in `39-REQUIREMENTS-TRACEABILITY.md`.
+This section is the **single source of truth** for every aggregate derived from case, intake or source-derived data, for every audience (ADR-046(5); resolves RVW-B-07, RVW-B-08, RVW-B-09). Other documents (`03-PRIVACY-ANONYMITY.md` §12, `09-DATABASE.md`, `13-FRONTEND-ADMIN.md`, `14-CASE-MANAGEMENT.md` §14, `20-LOGGING-AUDITING.md` §5.4/§13, `21-ENTERPRISE.md`, `23-COMMUNITY-EDITION.md`, `30-ANONYMITY-TESTING.md`, `32-OPERATIONS.md`) SHALL reference "24 §TEL" and SHALL NOT restate or vary its parameters. The parameters are also entered in the canonical constants registry owned by `39-REQUIREMENTS-TRACEABILITY.md` §6 (`tools/constants.json`, ADR-047(11)) and checked by the spec-constant lint (39 §7; ST-167, SG-25); this section remains the normative text for their meaning (e.g., registry entry `metrics_k_threshold` = 10).
 
 ### 9.1 Scope
 
@@ -256,10 +256,18 @@ This section is the **single source of truth** for every aggregate derived from 
 
 | Rule | Value |
 |---|---|
-| Counters | defined in `20-LOGGING-AUDITING.md` §5.4; per-day values never leave C-08; monthly totals in C-24 released only under §9.3 |
+| Counters (confirmed, final round) | exactly `submissions`, `accounts_created`, `account_deletions` per channel and calendar month, held only in the intake `counter_month` table (`09-DATABASE.md`; names in `20-LOGGING-AUDITING.md` §5.4 and `08-API.md` CTR), plus the core counter `intake.coi_exhausted` (month total per instance, `14` ROUTE-021). No login, follow-up, reply, tier or daily counter exists. |
+| Input path | the only input to M2/M3 intake statistics is the **monthly RL-09 export** (`08-API.md` RL-09): C-09 pulls one closed calendar month after month close; values are released under §9.3 (k = 10; channels with < 3 cases in the month folded into their channel group) and then stored in C-24 as monthly totals |
+| Chaff (ADR-047(3)) | chaff envelopes are never counted in any counter, table, health band, telemetry field or aggregate surface of §9.7; counters are incremented only on real commits (`07-BACKEND.md`; `09-DATABASE.md` DB-059) |
+| COI exhaustion | `intake.coi_exhausted` is released only as an M2 program-report figure under §9.3 (k = 10, monthly tumbling, yearly under small-program coarsening), never per channel and never to class H |
 | Health bands (class H) | computed once per UTC day per service from internal detectors; the band thresholds are set so that ELEVATED/UNDER_ATTACK occur only under load ≥ 10× design peak (RVW-A-27); no band is derived from per-channel data |
 | Abuse alerting | raw values are evaluated only inside C-24/C-25 and emit "threshold exceeded" SYSTEM events with date-only `ts` |
 | Retired | round-1 M4 "7-day rolling buckets", per-hour request-rate bands, `v_case_counts`-style per-channel weekly admin counts (RVW-B-07) |
+
+### 9.4a Tumbling periods and regime evaluation (summary of §9.3, for the constants registry)
+- Periods: calendar months (or coarser quarter/year), non-overlapping, computed once after close, frozen; no month-to-date figures.
+- Regime evaluation (small-program coarsening, GOV-013): once per calendar year on the prior year's non-spam report count, hysteresis 2 consecutive years (TEL-020).
+- Magnitude rule: TEL-015. Channel minimum: a channel with < 3 cases in the period, or a declared population < 50, is shown only inside a channel group (TEL-016).
 
 ### 9.5 Inference risks
 
@@ -288,6 +296,32 @@ The CI test `stats-inference` runs against the report catalog with synthetic dat
 
 It fails if any cell below k, or any single-case attribute, becomes derivable.
 
+### 9.7 Aggregate surface catalogue (enumerated; for `30-ANONYMITY-TESTING.md` AT-065/AT-085)
+
+Every surface that shows or emits an aggregate derived from case, intake or source-derived data is listed here; a surface not listed SHALL NOT exist (TEL-022).
+
+| # | Surface | Owner doc | Audience class | Content allowed |
+|---|---|---|---|---|
+| AS-01 | Desk "My cases", Tasks/SLA dashboard (`12` R09) | 12, 14 §14 | M0 (team-lead aggregates over own team's openable cases only) | counts by state/SLA over cases the viewer can open |
+| AS-02 | Desk Inbox badge / empty state (`12` R02) | 12 | M0, Triage Set only | pending envelopes this Desk opened; never unopenable or chaff counts |
+| AS-03 | OVERSIGHT register and signed daily snapshot (`14` §9.5, CASE-019) | 14 | M0-equivalent per case row; no totals over cases outside OVERSIGHT scope | per-case rows; no per-channel counts |
+| AS-04 | Program report (`14` §14 catalog) | 14 | M2 | §9.3 |
+| AS-05 | KPI report (ISO 37002 cl. 9) | 14 | M2 | §9.3 incl. magnitude rule |
+| AS-06 | Statutory/public report (EU Art 27, PSDPA) and published statistics | 14, 25 | M3 | §9.3 + rounding, channel type only |
+| AS-07 | Admin Console channel list and dashboards (`13` §4.3, CR-2) | 13 | M2 (no intake counts per channel) | availability states; catalog reports only |
+| AS-08 | SOC UI health overview and anomaly alerts (`13` §5) | 13 | H | global daily health bands |
+| AS-09 | SYSTEM event stream and `sys.relay_daily` (`20` §5.3) | 20 | H | slot success/failure only; no arrival counts |
+| AS-10 | C-26 SIEM export (`20` §13) | 20 | H | allow-listed fields; breakglass daily count per reason only |
+| AS-11 | Support bundles (`20` LOG-019; `32` §8) | 20, 32 | H | hour-truncated SYSTEM events; no `sys.relay_*` |
+| AS-12 | Intake health exporter / C-25 (`16` §15) | 16, 17 | H | liveness fields and daily load bands |
+| AS-13 | RL-09 monthly counter export (`08` RL-09) | 08, 09 | input to AS-04..AS-06 only | §9.4 counters after §9.3 |
+| AS-14 | Telemetry (§8.2) | 24 | T | schema v1; no case/submission counts |
+| AS-15 | Fleet Manager / EM UI instance health (`13` §6; `21` §9) | 13, 21 | H | global daily health bands per instance; opaque IDs |
+| AS-16 | Tier W/Tier V source pages (`11`) | 11 | none | no counts of any kind (ADP-05) |
+| AS-17 | Key Directory public data (`14` ROUTE-002) | 14, 04 | public | roster role labels only; no report counts |
+| AS-18 | Records search results (`12` R15) | 12 | M0 | hit counts over cases the custodian can decrypt |
+| AS-19 | Backups screen vault-event counts (`13` AUI-039) | 13 | SYS_ADMIN counts only; OVERSIGHT pseudonyms | `EK_MISSING`/restored/lost counts after a vault event (operational, not source-derived per period) |
+
 ## 10. Requirements
 
 | ID | Requirement | Evidence | Threats | Component | Verification |
@@ -298,7 +332,7 @@ It fails if any cell below k, or any single-case attribute, becomes derivable.
 | BIZ-004 | Source for every Trust Path release, including LTS, SHALL be public no later than the release's publication time. | B-CO-64 | THR-024 | C-30, C-32 | TST: release pipeline checks tag visibility before signing; AUD |
 | BIZ-005 | Pricing SHALL NOT be based on any metric of source activity (reports, cases, submissions, messages, sources). | INC-53; INC-72 | THR-036 | C-35 | INSP: price-list review by the governance board |
 | BIZ-006 | The vendor SHALL NOT sell, share, advertise with, profile or train models on deployment data or metadata. This SHALL be a contractual term in all EE and MANAGED agreements. | INC-53; INC-72 | THR-027, THR-036 | C-36 | AUD: contract template review |
-| BIZ-007 | (amended RVW-C-24) EE license validation SHALL be offline (signed license files). Expiry SHALL freeze only configuration changes of EE modules and SHALL NOT disable intake, decryption, case access, SSO-bridge login, HA fencing/failover, DR automation or configured SIEM export. | ADR-023; C-35; RVW-C-24 | THR-032, THR-036 | C-35, C-19 | TST: expired license + node failure: failover completes; SSO-first-factor login works; config change rejected |
+| BIZ-007 | (amended RVW-C-24; final round per 21 ENT-050 and 34 F18) EE license validation SHALL be offline (signed license files). Expiry SHALL freeze only configuration changes of EE modules and SHALL NOT disable or degrade intake, decryption, case access, SSO-bridge login, HA fencing/failover, DR automation (incl. Erasure Key Vault replication and erasure-log replay), configured SIEM export, Fleet check-in within its allow-list, security-floor updates, self-tests, retention/erasure jobs, canary escalation, or any class-S safety automation; expiry SHALL NOT change any §TEL parameter. The only user-visible effect is an Admin Console banner "EE licence expired: EE settings are frozen; protections keep running." | ADR-023; C-35; RVW-C-24; ENT-050 | THR-032, THR-036 | C-35, C-19 | TST: expired license + node failure: failover completes; SSO-first-factor login works; config change rejected |
 | BIZ-008 | EE modules SHALL be source-available to customers and customer-appointed auditors under the Enterprise License. | R6 D6; B-CO-65 | THR-024 | C-26, C-34, C-40 | INSP |
 | BIZ-009 | The Enterprise License SHALL prohibit telemetry or phone-home in EE modules. | ADR-023 | THR-036 | C-26, C-34, C-40 | TST: EE network egress test |
 | BIZ-010 | Starter compliance packs and documentation SHALL be licensed CC BY 4.0 and CC BY-SA 4.0 respectively. | R6 D6 | — | C-30 | INSP |
@@ -324,7 +358,8 @@ It fails if any cell below k, or any single-case attribute, becomes derivable.
 | TEL-018 | SOC, SYS_ADMIN, SIEM, support-bundle and Fleet Manager views SHALL receive only global daily per-service health bands; no source-derived count, per-channel, per-tenant or sub-daily value SHALL be exposed to them. | ADR-046(5); ADR-038(5); RVW-B-07; RVW-A-27 | THR-011; THR-039; THR-016 | C-25; C-26; C-19; C-34 | TST: SOC/API surface and C-26 output inspection; bundle inspection |
 | TEL-019 | Telemetry SHALL contain no case, submission, message or source-derived count at any level, `crash_counts` SHALL exclude Z-INTAKE components, and `health-full` SHALL be unavailable in GOV-ONPREM. | RVW-B-09; RVW-B-20; ADR-023 | THR-036; THR-039 | C-25 | TST: schema test; GOV-ONPREM profile rejects `health-full` |
 | TEL-020 | Regime switches (e.g., small-program yearly coarsening) SHALL be evaluated once per calendar year with hysteresis of 2 consecutive years, and no intra-period or cumulative-to-date figure SHALL be displayed for M2/M3. | RVW-B-09 | THR-039 | C-10 | TST: before/after-one-submission across switch in `stats-inference`; UI shows no month-to-date values |
-| TEL-021 | The §TEL parameters SHALL be published once in `spec/constants/tel.yaml`, and CI SHALL fail when any specification or code literal for k, period, band or rounding diverges from it. | ADR-046(5); RVW-B-07; RVW-B-29 | THR-039; THR-035 | C-30; C-31 | TST: spec-constant lint (39) |
+| TEL-021 | (amended ADR-047(11)) The §TEL parameters SHALL be published once in the canonical constants registry owned by 39 (`tools/constants.json`), and CI SHALL fail when any specification or code literal for k, period, band or rounding diverges from it. | ADR-046(5); RVW-B-07; RVW-B-29 | THR-039; THR-035 | C-30; C-31 | TST: spec-constant lint (39) |
+| TEL-022 | Every aggregate surface SHALL be one of the §9.7 catalogue entries with the stated audience class and content; adding a surface SHALL require a catalogue change reviewed under §9.6, and chaff envelopes SHALL NOT contribute to any surface. | ADR-046(5); ADR-047(3); RVW-B-07 | THR-039; THR-110 | C-10; C-19; C-25; C-26 | TST (30 AT-065/AT-085): surface inventory scan of UIs, APIs and exports against §9.7; chaff-only month leaves every surface unchanged |
 | TEL-013 | The C-03 update check SHALL fetch only public TUF metadata over Tor, SHALL send no identifiers, and SHALL use the same request for all clients. | ADR-022; INC-57 | THR-036, THR-001 | C-03 | TST: request golden test |
 | TEL-014 | Any schema change SHALL increment `schema_version`, SHALL be published with a privacy analysis 30 days before shipping, and SHALL NOT be applied to instances until the admin re-consents. | B-CO-66 | THR-036 | C-25 | INSP; TST: consent version check |
 
