@@ -89,7 +89,7 @@ Only the flows below are allowed; everything else is denied. `→` means the con
 | # | From → To | Proto/port | Purpose | Notes |
 |---|---|---|---|---|
 | F1 | Tor network → C-05 (via tor's own outbound circuits) | tor | Source access | No listener on any IP. Onion traffic arrives over tor's outbound OR connections |
-| F2 | C-05 tor → Tor relays | TCP any ORPort | Circuit building | Only `debian-tor` UID, only on N-INTAKE-EXT |
+| F2 | C-05 tor → Tor relays | TCP any ORPort | Circuit building | Only `_tor-candor-intake` UID, only on N-INTAKE-EXT |
 | F3 | C-09 (H-CORE) → H-INTAKE:7443 | TCP, mTLS 1.3, pinned certificate | Pull sealed batches; push sealed replies and key-directory snapshots | ADR-009. No flow from intake to core, ever |
 | F4 | C-25 agent on H-INTAKE/H-CORE/H-BAK → H-MON:8514 | TCP, mTLS 1.3 | Push self-test results (allow-listed schema, `32-OPERATIONS.md` §6; `06-SYSTEM-ARCHITECTURE.md` §8.5) | Z-INTAKE → Z-SOC is permitted (ADR-009 forbids only Z-INTAKE → Z-CORE) |
 | F4b | H-ALERT tor client → source onion `/.well-known/candor/health` | tor | External availability probe (`16-TOR-I2P.md`); moved from H-MON in r3 so that H-MON has no Internet egress | Fixed-size static response; H-ALERT reports only an up/down flag to the collector inside its next F10a request |
@@ -180,7 +180,7 @@ table inet candor_intake {
     ct state established,related accept
     ip daddr 169.254.0.0/16 counter drop comment "no cloud metadata service"
     ip6 daddr fe80::/10 udp dport 547 drop
-    oifname "ext0" meta skuid "debian-tor" meta l4proto tcp ct state new accept   # F2: source onion tor instance only
+    oifname "ext0" meta skuid "_tor-candor-intake" meta l4proto tcp ct state new accept   # F2: source onion tor instance only
     oifname "ext0" meta skuid "_tor-candor-update" meta l4proto tcp ct state new accept   # F14: client-only update/time tor instance
     oifname "mgmt0" meta skuid "candor-health" ip daddr @mon_hosts tcp dport 8514 accept  # F4 agent push
     oifname "mgmt0" meta skuid "_chrony" ip daddr @mon_hosts udp dport 123 accept  # F5 NTP
@@ -199,7 +199,7 @@ This matrix is the single normative list of flows that H-INTAKE may **initiate**
 
 | # | Initiating UID on H-INTAKE | Interface → destination | Proto/port | Purpose | Constraint on the destination |
 |---|---|---|---|---|---|
-| E1 | `debian-tor` (source onion instance, C-05) | ext0 → Tor relays | TCP | Circuits for the source onion service | — |
+| E1 | `_tor-candor-intake` (source onion instance, C-05) | ext0 → Tor relays | TCP | Circuits for the source onion service | — |
 | E2 | `_tor-candor-update` (client-only tor instance, `SocksPort unix:` only, started by `candor-update.timer` and `candor-roughtime.timer`) | ext0 → Tor relays | TCP | Updates from the project onion mirror (F14, ADR-046(3)); Roughtime queries over tor (§4.5) | The instance never hosts an onion service and never shares a data directory with E1 |
 | E3 | `candor-health` (C-25 agent) | mgmt0 → H-MON collector 10.30.0.5 | TCP 8514 mTLS | Self-test push (F4; ARCH-014 push-only) | H-MON SHALL satisfy §4.3.2 (no forwarding, no default route, no mail daemon) |
 | E4 | `_chrony` | mgmt0 → H-MON | UDP 123, TCP 4460 | Time discipline (F5) | As E3 |

@@ -595,7 +595,7 @@ role: intake
 secrets:
   - id: onion.source.hs_ed25519_secret_key
     path: /var/lib/tor/candor-source/hs_ed25519_secret_key
-    owner: debian-tor
+    owner: _tor-candor-intake
     mode: "0600"
     provenance: generated_on_host   # or: restored_from_BS-SECRETS
     backup_set: BS-SECRETS
