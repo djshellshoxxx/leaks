@@ -198,7 +198,7 @@ The following role pairs SHALL NOT be held by the same person (`person_ref`) in 
 | `backup.status` | core, monitor | Last successful set per type within schedule; RT-0 result | backup state + RT-0 | hourly | OK/WARN/FAIL per set type | 2 missed nightly sets → FAIL alert |
 | `crypto.selftest` | intake, core | candor-core KATs, CSPRNG health, AEAD round trip | built-in test vectors (`04-CRYPTOGRAPHY.md`) | at start + daily | OK/FAIL | FAIL → stop the affected service (fail closed) |
 | `keys.epoch_runway` | core | For each channel: at least `min_recipients` eligible member epoch keys valid for the next N days (ADR-030) | key directory | hourly | per channel: {≥14 d, 7–14 d, 1–7 d, 0} | <7 d WARN to Channel Owner; 0 → intake for that channel fails closed (ARCH-037) |
-| `keys.availability` | intake, core | Intake Routing Key unsealable; backup public keys present; audit signing key usable; HSM reachable | local ops (sign/verify test) | hourly | OK/FAIL | FAIL → per FAIL table |
+| `keys.availability` | intake, core | Intake Routing Key unsealable; Erasure Key Vault readable and integrity-checked (ADR-033(3)); backup public keys present; audit signing key usable; HSM reachable | local ops (sign/verify test) | hourly | OK/FAIL | FAIL → per FAIL table |
 | `certs.expiry` | all | mTLS certificates (relay, agent, RCP-LAN) | parse | daily | bucket {>30 d, 7–30 d, <7 d, expired} | <7 d WARN; expired FAIL |
 | `perm.secrets` | all | Secret file owner/mode per manifest | stat | 15 min | OK/FAIL | FAIL → alert |
 | `secret.placement` | all | ADR-028 manifest equality | scan (`18-DEPLOYMENT.md` §15) | 5 min light / daily full | OK/FAIL | FAIL → `secret.placement_violation`; forbidden item → intake stop (DEP-024) |

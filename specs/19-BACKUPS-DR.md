@@ -42,9 +42,10 @@ Research:
 
 | Set | Contents | Produced on | Transport to store | Encrypted to | Schedule |
 |---|---|---|---|---|---|
-| BS-CORE | Logical dump of C-12 (`pg_dump -Fc`, all tables incl. wrapped case keys), C-13 blob store (ciphertext objects), C-14 key directory + transparency log, C-24 audit store | H-CORE | F7 → H-BAK (write-only) | BK-DATA public key | Nightly full (02:15 local ± 30 min jitter) |
+| BS-CORE | Logical dump of C-12 (`pg_dump -Fc`, all tables incl. Erasure-Key-encrypted member wraps, **excluding the Erasure Key Vault**, ADR-033(3)), C-13 blob store (ciphertext objects), C-14 key directory + transparency log, C-24 audit store | H-CORE | F7 → H-BAK (write-only) | BK-DATA public key | Nightly full (02:15 local ± 30 min jitter) |
 | BS-CORE-WAL | PostgreSQL WAL segments bundled into fixed 15-min bundles (§5.3) | H-CORE | F7 | BK-DATA | Every 15 min (EE, CE-HARDENED) |
 | BS-INTAKE | Logical dump of C-08: source accounts (public keys, verifiers), pending replies, not-yet-pulled envelopes (ciphertext), upload-session records | H-INTAKE, encrypted **on intake** | **Pulled** by C-09 over F3 (intake never initiates, ADR-009), then forwarded by H-CORE over F7 | BK-DATA public key (only the public key is present on H-INTAKE) | Nightly |
+| BS-ERASURE | The Erasure Key Vault (per-case Erasure Keys; separate schema / host-local file on H-CORE, ADR-033(3)) | H-CORE | F7 (T1/T3) and a dedicated T2 partition (§8) | BK-DATA | Nightly, in the same run as BS-CORE (so every BS-CORE has a matching vault set) |
 | BS-SECRETS | Onion service keys (source, offline standby onion key, RCP-ONION onions, SSH-onions), Intake Routing Key, Argon2 deployment salt, Tang key backup, internal CA **public** material, HSM backup blobs where the vendor supports wrapped export | Each host (per manifest entries with `backup_set: BS-SECRETS`) | Offline media only (never to the online store) | BK-SECRETS public key | At install and after every rotation of an included secret |
 | BS-CONFIG | `candor-site.toml`, effective non-secret config, manifests, install record, golden PCR values | WS-ADM | Online store + offline | BK-DATA | On change |
 | BS-ANCHOR | Signed audit checkpoints and backup-manifest chain heads | H-CORE | Online store + offline + optional external witness | Not encrypted (signed; contains hashes only) | Daily |
@@ -128,7 +129,7 @@ Consequence: an observer of the store learns only the size bucket per set. With 
 | Names reveal content | Random `set_id`, numeric segment names, no hostnames, case IDs or dates in object keys |
 | Store access logs | Object-store server access logs disabled, or retained ≤ 7 days, readable only by the security team (REQ-H-60) |
 | Backups add new metadata | Backup tooling SHALL NOT add fields beyond §5.1. Row-level data is copied as-is from stores already minimized by ADR-010 (day granularity) |
-| Deleted data persists | Retention ≤ 35 days default (§8). Deleted cases stay unreadable because key wrappings are destroyed (ADR-025) |
+| Deleted data persists | Retention ≤ 35 days default (§8). Deleted cases become unreadable in **all** backups once their Erasure Key is destroyed and the last BS-ERASURE set containing it expires (≤ 14 days, ADR-033(3)) |
 | Intake data in backups | BS-INTAKE retention 14 days (shorter than BS-CORE), because source-account records exist only to preserve source login ability |
 | Pending-reply presence in BS-INTAKE reveals "which sources were answered" | Accepted. Retention bounded to 14 days, encrypted to BK-DATA |
 | Restore tests leak data | Restores run in an isolated, network-less sandbox that is crypto-erased afterwards (§7) |
@@ -150,7 +151,7 @@ Transport of offline media: sealed tamper-evident bag with a logged serial, two-
 | Test | Frequency | Who | Decrypts? | Checks |
 |---|---|---|---|---|
 | RT-0 structural verification | Daily (H-MON) | automatic | No | Every expected set exists; manifest signatures valid; `prev_manifest_hash` chain unbroken; segment hashes match (from signed header-level hash list); Object Lock retention present and ≥ policy; no unexpected objects (injection) |
-| RT-1 sandbox restore | Quarterly (all profiles); monthly (EE-HA, GOV) | 2 admins + IRK custodians (k) | Yes (outer layer only) | Restore BS-CORE + latest WAL + BS-INTAKE into an isolated network-less sandbox VM (`candorctl dr drill`); `pg_amcheck`; row and blob counts match the manifest; every blob referenced by C-12 exists and its ciphertext hash matches; audit hash-chain and key-directory log verify; measured RPO (latest restorable point) and RTO (elapsed time) recorded |
+| RT-1 sandbox restore | Quarterly (all profiles); monthly (EE-HA, GOV) | 2 admins + IRK custodians (k) | Yes (outer layer only) | Restore BS-CORE + the matching BS-ERASURE + latest WAL + BS-INTAKE into an isolated network-less sandbox VM (`candorctl dr drill`); `pg_amcheck`; row and blob counts match the manifest; every blob referenced by C-12 exists and its ciphertext hash matches; audit hash-chain and key-directory log verify; measured RPO (latest restorable point) and RTO (elapsed time) recorded |
 | RT-2 end-to-end canary decrypt | Quarterly with RT-1 | 1 recipient (canary channel member) | Canary only | A **synthetic canary case** created at install on a dedicated canary channel (no real data) is opened in Candor Desk against the sandbox. This proves case-key unwrapping and blob decryption work after restore, **without anyone decrypting real reports** |
 | RT-3 secrets restore | Yearly, and after each BS-SECRETS change | 2 admins + IRK-S custodians | BS-SECRETS | Restore onion keys on a sandbox intake with tor in a netns **without** Internet (so the restored service is never published); verify the derived onion address equals the production address |
 | RT-4 full DR exercise | Yearly (EE-HA, GOV: twice yearly) | Ops + security + management | Yes | Execute DR-P3 (site loss) on spare hardware; measure RTO against §10 |
@@ -166,16 +167,18 @@ Optional (EE, ADVANCED): `backup.online_restore_test_key`. Sets are additionally
 | BS-CORE nightly | 35 days (dailies 14 + weeklies 3) | Latest weekly on each of 2 disks | 35 days | EE MAY configure monthly sets retained ≤ 12 months (ADVANCED: extends THR-017 exposure) |
 | BS-CORE-WAL | 14 days | — | 14 days | Enables point-in-time recovery within 14 days |
 | BS-INTAKE | 14 days | Latest weekly | 14 days | Source-account data minimized |
+| BS-ERASURE | 14 days (Object Lock 14 days, then deleted) | Written to a dedicated fixed-size partition that is **overwritten in place** at each weekly rotation, so no T2 copy is older than 14 days | 14 days | ADR-033(3) upper bound of "delete" for backups. A lost T2 disk (theft) can hold a vault copy past 14 days, which is handled as PB-13 |
 | BS-SECRETS | n/a (not online) | Current + previous generation | Offline copy at second site | Previous generation destroyed 30 days after rotation |
 | BS-CONFIG | 90 days | Latest | 90 days | No sensitive data |
 | BS-ANCHOR | 7 years (or as audit policy requires) | Yes | Yes | Hashes and signatures only |
 
 Legal hold (`35-DATA-RETENTION-DELETION.md`): a hold on a case SHALL be implemented in production (the case key is retained). It SHALL NOT be implemented by extending backup retention, because extending retention would retain every other deleted item too.
 
-Deletion propagation (ADR-025):
-- Deleting a case destroys all wrappings of its case key in production. Backup copies of the same wrapped keys remain decryptable **only** by the case members' private keys (and the Quorum, if enabled). So:
-  - (a) after member key rotation or revocation, old wrappings in backups are useless to anyone who lacks the old member keys;
-  - (b) residual exposure lasts until set expiry (≤ 35 days) for anyone holding a former member's device and credentials. This is documented in `35-DATA-RETENTION-DELETION.md`.
+Deletion propagation (ADR-025, ADR-033(3)):
+- Member-key wraps of every case key are stored in C-12 encrypted under that case's **Erasure Key**. The Erasure Key is kept in the Erasure Key Vault, which is excluded from BS-CORE and backed up only in BS-ERASURE (≤ 14 days).
+- Deleting a case destroys its Erasure Key and all its wrappings in production. Old BS-CORE sets still contain the Erasure-Key-encrypted wraps, but once the last BS-ERASURE set holding that Erasure Key expires (≤ 14 days), no copy of the case key is recoverable by anyone, including holders of former member devices.
+- Until then, residual exposure (≤ 14 days) exists only for an adversary holding **all of**: the backup KEK (IRK quorum), a BS-CORE set, a BS-ERASURE set, and a former member's device and credentials. This is documented in `35-DATA-RETENTION-DELETION.md`.
+- The Erasure Key never decrypts content by itself. It only unlocks member-key wraps, which still require a member's private key (ADR-008 "no server master key" holds). See Open issue 5.
 - Backup key epochs: BK-DATA is rotated yearly. When the last set encrypted under BK-DATA(n) expires, the BK-DATA(n) IRK shares are destroyed under two-person witness. Any lost or stray copy of those sets then becomes permanently undecryptable (crypto-erasure of backups).
 
 Destruction:
@@ -223,7 +226,7 @@ Each procedure is executed with the commands in `18-DEPLOYMENT.md` §13 and logg
 | ID | Scenario | Procedure (summary) | Source-facing effect |
 |---|---|---|---|
 | DR-P1 | H-INTAKE hardware failure (no compromise) | 1. Confirm no compromise indicators (attestation history, seals). 2. Prepare the spare (`18-DEPLOYMENT.md` §7.3). 3. `restore secrets` (BS-SECRETS, IRK-S quorum) → same onion address. 4. `restore data` BS-INTAKE latest. 5. Re-pair relay. 6. C-09 re-pushes all undelivered replies (core is the source of truth for replies). 7. Self-test, then open intake | Onion unreachable during downtime (no alternative path, ADR-002). Accounts created after the last BS-INTAKE are lost (notice advises re-registration) |
-| DR-P2 | H-CORE failure | Restore BS-CORE latest + WAL to point-in-time on spare hardware; restore the key directory and audit; re-pair relay and monitor; staff Desks resync | Intake keeps accepting (the intake queue buffers; `34-PERFORMANCE-SCALABILITY.md` sizes ≥ 7 days) |
+| DR-P2 | H-CORE failure | Restore BS-CORE latest + WAL to point-in-time and the latest BS-ERASURE on spare hardware (cases created after that BS-ERASURE need re-wrapping from members' Desks, Open issue 6); restore the key directory and audit; re-pair relay and monitor; staff Desks resync | Intake keeps accepting (the intake queue buffers; `34-PERFORMANCE-SCALABILITY.md` sizes ≥ 7 days) |
 | DR-P3 | Site loss (fire, flood, seizure of the whole site) | 1. Invoke the physical-seizure IR playbook if seizure is possible (`31-INCIDENT-RESPONSE.md`): **rotate onion keys** instead of restoring them. 2. Provision a new site from T2/T3. 3. Restore BS-CORE (+WAL from T3). 4. Restore BS-INTAKE. 5. BS-SECRETS: restore (non-hostile loss) or generate new keys (hostile) | New onion address in the hostile case, published per IR notice procedure |
 | DR-P4 | Ransomware / destructive attack on H-CORE or H-INTAKE | 1. Isolate (pull the uplinks). 2. Preserve evidence (`31-INCIDENT-RESPONSE.md`). 3. Determine the compromise start time T0 from attestation, audit and RT-0 history. 4. Rebuild hosts from clean media (never restore binaries or config from the compromised host). 5. Restore the latest set whose manifest chain verifies **and** whose creation predates T0 (dual approval to use later sets). 6. Rotate all online secrets (relay, monitor, agent, RCP-ONION or RCP-LAN, SSH-onion); rotate the source onion key if the intake was compromised. 7. Replay WAL up to T0 only | Possible data loss since T0. Security notice |
 | DR-P5 | Loss of the source onion key without a usable BS-SECRETS | Generate a new onion; publish it via C-37, the key directory (signed by Channel Identity Keys), and the Source App pinned directory; old-address notice where possible | Sources must find the new address; see the IR "onion key compromise" notification procedure |
@@ -276,6 +279,9 @@ flowchart TD
 | BAK-025 | Canary files in Candor data paths SHALL raise a SECURITY alert on modification. Backup size jumps of ≥ 2 buckets day over day SHALL raise an alert. | Knowledge (unverified) ransomware detection practice | THR-042 | C-25 | TST: modify the canary → alert; synthetic size jump → alert |
 | BAK-026 | The WORM store root credentials SHALL be kept offline in a two-person safe and SHALL NOT be usable from WS-ADM's routine session. | INC-55 | THR-042, THR-018 | C-27 | INSP: safe log; TST: routine admin session has no store-admin permission |
 | BAK-027 | Restore tooling SHALL verify the producer's signing key against the value pinned in BS-CONFIG / the install record, not against a key found in the set. | B-SD-02 | THR-037, THR-042 | C-27 | TST: set signed with an unpinned key → refused |
+| BAK-028 | The Erasure Key Vault SHALL be excluded from BS-CORE and BS-CORE-WAL, and backed up only as BS-ERASURE in the same run as BS-CORE, with ≤ 14-day retention on every tier. | ADR-033; ADR-025 | THR-017 | C-12, C-27 | TST: BS-CORE content inventory contains no vault schema; lifecycle and T2 overwrite tests |
+| BAK-029 | T2 media SHALL hold BS-ERASURE only in a dedicated fixed-size partition that is overwritten in place at each rotation. | ADR-033; B-CR-33 | THR-017, THR-031 | C-27 | TST: rotation tool overwrites the partition (read-back verification); INSP: rotation log |
+| BAK-030 | Restore SHALL pair each BS-CORE set with the BS-ERASURE set from the same run, and SHALL report cases whose Erasure Keys are missing. | ADR-033 | THR-042 | C-27 | TST: restore with a mismatched vault set reports affected cases; RT-1 checks pairing |
 | DR-001 | Each profile SHALL meet the RPO/RTO of §10, demonstrated at least yearly by RT-4. | R2 R-BKP-01 | THR-042, THR-032 | C-27, C-25 | DEMO: RT-4 record with measured values |
 | DR-002 | DR-P1..DR-P9 SHALL be maintained as tested runbooks with `candorctl` commands, exercised at least yearly (DR-P1, P2, P4 at least twice yearly in EE-HA/GOV). | B-SD-08 (operational burden) | THR-042 | C-19 | DEMO: exercise records; TST: runbook command blocks executed in the lab (DEP-036) |
 | DR-003 | When hostile compromise is possible, recovery SHALL rebuild hosts from clean media and SHALL NOT restore binaries, configuration or secrets from the compromised host. | INC-38; INC-41 | THR-014, THR-042 | C-19 | INSP: DR-P4 checklist; DEMO |
@@ -290,7 +296,7 @@ flowchart TD
 ## 13. Residual risks and limitations
 
 1. With k IRK shares and a backup set, an adversary obtains historical server metadata (not content) within retention. Custodian compromise or coercion is the main risk.
-2. Retention (≤ 35 days) delays the effect of deletion on backup copies (THR-017). Compliance-mode locks cannot be shortened even when deletion is urgent.
+2. Retention (≤ 35 days) keeps deleted **metadata** in backups (THR-017). Deleted **content** becomes unrecoverable after ≤ 14 days (Erasure Keys). Compliance-mode locks cannot be shortened even when deletion is urgent.
 3. Padding hides activity only to within about 25% (ratio 1.25) and costs storage. Bucket size still reveals long-term growth.
 4. Unpulled envelopes (≤ 25 min) and intake data since the last nightly BS-INTAKE are lost on intake destruction.
 5. Content recovery depends on recipient devices (no escrow default). This is a deliberate availability tradeoff (ADR-013).
@@ -303,3 +309,5 @@ flowchart TD
 2. `09-DATABASE.md` should confirm that logical dumps contain no fields beyond the ADR-010 minimization (e.g., PostgreSQL internal timestamps such as `pg_xact_commit_timestamp` MUST be disabled: `track_commit_timestamp=off`).
 3. Whether BS-INTAKE should exclude not-yet-pulled envelopes: including them preserves submissions; excluding them reduces backup-resident ciphertext. The current choice is to include.
 4. The exact interaction between legal hold and member key rotation in backups needs alignment with `35-DATA-RETENTION-DELETION.md`.
+5. ADR-033(3) says the case key is "additionally wrapped" under the Erasure Key. This document assumes a **layered** construction (member wraps encrypted under the Erasure Key), so that the Erasure Key alone never yields a case key. If a direct wrap were intended, the Erasure Key Vault would be a server-held content key, contradicting ADR-008. `04-CRYPTOGRAPHY.md` must confirm.
+6. The Erasure Key Vault RPO is 24 h (nightly BS-ERASURE), while core records have a 15-min RPO (WAL). Cases created between the last BS-ERASURE and a core loss need their wraps re-created by members' Desks, which still hold the case keys. `04-CRYPTOGRAPHY.md` / `12-FRONTEND-RECIPIENT.md` should specify this re-wrap path.

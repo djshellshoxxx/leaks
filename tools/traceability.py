@@ -21,7 +21,7 @@ COMP_RE = re.compile(r"C-\d{2}")
 EVID_RE = re.compile(r"(B-[A-Z]{2,3}-\d{2,3}|INC-\d{2,3}|F-\d{3}|ADR-\d{3}|REQ-H-\d{2,3}b?)")
 TEST_RE = re.compile(r"\b(ST-\d{3}|AT-\d{3})\b")
 # Prefixes whose rows are catalog entries rather than requirements.
-NON_REQ = {"THR", "ADV", "ST", "AT", "F", "RM", "INC", "ADR", "RVW"}
+NON_REQ = {"THR", "ADV", "ST", "AT", "F", "INC", "ADR", "RVW"}
 SEC_HINT = re.compile(r"(?i)encrypt|key|log|auth|anonym|metadata|tor|sign|audit|secur|privacy|delete|erase|source")
 
 
