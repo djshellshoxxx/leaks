@@ -114,6 +114,11 @@ It cannot stop a malicious authorized recipient from reading, photographing or r
   - Locking clears decrypted content from the webview DOM and drops plaintext caches.
   - Unsaved reply text survives lock in memory under the session key.
 
+### 4.2 Device custody indicator (ADR-043; RVW-C-01, RVW-A-24)
+- Every Desk shows a persistent status-bar item **"Custody: independent (attested)"**, **"Custody: organisation-managed"** or **"Custody: unknown"**. "Independent" means the device is recorded in C-14 as not enrolled in the operating organisation's MDM/EDR/DLP/VDI, with its hardware authenticator attestation recorded (ADR-043); the record is made by the admin custody workflow (`13-FRONTEND-ADMIN.md` §4.3a) and co-signed by OVERSIGHT.
+- For a member of a **Triage Set of an INDEPENDENT channel** (IG, audit committee, ombudsman, external counsel, ethics), a Desk whose custody is not "independent (attested)" shows a blocking banner: "This device is not recorded as independent of {organization}. People who manage it could read reports. You cannot receive new reports on this channel from this device." The Desk does not publish Member Epoch Keys for that channel from such a device, unless the channel has an active DANGEROUS custody exception (`13` §4.3a), in which case the banner remains non-dismissable.
+- Honest text in the Guide (RO-16) and in the indicator's details: "An organization that controls this computer can defeat Candor's protections. Candor cannot prevent this technically (ADR-043)."
+
 ## 5. Screens
 
 ### R02 Inbox / Triage

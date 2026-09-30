@@ -201,49 +201,64 @@ Session and draft material (ADR-034, single timer set):
 - Responses echo `rid`.
 - Unknown `op`, extra keys or oversize fields produce `ERR{code}` and close the connection.
 
-**Operations:**
+**Operations** (revised for ADR-034, ADR-036(4), ADR-037, ADR-046(7)):
 
 | op | Name | Request body | Response body | Limits / notes |
 |---|---|---|---|---|
-| 0x01 | `HELLO` | `{proto: 1}` | `{proto: 1, snapshot_version: u64}` | First message on every connection |
-| 0x10 | `GEN_ACCOUNT` | `{sess: [u8;16]}` | `{words: [u16;10]}` (EFF large list indices) | Creates a pending session holding the seed. The seed is derived via Argon2id in sealer. Passphrase words are returned once for display, and the sealer keeps no copy after derivation. |
-| 0x11 | `LOGIN_DERIVE` | `{sess, passphrase: bytes ≤ 256}` | `{locator_hash: [u8;32]}` | Argon2id (m = 256 MiB, t = 3, p = 1, per-deployment salt). Global concurrency 4. Queue ≤ 32. Queue wait ≤ 30 s, else `BUSY`. |
+| 0x01 | `HELLO` | `{proto: 2}` | `{proto: 2, snapshot_version: u64}` | First message on every connection |
+| 0x02 | `SESSION_OPEN` | `{sess: [u8;16], channel_id}` | `{}` | Creates a RAM-only drafting session and a random per-session part key `K_sp` (never leaves the sealer). Nothing is written anywhere. |
+| 0x03 | `DRAFT_SET` | `{sess, fields: map<u16, text> (≤ 96 KiB total), identity?: text ≤ 4 KiB, coi: {excluded_labels: [u16] ≤ 16, categories: [u16] ≤ 8} \| null, lang}` | `{}` | Replaces the RAM draft. Draft text, identity block and COI ticks live only here, including on every error path (ADR-034; RVW-A-02). `identity: null` zeroizes a previous identity block. |
+| 0x04 | `DRAFT_GET` | `{sess}` | `{fields, identity?, coi, parts: [{part, size_bucket}]}` | For re-rendering forms; never includes staged ciphertext |
+| 0x10 | `GEN_ACCOUNT` | `{sess}` | `{words: [u16;10], confirm_positions: [u8;3]}` (EFF large list indices) | Called at S09 Submit only (after drafting). Generates the seed with `getrandom`, keeps the words and seed in RAM until confirmation, and picks 3 random positions for the confirmation step (ADR-034). |
+| 0x11 | `LOGIN_DERIVE` | `{sess, passphrase: bytes ≤ 256}` | `{locator_hash: [u8;32]}` | Argon2id (m = 64 MiB, t = 3, p = 1, per-deployment salt; FIPS profile PBKDF2-HMAC-SHA-512, 210,000 iterations; ADR-046(7)). Global concurrency 4 (semaphore). Queue ≤ 32. Queue wait ≤ 30 s, else `BUSY`. |
 | 0x12 | `LOGIN_SIGN` | `{sess, challenge: [u8;32]}` | `{sig: [u8;64]}` | Ed25519 signature by the source auth key over `"candor-src-auth-v1" ‖ tenant_id ‖ challenge` |
-| 0x13 | `LOAD_PREFS` | `{sess, prefs_ct: bytes ≤ 4 KiB}` | `{}` | After successful login. Decrypts the source's own preferences (COI selection, language) with the source X-Wing key, in RAM. |
-| 0x20 | `SEAL_BEGIN` | `{sess, channel_id, coi: {excluded_labels: [u16] ≤ 16, categories: [u16] ≤ 8} \| null, part_kind: message\|file, followup: bool}` | `{part: [u8;16], recipients: u8}` | On the first part, computes the eligible set from the verified snapshot: channel roster minus source-selected role labels minus COI-map exclusions for the selected categories, restricted to members with a Member Epoch Key valid today (ADR-030). For follow-ups, `coi` is null and the selection is taken from the decrypted account preferences (`prefs_ct`, loaded at login). Refuses with `NO_ELIGIBLE_RECIPIENTS` if the eligible count is < the channel's `min_recipients` (§13). |
-| 0x21 | `SEAL_CHUNK` | `{part, data: bytes ≤ 65536, last: bool}` | `{ct: bytes}` | STREAM chunk encryption. Plaintext slab zeroized after encryption. |
-| 0x22 | `SEAL_FINISH` | `{sess, parts: [part], meta: {filenames: [text ≤ 255], lang: text ≤ 16}}` | `{header_ct (16 anonymous fixed-size HPKE slots, random order, no key IDs), manifest_ct (includes the recipient list of key IDs + directory tree head, signed with the source's Ed25519 key (ADR-005); exact construction in 04-CRYPTOGRAPHY.md), account: {locator_hash, auth_pk, xwing_pk, prefs_ct} \| null}` | Manifest (encrypted) contains per-part DEKs, display names and `thread_tag`. `account` is non-null only on first submission. |
-| 0x23 | `SEAL_ABORT` | `{sess}` | `{}` | Drops the draft |
+| 0x13 | `LOAD_PREFS` | `{sess, prefs_ct: bytes ≤ 4 KiB}` | `{}` | After successful login. Decrypts the source's own preferences (COI selection, language, **original eligible set**: member identity key IDs of the first report's recipients; ADR-036(4)) with the source X-Wing key, in RAM. |
+| 0x14 | `CONFIRM_PASSPHRASE` | `{sess, words: [u16;3]}` | `{ok: bool, confirm_positions?: [u8;3]}` | Constant-time compare against the 3 chosen positions. On failure, new positions are drawn; after 5 failures the draft and passphrase are zeroized. Success is required before `SEAL_FINISH` for a new account (ADR-034). |
+| 0x15 | `ROTATE_PASSPHRASE` | `{sess}` (AUTHENTICATED, current passphrase re-verified by web via `LOGIN_DERIVE`) | `{words: [u16;10], confirm_positions}`; after `CONFIRM_PASSPHRASE`: `{account: {locator_hash, auth_pk, xwing_pk, prefs_ct}, reencrypted_replies: [bytes], key_update_envelope}` | ADR-046(7). Re-encrypts pending replies to the new X-Wing key in RAM and seals a key-update follow-up (new reply public key, signed by old and new `sign_sk`) to the original eligible set. Bounds past captures only; a live compromise sees both passphrases (06 R-1). |
+| 0x20 | `PART_BEGIN` | `{sess, part_kind: message\|file}` | `{part: [u8;16]}` | Starts a part. Its DEK is derived as `HKDF(K_sp, part)` and kept in RAM. **No recipient wraps are created here** (RVW-A-07). |
+| 0x21 | `SEAL_CHUNK` | `{part, data: bytes ≤ 65536, last: bool}` | `{ct: bytes}` | STREAM chunk encryption under the part DEK. Plaintext slab zeroized after encryption. The web forwards `ct` to the intake store's tmpfs staging (§5.3) after padding the final part to its ADR-011 bucket (ADR-038(5)). |
+| 0x22 | `SEAL_FINISH` | `{sess, parts: [part], meta: {filenames: [text ≤ 255]}, delayed_delivery: bool}` | `{header_ct (16 anonymous fixed-size HPKE slots, random order, no key IDs), manifest_ct (per-part DEKs, display names, draft text as the message part, `thread_tag`, reply public key, signed recipient list of key IDs + directory tree head; 04-CRYPTOGRAPHY.md), release_offset_days: 0..3, account: {locator_hash, auth_pk, xwing_pk, prefs_ct} \| null}` | **The only step that seals to recipients** (ADR-034). Computes the eligible set from the verified snapshot **now**: (initial) the channel's **Triage Set** minus source-ticked role labels minus COI-map exclusions for the final category, restricted to entries whose `effective_day` ≤ today and to members with a Member Epoch Key valid today (ADR-030, ADR-036(2), ADR-037(1)); (follow-up) the original eligible set from `prefs_ct` ∩ current active members (ADR-036(4)). Generates the content key, wraps it into the 16 slots, and zeroizes `K_sp`, the DEKs and the draft. Refuses with `NO_ELIGIBLE_TRIAGE` (with the channel's `alternative_channel_id`) when fewer than 1 eligible Triage Set member remains. For a new account, requires a prior successful `CONFIRM_PASSPHRASE`. `account` is non-null only for a new account. |
+| 0x23 | `SEAL_ABORT` | `{sess}` | `{}` | Drops the draft, `K_sp` and part DEKs; the web deletes the staged parts |
+| 0x24 | `PART_DROP` | `{sess, part}` | `{}` | Removes one part (SW-07); the web deletes its staged ciphertext |
 | 0x30 | `OPEN_REPLIES` | `{sess, cts: [bytes ≤ 70000] ≤ 64}` | `{pts: [bytes]}` | Decrypts with the source X-Wing key. Plaintext returned for immediate rendering. |
 | 0x31 | `SEAL_SOURCE_MESSAGE_ACK` | — | — | Reserved; not implemented (no read receipts, ADR-010) |
 | 0x40 | `ZEROIZE` | `{sess}` | `{}` | Idempotent |
-| 0x7F | `STATUS` | `{}` | `{sessions: u16, argon_queue: u8, pool_free: u16}` | SYSTEM metrics only |
+| 0x7F | `STATUS` | `{}` | `{sessions_band: u8, argon_queue_band: u8, pool_free_band: u8}` | SYSTEM metrics as coarse bands; exported off-host only as the global daily health band (ADR-038(5); BE-073) |
 
-**Error codes:** `BAD_FRAME`, `UNKNOWN_SESSION`, `BUSY`, `NO_ELIGIBLE_RECIPIENTS`, `LIMIT`, `CRYPTO`, `INTERNAL`. Errors carry no other data.
+WITHDRAWN: `SEAL_BEGIN` (0x20 in v1), which computed the eligible set on the first part and sealed parts before the recipient set was final (RVW-A-07).
+
+**Error codes:** `BAD_FRAME`, `UNKNOWN_SESSION`, `BUSY`, `NO_ELIGIBLE_TRIAGE`, `NOT_CONFIRMED`, `LIMIT`, `CRYPTO`, `INTERNAL`. Errors carry no other data except `alternative_channel_id` on `NO_ELIGIBLE_TRIAGE`.
 
 **Session state machine (per `sess`):**
 
 ```
-NONE -> PENDING_NEW (GEN_ACCOUNT) -> DRAFTING (SEAL_BEGIN) -> COMMITTED (SEAL_FINISH ok) -> AUTHENTICATED
-NONE -> DERIVED (LOGIN_DERIVE) -> AUTHENTICATED (LOGIN_SIGN ok, confirmed by web) -> DRAFTING -> AUTHENTICATED
-any  -> NONE (ZEROIZE | idle 20 min | absolute 2 h | restart)
+NONE -> DRAFTING (SESSION_OPEN) -> PENDING_CONFIRM (GEN_ACCOUNT) -> COMMITTED (CONFIRM_PASSPHRASE ok, SEAL_FINISH ok, COMMIT_ENVELOPE fsynced) -> AUTHENTICATED
+NONE -> DERIVED (LOGIN_DERIVE) -> AUTHENTICATED (LOGIN_SIGN ok, confirmed by web) -> DRAFTING (follow-up) -> AUTHENTICATED
+AUTHENTICATED -> PENDING_CONFIRM (ROTATE_PASSPHRASE) -> AUTHENTICATED (CONFIRM_PASSPHRASE ok)
+any  -> NONE (ZEROIZE | SEAL_ABORT | idle 20 min | absolute 2 h | restart)
 ```
 
 ### 5.3 Intake store (`candor-intake-store`, C-08)
 
 - **IPC to web** (`/run/candor/istore/istore.sock`, SEQPACKET, peer = `candor-web`). Operations:
-  - `PUT_PART(draft, ct_chunk)`, `DISCARD_DRAFT`, `COMMIT_ENVELOPE`;
-  - `ACCOUNT_CREATE`, `AUTH_CHALLENGE(locator_hash)`, `AUTH_VERIFY(locator_hash, challenge, sig)`;
-  - `MAILBOX_LIST(account)`, `MAILBOX_GET`, `MAILBOX_DELETE`, `ACCOUNT_DELETE`;
-  - `UPLOAD_CREATE`, `UPLOAD_CHUNK`, `UPLOAD_STATUS`.
+  - `STAGE_PART(sess_ref, part, ct_chunk)`, `DROP_STAGED(sess_ref, part?)`: write or delete ciphertext in the tmpfs staging area (below);
+  - `COMMIT_ENVELOPE(account?, envelope, staged parts, release_offset_days)`: moves staged ciphertext into the blob directory, inserts rows, `fsync`s blobs, rows and directory entries, and only then returns `ok` so that the source is shown "received" (ADR-046(1));
+  - `ACCOUNT_AUTH_CHALLENGE(locator_hash)`, `ACCOUNT_AUTH_VERIFY(locator_hash, challenge, sig)` (Tier W only);
+  - `MAILBOX_LIST(account)`, `MAILBOX_GET`, `MAILBOX_DELETE`, `ACCOUNT_DELETE` (writes a `deletion_tombstone`), `ACCOUNT_ROTATE` (Tier W only);
+  - `REPLY_INDEX`, `REPLY_PAGE(n)` (fetch-all published set, ADR-039);
+  - `UPLOAD_CREATE`, `UPLOAD_CHUNK`, `UPLOAD_STATUS` (Tier V; 08-API.md §5.1).
   - All take and return typed CBOR. The store never receives plaintext.
-- **Uniform challenge:** `AUTH_CHALLENGE` returns a fresh 32-byte challenge whether or not the locator exists. For unknown locators, verification later fails with the same error and timing class (§11). This resists account enumeration.
+- **Staging area (ADR-034):** `/run/candor/staging` is a tmpfs (`mode=0700,uid=candor-istore,nosuid,nodev,noexec,size=${intake.tierw_staging_bytes}`; swap is disabled on intake-gw, BE-004). It holds only ciphertext under per-session keys that exist only in sealer RAM. Files are named by random 128-bit IDs via `candor-safefs` (`RootPolicy::Staging`). The session reference used to group them is a random value from the web session, not an account. Staged parts are deleted on `DROP_STAGED`, at session end (the web calls `DROP_STAGED` on logout, timeout or abort), and on restart (tmpfs is emptied). When the staging area is full, uploads get the busy page.
+- **Uniform challenge:** `ACCOUNT_AUTH_CHALLENGE` returns a fresh 32-byte challenge whether or not the locator exists. For unknown locators, verification later fails with the same error and timing class (§11). This resists account enumeration.
 - **Blob layout:**
   - `/var/lib/candor/intake/blobs/<2-char prefix>/<26-char base32 object id>`, created through `candor-safefs` with `O_CREAT|O_EXCL`, mode 0600.
   - Object IDs are random 128-bit. File names never derive from source input.
-  - Blob files are written with `O_DIRECT` disabled but `fdatasync` on commit.
+  - Blob files are written with `O_DIRECT` disabled but `fdatasync` on commit; mtime/atime set to 00:00 UTC of `received_date` (09 §5.1).
+- **Delayed delivery (ADR-038(4)):** `COMMIT_ENVELOPE` sets `release_day = received_date + release_offset_days` (the sealer draws U{1,2,3} when the source opted in, else 0). The relay claim offers only envelopes with `release_day ≤ today`.
+- **Published reply set (ADR-039):** `REPLY_INDEX` / `REPLY_PAGE` serve every non-expired reply (≤ 30 days) in pages of exactly 64 entries padded to 70,000 bytes, with the page count padded to the next power of two with dummy pages. Pages are rebuilt once per import slot (when replies arrive), so `set_version` changes only at slot times.
 - **Relay export endpoint:** rustls TLS 1.3 server on the relay-link interface, TCP 7443. It requires a client certificate equal to the pinned relay certificate (SPKI SHA-256 pin from the signed config) and verifies Ed25519 request signatures (§5.4).
-- **Routing key:** the Intake Routing Key private half is loaded from a systemd credential (`LoadCredentialEncrypted=`, TPM-sealed where available) and used only in `APPLY_REPLIES`.
+- **Routing key:** the Intake Routing Key private half is loaded from a systemd credential (`LoadCredentialEncrypted=`, TPM-sealed where available) and used only in `APPLY_REPLIES`. Replies whose account is tombstoned are dropped.
+- **Upload expiry:** Tier V uploads expire 24 h after creation, tracked in RAM with a monotonic clock (no time stored), and on restart (ADR-046(4)).
 - **Local jobs:** the intake store runs its own job loop on the intake DB (§6.3).
 
 ### 5.4 Relay pull protocol (`candor-relay`, C-09 ↔ intake export)
@@ -253,36 +268,42 @@ any  -> NONE (ZEROIZE | idle 20 min | absolute 2 h | restart)
 - Each request carries `Candor-Relay-Sig: ed25519(relay_key, method ‖ path ‖ sha256(body) ‖ req_counter)`.
 - `req_counter` is a strictly increasing u64 persisted on both sides. Replays are rejected.
 
-**Cycle algorithm** (per intake instance; per tenant in EE):
+**Schedule (ADR-038(1); resolves RVW-A-09, RVW-B-06):** imports are **never event-driven**. The relay runs two in-process timers (no job rows):
+- **Import slots** at fixed tenant-configured times (`relay.import_slots`, default 4×/day, e.g. 00:30, 06:30, 12:30, 18:30 UTC; HIGH/GOV profiles 1×/day). Only import slots claim envelopes, push replies and pull counters/backup snapshots.
+- **Control cycle** hourly at a fixed minute: pushes directory snapshots and config bundles only (so that removals and revocations reach the sealer within ≤ 1 h, ADR-036(2)); it never claims.
+
+**Import slot algorithm** (per intake instance; per tenant in EE):
 ```
-every U(5, 25) min:
-  1. GET  /relay/v1/health                     -> abort cycle if not "ok"
-  2. POST /relay/v1/batches/claim {max_objects: 500, max_bytes: 2 GiB}
-        -> {batch_no, objects:[{ref, kind, padded_size, sha256}]}
+at each fixed slot_start:
+  1. GET  /relay/v1/health                     -> skip slot (retry at the next slot) if not "ok"
+  2. POST /relay/v1/batches/claim {max_objects: 500, max_bytes: 2 GiB}   (repeat until empty or limits)
+        -> {batch_no, objects:[{ref, channel_id, epoch_index, padded_size, sha256}]}
   3. for each object: GET /relay/v1/batches/{batch_no}/objects/{ref}
         verify sha256 and canonical structure; stream blob to C-13 via candor-safefs;
-        insert import_envelope with NEW random id (intake ref not stored), received_date and batch_no only (no pull time, ADR-033 §4)
-     commit per envelope (all parts or none)
-  4. POST /relay/v1/batches/{batch_no}/ack {sha256[] of committed envelopes}
-  5. POST /relay/v1/replies           (≤ 500 sealed replies from reply_outbox, state→pushed on 200)
-  6. POST /relay/v1/directory-snapshot (if kd version advanced)
-  7. POST /relay/v1/config            (if signed bundle version advanced)
-  8. POST /relay/v1/deletions         (source-initiated deletions are local to intake; this carries retention-driven reply purges)
-  9. GET  /relay/v1/counters          (daily, k-anonymized per §9.5)
- 10. GET  /relay/v1/backup-snapshot   (daily, opaque blob encrypted to Backup Key)
+        set blob mtime/atime = slot_start (utimensat); S3: versioning off
+        stage import_envelope row with NEW random id (intake ref not stored),
+        import_date = date(slot_start), epoch_index, import_batch_no; no kind, no received_date
+  4. wait until slot_start + relay.slot_commit_offset (default 20 min), then COMMIT all staged rows of the slot
+        in ONE transaction, together with the date-only automatic import audit events
+        (if processing overran the offset: commit immediately and emit SYSTEM:relay_slot_overrun)
+  5. POST /relay/v1/batches/{batch_no}/ack {sha256[] of committed envelopes}
+  6. POST /relay/v1/replies           (≤ 500 sealed replies from reply_outbox per request, state→pushed on 200)
+  7. GET  /relay/v1/counters          (first slot of a month: previous closed month, 24 §TEL)
+  8. GET  /relay/v1/backup-snapshot   (first slot of the day: opaque blob encrypted to Backup Key)
+  9. POST /relay/v1/deletions         (retention-driven reply purges only)
 ```
+Consequence: Case DB WAL commit records, archived WAL, backups, C-13 blob mtimes and S3 `Last-Modified` reveal only the fixed slot, not arrival times (09 §8).
 
 **Intake-supplied data is untrusted.** The relay accepts only:
-- `kind` ∈ {initial, followup};
 - `channel_id` belonging to the intake's tenant;
 - a header with exactly 16 fixed-size slots and no other cleartext recipient data;
-- `received_date` ∈ [today−14, today];
+- `epoch_index` within [current epoch − 3, current epoch] (14-day decrypt window plus the 3-day delayed-delivery maximum);
 - `header_ct` ≤ 8 KiB, `manifest_ct` ≤ 64 KiB;
 - parts ≤ 32, each padded size ∈ the bucket set.
 
-Anything else is rejected, counted (SYSTEM) and left unacknowledged. After 3 failed cycles it is quarantined.
+Anything else is rejected, counted (SYSTEM) and left unacknowledged. After 3 failed slots it is quarantined.
 
-**Idempotency:** a unique index on `import_envelope.header_digest` (SHA-256 of `header_ct`) prevents double import. The digest is retained 30 days and then nulled (09-DATABASE.md).
+**Idempotency:** a unique index on `import_envelope.header_digest` (SHA-256 of `header_ct`) prevents double import. The digest is retained ≤ 24 h and then nulled (ADR-039; 09-DATABASE.md).
 
 **Backpressure:** if C-13 free space < 10 % or `import_envelope` pending > 50,000, the relay stops claiming and raises `SYSTEM:relay_backpressure`. Intake keeps buffering (06 R-8).
 
