@@ -255,7 +255,57 @@ The trademark policy is the only restriction: forks rebrand.
 | Ombudsperson | Receives complaints (including anonymously via the project's own Candor instance). Publishes findings within 60 days. |
 | Remedies | Public finding. Trademark-license suspension. Fork-endorsement right (Charter §8). |
 
-## 15. Requirements
+## 15. External Watcher and witness programme (ADR-035(1), ADR-036(5); RVW-A-01, RVW-A-08)
+
+### 15.1 Purpose
+
+External Watchers fetch each watched onion service over Tor and compare served static assets, CSP headers, the Sealer's signed running manifest and (where deployed) its confidential-VM attestation with the public transparency log; Key Directory witnesses cosign directory checkpoints after checking consistency with every checkpoint they cosigned before. Both are parties **outside the operator's control**, which is what split-view and compelled-modification detection needs. The Foundation governs the programme; it does not operate instances.
+
+### 15.2 Eligibility and admission
+
+| Criterion | Rule |
+|---|---|
+| Independence | A legal entity separate from the watched operator, its group and its hosting provider. The vendor that sells or hosts an instance never counts toward that instance's required watchers or witnesses. |
+| Type | Civil-society, press-freedom, academic or digital-rights organisations, national CERTs, or independent auditors |
+| Jurisdiction | Declared (seat and operators' residence); the registry records it so operators can meet the "≥ 1 outside the operator's jurisdiction" rule |
+| Conflict of interest | Yearly declaration (funding from watched operators, government contracts, employment links) |
+| Technical | Runs the AGPL, reproducibly built watcher/witness software; hardware-backed signing key; fresh Tor circuits per fetch; publishes to the public results log |
+| Admission and removal | Watcher and Witness Council (§3.2); removal with a published reason; key revocation propagated through the registry within 24 h |
+
+### 15.3 Registry and key distribution
+
+- The registry (watcher/witness identity, jurisdiction, keys, endpoints reachable over Tor) is signed by the registry key (§12) and delegated in TUF as a `watchers` role, so installers, Desks and the Source App obtain it through the same verified update path.
+- The Source App embeds the witness/monitor key set and endpoints (not a tenant checkpoint) and fetches the latest cosigned checkpoint from ≥ 1 witness over Tor before sealing (`04-CRYPTOGRAPHY.md`, `11-FRONTEND-SOURCE.md`; cross-document request).
+- `candorctl tuf init` can compare the root hash with ≥ 2 registered monitor endpoints over Tor (`33-RELEASE-UPDATE-SECURITY.md`; cross-document request).
+
+### 15.4 Duties and publication
+
+| Duty | Value |
+|---|---|
+| Fetch cadence per watched instance | ≥ 4 fetches/day at random times, each on a fresh Tor circuit, as an ordinary visitor (no submissions, no login) |
+| Checks | Static-asset and template digests; CSP and security headers; Sealer running manifest vs logged release; attestation report (if any); Operator Statement freshness (≤ 30 days) and wording vs the Foundation's standard text; Key Directory checkpoint consistency |
+| Publication | Pass/fail per check to the public results log daily; any mismatch within 24 h with evidence; results for instances that do not publicise their use are keyed by an opaque instance ID the operator shows on its own landing page |
+| Witness cosigning | Cosign only after a consistency proof from the last cosigned checkpoint; publish equivocation evidence immediately |
+| Data handling | No source data is collected; fetch logs keep only timestamps and results |
+| Dispute | The operator may respond; the mismatch stays published with the response; the Council reviews within 14 days |
+
+### 15.5 Coverage and funding
+
+- Minimum programme size before 1.0 GA: ≥ 5 registered watchers and ≥ 3 witnesses spanning ≥ 3 jurisdictions; CE operators may enrol at no cost.
+- Watchers and witnesses are paid from a Foundation-administered pool, not directly by the watched operator, so no single operator can defund its watchers; EE vendors and MANAGED operators contribute to the pool as a trademark-licence condition.
+- A watcher that stops publishing for 7 days is flagged in the registry; instances relying on it are alerted to enrol another.
+- Standard Operator Statement text (ADR-035(2)) is published and versioned by the Foundation so that deviations are mechanically detectable.
+
+## 16. Project transparency and compelled-modification statements (RVW-A-01, RVW-B-19)
+
+| Item | Rule |
+|---|---|
+| Project statement | Every 30 days the Foundation publishes a statement signed by ≥ 3 release signers from ≥ 2 jurisdictions: no compelled modification of releases, no targeted builds, no compelled signing, no compelled change to the watcher registry. Lapse is shown by monitors and the Source App as a warning. |
+| Transparency report | Every 6 months, the Foundation and each trademark licensee publish counts of legal requests and orders received, per jurisdiction, to the extent lawful. |
+| MANAGED licensees | Per-jurisdiction transparency report and per-instance Operator Statements (`21-ENTERPRISE.md` ENT-042) are trademark-licence conditions. |
+| Honest limit | Canary-style statements are legally uncertain and can be coerced; they are a signal, not a guarantee (ADR-035(2)). |
+
+## 17. Requirements
 
 | ID | Requirement | Evidence | Threats | Component | Verification |
 |---|---|---|---|---|---|
@@ -277,7 +327,7 @@ The trademark policy is the only restriction: forks rebrand.
 | OSG-016 | Advisories for A2/A3 issues SHALL include operator detection guidance. Post-incident reports SHALL be published within 30 days of the fix. | INC-37; INC-38 | THR-019 | C-30 | INSP |
 | OSG-017 | The Foundation SHALL publish a CRA cybersecurity policy, register for the ENISA Single Reporting Platform, and report actively exploited vulnerabilities per Art 14 timelines. | B-CR-50; B-CR-51 | THR-024 | C-30 | INSP; DEMO: annual tabletop |
 | OSG-018 | Each EE vendor SHALL maintain a CRA technical file and declare a support period ≥ 5 years for LTS releases. | B-CR-50 | THR-025 | C-32 | INSP |
-| OSG-019 | TUF root keys SHALL be held by 5 holders from ≥ 3 organizations and ≥ 2 jurisdictions (threshold 3). Targets keys SHALL be held by 3 holders from ≥ 2 organizations (threshold 2). | ADR-022; INC-48; INC-49 | THR-025, THR-026 | C-32 | AUD: key-holder attestation; ceremony records |
+| OSG-019 | TUF root keys SHALL be held by 5 holders from ≥ 3 organizations and ≥ 3 jurisdictions with no organisation or jurisdiction holding more than 2 keys and ≥ 1 key held by an unaffiliated civil-society organisation (threshold 3). Targets and delegated trust-path keys SHALL be held by 3 holders from 3 distinct organisations and 3 distinct jurisdictions (threshold 2). Spread SHALL be re-attested yearly and on any holder's change of jurisdiction. | ADR-022; ADR-040; INC-48; INC-49; RVW-A-16 | THR-025, THR-026 | C-32 | AUD: key-holder attestation; TST: ceremony tool refuses a holder set violating the spread rules; ceremony records |
 | OSG-020 | Every Trust Path area SHALL have ≥ 2 people who merged in the last 6 months. A quarterly bus-factor report SHALL be published. | R2 §1.1 (B-GL-01) | THR-024 | C-30 | TST: report generator from git history |
 | OSG-021 | The Foundation SHALL maintain a documented dead-man procedure (12 months without release, or 30 days Security Team unreachable, triggers Board appointment of interim maintainers). | B-CO-52 | THR-025 | C-30 | INSP |
 | OSG-022 | No single funder SHALL exceed 35% of Foundation annual income, and vendor income SHALL NOT exceed 50%, from year 3. Funders above the published threshold SHALL be disclosed. | B-CO-52; B-CO-50 | THR-026 | C-30 | AUD: financial statement |
@@ -287,17 +337,29 @@ The trademark policy is the only restriction: forks rebrand.
 | OSG-026 | Hosted instances using the trademark SHALL display the operator identity and release version on the source landing page. | INC-14 | THR-040 | C-06 | INSP: trademark-license condition; TST: template |
 | OSG-027 | Builds whose Trust Path artifact hashes differ from official releases SHALL NOT use the trademark. The trademark policy SHALL require rebranding of such forks. | INC-14; R6 D6 | THR-007, THR-024 | C-30 | INSP |
 | OSG-028 | AI-assisted contributions SHALL be disclosed in the PR and SHALL meet identical review rules. | B-GL-19 | THR-024 | C-30 | INSP: PR template check |
+| OSG-029 | Reproducible Builder A and Builder B SHALL be operated by different organisations in different jurisdictions. | ADR-040; RVW-A-16 | THR-024, THR-026 | C-31 | AUD: builder operator attestation |
+| OSG-030 | Emergency releases SHALL be signed by ≥ 2 signers from ≥ 2 organisations after a cooling period of ≥ 2 h, with the source diff published at signing. | ADR-040; RVW-A-16 | THR-025, THR-024 | C-32 | TST: signing tool enforces cooling and signer spread; INSP |
+| OSG-031 | The Foundation SHALL operate the External Watcher and witness programme of §15: a Watcher and Witness Council, published eligibility and COI rules, and a signed registry delegated in TUF (`watchers` role). The vendor of an instance SHALL NOT count toward that instance's required watchers or witnesses. | ADR-035(1); ADR-036(5); RVW-A-01; RVW-A-08 | THR-007, THR-026, THR-046 | C-32, C-14 | INSP: registry and Council records; TST: registry signature verification in installer and Source App |
+| OSG-032 | Registered watchers SHALL fetch each watched instance ≥ 4 times/day at random times over fresh Tor circuits, publish daily pass/fail results and any mismatch within 24 h, and SHALL NOT collect source data. | ADR-035(1) | THR-007, THR-014 | C-25 | AUD: sample of watcher logs; TST: reference watcher conformance suite |
+| OSG-033 | Witnesses SHALL cosign Key Directory checkpoints only after a consistency proof from their last cosigned checkpoint, and SHALL publish equivocation evidence immediately. | ADR-036(5); RVW-A-08 | THR-046, THR-026 | C-14 | TST: witness refuses inconsistent checkpoint; ST: forked-log scenario |
+| OSG-034 | Watchers and witnesses SHALL be funded from a Foundation-administered pool, not directly by the watched operator; before 1.0 GA the programme SHALL have ≥ 5 watchers and ≥ 3 witnesses spanning ≥ 3 jurisdictions, open to CE operators at no cost. | ADR-035(1); RVW-A-01 | THR-026 | C-30 | INSP: registry statistics; AUD: financial statement |
+| OSG-035 | The Foundation SHALL publish and version the standard Operator Statement text; watchers SHALL flag statements that deviate from it or are older than 30 days. | ADR-035(2) | THR-026, THR-040 | C-14, C-25 | TST: watcher statement-diff check |
+| OSG-036 | Every 30 days the Foundation SHALL publish a project statement signed by ≥ 3 release signers from ≥ 2 jurisdictions (no compelled modification, targeted build, compelled signing or registry change), and every 6 months the Foundation and each trademark licensee SHALL publish a per-jurisdiction transparency report. | ADR-035(2); RVW-A-01; RVW-B-19 | THR-026, THR-025 | C-30, C-32 | INSP: publication history; TST: monitor flags lapse |
 
-## 16. Residual risks and limitations
+## 18. Residual risks and limitations
 
 - **DCO leaves the Foundation without copyright standing.** AGPL enforcement depends on contributors.
 - **Governance cannot stop a determined insider** within threshold limits. The two-employer and threshold rules raise the collusion cost but do not remove it (INC-37).
-- **Legal compulsion** of individual key holders in one jurisdiction is mitigated by jurisdiction spread, not eliminated (THR-026).
+- **Legal compulsion** of individual key holders in one jurisdiction is mitigated by jurisdiction spread, not eliminated (THR-026). Cross-jurisdiction coercion (e.g., treaty-based requests) and reviewed-but-malicious code remain; transparency makes them visible after the fact.
+- **Watchers see only what an ordinary visitor sees.** A selector-based modification that serves altered content only to a targeted source is invisible to watchers; they bound, not eliminate, Tier W compelled modification (ADR-035 honest limit).
+- **Watcher capture or collusion.** Watchers and witnesses can themselves be compelled or captured; spread across jurisdictions and the ≥ 2 rule raise the cost. A small programme is concentrated in few organisations until it grows.
+- **Canary statements** are legally uncertain and may be compelled to continue.
 - **CRA role determinations** are unsettled. The conservative stance may impose costs.
 - **Funding caps** may slow development in early years.
 
-## 17. Open issues
+## 19. Open issues
 
 1. Foundation jurisdiction. Candidates: a Swiss association, a German e.V., a Dutch stichting, a US 501(c)(3), or a fiscal host (e.g., an existing open-source foundation). Criteria: legal compulsion exposure, CRA steward status, grant eligibility.
-2. Whether the TUF root should include one key held by an unaffiliated press-freedom organization.
+2. Resolved: the TUF root includes ≥ 1 key held by an unaffiliated civil-society organisation (§3.4, OSG-019).
+4. Legal review of watcher liability (publishing mismatch evidence about identifiable organisations) per candidate Foundation jurisdiction.
 3. Bounty funding source and scale.
