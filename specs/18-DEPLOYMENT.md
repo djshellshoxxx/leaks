@@ -42,14 +42,14 @@ Research lessons applied:
 
 | Profile | Edition | Hosts (minimum) | Z-INTAKE isolation | Z-CORE platform | K8s allowed | HSM | Default FDE unlock (17 §6.3) | Staff path |
 |---|---|---|---|---|---|---|---|---|
-| CE-SINGLE | CE | 1 physical (3 VMs) | Separate VM (container split = ADVANCED) | VM | No | No (TPM2) | U3 (or U2 ADVANCED) | STAFF-ONION |
-| CE-HARDENED | CE | 3 physical + off-site Tang | Dedicated host | Dedicated host | No | Optional | U4 | STAFF-ONION |
-| EE-ONPREM | EE | 4 hosts/VM hosts (intake physical) | Dedicated host | VMs on dedicated virtualization | No | Optional (recommended) | U4 | STAFF-ONION (STAFF-LAN ADVANCED) |
-| EE-HA | EE | ≥ 9 | 2–3 dedicated intake backends + H-PUB | Dedicated K8s cluster or VM cluster | Z-CORE only | Yes (pair) | U4 (Tang ×2 sites) | STAFF-ONION |
-| GOV-ONPREM | EE | as EE-ONPREM or EE-HA | Dedicated host in accredited facility | VMs (K8s only if accredited) | Z-CORE only | Mandatory (FIPS 140-3 L3) | U7 or U3 | STAFF-ONION or accredited LAN |
-| AIRGAP-RCP | CE/EE add-on | +1 sync WS + ≥1 air-gapped WS per recipient team | (inherits server profile) | (inherits) | — | Hardware tokens | U3 on workstations | STAFF-ONION from WS-SYNC only |
-| PRIVATE-CLOUD | EE (CE possible) | ≥ 3 VMs in customer cloud account + on-prem Tang | Sole-tenant / confidential VM | VMs, or K8s (ADVANCED) | Z-CORE only | Customer on-prem HSM or none; **no provider KMS** | U4 (Tang on-prem) or U6 | STAFF-ONION |
-| MANAGED | EE | Vendor-operated, dedicated per customer | Dedicated intake VM or host + onion key per customer | Dedicated per customer | Z-CORE only | Vendor HSM partition per customer (integrity keys only) | U4 (Tang at a second vendor site) | STAFF-ONION |
+| CE-SINGLE | CE | 1 physical (3 VMs) | Separate VM (container split = ADVANCED) | VM | No | No (TPM2) | U3 (or U2 ADVANCED) | RCP-ONION |
+| CE-HARDENED | CE | 3 physical + off-site Tang | Dedicated host | Dedicated host | No | Optional | U4 | RCP-ONION |
+| EE-ONPREM | EE | 4 hosts/VM hosts (intake physical) | Dedicated host | VMs on dedicated virtualization | No | Optional (recommended) | U4 | RCP-LAN (RCP-ONION allowed) |
+| EE-HA | EE | ≥ 9 | 2 dedicated intake hosts, active/passive, same onion key (ADR-032) | Dedicated K8s cluster or VM cluster | Z-CORE only | Yes (pair) | U4 (Tang ×2 sites) | RCP-LAN (RCP-ONION allowed) |
+| GOV-ONPREM | EE | as EE-ONPREM or EE-HA | Dedicated host in accredited facility | VMs (K8s only if accredited) | Z-CORE only | Mandatory (FIPS 140-3 L3) | U7 or U3 | RCP-LAN (accredited) or RCP-ONION |
+| AIRGAP-RCP | CE/EE add-on | +1 sync WS + ≥1 air-gapped WS per recipient team | (inherits server profile) | (inherits) | — | Hardware tokens | U3 on workstations | From WS-SYNC only (RCP-ONION or RCP-LAN) |
+| PRIVATE-CLOUD | EE (CE possible) | ≥ 3 VMs in customer cloud account + on-prem Tang | Sole-tenant / confidential VM | VMs, or K8s (ADVANCED) | Z-CORE only | Customer on-prem HSM or none; **no provider KMS** | U4 (Tang on-prem) or U6 | RCP-LAN (RCP-ONION recommended where staff IPs should stay hidden from the provider) |
+| MANAGED | EE | Vendor-operated, dedicated per customer | Dedicated intake VM or host + onion key per customer | Dedicated per customer | Z-CORE only | Vendor HSM partition per customer (integrity keys only) | U4 (Tang at a second vendor site) | RCP-ONION |
 
 ## 4. Deployment profiles (detail)
 
@@ -89,7 +89,7 @@ Research lessons applied:
 | ADVANTAGES | Uses existing enterprise virtualization for Z-CORE; SSO/SCIM (EE); SIEM export (C-26); HSM integration; enterprise backup targets |
 | DISADVANTAGES | Enterprise infrastructure teams become observers; change-management friction; temptation to integrate with general logging, backup or EDR tooling, which the config checker flags |
 | MINIMUM HARDWARE | H-INTAKE: dedicated physical host as in CE-HARDENED (NOT on the shared virtualization cluster). Z-CORE: dedicated VMs on hosts **not shared with general IT workloads**: `core-app` 8 vCPU/16 GiB; `core-db` 8 vCPU/32 GiB/1 TB+ (per 34); `core-blob` 4 vCPU/8 GiB/size per 34. H-MON VM (separate host from core). H-BAK: enterprise WORM target (S3 Object Lock / immutable NAS snapshots) in a separate security domain. Optional network HSM pair (FIPS 140-3 L3). Off-site Tang |
-| NETWORK DESIGN | H-INTAKE on an independent uplink (17 §4.10). N-RELAY: dedicated VLAN with firewall rule core→intake:7443 only. Z-CORE VLAN(s) with no route to user networks except via STAFF-ONION (default) or `candor-edge` mTLS (STAFF-LAN, ADVANCED). SIEM export from C-26 only |
+| NETWORK DESIGN | H-INTAKE on an independent uplink (17 §4.10). N-RELAY: dedicated VLAN with firewall rule core→intake:7443 only. Z-CORE VLAN(s) with no route to user networks except the recipient VLAN for RCP-LAN (Desk API TCP 8443 mTLS, default per `06-SYSTEM-ARCHITECTURE.md` §8.3) or RCP-ONION. The recipient VLAN is excluded from per-flow logging by general network monitoring (INFRA-009). SIEM export from C-26 only |
 | FAILOVER | H-INTAKE cold spare (as CE-HARDENED). Z-CORE: virtualization HA restart (VM-level). DB with a streaming replica VM on a different host (RPO ≈ 0 within a site) |
 | BACKUPS | As CE-HARDENED, plus a second WORM copy at a secondary site. Enterprise backup agents SHALL NOT image Z-INTAKE/Z-CORE VMs (hypervisor-level backup copies bypass BS-* encryption and retention; config checker + procedure) |
 | KEY MANAGEMENT | HSM: audit checkpoint, key-directory log, DB TDE (optional), SSH CA with two-person issuance for H-INTAKE. IRK for the backup KEK held by 3 of 5 custodians (security officer, DPO, ombudsman, …). Recovery Quorum optional (ADR-013, DANGEROUS config) |
@@ -101,12 +101,12 @@ Research lessons applied:
 |---|---|
 | THREAT MODEL | As EE-ONPREM, with availability objectives (THR-032, THR-042). Explicitly accounts for the **extra observers introduced by HA** (listed in `34-PERFORMANCE-SCALABILITY.md` §7): replication links, extra copies of the onion keys, K8s control plane, mesh sidecars |
 | ADVANTAGES | Intake survives a single-host failure; core survives node/zone failure; rolling upgrades without source-visible downtime |
-| DISADVANTAGES | More hosts means more seizure targets and more observers; Onionbalance-style descriptor publishing adds a master-key host (H-PUB); K8s adds cluster-admin as a super-role; highest complexity |
-| MINIMUM HARDWARE | Z-INTAKE: H-PUB × 1 (2 cores/4 GiB, TPM2; master onion key); H-INTAKE backends × 2 (min) – 3, each as CE-HARDENED H-INTAKE; intake store replication via PostgreSQL synchronous standby between backends on a dedicated intake-replication link (N-INTAKE-REPL). Z-CORE: dedicated K8s (3 control-plane + 3 workers, 8 vCPU/32 GiB each) **or** VM cluster; PostgreSQL 3-node (Patroni-class) on dedicated VMs outside K8s (recommended) or as a StatefulSet; blob store 4-node erasure-coded S3-compatible on-prem. H-MON × 2. HSM pair. H-BAK at 2 sites. Tang × 2 sites |
-| NETWORK DESIGN | Each intake backend runs its own tor instance with its own backend onion key (`HiddenServiceOnionbalanceInstance 1`). H-PUB publishes the frontend descriptor referencing backends (Knowledge (unverified): Onionbalance v3 behavior; to be confirmed in `16-TOR-I2P.md`). Backends sit in ≥ 2 racks, same site preferred (a second site adds a second uplink observer; ADVANCED). N-INTAKE-REPL carries batched, padded replication (§34 §7). C-09 pulls from every backend. K8s: dedicated cluster, NetworkPolicies default-deny, no service-mesh access logs, no ingress controller exposed to users (staff via STAFF-ONION pod) |
-| FAILOVER | Intake: automatic. H-PUB drops a failed backend from the descriptor within 10 min, and sources retry (the intake store standby is promoted by the HA module). H-PUB failure: descriptors remain valid until expiry (about 3 h; Knowledge (unverified)); a cold-standby H-PUB is restored from BS-SECRETS. Core: Patroni failover < 60 s; K8s rescheduling |
+| DISADVANTAGES | More hosts means more seizure targets and more observers; the onion key exists on 2 hosts (ADR-032 doubles THR-044 exposure); K8s adds cluster-admin as a super-role; highest complexity |
+| MINIMUM HARDWARE | Z-INTAKE: H-INTAKE (active) + H-INTAKE-B (passive), each as CE-HARDENED H-INTAKE, in separate racks with separate power; intake store synchronous PostgreSQL replication A→B on a dedicated link (N-INTAKE-REPL; `21-ENTERPRISE.md` §5.2); a fencing device (switched PDU or BMC on N-OOB) for STONITH. DR site: an intake VM **without** onion key until DR is declared. Z-CORE: dedicated K8s (3 control-plane + 3 workers, 8 vCPU/32 GiB each) **or** VM cluster; PostgreSQL 3-node (Patroni-class) on dedicated VMs outside K8s (recommended) or as a StatefulSet; blob store 4-node erasure-coded S3-compatible on-prem. H-MON × 2. HSM pair. H-BAK at 2 sites. Tang × 2 sites |
+| NETWORK DESIGN | Only the active intake's tor instance publishes descriptors. The passive host's tor is stopped (same onion key, ADR-032; active/active descriptor aggregation is deferred per `21-ENTERPRISE.md` §5.2 and `16-TOR-I2P.md`). Both intake hosts sit on the same site with independent uplinks from the same independent provider (a second site adds a second uplink observer; ADVANCED). N-INTAKE-REPL carries the sync replication (observer analysis in `34-PERFORMANCE-SCALABILITY.md` §7). C-09 pulls from the active intake only. K8s: dedicated cluster, NetworkPolicies default-deny, no service-mesh access logs, staff Desk API behind an L4 passthrough LB with logging off (`21-ENTERPRISE.md` HA-004) |
+| FAILOVER | Intake: health probe every 10 s; 3 consecutive failures → fence (STONITH) the active → promote the passive (DB promote, tor start, descriptor publish). Target intake RTO ≤ 10 min (`21-ENTERPRISE.md` §5.2); sources with a cached old descriptor may fail until they refetch. Core: Patroni failover ≤ 30 s; K8s rescheduling. Site DR: onion key restored from BS-SECRETS under IRK quorum |
 | BACKUPS | WAL archiving every 15 min with fixed-size segments; nightly base backup; WORM at 2 sites; offline monthly copy |
-| KEY MANAGEMENT | Master onion key only on H-PUB + BS-SECRETS. Backend onion keys per backend (compromise of one backend key allows impersonation only of that backend until the descriptor drops it). HSM pair for signing keys. The K8s Secrets encryption provider SHALL use the customer HSM (KMS v2 plugin), never provider KMS |
+| KEY MANAGEMENT | Source onion key on H-INTAKE and H-INTAKE-B only (TPM-sealed on each), plus BS-SECRETS offline. Both hosts are in the Secret Placement Manifest and monitored equally (ADR-032). Standby onion key offline only (`16-TOR-I2P.md` NET-020). HSM pair for signing keys. The K8s Secrets encryption provider SHALL use the customer HSM (KMS v2 plugin), never provider KMS |
 | OPERATIONAL COMPLEXITY | High (4.5/5). Dedicated platform team (≥ 1 FTE), on-call, runbooks, twice-yearly failover drills |
 
 ### 4.5 GOV-ONPREM
@@ -129,12 +129,12 @@ Research lessons applied:
 |---|---|
 | THREAT MODEL | Recipient-side malware and exfiltration (THR-023, THR-041), remote compromise of networked recipient workstations (THR-022), and network-borne exfiltration of decrypted content. **Not designed against:** malicious media transfer (USB is bidirectional; the SVS lesson, [B-SD-04]); a malicious insider at the station; a document exploit that persists on the station (mitigated by C-17 disposables on the station) |
 | ADVANTAGES | Private keys and plaintext never exist on a networked machine; strongest option for high-risk investigations |
-| DISADVANTAGES | Latency (manual transfers); human error at the transfer step; the **epoch window constraint**: envelopes MUST be imported within the 14-day epoch decrypt window (ADR-008), so a sync at least every 7 days is REQUIRED; the self-test warns at 5 days |
-| MINIMUM HARDWARE | WS-SYNC: a networked workstation running Candor Desk in **sync-only mode** (holds the staff-onion client credential and a sync-role token; no decryption keys). WS-VIEW: an air-gapped laptop per team (TPM2, 16 GiB+, radios removed) running Candor Desk full mode + C-17 disposable viewer. Transfer media: dedicated, labelled IN/OUT USB drives (`17-INFRASTRUCTURE.md` §6.6). Hardware keys per recipient |
-| NETWORK DESIGN | WS-SYNC → Tor → staff onion only. WS-VIEW: no network interfaces enabled. Transfer bundles: signed by the originating device's staff key, content-addressed names (ADR-027) |
+| DISADVANTAGES | Latency (manual transfers); human error at the transfer step; the **epoch window constraint**: envelopes MUST be imported within the 14-day decrypt window of the member epoch keys (ADR-008, ADR-030), and each member's WS-VIEW must publish new member epoch keys (pre-published 4 epochs ahead, ADR-030) via WS-SYNC. A sync at least every 7 days is therefore REQUIRED; the self-test warns at 5 days |
+| MINIMUM HARDWARE | WS-SYNC: a networked workstation running Candor Desk in **sync-only mode** (holds the RCP-ONION client credential or RCP-LAN certificate and a sync-role token; no decryption keys). WS-VIEW: an air-gapped laptop per team (TPM2, 16 GiB+, radios removed) running Candor Desk full mode + C-17 disposable viewer. Transfer media: dedicated, labelled IN/OUT USB drives (`17-INFRASTRUCTURE.md` §6.6). Hardware keys per recipient |
+| NETWORK DESIGN | WS-SYNC → Desk API only (RCP-ONION or RCP-LAN). WS-VIEW: no network interfaces enabled. Transfer bundles: signed by the originating device's staff key, content-addressed names (ADR-027) |
 | FAILOVER | A spare WS-VIEW enrolled with the same staff keys requires key re-provisioning per `04-CRYPTOGRAPHY.md`. Otherwise staff keys are wrapped per device |
 | BACKUPS | Server-side backups unchanged. WS-VIEW holds no unique data except drafts; drafts SHALL be synced back as sealed objects or discarded |
-| KEY MANAGEMENT | Staff private keys generated on WS-VIEW and wrapped by hardware key. Epoch private keys unwrapped only on WS-VIEW. Replies sealed on WS-VIEW and carried OUT to WS-SYNC |
+| KEY MANAGEMENT | Staff private keys generated on WS-VIEW and wrapped by hardware key. Member epoch private keys generated and held only on WS-VIEW (public halves carried OUT for publication). Replies sealed on WS-VIEW and carried OUT to WS-SYNC |
 | OPERATIONAL COMPLEXITY | High for recipients (3.5/5): documented transfer ritual; weekly minimum sync |
 
 ### 4.7 PRIVATE-CLOUD
@@ -264,7 +264,8 @@ apt-get install -y candor-role-core
 candorctl host init --role core --site /root/candor-site.toml
 candorctl fde bind --mode tpm2+tang --tang http://10.30.0.5:7500 --tang http://<OFFSITE_TANG>:7500 --sss-threshold 2
 candorctl ssh enroll-admin --fido2            # touch + PIN; repeat for each admin key
-candorctl onion init --kind staff             # restricted-discovery staff onion, key generated here
+candorctl onion init --kind rcp               # RCP-ONION profiles: restricted-discovery Desk/Admin onions, keys generated here
+# RCP-LAN profiles instead: candorctl rcp-lan init --vlan <RCP_VLAN> (server cert on H-CORE; device certs at enrollment)
 ```
 
 ```bash
@@ -346,7 +347,7 @@ mgmt_addr = "10.30.0.5/28"
 tang = true
 
 [backup]
-target = "s3+objectlock://10.50.0.3:8443/candor"   # write-only credentials generated on H-BAK
+target = "s3+objectlock://10.50.0.3:443/candor"   # write-only credentials generated on H-BAK
 schedule = "02:15"; jitter_minutes = 30
 wal_archive_timeout_s = 900
 
@@ -425,8 +426,9 @@ set -euo pipefail
 candorctl upgrade plan --rolling
 candorctl backup create --set core,intake --label "pre-upgrade-<VERSION>" --wait
 candorctl upgrade apply --rolling --intake-drain-timeout 30m --version "<VERSION>"
-# Sequence: core services (expand migration) -> intake backends one at a time (removed from descriptor, drained,
-# upgraded, self-tested, re-added) -> contract migration after all nodes report the new version.
+# Sequence: core services (expand migration) -> passive intake upgraded -> promote passive (fence old active)
+# -> upgrade old active -> switch back (intake unavailability <= 10 min, 21-ENTERPRISE.md §5.2)
+# -> contract migration after all nodes report the new version.
 candorctl selftest run --all --wait
 ```
 
@@ -537,6 +539,13 @@ secrets:
     provenance: generated_on_host
     backup_set: none                # re-paired on restore
     flags: [always]
+  - id: intake.routing_key
+    path: /var/lib/candor/intake/routing_key.sealed   # X-Wing private key, TPM-sealed where available
+    owner: candor-istore
+    mode: "0400"
+    provenance: generated_on_host
+    backup_set: BS-SECRETS
+    flags: [always]
   - id: intake.argon2_deployment_salt
     path: /var/lib/candor/intake/salt.bin
     owner: candor-sealer
@@ -565,23 +574,25 @@ forbidden_everywhere:
 
 ### 15.2 Per-role summary (normative; complements `17-INFRASTRUCTURE.md` §3)
 
-| Secret | H-INTAKE | H-PUB | H-CORE | H-MON | H-BAK | WS-ADM | WS-RCP | Offline |
-|---|---|---|---|---|---|---|---|---|
-| Source onion key (or backend key in EE-HA) | ✔ | — | — | — | — | — | — | BS-SECRETS |
-| EE-HA master onion key | — | ✔ | — | — | — | — | — | BS-SECRETS |
-| SSH-onion keys | own host | own | own | own | own | — | — | BS-SECRETS |
-| Admin-onion client-auth private keys | — | — | — | — | — | ✔ (hardware-sealed) | — | — |
-| Staff-onion key | — | — | ✔ | — | — | — | — | BS-SECRETS |
-| Staff-onion client-auth private keys | — | — | — | — | — | — | ✔ (hardware-wrapped) | — |
-| Relay mTLS server / client key | server | — | client | — | — | — | — | re-pair |
-| Monitor mTLS client key | — | — | — | ✔ | — | — | — | re-pair |
-| Audit / key-directory signing key | — | — | ✔ (TPM/HSM) | — | — | — | — | HSM backup / BS-SECRETS |
-| Backup-agent signing key | — | — | ✔ | — | — | — | — | re-generate |
-| Backup KEK public key | — | — | ✔ (public) | — | — | — | — | — |
-| Backup KEK private / IRK shares | — | — | — | — | — | — | — | ✔ only |
-| WORM store root credentials | — | — | — | — | ✔ | — | — | sealed envelope |
-| Tang keys | — | — | — | ✔ | — | — | — | off-site Tang |
-| Staff private keys, case keys | — | — | — | — | — | — | ✔ | (Quorum if enabled) |
+| Secret | H-INTAKE (+ H-INTAKE-B in EE-HA/GOV) | H-CORE | H-MON | H-BAK | WS-ADM | WS-RCP | Offline |
+|---|---|---|---|---|---|---|---|
+| Source onion key | ✔ (both intake hosts in EE-HA/GOV, ADR-032) | — | — | — | — | — | BS-SECRETS |
+| Standby onion key (`16-TOR-I2P.md` NET-020) | — | — | — | — | — | — | ✔ only (BS-SECRETS) |
+| Intake Routing Key (private) | ✔ (TPM-sealed where available) | — | — | — | — | — | BS-SECRETS |
+| SSH-onion keys (remote sites only) | own host | own | own | own | — | — | BS-SECRETS |
+| Admin-onion / RCP-ONION client-auth private keys | — | — | — | — | ✔ admin (hardware-sealed) | ✔ Desk (hardware-wrapped) | — |
+| RCP-ONION onion keys (Desk API, Admin API) | — | ✔ (or Z-CORE edge host) | — | — | — | — | BS-SECRETS |
+| RCP-LAN server key / device client certificates | — | server | — | — | admin cert | device cert | re-issue |
+| Relay mTLS server / client key | server | client | — | — | — | — | re-pair |
+| C-25 agent mTLS client keys / collector server key | agent | agent | collector | agent | — | — | re-pair |
+| Intake-replication TLS key (EE-HA/GOV) | ✔ | — | — | — | — | — | re-pair |
+| Audit / key-directory signing key | — | ✔ (TPM/HSM) | — | — | — | — | HSM backup / BS-SECRETS |
+| Backup-agent signing key | intake set signer | ✔ | — | — | — | — | re-generate |
+| Backup KEK public keys (BK-DATA, BK-SECRETS) | public | public | — | — | — | — | — |
+| Backup KEK private / IRK shares | — | — | — | — | — | — | ✔ only |
+| WORM store root credentials | — | — | — | ✔ | — | — | sealed envelope |
+| Tang keys | — | — | ✔ | — | — | — | off-site Tang |
+| Staff private keys, member epoch private keys, case keys | — | — | — | — | — | ✔ | (Quorum if enabled) |
 
 ## 16. Requirements
 
@@ -610,16 +621,16 @@ forbidden_everywhere:
 | DEP-021 | Debian major-version transitions SHALL use rebuild-and-restore. In-place dist-upgrade of Candor hosts SHALL be blocked by the config checker. | B-SD-02; B-SD-03 | THR-042 | C-19 | TST: dist-upgrade detection rule; DEMO: 13→14 rehearsal |
 | DEP-022 | VM appliance images SHALL contain no secrets and SHALL regenerate machine-id, host keys, LUKS keys, onion keys and TLS keys at first boot. | B-SD-22; ADR-028 | THR-044, THR-013 | C-39 | TST: two instances from the same image have disjoint key fingerprints; manifest scan of the image |
 | DEP-023 | Each host role SHALL ship a signed Secret Placement Manifest (§15). Post-deploy verification SHALL fail the deploy on any unexpected or missing secret for any feature-flag combination. | ADR-028; B-SD-22 | THR-013, THR-044 | C-25, C-19 | TST: CI matrix over all flag combinations; planted-key tests |
-| DEP-024 | Items marked `forbidden_everywhere` (staff private keys, plaintext case/epoch keys, IRK shares) SHALL cause a critical alert and intake shutdown if found on any online host. | ADR-007; ADR-013 | THR-013, THR-018 | C-25 | TST: planted forbidden item → alert + intake closed |
+| DEP-024 | Items marked `forbidden_everywhere` (staff private keys, plaintext case keys and member epoch keys, IRK shares) SHALL cause a critical alert and intake shutdown if found on any online host. | ADR-007; ADR-013 | THR-013, THR-018 | C-25 | TST: planted forbidden item → alert + intake closed |
 | DEP-025 | The configuration checker SHALL evaluate every CFG-classified control and the `17-INFRASTRUCTURE.md` baselines, with exit codes per §14, and SHALL block intake start on exit ≥ 20 unless a valid dual-approval record exists. | THR-035; B-GL-04 | THR-035 | C-19, C-25 | TST: rule-coverage test (every CFG row has a checker rule); exit-code tests |
 | DEP-026 | Configuration-checker output SHALL contain no secrets, onion addresses of source channels, or source-related data. | ADR-016; INC-56 | THR-016 | C-19 | TST: canary scan of `--json` output |
 | DEP-027 | MANAGED SHALL provide per-customer dedicated intake host/VM, onion key, Z-CORE, database, backup set and backup KEK, with no cross-customer network routes. | ADR-021; B-GL-37 (CVE-2026-46648 cross-tenant) | THR-045, THR-027 | C-05, C-12, C-27 | TST: cross-customer reachability tests; INSP: vendor architecture audit (AUD) |
 | DEP-028 | MANAGED vendor administrative access SHALL use two-person SSH certificate issuance and SHALL be recorded in a customer-visible access log. | INC-56; INC-69 | THR-027, THR-018 | C-34, C-36 | TST: single-person issuance refused; DEMO: customer views log |
 | DEP-029 | MANAGED customers SHALL be able to export BS-SECRETS and data to self-host with the same onion address. | Design; THR-026 | THR-026 | C-19 | DEMO: export/import exercise |
-| DEP-030 | AIRGAP-RCP SHALL enforce that WS-SYNC holds no decryption keys, and the self-test SHALL warn when no import has occurred for 5 days and alert at 7 days (epoch window). | ADR-008; B-SD-04 | THR-013, THR-023 | C-15, C-18, C-25 | TST: manifest check on WS-SYNC; timer test |
+| DEP-030 | AIRGAP-RCP SHALL enforce that WS-SYNC holds no decryption keys, and the self-test SHALL warn when no import has occurred for 5 days and alert at 7 days (epoch window and member epoch key pre-publication, ADR-030). | ADR-008; ADR-030; B-SD-04 | THR-013, THR-023 | C-15, C-18, C-25 | TST: manifest check on WS-SYNC; timer test |
 | DEP-031 | Enterprise hypervisor-level or agent-based backup tools SHALL NOT image Z-INTAKE or Z-CORE volumes. The procedure and config checker SHALL detect installed backup agents. | INC-55; THR-017 | THR-017, THR-015 | C-27 | TST: agent-detection rule; INSP: customer attestation |
-| DEP-032 | The default staff path SHALL be STAFF-ONION in all profiles. STAFF-LAN SHALL be EE-only and ADVANCED. | 17 §4.6 | THR-018, THR-022 | C-10, C-15 | TST: config checker; INSP |
-| DEP-033 | EE-HA intake backends SHALL each use their own onion key, with the master key present only on H-PUB and in BS-SECRETS. | 17 §3; B-AN-47 | THR-044 | C-05 | TST: manifest verification per role |
+| DEP-032 | The staff access path SHALL default to RCP-ONION in CE-SINGLE, CE-HARDENED and MANAGED, and to RCP-LAN in EE-ONPREM, EE-HA, GOV-ONPREM and PRIVATE-CLOUD (`06-SYSTEM-ARCHITECTURE.md` §8.3). RCP-LAN deployments SHALL isolate the recipient VLAN from per-flow logging by general network monitoring. | 17 §4.6; ADR-007 | THR-018, THR-022, THR-020 | C-10, C-15 | TST: config checker rule `rcp.path`; INSP: network monitoring configuration |
+| DEP-033 | In EE-HA and GOV-ONPREM, the source onion key SHALL exist on at most the two intake hosts of the active/passive pair (plus BS-SECRETS offline). Only the active host's tor SHALL publish descriptors, and promotion SHALL require successful fencing of the old active. | ADR-032; `21-ENTERPRISE.md` §5.2 | THR-044, THR-032 | C-05, C-25 | TST: manifest verification per role; failover test asserts that the old active is fenced before the passive publishes |
 | DEP-034 | Physical appliances SHALL ship with tamper-evident packaging and serial records, and SHALL attest first boot against published golden PCR values. | INC-50; Knowledge (unverified) | THR-024, THR-031 | C-39 | DEMO: first-boot attestation; INSP: shipping record |
 | DEP-035 | The install record (versions, golden PCRs, manifest hashes, checklist) SHALL be signed by two admins and stored in Z-ADM. | B-SD-04 | THR-018, THR-035 | C-19 | INSP: record present and verifiable (`candorctl site verify-record`) |
 | DEP-036 | Operational documentation SHALL provide copy-pasteable, `set -euo pipefail` command blocks for install, upgrade, rollback, backup and restore, tested in CI against a reference lab. | B-SD-08 (burden lesson) | THR-035 | C-19 | TST: docs-as-tests job executes every command block in the lab |
@@ -628,15 +639,15 @@ forbidden_everywhere:
 
 1. CE-SINGLE shares a hypervisor between zones; a host compromise defeats ADR-009 separation. It is documented as reduced isolation.
 2. PRIVATE-CLOUD and MANAGED add a provider or vendor observer who can see intake timing and volume and, if compelled or malicious, live Tier W plaintext (`17-INFRASTRUCTURE.md` §7). Disclosure reduces deception but not exposure.
-3. EE-HA adds seizure targets and observers (H-PUB, replicas, K8s control plane). Availability is traded against metadata exposure (`34-PERFORMANCE-SCALABILITY.md` §7).
+3. EE-HA adds seizure targets and observers (a second onion-key host, the intake replica, the K8s control plane). Availability is traded against metadata exposure (`34-PERFORMANCE-SCALABILITY.md` §7).
 4. Offline installs accept metadata up to 30 days old. A key compromise inside that window may not be revoked on offline sites in time.
 5. The simple installer's U2 option (TPM-only) weakens seizure resistance for organizations without on-site staff.
 6. AIRGAP-RCP relies on human transfer discipline. The weekly-sync requirement can be missed, and missing it causes data loss once epoch keys are destroyed.
-7. Onionbalance-style HA behavior is Knowledge (unverified) and must be validated by `16-TOR-I2P.md` before EE-HA GA.
+7. Active/passive failover leaves sources with cached descriptors failing for several minutes after promotion (`21-ENTERPRISE.md` §5.2).
 
 ## 18. Open issues
 
-1. Confirm the Onionbalance v3 compatibility with PoW and full vanguards, and the H-PUB descriptor lifetimes (`16-TOR-I2P.md`).
+1. Active/active intake (descriptor aggregation) is deferred (ADR-032). If it is adopted later, re-run the observer analysis of `34-PERFORMANCE-SCALABILITY.md` §7 and the manifest design.
 2. Define the Candor Desk sync-only mode API scope for AIRGAP-RCP (`12-FRONTEND-RECIPIENT.md`, `15-AUTHENTICATION-AUTHORIZATION.md`).
 3. The local-repo signing approach (`candor-update` host-local key) needs review by `33-RELEASE-UPDATE-SECURITY.md`. An alternative is an APT method plugin that verifies TUF directly.
 4. The MANAGED customer-held IRK share model needs to be reconciled with vendor-side DR SLAs (`21-ENTERPRISE.md`).

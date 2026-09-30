@@ -250,7 +250,7 @@ Residual risk remains high where the candidate set is small, whatever the guidan
 **GC-21 USB drives and memory cards** — `sops.usb`
 > Work computers often record every USB drive that is plugged in, including its serial number. Don't plug personal drives into work computers, and don't plug work drives into your personal device.
 >
-> *Higher risk:* USB sticks and memory cards keep deleted files and hidden records. *Real case:* police found a deleted file with a church name and a first name on a floppy disk the sender believed was untraceable. If you must move files, use a new drive that has never touched a work device, and don't send the drive itself to anyone.
+> *Higher risk:* USB sticks and memory cards keep deleted files and hidden records. *Real case:* police found a deleted file with a church name and a first name on a floppy disk the sender believed could not be traced. If you must move files, use a new drive that has never touched a work device, and don't send the drive itself to anyone.
 
 ### G. What files reveal
 
@@ -432,7 +432,7 @@ Matches are shown as a **non-blocking** notice: "Your text may contain details t
 
 **8.9 No persistence.** No "remember me", no persistent cookies, no `localStorage`/IndexedDB/Service Worker, `Cache-Control: no-store`. Logout and "Leave" send `Clear-Site-Data: "cache", "cookies", "storage"` [B-SD-02 2.13.0].
 
-**8.10 Clearnet Information Site (C-37) Tor check.** C-37 MAY compare the connecting IP with the public Tor exit list **in memory, without logging**. It then shows either "You are not using Tor Browser. Don't report from this browser. Get Tor Browser" or the onion address with `Onion-Location` (ADR-003; B-AN R4 §7.1(3)).
+**8.10 Clearnet Information Site (C-37) Tor check.** C-37 MAY compare the connecting IP with the public Tor exit list **in memory, without logging**. It then shows either "You are not using Tor Browser. Don't report from this browser. Get Tor Browser" or the onion address with `Onion-Location` (ADR-003; R4 §7.1(3), Knowledge (unverified) of exit-list mechanics).
 
 **8.11 Leave and clear.** Every source page has a "Leave" control (a form POST) that ends the session, sends `Clear-Site-Data`, and shows a neutral page with the GC-07 "New Identity" instruction. The neutral page has no external redirect (GP-7).
 
@@ -479,7 +479,7 @@ Key messages: **K1** don't use work devices or networks; **K2** use Tor Browser 
 | SOPS-023 | The Source UI SHALL NOT use persistent cookies, Web Storage, IndexedDB, Cache API or Service Workers, and SHALL send `Clear-Site-Data: "cache", "cookies", "storage"` on logout, Leave, submit completion and mailbox close. | REQ-H-23 (INC-23); B-SD-02 | THR-048, THR-006 | C-06 | TST: header assertions; forensic-residue suite (30) in Tor Browser and Tails |
 | SOPS-024 | Every source page SHALL offer the §8.11 "Leave" control. The resulting page SHALL instruct "New Identity" and SHALL NOT redirect to any external site. | GC-07; REQ-H-36 | THR-048 | C-06 | TST: e2e; header test |
 | SOPS-025 | C-37 MAY check the connecting IP against the Tor exit list only in memory, and SHALL NOT log, store or count that result. | ADR-003 | THR-001, THR-016 | C-37 | TST: log grep after 1,000 requests; INSP config |
-| SOPS-026 | C-37 SHALL publish the onion address, an `Onion-Location` header, a signed copy of the onion address, and GC-01..GC-11, with signature-verification instructions for Tor Browser and Tails downloads. | REQ-H-52 (INC-52); B-AN R4 §7.1 | THR-044, THR-002 | C-37 | INSP; TST: header check |
+| SOPS-026 | C-37 SHALL publish the onion address, an `Onion-Location` header, a signed copy of the onion address, and GC-01..GC-11, with signature-verification instructions for Tor Browser and Tails downloads. | REQ-H-52 (INC-52); ADR-003 | THR-044, THR-002 | C-37 | INSP; TST: header check |
 | SOPS-027 | No guidance SHALL advise destroying evidence, disabling or evading monitoring, or accessing information without authorization. Guidance SHALL include GC-03 on S01, S02 and S13. | GP-6 | THR-040 | C-06 | INSP: counsel review per jurisdiction pack (25) |
 | SOPS-028 | Deployments MAY add jurisdiction text via placeholders and MAY add cards, but SHALL NOT remove or edit GC-01..GC-38 core text. The admin UI SHALL enforce this. | ADR-020 edition charter; B-GL-09 | THR-035 | C-19, C-06 | TST: admin API rejects edits to `sops.*` core keys |
 | SOPS-029 | Guidance pages SHALL contain no feedback widgets, counters, ratings or analytics. | ADR-023; INC-53 | THR-036 | C-06 | TST: template lint; network capture |
@@ -490,7 +490,7 @@ Key messages: **K1** don't use work devices or networks; **K2** use Tor Browser 
 | SOPS-034 | GC-38 SHALL state the trade-off that an installed Source App is discoverable on a searched device, and the Tier V web bundle SHALL be presented only when a WEBCAT-capable browser verifies it. The page itself SHALL never claim to be verified. | ADR-004; B-CR-37, B-CR-38; B-SD-12 | THR-007, THR-048 | C-06, C-03 | INSP; TST: no "verified" badge string in C-06 templates |
 | SOPS-035 | Tier W pages SHALL NOT instruct or require sources to lower Tor Browser's security level for any feature. | REQ-H-27; ADR-004 | THR-008 | C-06 | INSP: copy lint for "Safer"/"Standard" instructions outside GC-07 |
 | SOPS-036 | The Source UI SHALL be fully usable in Tails' bundled Tor Browser at Safest, including with the Orca screen reader. | REQ-H-23; B-SD-02 (Orca fixes) | THR-048 | C-06 | TST: CI e2e in Tails image; DEMO: Orca walkthrough per release |
-| SOPS-037 | GC-06 SHALL state that Onion Browser on iOS gives weaker protection. The UI SHALL NOT fingerprint or block any browser (ADR-003). | B-AN R4 §3.3; ADR-003 | THR-006 | C-06 | INSP; TST: no UA-dependent rendering (diff responses across UAs = identical) |
+| SOPS-037 | GC-06 SHALL state that Onion Browser on iOS gives weaker protection. The UI SHALL NOT fingerprint or block any browser (ADR-003). | R4 §3.3 (Knowledge (unverified) Onion Browser status); ADR-003 | THR-006 | C-06 | INSP; TST: no UA-dependent rendering (diff responses across UAs = identical) |
 | SOPS-038 | Guidance on canary traps, watermarks and printer dots (GC-25..GC-27) SHALL appear on S07 for the relevant file classes and in S02. | B-AN-41, B-AN-42; B-CR-54; INC-16 | THR-010 | C-06, C-03 | INSP; TST: S07 rendering per class |
 | SOPS-039 | Security-critical guidance (`sops.*`) SHALL only be shown in a language whose `sec:critical` strings passed review (`26-ACCESSIBILITY.md`). Otherwise the default language version SHALL be shown with a notice. | B-SD-02 (Weblate) | THR-040 | C-06 | TST: locale gate test |
 | SOPS-040 | Timing statements (GC-34) SHALL be consistent with ADR-010. Any change to stored timing granularity SHALL trigger review of GC-34 and GC-01. | ADR-010; INC-16 | THR-011 | C-06 | INSP: release checklist item |

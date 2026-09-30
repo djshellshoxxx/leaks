@@ -78,6 +78,7 @@ Build profile for all trust-path binaries:
 | `candor-keydir` | `candor-keydir` | core | PG role `candor_kd` (append-only) | Unix socket; outbound witness HTTPS (optional, via egress proxy) | no | disabled |
 | `candor-notify` | `candor-notify` | core | PG role `candor_notify` | egress to allow-listed SMTP/HTTPS only | no | disabled |
 | `candor-audit` | `candor-audit` | core | DB `candor_audit` role `candor_audit_w` (INSERT only); checkpoint key via TPM/HSM | Unix socket only | yes | disabled |
+| `candor-ekv` | `candor-ekv` | core | rw `/var/lib/candor/ekv` (0700); TPM/HSM access for the Vault Master Key | Unix socket only (`/run/candor/ekv/ekv.sock`, peers `candor-case`, `candor-worker`) | yes | disabled |
 | `candor-worker` | `candor-worker` | core | PG role `candor_worker` | calls local services via Unix sockets | no | disabled |
 | `candor-health` agent | `candor-health` | all | read-only host facts; no application data dirs | TCP 8514 to monitor | no | disabled |
 | `candor-backup` | `candor-backup` | core | read DB via `pg_basebackup` role `candor_backup`; read blobs | TCP 443/22 to backup store only | no | disabled |
@@ -185,7 +186,7 @@ After every request:
 | Rate limiting | Token bucket keyed by `EphemeralCircuitToken` (06 §11), in RAM only, plus global buckets. Values in §11. |
 | Padding | The response body is padded (HTML comment filler) to the route's `pad_class`: 16, 32, 64 or 128 KiB. Headers are fixed-order, fixed-set. |
 | Headers | Fixed set per 08-API.md §4.3. No `Server`, `Date`, `ETag` or `Last-Modified`. |
-| Tier V validator | Validates canonical envelope CBOR (04-CRYPTOGRAPHY.md): exact field set and lengths, size bucket membership, and exactly 16 recipient slots (ADR-030). Every non-dummy slot key ID must be a Member Epoch Key of this channel valid for today or yesterday in the verified snapshot. It cannot distinguish dummies, so it checks only that the count of known key IDs is ≥ 1. It never inspects ciphertext. |
+| Tier V validator | Validates canonical envelope CBOR (04-CRYPTOGRAPHY.md): exact field set and lengths, size bucket membership, and exactly 16 fixed-size anonymous recipient slots (ADR-030, ADR-033 §1). The server cannot and does not check recipients: slots carry no key IDs, and the signed recipient list is inside the AEAD payload. It never inspects ciphertext. |
 
 ### 5.2 Sealer IPC protocol (`candor-web` ↔ `candor-sealer`)
 
@@ -207,7 +208,7 @@ After every request:
 | 0x13 | `LOAD_PREFS` | `{sess, prefs_ct: bytes ≤ 4 KiB}` | `{}` | After successful login. Decrypts the source's own preferences (COI selection, language) with the source X-Wing key, in RAM. |
 | 0x20 | `SEAL_BEGIN` | `{sess, channel_id, coi: {excluded_labels: [u16] ≤ 16, categories: [u16] ≤ 8} \| null, part_kind: message\|file, followup: bool}` | `{part: [u8;16], recipients: u8}` | On the first part, computes the eligible set from the verified snapshot: channel roster minus source-selected role labels minus COI-map exclusions for the selected categories, restricted to members with a Member Epoch Key valid today (ADR-030). For follow-ups, `coi` is null and the selection is taken from the decrypted account preferences (`prefs_ct`, loaded at login). Refuses with `NO_ELIGIBLE_RECIPIENTS` if the eligible count is < the channel's `min_recipients` (§13). |
 | 0x21 | `SEAL_CHUNK` | `{part, data: bytes ≤ 65536, last: bool}` | `{ct: bytes}` | STREAM chunk encryption. Plaintext slab zeroized after encryption. |
-| 0x22 | `SEAL_FINISH` | `{sess, parts: [part], meta: {filenames: [text ≤ 255], lang: text ≤ 16}}` | `{header: {recipient_slots: [{key_id: [u8;16], wrap_ct}] × 16}, header_ct, manifest_ct, account: {locator_hash, auth_pk, xwing_pk, prefs_ct} \| null}` | Manifest (encrypted) contains per-part DEKs, display names and `thread_tag`. `account` is non-null only on first submission. |
+| 0x22 | `SEAL_FINISH` | `{sess, parts: [part], meta: {filenames: [text ≤ 255], lang: text ≤ 16}}` | `{header_ct (16 anonymous fixed-size HPKE slots, random order, no key IDs), manifest_ct (includes the recipient list of key IDs + directory tree head, signed with the source's Ed25519 key (ADR-005); exact construction in 04-CRYPTOGRAPHY.md), account: {locator_hash, auth_pk, xwing_pk, prefs_ct} \| null}` | Manifest (encrypted) contains per-part DEKs, display names and `thread_tag`. `account` is non-null only on first submission. |
 | 0x23 | `SEAL_ABORT` | `{sess}` | `{}` | Drops the draft |
 | 0x30 | `OPEN_REPLIES` | `{sess, cts: [bytes ≤ 70000] ≤ 64}` | `{pts: [bytes]}` | Decrypts with the source X-Wing key. Plaintext returned for immediate rendering. |
 | 0x31 | `SEAL_SOURCE_MESSAGE_ACK` | — | — | Reserved; not implemented (no read receipts, ADR-010) |
@@ -256,7 +257,7 @@ every U(5, 25) min:
         -> {batch_no, objects:[{ref, kind, padded_size, sha256}]}
   3. for each object: GET /relay/v1/batches/{batch_no}/objects/{ref}
         verify sha256 and canonical structure; stream blob to C-13 via candor-safefs;
-        insert import_envelope with NEW random id (intake ref not stored)
+        insert import_envelope with NEW random id (intake ref not stored), received_date and batch_no only (no pull time, ADR-033 §4)
      commit per envelope (all parts or none)
   4. POST /relay/v1/batches/{batch_no}/ack {sha256[] of committed envelopes}
   5. POST /relay/v1/replies           (≤ 500 sealed replies from reply_outbox, state→pushed on 200)
@@ -270,8 +271,8 @@ every U(5, 25) min:
 **Intake-supplied data is untrusted.** The relay accepts only:
 - `kind` ∈ {initial, followup};
 - `channel_id` belonging to the intake's tenant;
-- exactly 16 recipient slots, with ≥ 1 slot key ID that is a Member Epoch Key of that channel in C-14;
-- `received_epoch_day` ∈ [today−14, today];
+- a header with exactly 16 fixed-size slots and no other cleartext recipient data;
+- `received_date` ∈ [today−14, today];
 - `header_ct` ≤ 8 KiB, `manifest_ct` ≤ 64 KiB;
 - parts ≤ 32, each padded size ∈ the bucket set.
 
@@ -289,7 +290,7 @@ Anything else is rejected, counted (SYSTEM) and left unacknowledged. After 3 fai
 | Request pipeline | TLS/onion → audience + token verification (via `candor-auth` Unix call, cached ≤ 30 s per token) → tenant context bind (`SET LOCAL candor.tenant_id`, `candor.user_id`) → schema validation (serde `deny_unknown_fields`, explicit per-route DTOs, no generic "set attribute" operations; INC-112) → **authorization** (§5.6) → handler → audit emit (fail-closed) → response |
 | Concurrency | Optimistic: every mutable row has `version BIGINT`. Mutations carry `If-Match: <version>`. A mismatch returns 409. |
 | Idempotency | Mutating Desk endpoints take an `Idempotency-Key` (128-bit client-generated). Stored 24 h per user. A replay returns the stored status code. |
-| Key-wrap verification | On case create, member add and re-key, the service verifies that the set of `recipient_key_id`s in the wraps equals the eligible set returned by C-22 at that moment. Any extra wrap is rejected (THR-046). It verifies that each key is the current key-directory entry for the user. It cannot verify the ciphertext wraps themselves (no keys); Desk-side verification is in 12-FRONTEND-RECIPIENT.md. |
+| Key-wrap verification | On case create, member add and re-key, the service verifies that the set of `recipient_key_id`s in the wraps equals the eligible set returned by C-22 at that moment. Any extra wrap is rejected (THR-046). It verifies that each key is the current key-directory entry for the user. It cannot verify the ciphertext wraps themselves (no keys); Desk-side verification is in 12-FRONTEND-RECIPIENT.md. Before storing, each inner wrap is sealed under the case's Erasure Key by `candor-ekv` (§5.12; ADR-033 §3). On read, the caller's row is unsealed by `candor-ekv` and returned. |
 | Blob I/O | Streaming to/from C-13 via `candor-safefs` (filesystem) or an S3 client (EE) with per-tenant prefix credentials. Max single object 4 GiB. |
 
 ### 5.6 Authorization engine integration (C-22)
@@ -306,7 +307,7 @@ Anything else is rejected, counted (SYSTEM) and left unacknowledged. After 3 fai
 
 - Timers are derived from the workflow definition (14-CASE-MANAGEMENT.md). Defaults for the EU channel template are acknowledgement ≤ 7 days and feedback ≤ 3 months (B-CO-02, Directive 2019/1937 Art. 9(1)(b),(f)).
 - Timer fields: `kind`, `anchor_day` (EpochDay), `due_day` (EpochDay), `business_calendar_id`, `state ∈ {running, paused, met, breached, cancelled}`.
-- The anchor for source-driven timers is `received_epoch_day` (day granularity; ADR-010).
+- The anchor for source-driven timers is `received_date` (day granularity; ADR-010).
 - Evaluation job `sla_evaluate` runs daily at a jittered time 02:00–04:00 local, and on every workflow transition. A breach produces a content-free notification to case leads plus a CASE audit event.
 
 ### 5.8 Notification service (C-23)
@@ -370,6 +371,13 @@ Anything else is rejected, counted (SYSTEM) and left unacknowledged. After 3 fai
   - backup age.
 - Output: `HealthEvent{host_role, check_id, status ∈ {ok, warn, fail}, value_bucket}`. There are no free-text fields. Pushed to the collector (TCP 8514, mTLS).
 
+### 5.12 Erasure Key Vault (`candor-ekv`, ADR-033 §3)
+
+- IPC ops: `CREATE(tenant, case)`, `SEAL(tenant, case, inner) → outer`, `UNSEAL(tenant, case, outer) → inner`, `DESTROY(tenant, case)`, `EXPORT_BACKUP`. The Erasure Key never leaves the process.
+- AEAD: XChaCha20-Poly1305 (STD) or AES-256-GCM (FIPS), AAD = tenant ‖ case ‖ key_epoch ‖ recipient_key_id.
+- Storage: 09-DATABASE.md §5.6. Excluded from routine backups; own backup stream with ≤ 14-day retention.
+- Failure: if the vault is unavailable, case reads and writes that need key wraps fail closed (503). There is no fallback to storing unsealed wraps.
+
 ## 6. Queues and jobs
 
 ### 6.1 Mechanism
@@ -386,21 +394,22 @@ FROM c WHERE job.job_id = c.job_id RETURNING job.*;
 - Lease 5 min, renewed every 60 s by the runner. An expired lease makes the job reclaimable.
 - Backoff `min(2^attempts × 30 s, 6 h)` ± 20 % jitter. `max_attempts` per kind (default 8), then `dead`, which raises a SYSTEM alert.
 - Payload: CBOR ≤ 4 KiB containing **only** opaque IDs, enums and day numbers. A schema per kind is enforced on insert (a DB CHECK on `kind` plus Rust type). No SOURCE-SENSITIVE data and no ciphertext in payloads.
-- Jobs triggered by source events (for example `notify_intake_available`) get `run_after = now() + U(0, 60 min)` to decouple staff-visible timing from import timing.
+- Jobs triggered by imports (for example `notify_intake_available`) get `run_after` = the next hourly digest slot + U(0, 10 min), not an offset from the import time. They are deleted immediately on completion, so no job row preserves the import time (ADR-033 §4).
 
 ### 6.2 Z-CORE job types
 
 | Kind | Runner service context | Trigger | Payload | Notes |
 |---|---|---|---|---|
-| `relay_cycle` | relay | self-scheduled U(5, 25) min | `{intake_instance}` | §5.4 |
-| `notify_intake_available` | notify | after import commit | `{user_ids[] ≤ 16}` (members whose key IDs appear in the slots) | Content-free, digest |
+| (relay cycle) | relay | in-process timer U(5, 25) min; **no job row** | — | §5.4; avoids persisting pull times (ADR-033 §4) |
+| `notify_intake_available` | notify | after an import batch commit | `{channel_id}` | Content-free digest to the channel roster. Servers cannot know recipients (anonymous slots). |
 | `notify_digest_flush` | notify | hourly jittered | `{}` | |
 | `sla_evaluate` | case | daily jittered + on transition | `{case_id?}` | |
 | `retention_evaluate` | case | daily | `{}` | Enqueues `crypto_erase_case` for due cases without legal hold |
-| `crypto_erase_case` | case | retention / manual dual-approved | `{case_id}` | Deletes all `case_key_wrap` rows, then blobs, then rows (35-DATA-RETENTION-DELETION.md) |
-| `import_expire` | case | daily | `{}` | Marks `import_envelope` not imported within the decrypt window of all its slot keys as expired (content unrecoverable once Member Epoch Keys are destroyed) |
+| `crypto_erase_case` | case | retention / manual dual-approved | `{case_id}` | `candor-ekv` DESTROY of the case Erasure Key first, then deletes all `case_key_wrap` rows, then blobs, then rows (35-DATA-RETENTION-DELETION.md; ADR-033 §3) |
+| `import_escalate` | case | daily | `{}` | Pending `import_envelope` rows older than 7 days: set `escalated_date` and send a content-free escalation to the channel's independent escalation role. There is **no** automatic expiry (ADR-033 §2). |
+| `ekv_backup` | ekv | daily | `{}` | Encrypted vault backup to its own stream; the store enforces ≤ 14-day retention |
 | `epoch_runway_check` | keydir | daily | `{}` | Alerts per member when < 14 days of future Member Epoch Keys exist; per channel when fewer than `min_recipients` members would have valid keys |
-| `epoch_key_destroy` | keydir | daily | `{}` | Marks Member Epoch Keys past their decrypt window (and with all addressed envelopes imported or expired) as `destroy_due`. Each Desk deletes its private key on sync and acknowledges (DA-15). No private epoch key material exists server-side (ADR-030). |
+| `epoch_key_destroy` | keydir | daily | `{}` | Marks a Member Epoch Key `destroy_due` only when its decrypt window has passed **and** no envelope of its channel and epoch is `pending` (ADR-033 §2). Each Desk deletes its private key on sync and acknowledges (DA-15). No private epoch key material exists server-side (ADR-030). |
 | `blob_gc` | case | daily | `{}` | Removes unreferenced blobs > 24 h old |
 | `audit_checkpoint` | audit | 10 min | `{class}` | |
 | `audit_anchor` | audit | hourly (if configured) | `{}` | |
@@ -608,8 +617,7 @@ Rules:
 - The Case DB has `timestamptz` columns only in tables on the 09-DATABASE.md §8 allow-list.
 - Staff-authored times shown in the Desk (e.g., note times) are carried **inside** encrypted payloads, not in cleartext columns.
 - Member Epoch Key selection uses `today` in UTC.
-  - The sealer and Tier V use keys valid for `today`. Intake accepts slot key IDs valid for `today` or `today−1` to tolerate clock skew and midnight races.
-  - Intake refuses a Tier V envelope whose slot keys are all > 1 day past validity.
+  - The sealer and Tier V clients use keys valid for `today`. Intake cannot check key validity because slots are anonymous (ADR-033). The Desk checks the signed recipient list and flags envelopes encrypted to keys outside their validity (± 1 day tolerance).
 - **Clock sanity (THR-043):**
   - At start and hourly, services compare the wall clock with (a) chrony offset and (b) on intake-gw, the Tor consensus `valid-after`/`valid-until` window.
   - If out of window, intake refuses new submissions (busy) and raises `SYSTEM:clock_insane`.
@@ -659,7 +667,7 @@ Rules:
 | BE-018 | The case service SHALL reject case creation, member addition or re-key if the set of wrapped-to keys differs from the C-22 eligible set, or if any key is not the current key-directory entry. | ADR-015; INC-14 | THR-046; THR-020 | C-10; C-14 | TST: extra-wrap and stale-key injection tests |
 | BE-019 | Mutable resources SHALL use optimistic concurrency (`version`, `If-Match`). Mutating Desk endpoints SHALL honor `Idempotency-Key` for 24 h. | Design | — | C-10 | TST: concurrent update tests |
 | BE-020 | Job payloads SHALL contain only opaque IDs, enums and day numbers, validated by per-kind schema, and SHALL never contain ciphertext or SOURCE-SENSITIVE data. | ADR-016 | THR-016; THR-015 | C-10; C-12 | TST: job schema tests; DB lint on the `job.payload` CHECK |
-| BE-021 | Jobs triggered by source events SHALL be scheduled with U(0, 60 min) jitter. | ADR-010 | THR-011 | C-10; C-23 | TST: scheduler distribution test |
+| BE-021 | Jobs triggered by imports SHALL be scheduled on the next hourly digest slot + U(0, 10 min), never at an offset from the import time, and SHALL be deleted on completion. | ADR-010; ADR-033 | THR-011 | C-10; C-23 | TST: scheduler test (run_after independent of import time) |
 | BE-022 | The job runner SHALL use `FOR UPDATE SKIP LOCKED` leases of 5 min with renewal, bounded retries with jittered exponential backoff, and a `dead` state that raises a SYSTEM alert. | ADR-019 | THR-042 | C-10 | TST: lease expiry and crash-recovery tests |
 | BE-023 | Behavior configuration SHALL be loaded only from signed bundles meeting the signer threshold of the highest changed class, with monotonic versions and rejection of unknown keys. | INC-114; INC-106 | THR-035; THR-018 | all server components | TST: unsigned, under-signed, rollback and unknown-key bundles rejected |
 | BE-024 | DANGEROUS configuration changes SHALL require two distinct admins with step-up, a 72-h cancellable cool-off, content-free notice to all staff, and a source-visible protection statement update when source-affecting. | ADR-013; INC-114 | THR-035; THR-018 | C-10; C-14; C-19 | TST: e2e: single approval stays pending; cancel works; statement entry appended |
@@ -670,7 +678,7 @@ Rules:
 | BE-029 | Intake-gw journald SHALL be volatile. Tor logging SHALL be disabled or SafeLogging-only with no persistent file. The self-test SHALL verify both. | ADR-016; B-SD-21 | THR-016; THR-001 | C-05; C-25 | TST: health checks `journald_volatile`, `tor_log_off` |
 | BE-030 | SOURCE-SENSITIVE counters SHALL be exported only as daily totals with suppression of values 1–4 and of groups with total < 5. | ADR-016 | THR-039 | C-08; C-09 | TST: counter export tests with small cells |
 | BE-031 | Wall-clock access on intake-gw trust-path code SHALL be limited to `SourceClock::today()` (day resolution). A lint SHALL ban other wall-clock APIs there. | ADR-010 | THR-011 | C-06; C-07; C-08 | TST: `time-lint` |
-| BE-032 | Services SHALL detect clock insanity (§12) and fail closed as specified. Epoch-key selection SHALL tolerate exactly one day of skew. | THR-043 | THR-043 | C-07; C-08; C-21 | TST: clock-skew injection |
+| BE-032 | Services SHALL detect clock insanity (§12) and fail closed as specified. Epoch-key selection SHALL tolerate exactly one day of skew. | ADR-010 | THR-043 | C-07; C-08; C-21 | TST: clock-skew injection |
 | BE-033 | Every failure listed in §13 SHALL produce the specified fail-closed behavior. No component SHALL fall back to plaintext storage, clearnet, unverified keys or an alternative notification channel. | ADR-002; ADR-004 | THR-040; THR-035 | all | TST: fault-injection suite (one test per §13 row) |
 | BE-034 | The audit append SHALL precede business commit (two-phase with reconciliation). Failure to append SHALL abort the mutation. | ADR-016 | THR-037; THR-018 | C-24; C-10 | TST: audit outage makes mutations fail; reconciliation test |
 | BE-035 | Audit chains SHALL be hash-chained per class per tenant and checkpoint-signed every ≤ 1,000 events or ≤ 10 min, with the signing key in TPM or HSM. | ADR-016 | THR-037 | C-24 | TST: chain verification tool; tamper detection test |
@@ -687,10 +695,12 @@ Rules:
 | BE-046 | The web service SHALL enforce one in-flight request per connection and close connections after any error response. | INC-116 | THR-021 | C-06 | TST: pipelining test |
 | BE-047 | Sealer and web memory for plaintext SHALL be drawn from a pre-allocated locked slab pool (4,096 × 64 KiB). Exhaustion SHALL produce `BUSY`, never unlocked allocation. | ADR-004 | THR-014 | C-06; C-07 | TST: pool exhaustion test; VmLck assertion |
 | BE-048 | The intake routing private key SHALL be used only for decrypting reply routing blobs in `candor-intake-store`, and SHALL be loaded only via encrypted credential. | ADR-028 | THR-013; THR-015 | C-08 | INSP; TST: manifest |
-| BE-049 | Tier V envelopes SHALL be validated for canonical structure, size bucket membership, exactly 16 recipient slots, and ≥ 1 slot key ID that is a current Member Epoch Key of the channel. Invalid envelopes SHALL be rejected with no storage. | ADR-004; ADR-011; INC-117 | THR-012; THR-033 | C-06 | TST: envelope conformance corpus |
+| BE-049 | Tier V envelopes SHALL be validated for canonical structure, size bucket membership and exactly 16 fixed-size anonymous slots with no cleartext recipient data. Invalid envelopes SHALL be rejected with no storage. | ADR-004; ADR-011; ADR-033; INC-117 | THR-012; THR-033 | C-06 | TST: envelope conformance corpus |
 | BE-050 | Services SHALL refuse to start on DB schema hash mismatch, invalid config signature, or missing Secret Placement Manifest entries. | ADR-028 | THR-035 | all | TST: startup negative tests |
-| BE-051 | The sealer SHALL apply the ADR-030 COI filter in RAM using only the verified directory snapshot (roster, COI map, Member Epoch Keys). It SHALL wrap the content key only to eligible members, fill all 16 slots (dummies for the rest), and return `NO_ELIGIBLE_RECIPIENTS` when fewer than `min_recipients` remain. | ADR-030; ADR-015; INC-22 | THR-020; THR-046 | C-07 | TST: COI matrix tests on the sealer (all selections × rosters); TST: dummy slot size indistinguishability |
+| BE-051 | The sealer SHALL apply the ADR-030 COI filter in RAM using only the verified directory snapshot (roster, COI map, Member Epoch Keys). It SHALL wrap the content key only to eligible members in 16 anonymous slots (dummies for the rest, random order), put the signed recipient list inside the payload, and return `NO_ELIGIBLE_RECIPIENTS` when fewer than `min_recipients` remain. | ADR-030; ADR-033; ADR-015; INC-22 | THR-020; THR-046 | C-07 | TST: COI matrix tests on the sealer (all selections × rosters); TST: slot indistinguishability (size, order) |
 | BE-052 | A source's COI selection SHALL persist only inside `prefs_ct`, encrypted to the source's own X-Wing key, and SHALL be re-applied to follow-ups. The intake store SHALL never hold it in cleartext. | ADR-030; ADR-010 | THR-020; THR-015 | C-07; C-08 | TST: intake DB inspection after a COI submission; TST: follow-up recipient set equals the original filter |
+| BE-053 | `candor-ekv` SHALL run as its own OS user with the §4.2 baseline, `PrivateNetwork=yes` and memory locking. It SHALL expose only the §5.12 operations to the `candor-case` and `candor-worker` UIDs. | ADR-033; ADR-028 | THR-017; THR-013 | C-12 | TST: IPC peer tests; unit hardening check |
+| BE-054 | The relay SHALL NOT persist pull timestamps (no job rows for cycles; import rows carry date and batch number only). Import-triggered jobs SHALL be scheduled on hourly digest slots and deleted on completion. | ADR-033 §4 | THR-011 | C-09; C-10 | TST: DB and audit inspection after relay cycles |
 
 ## 15. Residual risks and limitations
 

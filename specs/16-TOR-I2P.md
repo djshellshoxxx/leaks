@@ -22,7 +22,7 @@ Out of scope: application-level cryptography (04-CRYPTOGRAPHY.md), source operat
 
 | Document | Relationship |
 |---|---|
-| DECISIONS.md | ADR-001 (Tor only + abstraction), ADR-002 (no fallback), ADR-003 (no Tor Browser fingerprinting), ADR-009 (intake/core separation), ADR-010 (timing), ADR-016 (logging), ADR-021 (per-customer onion), ADR-024 (profiles), ADR-026 (abuse), ADR-028 (secret placement) |
+| DECISIONS.md | ADR-001 (Tor only + abstraction), ADR-002 (no fallback), ADR-003 (no Tor Browser fingerprinting), ADR-009 (intake/core separation), ADR-010 (timing), ADR-016 (logging), ADR-021 (per-customer onion), ADR-024 (profiles), ADR-026 (abuse), ADR-028 (secret placement), ADR-032 (onion key on ≤ 2 HA intake hosts) |
 | 02-THREAT-MODEL.md | THR-001..005, 008, 011, 016, 032, 035, 044, 047 |
 | 03-PRIVACY-ANONYMITY.md | Timing/size minimization that complements transport |
 | 04-CRYPTOGRAPHY.md | K16 onion key in key table; K01 signs onion address statements; onion TLS option (§5.1) |
@@ -271,7 +271,7 @@ P0 (now): Arti client in C-03 only. P1: staging dual-run (Arti serves a separate
 | Aspect | Specification |
 |---|---|
 | Generation | By tor on C-05 at install (host RNG, 04 §23.4), or on the ceremony machine and transferred encrypted when the organisation requires offline generation |
-| Storage | `hs_ed25519_secret_key` in `HiddenServiceDir` (0700/0600) on LUKS; present only on C-05 per Secret Placement Manifest (ADR-028) |
+| Storage | `hs_ed25519_secret_key` in `HiddenServiceDir` (0700/0600) on LUKS; present only on C-05 per Secret Placement Manifest (ADR-028). Single-host profiles: exactly one host copy + optional offline encrypted escrow. EE-HA/GOV-ONPREM: at most **2** intake gateway hosts, active/passive, both listed in the manifest and monitored identically (ADR-032); active/active OnionBalance-style publication is deferred |
 | Offline identity key | Not supported for C-tor onion services (Knowledge (unverified)); track Arti (Open Issue OI-3) |
 | Backup | Optional **Onion Key Escrow**: key file sealed (04 STREAM + HPKE) to the Backup Master public key (K25) and stored offline, separate from routine backups. HIGH profile MAY choose "no escrow" (rebuild = new address) |
 | Standby address | A second onion key generated at install, sealed and stored offline (never on C-05); its address MAY be pre-published as "standby" in the signed address statement |
@@ -342,7 +342,7 @@ Candor Source App: supports configuring obfs4, Snowflake and WebTunnel through A
 | L5 app | Global concurrency limits: C-07 Argon2 slots (04 CRYPTO-044), upload bandwidth cap, queue with wait page (meta-refresh, no JS) | 34 | Queue position not tied to identity |
 | L6 app | Optional app-level Equi-X PoW for Tier V clients to enter the priority tier when queue > threshold | Difficulty adaptive | — |
 | L7 abuse | Upload quotas per source account; submission size caps; spam triage queue | 10, 14 | Quota counters keyed by `lookup_tag`, reset per epoch |
-| L8 availability | Standby onion (§10), second intake host (EE-HA) serving the same onion via failover (not concurrent descriptors unless Onionbalance-style design is reviewed) | 21 | — |
+| L8 availability | Standby onion (§10); in EE-HA/GOV-ONPREM a second intake host holding the same onion key, **passive** (tor instance stopped) until failover, so only one host publishes descriptors at a time (ADR-032) | 21 | — |
 
 No third-party CAPTCHA or CDN (ADR-026; INC-54).
 
@@ -423,13 +423,13 @@ table inet candor_intake {
 | NET-002 | The source web service SHALL have no clearnet listener, reverse proxy or CDN; it SHALL listen only on Unix sockets (or loopback in an isolated namespace) reachable from tor. | ADR-002; INC-33; INC-34 | THR-001; THR-035 | C-06, C-05 | TST: external port scan of all host IPs; `ss -ltnp` check in `net selftest` |
 | NET-003 | The Intake Gateway SHALL run C-tor ≥ 0.4.8 (or an admitted Arti per §9) at or above the version floor published in signed release metadata, and tor security releases SHALL be deployed within 72 hours. | INC-29; INC-35; B-AN-26 | THR-005; THR-003 | C-05, C-25 | TST: C-25 version-floor check; DEMO: advisory drill |
 | NET-004 | The intake torrc SHALL be exactly the release template of §7.1 (hash-verified) with only documented tunables changed within bounds. | INC-34 | THR-035 | C-05 | TST: `candorctl net lint`; INSP |
-| NET-005 | `HiddenServiceSingleHopMode` and `HiddenServiceNonAnonymousMode` SHALL be 0 on every onion service and the build SHALL refuse templates setting either to 1. | R4 §3.4; B-AN-12 | THR-001; THR-005 | C-05, C-31 | TST: config lint in CI and on host |
+| NET-005 | `HiddenServiceSingleHopMode` and `HiddenServiceNonAnonymousMode` SHALL be 0 on every onion service and the build SHALL refuse templates setting either to 1. | B-AN-12 | THR-001; THR-005 | C-05, C-31 | TST: config lint in CI and on host |
 | NET-006 | Onion PoW defence (`HiddenServicePoWDefensesEnabled 1`) and intro-point DoS defence SHALL be enabled on every onion service. | ADR-026; B-AN-26; B-AN-27; B-AN-28 | THR-032 | C-05 | TST: lint; load test (34) shows PoW activation |
 | NET-007 | Vanguards-lite SHALL be enabled on all profiles; the full vanguards protection (add-on or Arti full mode) SHALL be enabled for GOV-ONPREM, MANAGED high-risk and HIGH-flagged tenants. | ADR-001; B-AN-11; B-AN-12; B-AN-13 | THR-005 | C-05 | TST: control-socket query in self-test; INSP: profile config |
 | NET-008 | tor on intake hosts SHALL log at level `warn` or higher with `SafeLogging 1` to volatile journald storage retained ≤ 24 h; web server access logs SHALL be disabled. | ADR-016; B-SD-21; INC-60 | THR-016; THR-011 | C-05, C-06 | TST: log canary test; INSP: journald config |
 | NET-009 | The tor ControlPort SHALL be disabled; control access SHALL be via a Unix socket with cookie authentication readable only by the vanguards and health-exporter users. | INC-34 | THR-035; THR-014 | C-05 | TST: lint; permission check |
 | NET-010 | tor SHALL run with `Sandbox 1`, `DisableDebuggerAttachment 1`, no core dumps and the systemd hardening of §7.3. | INC-58 | THR-014 | C-05 | TST: `systemd-analyze security` threshold; lint |
-| NET-011 | The intake tor instance SHALL NOT act as a client proxy, relay, bridge or exit (`SocksPort 0`, `ORPort 0`, `ExitRelay 0`, `BridgeRelay 0`, `PublishServerDescriptor 0`). | R4 §3.4 | THR-005; THR-035 | C-05 | TST: lint |
+| NET-011 | The intake tor instance SHALL NOT act as a client proxy, relay, bridge or exit (`SocksPort 0`, `ORPort 0`, `ExitRelay 0`, `BridgeRelay 0`, `PublishServerDescriptor 0`). | B-AN-11; B-AN-12 | THR-005; THR-035 | C-05 | TST: lint |
 | NET-012 | The Transport Adapter SHALL expose to applications only a byte stream, an in-memory random CircuitToken and an AnonymityClass, never addresses, relay identities or timing metadata. | ADR-001; ADR-026 | THR-001; THR-016 | C-06 | TST: API test; INSP: code review |
 | NET-013 | CircuitTokens and rate-limit state SHALL exist only in memory and SHALL be evicted on circuit close or after 10 minutes idle. | ADR-026 | THR-001; THR-047 | C-06 | TST: memory inspection; persistence scan |
 | NET-014 | A transport SHALL be labelled ANONYMOUS only if its signed AdmissionRecord shows all criteria AC-1..AC-10 met and an ADR amending ADR-001 exists. | ADR-001; B-AN-57 | THR-040 | C-06, C-14 | INSP: ADR + record review |
@@ -438,9 +438,9 @@ table inet candor_intake {
 | NET-017 | The Candor Source App SHALL route all traffic through embedded Arti with client PoW enabled and SHALL contain no direct-connection code path. | ADR-004; B-AN-29 | THR-001; THR-002 | C-03 | TST: build-time socket API ban; network capture shows only Tor traffic |
 | NET-018 | Service-side migration to Arti SHALL occur only when criteria AM-1..AM-8 are met, via a new AdmissionRecord, with C-tor rollback retained for 6 months. | B-AN-47; B-AN-13; B-AN-44 | THR-005; THR-032 | C-05 | INSP: migration checklist; TST: AT suite (30) on canary |
 | NET-019 | Onion service keys SHALL be generated per tenant on the intake host or ceremony machine, stored only in the 0700 `HiddenServiceDir` on an encrypted volume, and optionally escrowed offline sealed to K25. | ADR-021; ADR-028; B-GL-11 | THR-044; THR-031 | C-05, C-27 | INSP; TST: permission and placement checks |
-| NET-020 | A standby onion key SHALL be generated at install and stored offline, not on C-05. | R4 §3.4 | THR-044; THR-032 | C-05, C-28 | INSP: standby inventory |
-| NET-021 | On onion key compromise, the standby address SHALL be activated and a K01-signed statement revoking the old address published on all channels within 4 hours of the decision. | R4 §3.4 | THR-044 | C-05, C-37, C-14 | DEMO: annual drill (31) |
-| NET-022 | C-25 SHALL compare fetched onion descriptors with the service's own published descriptor and alert on unexpected introduction points or revision counters. | THR-044 (02) | THR-044 | C-25 | TST: simulated duplicate-descriptor test |
+| NET-020 | A standby onion key SHALL be generated at install and stored offline, not on C-05. | B-AN-26 | THR-044; THR-032 | C-05, C-28 | INSP: standby inventory |
+| NET-021 | On onion key compromise, the standby address SHALL be activated and a K01-signed statement revoking the old address published on all channels within 4 hours of the decision. | B-AN-26; INC-28 | THR-044 | C-05, C-37, C-14 | DEMO: annual drill (31) |
+| NET-022 | C-25 SHALL compare fetched onion descriptors with the service's own published descriptor and alert on unexpected introduction points or revision counters. | ADR-028; Knowledge (unverified) | THR-044 | C-25 | TST: simulated duplicate-descriptor test |
 | NET-023 | The organisation's onion address SHALL be published as a K01-signed statement (§11.1) on the info site, in the key directory and on ≥ 2 further independent channels, with verification words. | INC-52 | THR-044; THR-007 | C-37, C-14 | INSP; TST: signature verification of published statement |
 | NET-024 | The Source App SHALL accept an organisation only via an onion address plus K01 fingerprint (deep link/QR or manual entry) and SHALL refuse revoked or unsigned addresses. | INC-52; INC-28 | THR-044 | C-03 | TST: revoked/unsigned address rejected |
 | NET-025 | The Clearnet Information Site SHALL send `Onion-Location` on every page, be static with no submission form for anonymous mode, load no third-party resources, and not be fronted by a TLS-terminating third party. | ADR-002; ADR-003; INC-46; INC-54 | THR-036; THR-040 | C-37 | TST: header and CSP scanner; INSP: hosting config |
@@ -460,7 +460,8 @@ table inet candor_intake {
 | NET-039 | Each tenant/customer SHALL have a dedicated onion service and intake gateway; onion services SHALL NOT be shared across customers. | ADR-021 | THR-045 | C-05 | INSP: deployment inventory |
 | NET-040 | The Source App's update checks and all other network requests SHALL use Arti to a vendor onion mirror with identical requests for all users and SHALL NOT contact organisation-specific endpoints for updates. | ADR-022 | THR-002; THR-025 | C-03, C-33 | TST: traffic capture |
 | NET-041 | Intake hosts SHALL block cloud metadata endpoints and IPv6 router advertisements. | INC-59 | THR-030 | C-39 | TST: probe from host |
-| NET-042 | The optional onion TLS mode SHALL replace (not add to) the HTTP onion port and SHALL NOT permit downgrade to HTTP. | 04 §5.1 (B-CR-08) | THR-003 | C-05, C-06 | TST: port scan over Tor |
+| NET-042 | The optional onion TLS mode SHALL replace (not add to) the HTTP onion port and SHALL NOT permit downgrade to HTTP. | B-CR-08 | THR-003 | C-05, C-06 | TST: port scan over Tor |
+| NET-043 | An onion service private key SHALL be present on exactly one intake host in single-host profiles and on at most two intake hosts (active/passive, only one tor instance publishing at a time) in EE-HA/GOV-ONPREM, both listed in the Secret Placement Manifest and monitored identically. | ADR-032; ADR-028 | THR-044 | C-05, C-25 | TST: placement self-test counts key copies; failover test shows single publisher |
 
 ## 19. Residual risks and limitations (honest)
 1. **Tor use is visible** to the source's local network, employer and ISP (THR-002). Bridges reduce, but do not eliminate, this signal; on managed devices nothing at the transport layer helps.
@@ -468,7 +469,7 @@ table inet candor_intake {
 3. **Website fingerprinting** of a single monitored portal can give an employer a lead (THR-004).
 4. **Guard discovery** against a long-lived service remains a state-level threat; vanguards raise cost, not impossibility.
 5. **Onion address impersonation** after key theft cannot be revoked inside Tor; Tier W sources on bookmarks may be phished.
-6. **No offline onion identity keys** with C-tor: the key is on an Internet-connected host.
+6. **No offline onion identity keys** with C-tor: the key is on an Internet-connected host — on two hosts in HA profiles (ADR-032), doubling THR-044 exposure.
 7. **Anonymity set within an organisation** may be very small (the employees who use Tor) regardless of Tor's global size.
 8. **Onion Browser (iOS)** offers weaker protections; iOS-only sources are at higher risk.
 9. **Availability**: large DoS can still degrade intake, and sources may turn to unsafe channels.
@@ -481,4 +482,4 @@ table inet candor_intake {
 | OI-3 | C-tor has no offline onion identity key support (Knowledge (unverified)). | Track Arti; revisit K16 custody. |
 | OI-4 | Current Tor Metrics figures, Onion Browser status and Arti service-side PoW status require re-verification (R4 §8). | Research follow-up before 1.0. |
 | OI-5 | Cover-traffic transport (CoverDrop/Nym-style) evaluation for "using the channel is not a signal". | Separate research track; admission per §6.3. |
-| OI-6 | High availability with a single onion address (Onionbalance-style) needs security review. | 21-ENTERPRISE HA design. |
+| OI-6 | Active/active HA with one onion address (OnionBalance-style) is deferred by ADR-032; the passive host doubles THR-044 exposure. | Security review before any active/active design (21). |

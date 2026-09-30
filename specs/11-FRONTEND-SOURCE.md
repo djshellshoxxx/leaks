@@ -62,7 +62,7 @@ Residual risks are in §15. Specifically, Tier W cannot protect submission plain
 | DP-8 | **Keyboard** | Full operation by keyboard. Visible focus. DOM-order tab sequence. Skip link. |
 | DP-9 | **Screen readers** | Unique page titles, one `<h1>`, landmarks, labelled controls, errors linked by `aria-describedby`. |
 | DP-10 | **Zero third parties** | No third-party scripts, fonts, styles, images, iframes, CDNs, analytics, CAPTCHAs, error reporting, or accessibility overlays [INC-13, INC-46, INC-53; ADR-023; ADR-026]. |
-| DP-11 | **Uniform traffic shape** | Every page falls into one of 3 padded size classes. No compression. No conditional sub-resources [B-AN-15, B-AN-16; ADR-011]. |
+| DP-11 | **Uniform traffic shape** | Every page falls into one of 2 padded size classes. No compression. No conditional sub-resources [B-AN-15, B-AN-16; ADR-011]. |
 | DP-12 | **No residue** | No persistent cookies or Web Storage. `no-store`. `Clear-Site-Data` on exit. No downloads offered [REQ-H-23]. |
 | DP-13 | **Stable, secret-free URLs** | Paths contain no identifiers, tokens or user data. No query strings carry state. Language is a path prefix. |
 
@@ -151,12 +151,13 @@ Content-Language: {bcp47}
 | Class | Exact `Content-Length` | Used for | Max unpadded content |
 |---|---|---|---|
 | P1 | 65,536 bytes | All pages by default, including guidance, forms, errors, busy and leave | 61,440 bytes (inline CSS ≤ 20,480; inline SVG total ≤ 4,096) |
-| P2 | 262,144 bytes | Review (S08) and Conversation (S12) when content exceeds P1 | 258,048 bytes |
-| P3 | 1,048,576 bytes | Only if S12 cannot paginate below P2 (a single message is ≤ 64 KiB, so this should be unreachable; kept as a safety valve) | 1,044,480 bytes |
+| P2 | 131,072 bytes | Review (S08) and Conversation (S12) when content exceeds P1 | 129,024 bytes |
+
+There is no larger class. The ≤ 128 KiB ceiling follows `01-PRODUCT-REQUIREMENTS.md` §8. Content limits (§5.7) and pagination guarantee every page fits P2.
 
 Rules:
 1. Padding is an HTML comment of ASCII spaces appended before `</body>`, inserted after rendering. Responses are never compressed.
-2. S12 paginates at ≤ 3 maximum-size messages per page, or whatever fits P2.
+2. S12 paginates so that each page fits P2: at most one maximum-size (64 KiB) message, plus as many smaller messages as fit.
 3. HTTP 3xx redirects are not used in the source flow. POST responses render the next page directly (200). Repeated POSTs are made idempotent by the form token (§5.7).
 4. Each page view is **exactly one** HTTP request. Favicon requests are suppressed (`href="data:,"`). There are no sub-resources.
 5. Performance budget: P1 fully rendered in ≤ 4 s at 256 kbit/s with 1.5 s RTT (Tor median-like conditions), measured in CI with a throttled Tor Browser profile.
@@ -235,7 +236,7 @@ Each authenticated page includes a `<div class="timeout-warn" role="status">` bl
 | Short text | 500 chars |
 | Long text | 60,000 chars (fits the 64 KiB bucket with UTF-8 headroom per ADR-011; the server rejects more than 65,536 bytes UTF-8) |
 | Radio/checkbox values | From an allow-list |
-| Total per report (text) | 256 KiB |
+| Total per report (text, all questionnaire fields) | 96 KiB (98,304 bytes UTF-8), so that S08 Review fits P2. Longer material can be attached as a file |
 
 ### 5.8 Progress indicator
 Text "Step 4 of 8: What happened", plus an ordered list in `<nav aria-label="Report steps">` showing completed, current (`aria-current="step"`) and upcoming steps. Completed steps are links (GET, re-render from draft). There is no percentage bar and no timers.
@@ -656,6 +657,7 @@ Each screen lists its purpose, content, fields, validation, no-JS behavior, erro
 - **Login content:**
   - Reminder box: "Tor Browser at Safest, personal device, not a work network. Come back every few days, not every hour." (GC-33 short).
   - Passphrase field: `<input type="text" autocomplete="off" autocapitalize="none" spellcheck="false">`. Paste is allowed (WCAG 3.3.8). The label is "Your 10-word passphrase".
+  - Alternative layout: a secondary button "Use 10 separate boxes" (POST `/login` with `layout=ten`, which re-renders without attempting authentication; no query string). It shows 10 labelled inputs "Word 1" … "Word 10", which helps users who track position (`01-PRODUCT-REQUIREMENTS.md` §7.8).
   - Button: "Open my mailbox".
   - Note: "Opening your mailbox can take up to 30 seconds."
 - **Login validation:**
@@ -750,7 +752,7 @@ Build-time enforcement: template lint, a dependency allow-list, and a crawler th
 | ADP-03 | Unequal choice weight | Choices with different privacy consequences have equal size and styling. Only the primary *navigation* action is emphasized. |
 | ADP-04 | False urgency | No countdowns (except the session warning), "limited time" copy, or pressure to submit quickly. |
 | ADP-05 | Social proof and metrics | No "N reports this month", no testimonials, no visitor counters (also THR-039 small cells). |
-| ADP-06 | Self-asserted security badges | No "Verified", "100% secure", lock icons or seals asserted by the page itself (DP-1; DECISIONS §0). |
+| ADP-06 | Self-asserted security badges | No "Verified" labels, absolute-security claims (the terms banned by DECISIONS §0), lock icons or seals asserted by the page itself (DP-1). |
 | ADP-07 | Contact harvesting | No "leave your email for updates", no optional contact fields in ANONYMOUS mode. |
 | ADP-08 | Roach motel | Discarding, closing the mailbox and leaving are as easy as starting (≤ 2 actions each). |
 | ADP-09 | Nagging | Warnings appear at the defined JIT points. They are not repeated as modal interruptions. There are no repeated "Are you sure?" prompts. |
@@ -788,9 +790,9 @@ Build-time enforcement: template lint, a dependency allow-list, and a crawler th
 | SUI-002 | Every C-06 response SHALL carry the §5.3 headers exactly, and none of the prohibited headers. | B-GL-04; REQ-H-27, REQ-H-36; INC-34 | THR-006, THR-008, THR-036 | C-06 | TST: header conformance test over all routes and status codes; ST: CSP scanner (no `unsafe-*`, no external origins) |
 | SUI-003 | The inline stylesheet SHALL be the only style source and SHALL be pinned by `sha256` in CSP. No `style` attributes SHALL be present. | B-GL-04 | THR-008 | C-06 | TST: build step computes hash; lint `no-style-attr` |
 | SUI-004 | Each page view SHALL consist of exactly one HTTP request. No sub-resources SHALL be referenced (favicon `data:,`). | B-AN-15, B-AN-16; ADR-011 | THR-004 | C-06 | TST: HAR capture per screen in e2e = 1 request (+ form POST) |
-| SUI-005 | Every C-06 HTML response SHALL be padded to exactly one of the P1/P2/P3 sizes (§5.4), SHALL NOT be compressed, and SHALL meet the unpadded budget of its class. | ADR-011; B-AN-16 | THR-004 | C-06 | TST: `sui-size-classes` asserts `Content-Length` ∈ {65536, 262144, 1048576} for all routes incl. errors; CI budget check |
+| SUI-005 | Every C-06 HTML response SHALL be padded to exactly one of the P1/P2 sizes (§5.4), SHALL NOT be compressed, and SHALL meet the unpadded budget of its class. | ADR-011; B-AN-16 | THR-004 | C-06 | TST: `sui-size-classes` asserts `Content-Length` ∈ {65536, 131072} for all routes incl. errors; CI budget check |
 | SUI-006 | The source UI SHALL load no resource from, link to, or submit to any origin other than its own onion origin, and SHALL include no third-party component listed in §9. | INC-13, INC-46, INC-53, INC-54; ADR-023 | THR-036, THR-006 | C-06, C-37 | TST: crawler `sui-origin-check`; dependency allow-list in CI; INSP |
-| SUI-007 | C-06 SHALL NOT vary responses by User-Agent, Accept-Language or other client headers, and SHALL NOT perform browser fingerprinting. | ADR-003; B-AN R4 §2.2 | THR-006 | C-06 | TST: response diff across 5 UA/Accept-Language variants = byte-identical (except CSRF tokens) |
+| SUI-007 | C-06 SHALL NOT vary responses by User-Agent, Accept-Language or other client headers, and SHALL NOT perform browser fingerprinting. | ADR-003; B-AN-15 | THR-006 | C-06 | TST: response diff across 5 UA/Accept-Language variants = byte-identical (except CSRF tokens) |
 | SUI-008 | The UI SHALL use exactly one cookie `__Host-s` (session-only, Secure, HttpOnly, SameSite=Strict) carrying a 256-bit client secret. The server SHALL store only `SHA-256(HKDF(cs,"candor/src/handle"))`. | ADR-005; REQ-H-23; B-SD-02 (cookie prefixes) | THR-006, THR-015, THR-048 | C-06, C-07, C-08 | TST: cookie attribute test; DB inspection shows no `cs`; TST `sui-cookie-onion` in Tor Browser |
 | SUI-009 | Pre-submission drafts and unsent replies SHALL be stored only as AEAD ciphertext under `k_draft` derived from the client-held cookie secret, SHALL expire `T_DRAFT` (default 24 h, min 20 h) after the last save, and SHALL be deleted on submit or discard. | WCAG 2.2.1 [B-CO-28]; R6 §C | THR-015, THR-014 | C-07, C-08 | TST: DB dump contains no draft plaintext canary; expiry job test; discard test |
 | SUI-010 | Uploaded attachment content SHALL be sealed to the channel epoch key on arrival and SHALL NOT be retrievable by the source or C-06 afterwards. | ADR-008; ADR-012 | THR-014, THR-015 | C-07 | TST: no GET route returns attachment bytes; memory canary test (07) |
@@ -798,7 +800,7 @@ Build-time enforcement: template lint, a dependency allow-list, and a crawler th
 | SUI-012 | Any POST received after session expiry, under rate limiting or during busy state SHALL first persist the posted text and file references to the draft, and the resulting page SHALL state that the text is saved and restore it after re-authentication. | WCAG 2.2.5 (AAA, adopted); COGA [B-CO-36] | THR-032 | C-06, C-07 | TST: expire session → POST reply → login → form restored with canary text |
 | SUI-013 | Every form SHALL carry a single-use 128-bit token `ft` bound to the session. POSTs SHALL be rejected unless `ft` is valid and `Origin` equals the onion origin. `ft` SHALL make submission idempotent. | ADR-029; B-GL-37 | THR-021, THR-033 | C-06 | ST: CSRF test suite; TST: double POST /submit → one report |
 | SUI-014 | Routes SHALL be as in §5.5, carry no identifiers or user data in paths or query strings, and be registered deny-by-default with audience `source-web`. | ADR-029; B-GL-04 (no URI change) | THR-048, THR-021 | C-06 | TST: route-registry CI check; lint for query-string use |
-| SUI-015 | Every source page SHALL display the mode banner (§5.2) as the first header content, with the mode word first in `<title>`, non-color cues, and the specified text per mode. | ADR-002; B-GL (R2 §8 ADOPT-1) | THR-040 | C-06, C-03, C-38 | TST: snapshot per mode; a11y tree check; INSP: forced-colors screenshot |
+| SUI-015 | Every source page SHALL display the mode banner (§5.2) as the first header content, with the mode word first in `<title>`, non-color cues, and the specified text per mode. | ADR-002; B-GL-09 | THR-040 | C-06, C-03, C-38 | TST: snapshot per mode; a11y tree check; INSP: forced-colors screenshot |
 | SUI-016 | Primary send buttons SHALL name the mode ("Send anonymously", "Send confidentially (with my name)", "Send with my name"). | ADR-002 | THR-040 | C-06, C-03 | TST: button label per mode |
 | SUI-017 | Identity disclosure SHALL require the S05b two-page flow with an explicit "Yes, share who I am" confirmation. Identity data SHALL be sealed separately to Identity Custodian keys, SHALL be removable before submit, and SHALL be irreversible after submit. | ADR-002; ADR-014; REQ-H-05 | THR-040, THR-018, THR-019 | C-06, C-07 | TST: flow tests; envelope inspection shows separate identity envelope |
 | SUI-018 | C-38 pages SHALL display the CLEARNET "NOT ANONYMOUS" banner on every page and SHALL NOT offer an ANONYMOUS mode option. | ADR-002 | THR-040, THR-001 | C-38 | TST: C-38 template tests |
@@ -807,7 +809,7 @@ Build-time enforcement: template lint, a dependency allow-list, and a crawler th
 | SUI-021 | Immediately after channel selection, the UI SHALL present the optional S04b checklist "Is your report about any of these people?". Role labels SHALL come from the channel's member entries in the Key Directory, and none SHALL be ticked by default. Ticked roles, plus the tenant COI map for the chosen category, SHALL be removed from the recipient set before any wrapping, so that excluded members receive no wrapped key (applied in C-07 RAM for Tier W, locally for Tier V). | ADR-030; ADR-015; INC-22 | THR-020, THR-046 | C-06, C-07, C-03, C-14 | TST: flagged role member never receives case key (14/15 integration test) |
 | SUI-022 | Server-side validation SHALL be authoritative, and error presentation SHALL follow §5.7 (error summary with `autofocus`, field `aria-invalid`, linked messages, "Error:" title prefix, preserved values). | WCAG 3.3.1, 3.3.3; B-CO-28 | — | C-06 | TST: a11y assertions; DEMO: NVDA/Orca error walkthrough |
 | SUI-023 | All user and recipient content SHALL be HTML-escaped and rendered as plain text without auto-linking, Markdown or HTML interpretation. | B-GL-39 (CVE-2024-38521); REQ-H-36 | THR-008 | C-06 | ST: XSS corpus against every rendering path; TST |
-| SUI-024 | Text inputs SHALL enforce the §5.7 limits server-side. Long text SHALL be ≤ 65,536 bytes UTF-8, and total report text ≤ 256 KiB. | ADR-011 | THR-032 | C-06, C-07 | TST: boundary tests |
+| SUI-024 | Text inputs SHALL enforce the §5.7 limits server-side. Long text SHALL be ≤ 65,536 bytes UTF-8, and total report text ≤ 98,304 bytes. | ADR-011 | THR-032 | C-06, C-07 | TST: boundary tests |
 | SUI-025 | The attach screen SHALL use `<input type="file" multiple>` without `capture` and without type restrictions, SHALL display configured limits as text, SHALL default filename replacement ON, and SHALL enforce limits while streaming. | `05` SOPS-014; REQ-H-08 | THR-009, THR-032 | C-06, C-07 | TST: template lint; oversized upload aborted at limit |
 | SUI-026 | S07 SHALL be shown whenever files are attached, before S08, with per-class warnings, and SHALL require an explicit choice between "Change files" and "Continue with these files". | `05` SOPS-015; REQ-H-17 | THR-009, THR-010 | C-06, C-03 | TST: navigation guard test |
 | SUI-027 | S08 SHALL present all answers with Edit links, the mode summary, recipients, kept-out roles, files, identity-hint notices (`05` SOPS-018) and the writing checklist, and SHALL re-validate before submit. | REQ-H-05; INC-32; WCAG 3.3.4 | THR-010, THR-040 | C-06 | TST; DEMO |
@@ -815,7 +817,7 @@ Build-time enforcement: template lint, a dependency allow-list, and a crawler th
 | SUI-029 | S10 SHALL show the 10-word passphrase as an ordered list plus a read-only one-line field and a spelled-out `<details>`, and SHALL NOT offer download, print, QR, email or scripted copy. | ADR-005; `05` SOPS-022; WCAG 3.3.8 | THR-034, THR-048 | C-06, C-03 | TST: DOM assertions; forensic-residue test (30) |
 | SUI-030 | Dates shown to sources SHALL have day granularity with "(UTC)". The UI SHALL NOT show times, last-visit, unread or presence indicators. | ADR-010; `05` SOPS-031 | THR-011 | C-06, C-03 | TST: render tests; schema has no source last-seen |
 | SUI-031 | Login SHALL accept pasted input, normalize whitespace, case and separators, report word-count and not-in-list errors without echoing words, and return a single generic message for authentication failure. | WCAG 3.3.8; ADR-005; B-SD-16 | THR-034 | C-06, C-07 | TST: normalization table tests; response diff between wrong-passphrase variants = identical |
-| SUI-032 | Login attempts SHALL be rate-limited per circuit and globally, without persisting circuit identifiers, and SHALL NOT use CAPTCHAs. | ADR-026; B-GL (R2 ADOPT-5) | THR-033, THR-034 | C-05, C-06 | TST: rate-limit test; INSP: no circuit IDs in DB/logs |
+| SUI-032 | Login attempts SHALL be rate-limited per circuit and globally, without persisting circuit identifiers, and SHALL NOT use CAPTCHAs. | ADR-026; B-GL-04 | THR-033, THR-034 | C-05, C-06 | TST: rate-limit test; INSP: no circuit IDs in DB/logs |
 | SUI-033 | The inbox and conversation SHALL render recipient messages as plain text, grouped by day, newest first, with sender label. In Tier V, each message's recipient signature SHALL be verified and invalid signatures shown as "Could not be checked — don't trust this message". | INC-62; REQ-H-64 | THR-046, THR-007 | C-06, C-03 | TST: Tier V tampered-signature test |
 | SUI-034 | S12 SHALL display the GC-36 side-channel warning and SHALL allow later identity disclosure only via the S05b flow applied to the existing report. | REQ-H-21; ADR-002 | THR-040, THR-019 | C-06 | TST; INSP |
 | SUI-035 | S13 SHALL provide Discard (pre-submit), Close mailbox and Ask-to-delete with the specified consequence text, equal-weight buttons and ≤ 2 actions each. Close SHALL invalidate the source auth verifier and notify the case. | ADR-025; `05` SOPS-032 | THR-034 | C-06, C-07, C-10 | TST: post-close login fails; case event present |
@@ -850,14 +852,14 @@ Build-time enforcement: template lint, a dependency allow-list, and a crawler th
 | Screen | Class | Unpadded budget | Notes |
 |---|---|---|---|
 | S01, S02, S03, S04, S05, S05b, S06, S07, S10, S11, S13, Leave, S90–S94 | P1 | ≤ 60 KiB | S02 carries all GC cards collapsed: the largest P1 page; its budget is checked in CI |
-| S08 | P1 or P2 | ≤ 252 KiB | P2 if answers exceed P1 |
-| S11 inbox, S12 | P1 or P2 | ≤ 252 KiB | Pagination keeps pages ≤ P2 |
+| S08 | P1 or P2 | ≤ 126 KiB | P2 if answers exceed P1 |
+| S11 inbox, S12 | P1 or P2 | ≤ 126 KiB | Pagination keeps pages ≤ P2 |
 
 ## 15. Residual risks and limitations
 
 1. **Tier W plaintext exposure:** a live-compromised C-06/C-07 sees submissions and drafts being processed (ADR-004). Drafts are encrypted at rest under a cookie-held key, but the key arrives with each request.
 2. **Upload sizes are not padded in Tier W.** Network observers see approximate request sizes at Tor-cell granularity, and C-06 sees raw sizes before sealing.
-3. **Only three size classes:** the *sequence* of classes and inter-request timing still form a trace for website fingerprinting (B-AN-16). Argon2id login latency (~1–3 s) is a timing feature.
+3. **Only two size classes:** the *sequence* of classes and inter-request timing still form a trace for website fingerprinting (B-AN-16). Argon2id login latency (~1–3 s) is a timing feature.
 4. **The CSS timeout warning is not reliably announced by screen readers.** Static text states the rule. Tier V gives real announcements.
 5. **The `Secure` cookie on http onion origins, the `scripting` media query and CSP `sandbox` interplay** depend on browser behavior that must be re-verified per Tor Browser release.
 6. **Closing Tor Browser loses the draft by design.** Some sources will lose work. Copy warns of this on S04 and S06.
@@ -869,7 +871,15 @@ Build-time enforcement: template lint, a dependency allow-list, and a crawler th
 
 - **OI-11-1:** Confirm with `16-TOR-I2P.md` and `07-BACKEND.md` the omission of the `Date` header and the onion-host clock-skew posture.
 - **OI-11-2:** Decide whether S02 should be skippable ("Skip to report" link) for returning-but-new reports. Currently it is a required interstitial with a single Continue.
-- **OI-11-3:** Evaluate a single fixed size class (P2 for all pages) against the bandwidth cost (256 KiB per page over Tor) for stronger uniformity.
+- **OI-11-3:** Evaluate a single fixed size class (P2 for all pages) against the bandwidth cost (128 KiB per page over Tor) for stronger uniformity.
+- **OI-11-6 (conflict with `01-PRODUCT-REQUIREMENTS.md` §7.8):** The PRD says typed text is "never stored server-side". This spec stores **encrypted drafts** keyed by a client-held cookie secret (§5.6), for four reasons:
+  1. no-JS multi-step forms need state;
+  2. attachments must be held server-side before submit anyway;
+  3. carrying all answers in hidden fields would echo the full report in every response and break size classes;
+  4. WCAG 2.2.1/COGA require that data not be lost.
+
+  The server holds only ciphertext, and it is undecryptable without the source's cookie. The PRD owner should confirm or amend. The PRD's "≥ 2 minutes" warning is satisfied (5 min idle, 10 min absolute).
+- **OI-11-7:** PRD §7.8 suggests linking an EFF word list for spelling checks. The full list (7,776 words) exceeds P1. Candidate approaches are a paginated static word-list page on the onion, or the Tier V app's local autocomplete.
 - **OI-11-4:** Oral and voice reporting (EU Directive Art 9(2); R6 WB-01/WB-13) is not provided in Tier W, because audio recording requires JS and media APIs. Staff-assisted oral intake is handled in `14-CASE-MANAGEMENT.md`. Revisit for Tier V.
 - **OI-11-5:** Source-visible case status values need alignment with `14-CASE-MANAGEMENT.md`.
 

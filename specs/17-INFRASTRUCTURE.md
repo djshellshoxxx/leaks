@@ -72,7 +72,7 @@ The default addresses are an installer-editable example plan.
 | N-RELAY | Private point-to-point link: C-09 (core) → C-08 relay export endpoint (intake, TCP 7443) | 10.20.0.0/29 (intake .2, intake-B .4, core .3) | H-INTAKE(-B), H-CORE | No |
 | N-INTAKE-REPL (EE-HA/GOV) | Intake A ↔ B PostgreSQL synchronous replication and fencing heartbeat | 10.21.0.0/30 | H-INTAKE, H-INTAKE-B | No |
 | N-CORE | Core internal: services ↔ PostgreSQL ↔ blob store | 10.40.0.0/24 | H-CORE (and cluster nodes in EE-HA) | No |
-| N-CORE-EGRESS | H-CORE uplink for tor (staff onion, updates) and, optionally, the SMTP relay and SIEM | NAT | H-CORE | Yes, allow-listed |
+| N-CORE-EGRESS | H-CORE uplink for tor (RCP-ONION, updates) and, optionally, the SMTP relay and SIEM | NAT | H-CORE | Yes, allow-listed |
 | N-MGMT | Agents push self-test results to H-MON; time distribution; Tang; SSH from the admin workstation jump | 10.30.0.0/28 (mon .5, admin jump .9) | H-MON, H-INTAKE, H-CORE, H-BAK, WS-ADM (jump port) | No |
 | N-BAK | Backup push, core → store, write-only | 10.50.0.0/29 | H-CORE, H-BAK | No |
 | N-OOB | BMC/IPMI/iDRAC/iLO | 10.90.0.0/28 | BMCs only, plus one jump port in a locked rack | **Never**. Physically separate switch or unplugged |
@@ -92,7 +92,7 @@ Only the flows below are allowed; everything else is denied. `→` means the con
 | F5 | H-INTAKE/H-CORE/H-BAK → H-MON:123 (+ NTS-KE 4460 where supported) | NTP/NTS | Time | Only to H-MON; H-MON itself uses NTS servers or GPS |
 | F6 | H-INTAKE/H-CORE → H-MON:7500 (Tang) | HTTP (Tang/JOSE; McCallum-Relyea exchange, key material not exposed) | Network-bound disk unlock at boot | Only when NBDE is enabled (§6.3) |
 | F7 | H-CORE → H-BAK:443 (or :22 SFTP append-only) | HTTPS S3-API with Object Lock | Backup upload | Credentials can PUT but not DELETE or overwrite (`19-BACKUPS-DR.md`) |
-| F8 | H-CORE tor → Tor relays | TCP any ORPort | Staff onion (restricted discovery), update fetch via onion mirror | `debian-tor` UID only |
+| F8 | H-CORE tor → Tor relays | TCP any ORPort | RCP-ONION and admin onion (restricted discovery), update fetch via onion mirror | `debian-tor` UID only |
 | F9 | H-CORE C-23 → customer SMTP relay:587 | TCP STARTTLS, certificate pinned | Content-free notifications (ADR-017) | Optional. Alternatively over tor |
 | F10 | H-MON → alert sink (SMTP over tor / Matrix webhook over tor) | tor | Content-free alerts | Alerts never include source data (`32-OPERATIONS.md`) |
 | F11 | H-CORE C-26 → customer SIEM (EE) | TLS syslog/HTTPS | Scrubbed SECURITY/SYSTEM events (ADR-016, ADR-018) | Never from H-INTAKE |
@@ -121,7 +121,7 @@ flowchart LR
     C09[C-09 relay puller] -->|F3 pull, core-initiated| RL
     C09 --> C10[C-10 case svc] --> C12[(C-12 DB)]
     C10 --> C13[(C-13 blobs)]
-    SO[staff onion tor]
+    SO[RCP-ONION tor]
   end
   subgraph ZSOC[Z-SOC: H-MON]
     C25[C-25 monitor / NTS / Tang]
@@ -192,7 +192,7 @@ Operational rules:
 
 ### 4.4 Z-CORE egress
 
-H-CORE egress SHALL be allow-listed to F7, F8, F9 (if enabled) and F11 (EE), plus F5/F6 on N-MGMT. The same nftables pattern applies, with a UID match per service: `debian-tor`, `candor-notify` for F9, `candor-siem` for F11, `candor-backup` for F7. H-CORE SHALL have no inbound listener on N-CORE-EGRESS.
+H-CORE egress SHALL be allow-listed to F7, F8, F9 (if enabled) and F11 (EE), plus F4/F5/F6 on N-MGMT. The same nftables pattern applies, with a UID match per service: `debian-tor`, `candor-notify` for F9, `candor-siem` for F11, `candor-backup` for F7. H-CORE SHALL have no inbound listener on N-CORE-EGRESS.
 
 ### 4.5 DNS, time and update paths
 
@@ -206,16 +206,19 @@ H-CORE egress SHALL be allow-listed to F7, F8, F9 (if enabled) and F11 (EE), plu
 
 ### 4.6 Staff access paths
 
-| Path | Default | Description | Metadata created |
+The path names and per-profile defaults follow `06-SYSTEM-ARCHITECTURE.md` §8.3.
+
+| Path | Default in | Description | Metadata created |
 |---|---|---|---|
-| STAFF-ONION | **Default, all profiles** | desk-api and admin-api are served on a restricted-discovery (client-auth) v3 onion on H-CORE. Candor Desk embeds Arti. Its client-auth x25519 key is wrapped by the staff hardware key (ADR-007) | H-CORE learns no staff IP. The staff's local network sees Tor use |
-| STAFF-LAN | EE, ADVANCED (`32-OPERATIONS.md` CFG table) | `candor-edge` (Rust reverse proxy on H-CORE or a Z-CORE edge VM) with device-bound mTLS on the corporate network | Core learns staff internal IPs. The corporate network team sees who talks to Candor and when. Allowed only when staff identity is already known to the organization (it is) and the customer accepts the internal-observer risk |
+| RCP-ONION | CE-SINGLE, CE-HARDENED, MANAGED (and allowed everywhere) | The Desk API and, separately, the Admin API are served on restricted-discovery (client-auth) v3 onions by a core tor instance on H-CORE or on a Z-CORE edge host (`16-TOR-I2P.md` NET-015). One client-auth key per Desk device, wrapped by the staff hardware key (ADR-007) | H-CORE learns no staff IP. The staff's local network sees Tor use |
+| RCP-LAN | EE-ONPREM, EE-HA, GOV-ONPREM, PRIVATE-CLOUD | TCP 8443 mTLS on a dedicated recipient VLAN or WireGuard (N-RCP), with per-device client certificates | Core and the corporate network team learn staff internal IPs and connection times. This is acceptable because staff identities are known to the organization. However, a network team that is itself a report subject (THR-020) can see **which staff work on Candor and when**. The VLAN therefore SHOULD be isolated from the general network-monitoring stack, and flow logging SHOULD be aggregate-only |
 
 Staff access SHALL NOT be exposed on N-INTAKE-EXT or through H-INTAKE in any profile.
 
 ### 4.7 Administrative access
 
-- CE default: SSH on each host listens on `127.0.0.1:22` only and is published as a restricted-discovery onion (the SecureDrop pattern [B-SD-04]).
+- SSH listens only on the N-MGMT interface address, reachable only from the admin workstation jump port (`06-SYSTEM-ARCHITECTURE.md` §8.4).
+- Remote or colocated sites without an on-site management network instead bind sshd to `127.0.0.1:22` and publish it as a restricted-discovery onion (the SecureDrop pattern [B-SD-04]).
 - Authentication uses only `sk-ssh-ed25519@openssh.com` keys, which need a FIDO2 touch plus PIN (`verify-required`). This addresses SecureDrop's missing SSH MFA (SEC-01-011) [B-SD-13].
 - `AllowUsers candor-admin`. `PermitRootLogin no`. `sudo` requires a second FIDO2 assertion via `pam_u2f` (`cue`, `pinverification=1`).
 - EE MAY use short-lived SSH certificates (TTL 8 h) issued by an offline or HSM-backed SSH CA. The CA is configured for two-person issuance for H-INTAKE (HUM controls in `32-OPERATIONS.md`).
@@ -335,7 +338,7 @@ This limits persistence of plaintext and keys to RAM for the duration defined in
 | Host | journald | auditd | Web/tor logs |
 |---|---|---|---|
 | H-INTAKE | `Storage=volatile`, `RuntimeMaxUse=64M`, `MaxRetentionSec=7day` (REQ-H-60), `ForwardToSyslog=no`. rsyslog not installed | Rules only for `/etc`, `/usr`, `/boot`, `execve` by uid≠service accounts, and module loads. **No** rules on `/var/lib/candor/intake` (their timestamps would be submission timing) | Tor `Log notice syslog` → journald. `SafeLogging 1`. No `HiddenServiceExportCircuitID`. No access logs (ADR-016, B-SD-21) |
-| H-CORE | persistent, 30 days, forwarded as SYSTEM class per `20-LOGGING-AUDITING.md` | Same exclusions for blob/DB paths | staff-onion tor: `SafeLogging 1` |
+| H-CORE | persistent, 30 days, forwarded as SYSTEM class per `20-LOGGING-AUDITING.md` | Same exclusions for blob/DB paths | RCP-ONION tor: `SafeLogging 1` |
 | H-MON | persistent, 90 days | standard | n/a |
 
 ### 5.6 Integrity and attestation
@@ -410,7 +413,7 @@ Tang servers run on H-MON (CE-HARDENED) **plus** one off-site Tang (EE). Tang ke
 | SSH CA (EE) | Online HSM with two-person issuance policy for H-INTAKE principals | n/a | Access control |
 
 Rules:
-- Recipient private keys, case keys, channel epoch private keys and Recovery Quorum shares SHALL NOT be placed in a shared server-side HSM (ADR-007, ADR-013).
+- Recipient private keys, case keys, member epoch private keys (ADR-030) and Recovery Quorum shares SHALL NOT be placed in a shared server-side HSM (ADR-007, ADR-013).
 - HSM partitions per tenant (EE multi-tenant).
 - HSM admin (SO) and crypto-user roles are held by different people.
 - M-of-N activation (e.g., 2-of-3) for the SO role.
@@ -442,9 +445,9 @@ A provider that hosts Candor infrastructure is a potential observer and a compel
 | VM snapshots / disk images / backups taken by the provider | Point-in-time disk (and RAM, for memory snapshots) | FDE protects disk snapshots **only if** the unlock key is not also available to the provider (TPM-only in a vTPM **is** provider-accessible). RAM snapshots expose as the hypervisor row | Same | FDE with U4 (Tang in the customer's own site) or U6. Disable provider-level snapshot/backup features on intake VMs; organization policy denies `CreateSnapshot` on intake disks | The provider can snapshot anyway under compulsion |
 | Storage replicas / distributed block storage | Multiple physical copies of disk blocks; deletion not physical (ADR-025) | FDE ciphertext only | FDE ciphertext only | FDE inside the guest (not provider-managed encryption); crypto-erasure | Ciphertext blocks persist beyond deletion |
 | Cloud control-plane / audit logs (CloudTrail-class) | Who created, started or stopped VMs, key usage, API calls, timestamps, principal identities | Instance lifecycle; reveals intake existence to provider staff | Admin API activity patterns | Minimal cloud API use after deployment; separate cloud account/project for Candor; restrict log readers | Provider always has these logs |
-| VPC flow logs / provider netflow | 5-tuples, byte counts, timestamps of every flow | **All Tor OR connections of H-INTAKE with byte counts and timing.** Upload volume per time slice correlates with submission sizes and times (THR-003, THR-011, THR-047) | Staff-onion Tor flows | Disable customer flow logs for the intake subnet (CFG default); padding (ADR-011); PoW; the provider-internal netflow cannot be disabled by the customer; consider off-cloud intake | A provider-level observer plus a source-side ISP observer can attempt end-to-end correlation. This is the strongest argument for self-hosted Z-INTAKE for high-risk tenants |
+| VPC flow logs / provider netflow | 5-tuples, byte counts, timestamps of every flow | **All Tor OR connections of H-INTAKE with byte counts and timing.** Upload volume per time slice correlates with submission sizes and times (THR-003, THR-011, THR-047) | RCP-ONION Tor flows | Disable customer flow logs for the intake subnet (CFG default); padding (ADR-011); PoW; the provider-internal netflow cannot be disabled by the customer; consider off-cloud intake | A provider-level observer plus a source-side ISP observer can attempt end-to-end correlation. This is the strongest argument for self-hosted Z-INTAKE for high-risk tenants |
 | Instance metadata service (IMDS) | Instance credentials, user-data (bootstrap secrets) | SSRF or exploit → IAM credentials | Same | Egress drop to 169.254.0.0/16 (§4.3); IMDSv2 with hop limit 1; no secrets in user-data (installer verifies); no IAM role attached to intake VMs | Provider root |
-| Load balancer / CDN / WAF logs | Client IPs, paths, timing, TLS termination = plaintext | **Forbidden** in front of Z-INTAKE (REQ-H-54, INC-54). Onion traffic does not use an LB | Staff LB (STAFF-LAN only) logs staff IPs | No LB/CDN/WAF on the source path; STAFF-ONION default | n/a |
+| Load balancer / CDN / WAF logs | Client IPs, paths, timing, TLS termination = plaintext | **Forbidden** in front of Z-INTAKE (REQ-H-54, INC-54). Onion traffic does not use an LB | A staff-facing LB (RCP-LAN) logs staff IPs unless configured as L4 passthrough with logging off (`21-ENTERPRISE.md` HA-004) | No LB/CDN/WAF on the source path; RCP-ONION in PRIVATE-CLOUD where staff-IP exposure to the provider matters | n/a |
 | Cloud KMS / cloud HSM | Key-use events (decrypt/unwrap), timing, and the provider's technical ability to use keys under compulsion | If KMS unwraps the intake volume key, the provider controls the disk | DB TDE keys | Do **not** use provider KMS for anything protecting source-relevant material; use in-guest LUKS + Tang/customer HSM. Provider KMS MAY be used only for non-sensitive infrastructure (e.g., Terraform state encryption) | KMS decrypt events reveal activity timing |
 | Provider support / admin staff | Console access, disk attach, "break glass" | As hypervisor | As hypervisor | Contractual controls, customer lockbox features (Knowledge (unverified)), confidential VMs, alerting on console access events | Policy-based only |
 | Serial console / VNC logs | Boot and console output | Boot messages | Same | `quiet`, no secrets on console, console logging disabled on the provider side where possible | — |
@@ -485,7 +488,7 @@ Assumptions: cryptographic primitives hold (`04-CRYPTOGRAPHY.md`); the source pa
 |---|---|---|---|
 | S-OFF, FDE (U3), hardware key absent | Nothing beyond hardware identifiers | Everything | — |
 | S-UNLOCKED (disk key obtained, e.g., coerced PIN), hardware key absent | OS artifacts: exported Export Packages, printed-file spool remnants, downloads, recent-file lists (THR-041); Candor Desk encrypted store (opaque); Desk config (staff onion hostname, user ID); client-auth key **wrapped** (unusable without the token) | Case content, case keys, staff private keys (wrapped by FIDO2 PRF/PIV/TPM, ADR-007) | Desk SHALL store all case data encrypted; no plaintext working files outside disposable C-17 |
-| S-LIVE (session unlocked, token inserted) | **All case content within the user's ACL** (Desk can fetch and decrypt it); case keys in RAM; **channel epoch private keys** for the user's channels within the 14-day window (ADR-008) → envelopes not yet imported; staff signing key usage (sign replies and actions as the user); any decrypted viewer content open at that moment | Cases outside the ACL; Sealed Identity Store unless the user is an Identity Custodian (ADR-014); epoch keys already destroyed; other users' keys; source network identity (never exists) | Blast radius bounded by ACL + COI (ADR-015). Revocation (`15-AUTHENTICATION-AUTHORIZATION.md`) stops server fetches; already-cached data remains |
+| S-LIVE (session unlocked, token inserted) | **All case content within the user's ACL** (Desk can fetch and decrypt it); case keys in RAM; **the user's own member epoch private keys** within the 14-day window (ADR-030) → envelopes that were wrapped to this member and not yet imported; staff signing key usage (sign replies and actions as the user); any decrypted viewer content open at that moment | Cases outside the ACL; envelopes from which this member was COI-excluded (ADR-030: no wrapping to the member exists); Sealed Identity Store unless the user is an Identity Custodian (ADR-014); epoch keys already destroyed; other members' keys; source network identity (never exists) | Blast radius bounded by ACL + cryptographic COI exclusion (ADR-015, ADR-030). Revocation (`15-AUTHENTICATION-AUTHORIZATION.md`) stops server fetches; already-cached data remains |
 | S-COERCED (device + token + PIN) | Same as S-LIVE, **plus continued remote access** until the account is revoked | Same | IR playbook "Recipient credential stolen" (`31-INCIDENT-RESPONSE.md`) |
 | C-17 viewer VM after close | Nothing, if the host has no swap or has encrypted ephemeral swap and the VM is disposable | — | ADR-012 |
 
@@ -504,7 +507,7 @@ Assumptions: cryptographic primitives hold (`04-CRYPTOGRAPHY.md`); the source pa
 |---|---|---|
 | S-OFF, U3/U4 with Tang not reachable | Nothing (LUKS2 argon2id) | Everything |
 | S-OFF, U2 (TPM-only) whole machine | Equivalent to S-UNLOCKED once any OS-level or TPM-bus attack succeeds (§6.1 P9) | — |
-| S-UNLOCKED | **Onion service private key** → impersonation of the source portal (THR-044); the Intake Store (§8.6); relay mTLS server key; SSH-onion key; the per-deployment Argon2 salt; source-web code and config | Report plaintext (sealed to epoch keys); recipient keys; source IPs (never recorded); exact submission times (ADR-010: only `received_epoch_day`, batch number) |
+| S-UNLOCKED | **Onion service private key** → impersonation of the source portal (THR-044); the Intake Store (§8.6); the **Intake Routing Key** (if not TPM-sealed or if the TPM is also defeated) → combined with the routing ciphertexts in C-12, it links cases to intake source mailboxes (still no identity); relay mTLS server key; SSH-onion key; the per-deployment Argon2 salt; source-web code and config | Report plaintext (sealed to member epoch keys); recipient keys; source IPs (never recorded); exact submission times (ADR-010: only `received_epoch_day`, batch number) |
 | S-LIVE | Everything in S-UNLOCKED plus: **Tier W plaintext of submissions in flight** at capture time; **passphrases and derived source keys of Tier W logins in progress** (ADR-005 Tier W login) → decrypt that source's replies; in-memory rate-limiter circuit identifiers (ephemeral Tor circuit IDs, not IPs); session tokens | Plaintext of past submissions already sealed; Tier V submissions (encrypted client-side) |
 | S-CONTROLLED | Serve modified Tier W pages to future visitors (THR-007, THR-008, INC-28); harvest future Tier W submissions and passphrases; link logins of the same source over time. Tier V clients detect code/key changes (ADR-004) | Past content |
 
@@ -512,7 +515,7 @@ Assumptions: cryptographic primitives hold (`04-CRYPTOGRAPHY.md`); the source pa
 
 | State | Available | Not available |
 |---|---|---|
-| S-UNLOCKED | Case DB (§8.6); case blob store (padded ciphertext); key directory (public); audit logs (staff identities and **exact timestamps of staff actions**, ADR-010); relay mTLS client key (→ can pull from intake: ciphertext only); staff-onion key and client-auth public keys; notification config (staff notification addresses); SSO/SCIM config (EE); backup-agent signing key (can forge new backup sets, but cannot delete WORM sets) | Case plaintext; case keys (wrapped to member X-Wing keys only); epoch private keys; backup decryption keys |
+| S-UNLOCKED | Case DB (§8.6); case blob store (padded ciphertext); key directory (public); audit logs (staff identities and **exact timestamps of staff actions**, ADR-010); relay mTLS client key (→ can pull from intake: ciphertext only); RCP-ONION key and client-auth public keys, or the RCP-LAN server key; notification config (staff notification addresses); SSO/SCIM config (EE); backup-agent signing key (can forge new backup sets, but cannot delete WORM sets) | Case plaintext; case keys (wrapped to member X-Wing keys only); epoch private keys; backup decryption keys |
 | S-LIVE | Additionally: staff session tokens (audience-bound, ADR-029); DB TDE key if used; no plaintext content (Desk decrypts locally, ADR-007) | Same as above |
 | S-CONTROLLED | Serve malicious metadata or files to Desks (mitigated by the malicious-server harness, ADR-027); withhold or delay submissions (THR-020); attempt key substitution (THR-046; detected by client verification and transparency monitors) | Content (unless a Desk is exploited) |
 
@@ -555,15 +558,15 @@ Assumptions: cryptographic primitives hold (`04-CRYPTOGRAPHY.md`); the source pa
 | ID | Requirement | Evidence | Threats | Component | Verification |
 |---|---|---|---|---|---|
 | INFRA-001 | Z-INTAKE hosts SHALL have a default-deny egress policy in which only the tor process UID may open Internet connections, plus the N-MGMT time and Tang flows of §4.2. | REQ-H-33 (INC-33); B-SD-04; ADR-001 | THR-001, THR-016, THR-030 | C-05, C-06, C-07 | TST: `infra-egress-deny` runs `curl`, `nc` and DNS lookups as root and each service UID and expects all to fail, while `tor` builds circuits; INSP: nftables ruleset diff against §4.3 |
-| INFRA-002 | No Candor service on H-INTAKE SHALL listen on any IP address except the relay endpoint on N-RELAY and the monitor endpoint on N-MGMT. The source web and SSH SHALL listen only on unix sockets or loopback. | REQ-H-33; INC-34 | THR-001 | C-05, C-06 | TST: `ss -ltnpx` snapshot compared with the manifest; external port scan of all H-INTAKE addresses shows no open ports |
+| INFRA-002 | No service on H-INTAKE SHALL listen on any IP address except the relay export endpoint (TCP 7443) on N-RELAY and sshd on N-MGMT (or on loopback behind an SSH onion at remote sites). The source web SHALL listen only on a unix socket. | REQ-H-33; INC-34 | THR-001 | C-05, C-06 | TST: `ss -ltnpx` snapshot compared with the listener inventory; external port scan of all H-INTAKE uplink addresses shows no open ports |
 | INFRA-003 | H-INTAKE SHALL NOT run a DNS resolver or have a reachable resolver configured. | INC-34; B-SD-04 | THR-001, THR-016 | C-05 | TST: `getent hosts example.org` fails; packet capture on ext0 during a 24 h soak shows only TCP from the tor UID |
 | INFRA-004 | No network connection SHALL be initiable from Z-INTAKE to Z-CORE. The relay SHALL be reachable only from the configured C-09 address with a pinned mTLS 1.3 client certificate. | ADR-009; B-GL-30 | THR-014, THR-015 | C-08, C-09 | TST: `infra-no-intake-to-core` opens connections from an H-INTAKE root shell to every H-CORE port and expects all to be dropped; INSP: firewall rules |
 | INFRA-005 | Hosts SHALL be segmented into the segments of §4.1. N-RELAY, N-MGMT, N-BAK, N-CORE and N-OOB SHALL NOT be routed to the Internet. | ADR-009; B-SD-04 | THR-014, THR-030 | C-39 | INSP: network diagram and switch config review; TST: traceroute/egress probes from each segment |
 | INFRA-006 | Cloud instance-metadata addresses (169.254.0.0/16) SHALL be unreachable from all Candor hosts, and no bootstrap secret SHALL be placed in cloud user-data. | INC-59; Knowledge (unverified) IMDS SSRF class | THR-030 | C-05, C-10 | TST: `curl 169.254.169.254` fails from each UID; config checker scans the user-data |
 | INFRA-007 | Hosts SHALL obtain time only from the H-MON NTS source (or an equivalent internal source). The self-test SHALL cross-check against the Tor consensus and FAIL on skew > 30 min, or WARN at > 5 s NTP offset. | ADR-001; B-AN-26 | THR-043 | C-25, C-05 | TST: fake-clock test with ±1 h skew expects FAIL and intake closed per the FAIL table |
 | INFRA-008 | OS and Candor updates on H-INTAKE and H-CORE SHALL be fetched only over tor from signed repositories (Debian signed Release; Candor TUF). | ADR-022; B-SD-02 | THR-025, THR-001 | C-05, C-33 | TST: update in a netns with clearnet blocked succeeds; INSP: apt sources use the `tor+` transport |
-| INFRA-009 | Staff access (desk-api, admin-api) SHALL default to a restricted-discovery onion on H-CORE. STAFF-LAN SHALL be an ADVANCED setting. Staff access SHALL never traverse Z-INTAKE. | ADR-007; B-SD-04; B-AN-44 | THR-022, THR-018 | C-10, C-15, C-19 | TST: on a default install, desk-api is unreachable on any IP; the onion descriptor is undecryptable without client auth |
-| INFRA-010 | SSH SHALL listen only on loopback (published through a restricted-discovery onion) in CE, SHALL accept only FIDO2 `sk-` keys with `verify-required`, and SHALL disallow root login. | B-SD-13 (SEC-01-011) | THR-022, THR-018 | C-19, C-20 | TST: `sshd -T` assertions; login attempt with a non-sk key fails |
+| INFRA-009 | Staff access (desk-api, admin-api) SHALL use RCP-ONION or RCP-LAN with the per-profile defaults of §4.6. Staff access SHALL never traverse Z-INTAKE. In RCP-LAN, the recipient VLAN SHALL be excluded from per-flow logging by general network monitoring. | ADR-007; B-SD-04; B-AN-44 | THR-022, THR-018, THR-020 | C-10, C-15, C-19 | TST: on an RCP-ONION install, desk-api is unreachable on any IP and the descriptor is undecryptable without client auth; INSP: RCP-LAN flow-logging configuration |
+| INFRA-010 | SSH SHALL listen only on the N-MGMT interface (or on loopback behind a restricted-discovery onion at remote sites), SHALL accept only FIDO2 `sk-` keys with `verify-required`, and SHALL disallow root login. | B-SD-13 (SEC-01-011) | THR-022, THR-018 | C-19, C-20 | TST: `sshd -T` assertions; a login attempt with a non-sk key fails; SSH is unreachable from N-INTAKE-EXT |
 | INFRA-011 | BMCs SHALL be disabled or confined to an unrouted N-OOB with default credentials replaced. Virtual media and SOL SHALL be disabled on H-INTAKE. | Knowledge (unverified) BMC attack class | THR-031, THR-014 | C-39 | INSP: installer hardware checklist record; DEMO: BMC unreachable from any production segment |
 | INFRA-012 | Hosts SHALL apply the §5.1 kernel, sysctl, swap, hibernation, core-dump and filesystem baseline. The config checker SHALL fail on deviation. | INC-58 (REQ-H-58); B-GL-04 | THR-014, THR-016 | C-05..C-13 | TST: `candorctl check --host` asserts each key; induced deviation fails the check |
 | INFRA-013 | Swap SHALL be disabled on H-INTAKE and H-CORE. If enabled (ADVANCED), it SHALL be dm-crypt with a per-boot random key. | REQ-H-58; B-CR-33 caveat | THR-014, THR-015 | C-07 | TST: `swapon --show` is empty; with ADVANCED set, `cryptsetup status` shows a plain random-key mapping |
@@ -592,7 +595,7 @@ Assumptions: cryptographic primitives hold (`04-CRYPTOGRAPHY.md`); the source pa
 | PHYS-006 | Tamper-evident seals SHALL be applied, serial-logged and photographed at install and verified quarterly by two people. Discrepancies SHALL trigger the physical-seizure IR playbook. | Knowledge (unverified) evil-maid practice | THR-031 | C-39, C-16, C-20, C-29 | DEMO: quarterly inspection record; INSP |
 | PHYS-007 | Where chassis-intrusion sensors exist, H-INTAKE SHALL power off on intrusion while running (configurable), and all hosts SHALL raise a SECURITY alert. | §6.4 | THR-031 | C-25, C-05 | TST: simulated intrusion event → power-off in the test rig; alert emitted |
 | PHYS-008 | HSMs used for Candor keys in GOV-ONPREM SHALL be FIPS 140-3 Level 3 validated, with M-of-N SO activation and role separation between SO and crypto users. | B-CR-11; B-CR-30; R5 A.9 | THR-013, THR-018 | C-29 | INSP: certificate and HSM policy export; AUD |
-| PHYS-009 | Recipient private keys, case keys, epoch private keys and Recovery Quorum shares SHALL NOT be stored in a shared server-side HSM. | ADR-007; ADR-013 | THR-013, THR-018 | C-29 | INSP: HSM object inventory; TST: PKCS#11 object listing in CI deployment test |
+| PHYS-009 | Recipient private keys, case keys, member epoch private keys and Recovery Quorum shares SHALL NOT be stored in a shared server-side HSM. | ADR-007; ADR-013; ADR-030 | THR-013, THR-018 | C-29 | INSP: HSM object inventory; TST: PKCS#11 object listing in CI deployment test |
 | PHYS-010 | Air-gapped equipment SHALL have radios, cameras and microphones disabled (physically removed for GOV), and SHALL accept data only as signed Candor transfer bundles via the transfer tool. | B-SD-04 (SVS lesson); R1 do-not-copy #3 | THR-023, THR-013 | C-18 | TST: transfer tool rejects an unsigned bundle; INSP: hardware checklist |
 | PHYS-011 | Key ceremonies SHALL be two-person, scripted, recorded in a signed ceremony log, with no personal electronic devices present. | R5 A.9; B-GL-22 | THR-018, THR-013 | C-28, C-29, C-32 | DEMO: ceremony rehearsal; INSP: log |
 | PHYS-012 | Decommissioned storage from Z-INTAKE/Z-CORE/Z-BAK SHALL be crypto-erased and physically destroyed on site under two-person witness. RMA SHALL be prohibited. | B-CR-33; ADR-025 | THR-015, THR-017 | C-39, C-27 | INSP: destruction certificates |
@@ -615,9 +618,9 @@ Assumptions: cryptographic primitives hold (`04-CRYPTOGRAPHY.md`); the source pa
 
 ## 11. Open issues
 
-1. **Staff access path.** This document sets STAFF-ONION as the default staff path. `06-SYSTEM-ARCHITECTURE.md` and `16-TOR-I2P.md` must confirm this, including Arti client embedding in Candor Desk (ADR-007 does not specify the transport).
+1. **RCP-LAN observer risk.** RCP-LAN (the default in EE profiles per `06-SYSTEM-ARCHITECTURE.md`) exposes staff working patterns to the corporate network team. This document asks for flow-logging isolation (INFRA-009). `21-ENTERPRISE.md` should decide whether high-risk EE tenants default to RCP-ONION instead.
 2. **Source App pin cache.** An organization-neutral key-directory cache is needed so that a seized source device does not reveal the target organization. Owner: `11-FRONTEND-SOURCE.md` / `04-CRYPTOGRAPHY.md`.
-3. **COI exclusion metadata.** Server-readable COI exclusion entries can reveal the subject of a report. `14-CASE-MANAGEMENT.md` / `09-DATABASE.md` should evaluate storing exclusions as opaque staff-ID sets without role or reason, or client-side-enforced exclusions (exclusion is already applied before key wrapping, ADR-015).
+3. **COI exclusion metadata.** ADR-030 makes exclusion cryptographic. However, the envelope's recipient key IDs (per-epoch pseudonymous, padded to 16 slots) plus the key directory's role labels still let a party with C-08/C-12 plus the directory infer **which roles were excluded**, and therefore whom a report concerns. `04-CRYPTOGRAPHY.md` / `14-CASE-MANAGEMENT.md` should evaluate whether recipient key IDs can be made unlinkable to directory role labels for server-side observers.
 4. **Arti onion-service hosting.** No HSM or keystore integration for onion keys exists today. Revisit when Arti onion services are production-grade [B-AN-47].
 5. **Source-side duress / compromise signal.** There is no mechanism for a source to signal that its passphrase is compromised (see §8.2). Candidate for `05-SOURCE-OPSEC.md` / `11-FRONTEND-SOURCE.md`.
 

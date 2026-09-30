@@ -226,7 +226,7 @@ Family defaults:
 | SA-09 | PUT `/app/v1/uploads/{upload_id}/chunks/{n}` | capability: `Candor-Chunk-Mac: HMAC-SHA256(K_U, upload_id ‖ n ‖ sha256(body))` with `K_U` as registered in SA-08 | body = ciphertext chunk ≤ 4 MiB | `204` | 600/h/circuit | `not_found` (unknown upload), `conflict` (chunk already stored with a different digest), `too_large` | CT | none | Idempotent for identical chunk re-sends; MAC verified before storing |
 | SA-10 | GET `/app/v1/uploads/{upload_id}` | capability MAC over `upload_id ‖ "status"` | — | `{received: bitmap}` | 60/h/circuit | `not_found` | none | none | Resumption from any circuit/session with no account linkage |
 | SA-11 | DELETE `/app/v1/uploads/{upload_id}` | capability MAC | — | `204` | default | `not_found` | none | none | Abandon |
-| SA-12 | POST `/app/v1/envelopes` | session token OR pub for one-shot mode (no reply capability) | `{kind, channel_id, recipient_slots: [{key_id: bytes16, wrap_ct}] × 16, header_ct ≤ 8 KiB, manifest_ct ≤ 64 KiB, parts: [{upload_id, mac_proof}] ≤ 32, account_locator_hash?}` | `201 {}` (no ID, no time) | 10/h/circuit | `bad_request` (non-canonical, slot count ≠ 16, no known member key ID), `gone` (all slot keys expired), `not_found` (upload incomplete) | CT; SS (linkage, recipient set) | CTR:`submissions_tier_v` | Canonical validation (07 BE-049); upload proofs verified; binds uploads to the envelope, and only now to the account |
+| SA-12 | POST `/app/v1/envelopes` | session token OR pub for one-shot mode (no reply capability) | `{kind, channel_id, header_ct ≤ 8 KiB (16 fixed-size anonymous HPKE slots, random order, no key IDs), manifest_ct ≤ 64 KiB (contains the signed recipient list), parts: [{upload_id, mac_proof}] ≤ 32, account_locator_hash?}` | `201 {}` (no ID, no time) | 10/h/circuit | `bad_request` (non-canonical, slot count or size ≠ spec), `not_found` (upload incomplete) | CT; SS (linkage) | CTR:`submissions_tier_v` | Canonical validation (07 BE-049); upload proofs verified; binds uploads to the envelope, and only now to the account. The server cannot see recipients (ADR-033 §1). |
 | SA-13 | GET `/app/v1/mailbox` | session | — | `{items: [{slot: u8, ct_len_bucket}] × 32}` (fixed 32; dummies included) | 30/h/token | `unauthorized` | SS | none | Fixed-count list (§3.8) |
 | SA-14 | GET `/app/v1/mailbox/{slot}` | session | slot 0–31 | `reply_ct` (bucketed; dummy slots return random ciphertext of a bucketed size) | 120/h/token | `not_found` for out-of-range only | CT | none | No fetch state recorded or propagated (ADR-010) |
 | SA-15 | DELETE `/app/v1/mailbox/{slot}` | session | slot | `204` | default | as SA-14 | none | none | Dummy slots accept delete silently |
@@ -244,7 +244,7 @@ Family defaults:
 3. Every chunk, status or delete request carries an HMAC under `K_U`. A party that learns only `upload_id` (e.g., from a log or backup) cannot add, probe or delete chunks. `K_U` never leaves the intake store.
 4. `U` and `upload_id` are **per upload**. They are never derived from the source passphrase, account keys or other uploads.
 5. Uploads carry no session token. The server cannot link an upload to an account until SA-12 commits the envelope.
-6. Chunk records store no time. Only `created_epoch_day` exists per upload, and uploads expire after 3 epoch days (07 §6.3).
+6. Chunk records store no time. Only `created_day` exists per upload, and uploads expire after 3 epoch days (07 §6.3).
 
 | Linkage question | Answer | Residual |
 |---|---|---|
@@ -252,7 +252,7 @@ Family defaults:
 | Can it link two uploads to each other before commit? | No. They have independent `U` and no shared token. Circuit tokens are not persisted. | A network observer may correlate by timing (THR-003). |
 | Can it link an upload to a source account? | Only at SA-12 commit, which is the same moment the envelope is linked to the account anyway. | none beyond the envelope↔account link that already exists (09 §9) |
 | Can it link uploads across different envelopes? | No shared identifiers. `thread_tag` is inside the ciphertext. | Size buckets and the same day can correlate weakly |
-| Does resumption state reveal time? | Only `created_epoch_day` | Day-level |
+| Does resumption state reveal time? | Only `created_day` | Day-level |
 | Could a malicious server tag or track the client via upload responses? | Responses are fixed-shape. The app ignores unknown fields and never stores server-provided identifiers on disk (11-FRONTEND-SOURCE.md). | App-side storage of `U` for resumption is encrypted in the app's vault and deleted after commit |
 
 ## 6. Relay pull protocol (intake export endpoint, machine audience `relay`)
@@ -267,10 +267,10 @@ Family defaults:
 | ID | Method Path | AuthZ | Input | Output | Rate | Errors | Sensitive | Log | Security |
 |---|---|---|---|---|---|---|---|---|---|
 | RL-01 | GET `/relay/v1/health` | relay | — | `{status: ok\|degraded, store_free_bucket, pending_bucket}` | default | — | SYS | SYS | — |
-| RL-02 | POST `/relay/v1/batches/claim` | relay | `{max_objects ≤ 500, max_bytes ≤ 2 GiB}` | `{batch_no, objects: [{ref: bytes16, kind, channel_id, slot_key_ids: [bytes16] × 16, received_epoch_day, header_len, manifest_len, parts: [{padded_size}], sha256}]}` | 1 in flight | `conflict` if a batch is unacked (returns the same batch) | CT; SS (day, recipient set) | SYS | `ref` is intake-local, valid only for this batch. Slot key IDs are carried so that core can route listings without decrypting. |
+| RL-02 | POST `/relay/v1/batches/claim` | relay | `{max_objects ≤ 500, max_bytes ≤ 2 GiB}` | `{batch_no, objects: [{ref: bytes16, kind, channel_id, received_date, header_len, manifest_len, parts: [{padded_size}], sha256}]}` | 1 in flight | `conflict` if a batch is unacked (returns the same batch) | CT; SS (date) | SYS | `ref` is intake-local, valid only for this batch. |
 | RL-03 | GET `/relay/v1/batches/{batch_no}/objects/{ref}/{part}` | relay | `part` = `header`, `manifest` or index | ciphertext stream | default | `not_found` | CT | none | Streaming; relay verifies digest |
 | RL-04 | POST `/relay/v1/batches/{batch_no}/ack` | relay | `{committed: [sha256]}` | `{deleted: u32}` | default | `bad_request` if a digest is not in the batch | none | SYS | Intake deletes only matching digests (BE-014) |
-| RL-05 | POST `/relay/v1/replies` | relay | `{replies: [{routing_ct ≤ 2 KiB, reply_ct ≤ 70,000 B}] ≤ 500}` | `{accepted: u32, rejected: [index]}` | default | `bad_request` | CT; routing SS-sealed | SYS | Intake decrypts `routing_ct` with the routing key; `available_epoch_day = today` |
+| RL-05 | POST `/relay/v1/replies` | relay | `{replies: [{routing_ct ≤ 2 KiB, reply_ct ≤ 70,000 B}] ≤ 500}` | `{accepted: u32, rejected: [index]}` | default | `bad_request` | CT; routing SS-sealed | SYS | Intake decrypts `routing_ct` with the routing key; `available_day = today` |
 | RL-06 | POST `/relay/v1/directory-snapshot` | relay | signed snapshot (CBOR) | `204` | default | `bad_request` (invalid signature or consistency) | none | SEC:`kd_snapshot_rejected` on failure | Intake verifies the signature chain and consistency from the previous snapshot |
 | RL-07 | POST `/relay/v1/config` | relay | signed config bundle | `204` | default | `bad_request` | SEC | SEC:`config_applied`/`config_rejected` | Verification per 07 §7.1 at intake |
 | RL-08 | POST `/relay/v1/deletions` | relay | `{reply_purge_before_day}` (retention) | `{purged: u32}` | daily | — | none | SYS | Only retention-driven; no targeted source deletion API exists from core |
@@ -303,7 +303,7 @@ The formats below are shared.
 
 **Entry types:** `USER_KEY`, `USER_KEY_REVOKE`, `CHANNEL_IDENTITY`, `CHANNEL_ROSTER`, `MEMBER_EPOCH_KEY`, `COI_MAP`, `ROUTING_KEY` (Intake Routing Key), `CONNECTOR_KEY` (EE), `RECOVERY_QUORUM_STATE`, `PROTECTION_STATEMENT`, `CLIENT_RELEASE`, `CONFIG_SIGNER` (07-BACKEND.md §5.10).
 
-**Member Epoch Key ID:** `key_id = SHA-256("candor-mek-id" ‖ pk)[0..16]`. It is pseudonymous and new every epoch. It appears in envelope recipient slots and in `MEMBER_EPOCH_KEY` entries.
+**Member Epoch Key ID:** `key_id = SHA-256("candor-mek-id" ‖ pk)[0..16]`. It is pseudonymous and new every epoch. It appears in `MEMBER_EPOCH_KEY` entries and inside the encrypted, signed recipient list of envelopes. It **never** appears in cleartext envelope headers (ADR-033 §1).
 
 ## 8. Desk API (audience `desk-api`)
 
@@ -342,18 +342,19 @@ Family defaults:
 
 | ID | Method Path | AuthZ | Input | Output | Rate | Errors | Sensitive | Log | Security |
 |---|---|---|---|---|---|---|---|---|---|
-| DA-20 | GET `/desk/v1/intake/envelopes?channel={ch}&cursor={c}` | `intake.list` + slot membership (one of the caller's Member Epoch Key IDs is in the envelope's slots) | filters | `[{import_envelope_id, channel_id, my_slot_key_id, slot_key_ids[16], received_epoch_day, parts: [{padded_size}], state}]` | 120/min | — | WF; SS (day, recipient set) | CASE:`intake_list` | COI-excluded members have no slot, so the envelope is never listed for them (ADR-030) |
+| DA-20 | GET `/desk/v1/intake/envelopes?channel={ch}&cursor={c}` | `intake.list` + active roster member of the channel | filters | `[{import_envelope_id, channel_id, received_date, parts: [{padded_size}], state, escalated_date?}]` | 120/min | — | WF; SS (date) | CASE:`intake_list` | The Desk trial-decrypts the 16 anonymous slots and hides envelopes it cannot open. Excluded members hold no key for any slot (ADR-030, ADR-033). |
 | DA-21 | GET `/desk/v1/intake/envelopes/{id}/header` | `intake.read` | — | `header_ct`, `manifest_ct` | 600/h | 404 uniform | CT | CASE:`intake_read` | — |
 | DA-22 | GET `/desk/v1/intake/envelopes/{id}/parts/{n}` | `intake.read` | Range header allowed | ciphertext stream | 120/min | 404 uniform | CT | CASE:`intake_part_read` | Desk writes via `candor-safefs` only (ADR-027) |
-| DA-23 | POST `/desk/v1/intake/envelopes/{id}/triage` | `intake.triage` | `{decision: import\|spam\|duplicate, target_case_id?}` + `If-Match` | `200 {state}` | 120/h | 404, 409 | WF | CASE:`intake_triaged` | Spam: blobs purged after 30 days unless reversed; `duplicate` links to a visible case only |
-| DA-24 | POST `/desk/v1/cases/eligibility` | `case.create` in channel + slot membership for the envelopes | `{channel_id, import_envelope_ids[], source_excluded_labels[] (from the decrypted manifest), department_id?}` | `{eligible: [{user_id, key_ids}], excluded_count_bucket}` | 60/h | 404 | WF | CASE:`eligibility_computed` | COI applied (ADR-015, ADR-030): source selection, COI map, self-declarations, admin COI registry. Excluded identities are not returned. |
+| DA-23 | POST `/desk/v1/intake/envelopes/{id}/triage` | `intake.triage` (import); `intake.reject` for reject | `{decision: import\|reject\|duplicate, reason_code?, target_case_id?}` + `If-Match` | `200 {state}` (`reject` → `pending_second_approval`) | 120/h | 404, 409 | WF | CASE:`intake_triaged` | Rejection requires a second distinct approver (DA-25), with no auto-expiry. Pending envelopes > 7 days escalate to the independent escalation role (ADR-033 §2). `duplicate` links to a visible case only. |
+| DA-24 | POST `/desk/v1/cases/eligibility` | `case.create` in channel + active roster member | `{channel_id, import_envelope_ids[], source_excluded_labels[] (from the decrypted manifest), department_id?}` | `{eligible: [{user_id, key_ids}], excluded_count_bucket}` | 60/h | 404 | WF | CASE:`eligibility_computed` | COI applied (ADR-015, ADR-030): source selection, COI map, self-declarations, admin COI registry. Excluded identities are not returned. |
+| DA-25 | POST `/desk/v1/intake/envelopes/{id}/reject-approvals` | `intake.reject`, distinct from the first rejecter + step-up | `{approve: bool}` | `200 {state: rejected\|pending}` | 50/day | 404, 403 | WF | CASE:`intake_rejected` | Rejected envelopes no longer block epoch key retirement (ADR-033 §2) |
 
 ### 8.4 Cases
 
 | ID | Method Path | AuthZ | Input | Output | Rate | Errors | Sensitive | Log | Security |
 |---|---|---|---|---|---|---|---|---|---|
 | DA-30 | POST `/desk/v1/cases` | `case.create` | `{channel_id, import_envelope_ids[] ≤ 32, workflow_def_id, record_ct ≤ 256 KiB, key_epoch: 1, wraps: [{recipient_key_id, wrap_ct}], dek_rewraps: [{import_envelope_id, part, rewrap_ct}], sealed_identity_ct?}` | `201 {case_id, display_ref, version}` | 60/h | `bad_request` (wrap set ≠ eligible set: BE-018), 404 (envelope not visible) | CT; WF | CASE:`case_created` | Server validates the eligible set at commit; envelopes → `imported` |
-| DA-31 | GET `/desk/v1/cases?filter…&cursor` | `case.list` (ACL-filtered) | filters: state, channel, due_before_day, assigned_to_me | `[{case_id, display_ref, state, priority, channel_id, received_epoch_day, sla_due_day, version, record_ct}]` | 120/min | — | WF; CT | CASE:`case_list` (count bucket only) | No existence leak for non-member cases |
+| DA-31 | GET `/desk/v1/cases?filter…&cursor` | `case.list` (ACL-filtered) | filters: state, channel, due_before_day, assigned_to_me | `[{case_id, display_ref, state, priority, channel_id, received_date, sla_due_day, version, record_ct}]` | 120/min | — | WF; CT | CASE:`case_list` (count bucket only) | No existence leak for non-member cases |
 | DA-32 | GET `/desk/v1/cases/{case_id}` | member(case) + `case.read` | — | case row + my `wrap_ct` + members summary | 600/min | 404 uniform | CT; WF | CASE:`case_read` | — |
 | DA-33 | PATCH `/desk/v1/cases/{case_id}` | member + `case.update` | allow-listed fields only: `{priority?, labels_ct?, record_ct?}` + `If-Match` | `200 {version}` | 120/h | 400 (unknown field), 409, 404 | CT; WF | CASE:`case_updated{fields}` | Per-role field allow-lists (INC-112) |
 | DA-34 | POST `/desk/v1/cases/{case_id}/transitions` | member + transition-specific action | `{transition_id, reason_code?, If-Match}` | `200 {state, version}` | 60/h | 409 (invalid from state), 403, 404 | WF | CASE:`case_transition` | Workflow definition enforced server-side (14-CASE-MANAGEMENT.md) |
@@ -379,7 +380,7 @@ Note on DA-36: when the target user is COI-excluded, the server returns `404 not
 | ID | Method Path | AuthZ | Input | Output | Rate | Errors | Sensitive | Log | Security |
 |---|---|---|---|---|---|---|---|---|---|
 | DA-50 | GET `/desk/v1/cases/{case_id}/evidence?cursor` | member + `evidence.list` | — | `[{evidence_id, kind: original\|derivative, derived_from?, padded_size, meta_ct, version}]` | 600/min | 404 | CT | CASE:`evidence_list` | — |
-| DA-51 | GET `/desk/v1/cases/{case_id}/evidence/{evidence_id}/blob` | member + `evidence.read` (originals may require `evidence.read_original`) | Range | ciphertext stream | 120/min | 404 uniform | CT | CASE:`evidence_read` | Desk writes via `candor-safefs`; opened only in C-17 |
+| DA-51 | GET `/desk/v1/cases/{case_id}/evidence/{evidence_id}/blob` | member + `evidence.read` (originals may require `evidence.read_original`) | Range | ciphertext stream | 120/min | 404 uniform | CT | CASE:`evidence_read` | Desk writes ciphertext via `candor-safefs` and hands ciphertext plus a single-use per-job key to C-17. Plaintext exists only inside the viewer sandbox (ADR-033 §5). |
 | DA-52 | POST `/desk/v1/cases/{case_id}/evidence/uploads` | member + `evidence.add` | `{padded_size, chunk_count}` | `{upload_id, chunk_size: 8 MiB}` | 60/h | 404 | none | none | — |
 | DA-53 | PUT `/desk/v1/evidence-uploads/{upload_id}/chunks/{n}` | uploader only | ciphertext chunk | `204` | 1,200/h | 404, 409 | CT | none | Upload is bound to user + case + upload_id |
 | DA-54 | POST `/desk/v1/cases/{case_id}/evidence` | member + `evidence.add` | `{upload_id, kind: derivative, derived_from, transformation_record_ct, meta_ct, key_epoch}` | `201 {evidence_id}` | 120/h | 404, 400 | CT | CASE:`evidence_added{kind}` | Originals are immutable; derivatives must reference an existing object (ADR-012) |
@@ -468,7 +469,7 @@ Family defaults:
 | HE-02 | POST `https://monitor:8514/collector/v1/events` | agent mTLS SAN `urn:candor:agent:<tenant>:<host_role>:<host_id>` | `{events: [HealthEvent] ≤ 500}` (07 §5.11 schema) | `204` | 60/min/agent | `bad_request` (schema) → dropped + SYS | SYS | SYS (collector-local) | Schema-strict; host identity from the certificate, not the payload (INC-103) |
 | HE-03 | GET `https://monitor/dashboard/v1/summary` | admin mTLS or local | — | aggregated status | — | — | SYS | none | Read-only; no write API on the monitor |
 
-**Not provided:** any health endpoint on the source onion (information leakage; REQ-H-34).
+**Not provided:** any health endpoint on the source onion (information leakage; INC-34).
 
 ## 12. Fleet Manager API (**EE**, C-34)
 
@@ -493,7 +494,7 @@ Direction: the instance's fleet agent (in Z-CORE) → C-34 outbound only. There 
 `ScrubbedEvent` never contains:
 - case IDs;
 - channel IDs of ANONYMOUS channels;
-- recipient slot key IDs;
+- recipient information of any kind;
 - envelope or import IDs;
 - day-level source counts per channel below k = 5;
 - any SOURCE-SENSITIVE counter.
@@ -506,15 +507,15 @@ Direction: the instance's fleet agent (in Z-CORE) → C-34 outbound only. There 
 | API-002 | Tokens and sessions SHALL be bound to exactly one audience and one tenant. A credential presented to another audience SHALL be rejected as unknown. | ADR-029; INC-105; B-SD-20 | THR-021; THR-022 | C-06; C-10; C-21 | TST: cross-context replay matrix (all audiences × all credential types, after logout, across workers) |
 | API-003 | Logout and revocation SHALL synchronously invalidate access and refresh tokens (Desk/Admin) and RAM sessions (source). | INC-105 | THR-022; THR-034 | C-06; C-21 | TST: token use after logout returns 401 on all workers |
 | API-004 | All public resource identifiers SHALL be random 128-bit values. No sequential, time-ordered or content-derived identifiers SHALL appear in any API. | B-GL-37; INC-112 | THR-021; THR-011 | C-06; C-10; C-12 | TST: ID generator tests; schema lint for serial/identity columns exposed in DTOs |
-| API-005 | Resource-bound routes SHALL return an identical 404 (status, headers, body, timing class) for nonexistent, other-tenant and unauthorized resources. | INC-113; INC-114; REQ-H-09 | THR-021; THR-045 | C-10; C-06 | TST: enumeration test comparing responses and timing distributions (KS p > 0.01) |
+| API-005 | Resource-bound routes SHALL return an identical 404 (status, headers, body, timing class) for nonexistent, other-tenant and unauthorized resources. | INC-113; INC-114; INC-11 | THR-021; THR-045 | C-10; C-06 | TST: enumeration test comparing responses and timing distributions (KS p > 0.01) |
 | API-006 | Mutation endpoints SHALL accept only explicit per-role field allow-lists and SHALL reject unknown fields. No generic attribute-setting endpoint SHALL exist. | INC-112; B-GL-37 | THR-021; THR-034 | C-10 | TST: property-based mass-assignment fuzzing per endpoint per role |
 | API-007 | Desk and Admin requests SHALL carry a valid `Candor-PoP` device signature with ±60 s freshness and nonce replay protection. | ADR-029; B-GL-04 | THR-022 | C-10; C-15; C-21 | TST: replayed, stale and wrong-device PoP rejected |
-| API-008 | Source Web SHALL function fully without JavaScript. All no-JS routes SHALL send `script-src 'none'` and the §3.10 header set. | ADR-003; ADR-004; REQ-H-27 | THR-008; THR-006 | C-06 | TST: header golden test against the deployed onion (external probe); e2e in Tor Browser "Safest" |
+| API-008 | Source Web SHALL function fully without JavaScript. All no-JS routes SHALL send `script-src 'none'` and the §3.10 header set. | ADR-003; ADR-004; INC-27 | THR-008; THR-006 | C-06 | TST: header golden test against the deployed onion (external probe); e2e in Tor Browser "Safest" |
 | API-009 | Source Web SHALL NOT send `Server`, `Date`, `ETag` or `Last-Modified` headers, SHALL NOT use compression, and SHALL pad responses to route size classes. | ADR-011; INC-118 | THR-004; THR-011 | C-06 | TST: response size distribution test per route; header golden test |
 | API-010 | Source Web state-changing requests SHALL be POST with a synchronizer CSRF token, a `SameSite=Strict` `__Host-` cookie and Origin validation. | INC-117; B-SD-13 | THR-021 | C-06 | TST: CSRF suite (missing, wrong or foreign token; foreign Origin) |
-| API-011 | No source-facing API SHALL return a case ID, submission ID, recipient identity, exact timestamp or read/delivery status. | ADR-010; REQ-H-09 | THR-011; THR-019 | C-06 | TST: response schema inspection; INSP |
+| API-011 | No source-facing API SHALL return a case ID, submission ID, recipient identity, exact timestamp or read/delivery status. | ADR-010; INC-11 | THR-011; THR-019 | C-06 | TST: response schema inspection; INSP |
 | API-012 | Login and challenge endpoints SHALL be indistinguishable for existing and nonexistent source accounts (response body class, status, timing floor). | INC-112 | THR-034 | C-06; C-08 | TST: timing and size indistinguishability test |
-| API-013 | Tier V uploads SHALL use per-upload random capabilities (`U`), SHALL NOT require a session, and SHALL be linked to an account only at envelope commit. | THR-047 analysis §5.1 | THR-047 | C-03; C-06; C-08 | TST: DB inspection after an interrupted upload shows no account linkage; AUD: protocol review |
+| API-013 | Tier V uploads SHALL use per-upload random capabilities (`U`), SHALL NOT require a session, and SHALL be linked to an account only at envelope commit. | ADR-026; B-SD-11 | THR-047 | C-03; C-06; C-08 | TST: DB inspection after an interrupted upload shows no account linkage; AUD: protocol review |
 | API-014 | Mailbox listings SHALL always contain exactly 32 entries (dummies included), and fetch or delete of a reply SHALL NOT be propagated to Z-CORE. | ADR-010; ADR-011; B-SD-11 | THR-011; THR-015 | C-06; C-08 | TST: list-size invariance; relay protocol has no fetch-state field (schema test) |
 | API-015 | The Source App SHALL verify directory checkpoints (signature, witness cosignatures when configured, consistency with the last seen checkpoint) and inclusion proofs before encrypting to any key. | ADR-004; INC-14; B-CR-37 | THR-046; THR-007 | C-03; C-14 | TST: malicious-server harness serving a forked tree, a stale checkpoint and a missing proof |
 | API-016 | Relay endpoints SHALL require pinned mTLS plus signed, counter-protected requests, and SHALL offer no operation that queries source accounts or mailboxes. | ADR-009; INC-103 | THR-014; THR-015 | C-08; C-09 | TST: relay API inventory test; replay and unsigned-request tests |
@@ -535,11 +536,11 @@ Direction: the instance's fleet agent (in Z-CORE) → C-34 outbound only. There 
 | API-031 | Health events SHALL be schema-strict. Host identity SHALL come from the agent certificate only. | INC-103 | THR-016; THR-035 | C-25 | TST: spoofed host-role payload test |
 | API-032 | Unknown request fields SHALL be rejected. Duplicate JSON keys SHALL be rejected. Response parsers in clients SHALL ignore unknown non-critical fields. | B-SD-28; INC-112 | THR-021 | all | TST: parser conformance tests |
 | API-033 | Servers SHALL support API major version N and N−1 for ≥ 12 months, and SHALL return 426 to clients below the minimum version published in the key directory. | Design | — | C-06; C-10 | TST: version negotiation tests |
-| API-034 | Desk intake listing and fetch SHALL be restricted to users one of whose current or decrypt-window Member Epoch Key IDs appears in the envelope's recipient slots. | ADR-015; ADR-030 | THR-020; THR-021 | C-10; C-22 | TST: non-recipient list and fetch return empty or 404 |
+| API-034 | Desk intake listing and fetch SHALL be restricted to active roster members of the envelope's channel. No API SHALL expose which members can open an envelope. | ADR-015; ADR-030; ADR-033 | THR-020; THR-021 | C-10; C-22 | TST: non-roster list and fetch return empty or 404; response schema has no recipient fields |
 | API-035 | Cursors SHALL be AEAD-protected and bound to principal and filter. A foreign or modified cursor SHALL be rejected. | INC-113 | THR-021 | C-10 | TST: cursor tampering and cross-user tests |
 | API-036 | Source Web (SW-02/SW-03) and Source App (SA-02) SHALL present the ADR-030 COI checklist from the verified directory (default none selected), and SHALL fail closed without submitting when fewer than `min_recipients` eligible members remain. | ADR-030; INC-22 | THR-020; THR-040 | C-03; C-06; C-07 | TST: e2e selections excluding all members yield the fail-closed page and no stored envelope; DEMO: usability test of the checklist |
 | API-037 | Source App directory, release and mailbox responses SHALL be padded to 4-KiB multiples, and dummy mailbox ciphertexts SHALL be size-indistinguishable from real ones within buckets. | ADR-011 | THR-004; THR-011 | C-06 | TST: size distribution tests |
-| API-038 | There SHALL be no health, status, debug or metrics endpoint on the source onion. | REQ-H-34; INC-34 | THR-001; THR-035 | C-06 | TST: path scan against the onion returns the uniform 404 for all non-listed paths |
+| API-038 | There SHALL be no health, status, debug or metrics endpoint on the source onion. | INC-34 | THR-001; THR-035 | C-06 | TST: path scan against the onion returns the uniform 404 for all non-listed paths |
 
 ## 15. Residual risks and limitations
 
