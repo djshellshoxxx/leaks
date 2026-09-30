@@ -138,7 +138,7 @@ Rules:
 | Service | Owns data | Exposes | Consumes | Must never |
 |---|---|---|---|---|
 | `candor-web` (C-06) | nothing persistent; in-RAM sessions | Source Web routes, Source App API | sealer IPC, intake-store IPC | write to disk; hold a DB credential; log request data; parse file content |
-| `candor-sealer` (C-07) | nothing persistent; RAM-only drafts and derived source keys | sealer IPC (Unix SEQPACKET) | channel epoch public keys (from signed snapshot) | open a network socket; write files; outlive a request with plaintext in RAM (zeroize) |
+| `candor-sealer` (C-07) | nothing persistent; RAM-only drafts and derived source keys | sealer IPC (Unix SEQPACKET) | channel roster, COI map and Member Epoch Keys (from the signed snapshot) | open a network socket; write files; outlive a request with plaintext in RAM (zeroize) |
 | `candor-intake-store` (C-08) | intake PostgreSQL DB and ciphertext blob directory | intake-store IPC (to web), relay export endpoint (TCP 7443) | — | initiate any outbound connection; hold any private decryption key except the intake routing key (§8.3) |
 | `candor-relay` (C-09) | relay cursor state | none (client only) | relay export endpoint, Case DB | accept inbound connections; transform envelope content |
 | `candor-case` (C-10, C-22, SLA) | Case DB (C-12), blob store (C-13) | Desk API, Admin API, Export API (EE connectors) | auth, keydir, audit, notify | hold any content-decryption key |

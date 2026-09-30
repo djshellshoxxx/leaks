@@ -238,7 +238,7 @@ Each authenticated page includes a `<div class="timeout-warn" role="status">` bl
 | Total per report (text) | 256 KiB |
 
 ### 5.8 Progress indicator
-Text "Step 3 of 7: What happened", plus an ordered list in `<nav aria-label="Report steps">` showing completed, current (`aria-current="step"`) and upcoming steps. Completed steps are links (GET, re-render from draft). There is no percentage bar and no timers.
+Text "Step 4 of 8: What happened", plus an ordered list in `<nav aria-label="Report steps">` showing completed, current (`aria-current="step"`) and upcoming steps. Completed steps are links (GET, re-render from draft). There is no percentage bar and no timers.
 
 ### 5.9 Busy, error and outage pages
 
@@ -411,7 +411,7 @@ Each screen lists its purpose, content, fields, validation, no-JS behavior, erro
 - **Errors:** "Choose who should receive your report." "This channel does not accept confidential reports; choose another option."
 - **A11y:** the `legend` is the question. Consequence text is linked by `aria-describedby`.
 ```
-| Step 1 of 7: Start                                            |
+| Step 1 of 8: Start                                            |
 | Who should receive your report?                               |
 | (o) Audit Committee - fraud, accounting (EN, FR)              |
 | ( ) Ethics Office - workplace conduct (EN)                    |
@@ -476,14 +476,14 @@ Each screen lists its purpose, content, fields, validation, no-JS behavior, erro
 
 | Step | Question | Type | Required |
 |---|---|---|---|
-| 2 | What is this about? | Single choice from channel categories + "Other" | yes |
-| 3 | What happened? | Long text | yes |
-| 3 | About when? | Month + year selects, "It is still happening" checkbox, "Not sure" | no |
-| 3 | Where? (general place, e.g., "Finance department, head office") | Short text | no |
-| 4 | Who is involved? (names or roles) | Long text | no |
-| 4 | How do you know? | Multiple choice (saw it / was told / have documents / other) | no |
-| 5 | About how many people could know these facts? (`05` §8.7) | Single choice | no |
-| 5 | Has this been reported before? | Yes / No / Not sure | no |
+| 3 | What is this about? | Single choice from channel categories + "Other" | yes |
+| 4 | What happened? | Long text | yes |
+| 4 | About when? | Month + year selects, "It is still happening" checkbox, "Not sure" | no |
+| 4 | Where? (general place, e.g., "Finance department, head office") | Short text | no |
+| 5 | Who is involved? (names or roles) | Long text | no |
+| 5 | How do you know? | Multiple choice (saw it / was told / have documents / other) | no |
+| 6 | About how many people could know these facts? (`05` §8.7) | Single choice | no |
+| 6 | Has this been reported before? | Yes / No / Not sure | no |
 | 6 | Anything else? | Long text | no |
 
 - **Field types permitted in the builder:** short text, long text, single choice, multiple choice, month-year, yes/no/not-sure.
@@ -502,7 +502,7 @@ Each screen lists its purpose, content, fields, validation, no-JS behavior, erro
   - Month-year uses two labelled `<select>` elements inside a `fieldset`.
   - Nothing auto-advances and there is no time limit.
 ```
-| Step 3 of 7: What happened                                    |
+| Step 4 of 8: What happened                                    |
 | What happened? (required)                                     |
 | Say what happened and where evidence can be found.            |
 | Keep it short and factual. Don't paste into AI tools,         |
@@ -545,7 +545,7 @@ Each screen lists its purpose, content, fields, validation, no-JS behavior, erro
 - **Errors:** "This file is too large. The limit is {max_total} in total." "The upload stopped. Please try again. Files already listed are saved."
 - **A11y:** the file input has a visible label. The attached-files list is a `<table>` with a caption. Each "Remove" button's accessible name includes the file name ("Remove file-02.pdf").
 ```
-| Step 5 of 7: Add files (optional)                             |
+| Step 7 of 8: Add files (optional)                             |
 | Describe or retype when you can. Files can hold hidden info.  |
 | Choose files: [ Browse... ]   (up to 20 files, 500 MB total)  |
 | [x] Replace file names with plain names (recommended)         |
@@ -595,7 +595,7 @@ Each screen lists its purpose, content, fields, validation, no-JS behavior, erro
   - Identity notices are in a `<section aria-labelledby>` headed "Check for details that could point to you".
   - The page may be class P2.
 ```
-| Step 7 of 7: Check and send                                   |
+| Step 8 of 8: Check and send                                   |
 | .-Your report will be sent ANONYMOUSLY--------------[Change]-.|
 | Who can open it: Audit Committee Chair, External Counsel      |
 |   (as listed by this site)                                    |
