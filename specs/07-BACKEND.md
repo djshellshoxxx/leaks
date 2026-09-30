@@ -195,7 +195,7 @@ Session and draft material (ADR-034, single timer set):
 ### 5.2 Sealer IPC protocol (`candor-web` ↔ `candor-sealer`)
 
 **Transport and framing:**
-- `AF_UNIX`, `SOCK_SEQPACKET`; one datagram = one message; max datagram 80 KiB.
+- `AF_UNIX`, `SOCK_SEQPACKET`; one datagram = one message; max datagram 128 KiB (fits a full `DRAFT_SET` of 96 KiB plus framing).
 - The sealer checks `SO_PEERCRED.uid == uid(candor-web)` on accept and closes otherwise.
 - Message = deterministic CBOR map `{ "v": 1, "op": u8, "rid": u32, "body": map }`.
 - Responses echo `rid`.
@@ -637,7 +637,7 @@ Rules:
 | Tier W staging (tmpfs) | `intake.tierw_staging_bytes` total | istore | "busy" page for new uploads |
 | Sealer sessions | 64 | sealer | `BUSY` |
 | Web sessions | 10,000 | web | oldest idle evicted |
-| Request body (message route) | 80 KiB (64 KiB text + form overhead) | web parser | 413 page |
+| Request body (message and questionnaire routes) | 112 KiB (≤ 96 KiB answers per 11 §5.7, or 64 KiB message text, + form overhead) | web parser | 413 page |
 | Message text | 64 KiB after UTF-8 validation | web | 413 page |
 | File per request (Tier W) | `intake.max_file_bytes` (≤ 4 GiB) and the free staging capacity; no resume | web streaming counter | 413 or busy; draft part discarded |
 | Files per envelope | 20 (max 32) | web/sealer | 400 |
