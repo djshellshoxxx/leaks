@@ -1,5 +1,5 @@
 # 35 — Data Retention and Deletion
-Status: Draft v1.0 · Edition applicability: both (CE: retention engine, legal hold, crypto-erasure, verification; EE/GOV: records-schedule import, disposition authority workflow, archival export, HSM-backed erasure keys) · Owner: Data Lifecycle team
+Status: Draft v1.1 (round-2 revision: ADR-033(3), 038, 039, 044, 046) · Edition applicability: both (CE: retention engine, legal hold, crypto-erasure, verification; EE/GOV: records-schedule import, disposition authority workflow, archival export, HSM-backed erasure keys) · Owner: Data Lifecycle team
 
 ## 1. Purpose and scope
 
@@ -8,19 +8,19 @@ Specifies how long every class of data is kept, how organizations configure rete
 **Protection statement.**
 - WHAT: confidentiality of reports, evidence and source-linked metadata after their retention ends.
 - FROM WHOM: later attackers or compelling parties who obtain storage media, backups or snapshots (THR-017, THR-031, THR-030, THR-026); insiders who would keep or restore deleted cases (THR-018).
-- ASSUMPTIONS: keys are destroyed in all copies (NIST SP 800-88r2 crypto-erase precondition, B-CR-33); the Erasure Key Vault (§6.2) is not backed up beyond its bounded backup window; member devices sync within the device-offline limit or are revoked; plaintext never reached persistent media (no swap, tmpfs disposables; B-CR-33 caveat). Registered as ASM-027 (key erasure effective), ASM-047 (backup operators do not hold member unlock factors), ASM-029 (HSM integrity), ASM-019 (recipient workstation integrity) in `40-SECURITY-ASSUMPTIONS.md`. Protection: 40 P-18.
-- RESIDUAL RISK: exported copies, copies on lost/unsynced devices, human notes, and plaintext that reached swap or journals cannot be reached by crypto-erase.
+- ASSUMPTIONS: keys are destroyed in all copies (NIST SP 800-88r2 crypto-erase precondition, B-CR-33); the Erasure Key Vault (§6.2) is not backed up beyond its bounded backup window, and infrastructure-level backups/snapshots (hypervisor, SAN, enterprise backup) of core hosts exclude the vault volume, as attested by their owners (ADR-044(4)); member devices sync within the device-offline limit or are revoked; plaintext never reached persistent media (no swap, tmpfs disposables; B-CR-33 caveat). Registered as ASM-027 (key erasure effective), ASM-047 (backup operators do not hold member unlock factors), ASM-029 (HSM integrity), ASM-019 (recipient workstation integrity) in `40-SECURITY-ASSUMPTIONS.md`. Protection: 40 P-18.
+- RESIDUAL RISK: exported copies, copies on lost/unsynced devices, human notes, and plaintext that reached swap or journals cannot be reached by crypto-erase; server-visible case metadata persists in data backups until they expire (§7 B7); the 14-day bound for backups does not hold where an infrastructure backup copied the vault despite the attestation.
 
 ## 2. Context and dependencies
 
 | Doc | Relationship |
 |---|---|
-| `DECISIONS.md` ADR-005, 008, 009, 010, 013, 014, 016, 025 | binding |
+| `DECISIONS.md` ADR-005, 008, 009, 010, 013, 014, 016, 025, 033(3), 037, 038, 039, 044, 046 | binding |
 | `04-CRYPTOGRAPHY.md` | key hierarchy, wrapping, zeroization |
 | `10-FILE-EVIDENCE-PIPELINE.md` | evidence objects, derivatives, exports |
 | `14-CASE-MANAGEMENT.md` | states RETAINED/DISPOSED, Art 17 purge, epoch-key abandonment |
 | `15-AUTHENTICATION-AUTHORIZATION.md` | dual control DC-03, DC-05, DC-12 |
-| `19-BACKUPS-DR.md` | backup architecture (this doc constrains content and lifetime) |
+| `19-BACKUPS-DR.md` | backup sets (BS-CORE, BS-CORE-WAL, BS-INTAKE, BS-ERASURE), retention values and DR procedures — **19 is canonical for backup retention numbers**; this doc constrains content and deletion semantics |
 | `20-LOGGING-AUDITING.md` | audit retention and case tombstones |
 | `25-COMPLIANCE.md` | jurisdiction retention packs, DSAR |
 | `17-INFRASTRUCTURE.md` | storage media, SSD/TRIM, encryption at rest |
@@ -38,29 +38,32 @@ Specifies how long every class of data is kept, how organizations configure rete
 
 | # | Data object | Location | Protection | Retention class / default | Deletion mechanism |
 |---|---|---|---|---|---|
-| D-01 | Sealed submission envelope (ciphertext) | C-08 Intake Store | Member Epoch Keys (ADR-008, ADR-030) | Until C-09 pull acknowledged + 24 h | Delete row/blob; epoch-key destruction makes all copies unreadable |
-| D-02 | Source account record (`lookup_id`, public keys, verifier) | C-08 | none needed beyond minimization | `SRC-ACCOUNT`: until case disposed, or 365 days after last reply delivered, or source deletion (§9) — whichever first | Row delete + backup expiry |
-| D-03 | Sealed replies awaiting source | C-08 | source key | `SRC-REPLY`: until read + 30 days, max 365 days | Row delete |
-| D-04 | Source `received_day` / batch metadata | C-08, C-12 | — | with D-02 / case | with parent |
-| D-05 | Member Epoch private keys (ADR-030) | member Desks (wrapped), C-12 wraps | member keys | decrypt window (14 d) and until all envelopes of the epoch imported or abandoned (CASE-020) | Destroy wraps + Desk zeroize |
+| D-01 | Sealed submission envelope (ciphertext) | C-08 Intake Store; BS-INTAKE (≤ 14 d) while un-pulled | Member Epoch Keys (ADR-008, ADR-030) | Until C-09 pull acknowledged + 24 h; delayed-delivery envelopes held until their release date (ADR-038(4)); undecryptable envelopes: 14 days pending + dual-approved rejection (ADR-038(6)) | Delete row/blob; epoch-key destruction makes all copies unreadable |
+| D-02 | Source account record (`lookup_id`, public keys, verifier, month-granular `activity_month`) | C-08; BS-INTAKE (≤ 14 d) | none needed beyond minimization | `SRC-ACCOUNT`: until case disposed, or 365 days after `activity_month` (month of the last envelope commit or last reply made available; never login-based, RVW-B-11), or source deletion (§9) — whichever first | Row delete + intake deletion list (§7 B6) + backup expiry |
+| D-03 | Sealed replies | C-08 (fetch-all dead-drop set, ADR-039); BS-INTAKE (≤ 14 d) | source key | `SRC-REPLY`: `intake.reply_retention_days` after `available_day`, **default 30** (the ADR-039 publication window); no read tracking (RVW-B-11) | Row delete + intake deletion list |
+| D-04 | `received_day` / `import_slot_date` (dates only; no batch times, ADR-038(1)) | C-08, C-12 | — | with D-02 / case | with parent |
+| D-05 | Member Epoch private keys (ADR-030) | Triage Set Desks (wrapped), C-12 wraps | member keys | decrypt window (14 d) and until all envelopes of the epoch imported or rejected (CASE-020, ADR-038(6)) | Destroy wraps + Desk zeroize |
 | D-06 | Case record (encrypted) | C-12 | case key | by outcome (§5) | Crypto-erase case key (§6) |
 | D-07 | Evidence blobs (ORIGINAL, DERIVED) | C-13 | per-object DEK wrapped under case key | with case; DERIVED may be deleted earlier | Crypto-erase + blob delete |
-| D-08 | Case-key wraps (member, quorum) | C-12 (erasure-layer encrypted, §6.2) | member X-Wing keys + Erasure Key | with case | Destroy Erasure Key + delete wraps |
-| D-09 | Sealed Identity Store entries (ADR-014) | C-12 | Identity Custodian keys + Erasure Key | `IDENTITY`: shortest of case retention or configured identity retention (default: case closure + 90 days) | Crypto-erase identity DEK |
-| D-10 | Server-visible case metadata (state, ACL, SLA) | C-12 | at-rest encryption only | with case; tombstone after disposal (§6.4) | Row delete → tombstone |
+| D-08 | Case-key wraps (member, quorum) | C-12, each wrap stored as `AEAD(E_case, wrap)` (outer Erasure layer, §6.2) | member X-Wing keys (inner) + Erasure Key (outer) | with case; deletion of a single member's wraps per 15 DC-15 (7-day cooling-off) | Destroy Erasure Key + delete wraps |
+| D-09 | Sealed Identity Store entries (ADR-014) | C-12 | Identity Custodian keys + Erasure Key | `IDENTITY`: shortest of case retention or configured identity retention (default: case closure + 30 days, aligned with 21 ENT-009, RVW-B-33(c)) | Crypto-erase identity DEK |
+| D-10 | Server-visible case metadata (channel, state, flags, ACL user IDs, SLA dates, `received_day`, `import_slot_date`, 8 blinded COI tags) | C-12; BS-CORE sets | at-rest + backup encryption only | with case; tombstone after disposal (§6.4); in BS-CORE until set expiry (§7 B7) | Row delete → tombstone; backup expiry |
 | D-11 | Audit streams | C-24 | append-only | `20-LOGGING-AUDITING.md` §12 | Interval deletion / case tombstone |
 | D-12 | Desk local cache (wrapped keys, cached ciphertext, sanitized copies) | C-15/C-16 | device key + member key | while membership valid; purge on tombstone sync | Zeroize + file delete in encrypted app store |
 | D-13 | Viewer VM scratch | C-17 | tmpfs | per job | VM destruction |
 | D-14 | Export Packages | outside system (media, recipients) | recipient keys / LUKS | **not controllable** | Custody record only; recall request workflow (§8) |
-| D-15 | Backups | C-27 Backup Store | backup encryption key + inner encryption | backup rotation (default 35 days daily, 12 weeks weekly, 12 months monthly — see 19) | Expiry + crypto properties (§7) |
+| D-15 | Backups | C-27 Backup Store | backup encryption key + inner encryption | per `19-BACKUPS-DR.md` (BAK-019): BS-CORE ≤ 35 days; BS-CORE-WAL, BS-INTAKE and BS-ERASURE ≤ 14 days; EE monthly BS-CORE sets up to 12 months only as ADVANCED with the warning that server-visible metadata of disposed cases persists for that long | Expiry + crypto properties (§7) |
 | D-16 | Replicas (EE-HA streaming replicas) | C-12 replicas | same as primary | real-time | Deletes replicate; crypto-erase applies |
-| D-17 | VM/disk snapshots (hypervisor, cloud) | C-39 / provider | at-rest encryption | operator-defined; **must be ≤ backup window** | Snapshot deletion; crypto-erase |
+| D-17 | VM/disk snapshots and infrastructure-level backups (hypervisor, SAN, enterprise backup of core hosts) | C-39 / provider / customer backup estate | at-rest encryption | operator-defined; **MUST exclude the vault volume** (attested, ADR-044(4)) and SHOULD be ≤ BS-CORE retention | Snapshot deletion; crypto-erase (only if vault excluded) |
 | D-18 | Notifications | C-23 outbound queue | content-free | 7 days | Row delete |
 | D-19 | SOURCE-SENSITIVE counters | C-08 (daily), C-24 (monthly) | — | daily: until monthly aggregation; monthly: 13 months | Row delete |
-| D-20 | Z-INTAKE host logs | journald volatile | — | ≤ 48 h (max 7 days) | Volatile |
+| D-20 | Z-INTAKE host logs | journald volatile | — | ≤ 24 h (max 48 h), per 20 §12 | Volatile |
 | D-21 | Staff accounts, authenticator registrations | C-21 | — | account life + 400 days (SECURITY audit alignment) | Row delete; key bundles remain in C-14 (append-only, public keys only) |
-| D-22 | Key Directory / transparency log entries | C-14 | public | permanent (public keys, hashes only) | Not deleted (contains no personal content; staff key entries use pseudonymous IDs) |
+| D-22 | Key Directory / transparency log entries | C-14 | public | permanent (public keys, hashes, role labels; no personal names on ANONYMOUS channels, 14 §8.1) | Not deleted (append-only log; retired-member role labels remain — see §15 item 9) |
 | D-23 | Deletion receipts | C-24 / C-12 | signed | 10 years default | Interval deletion |
+| D-24 | Erasure Key Vault (per-case E_case) | H-CORE host-local file (never a DB schema), DR-site replica; BS-ERASURE (≤ 14 d) | TPM (physical TPM for HIGH/GOV) or HSM | with case | E_case destruction on all replicas (§6.2) |
+| D-25 | Erasure log (signed append-only list of erased case IDs, ADR-044(4)) | C-24 and witness-cosigned checkpoints; included in every backup set | signed | ≥ longest backup retention in force + 1 year (default 10 years, aligned with D-23) | Interval deletion after all backups predating the entries have expired |
+| D-26 | Intake deletion list (hashes of deleted `lookup_id`s and reply references, RVW-A-28) | C-08; included in BS-INTAKE | none (random-looking hashes) | 30 days (≥ BS-INTAKE retention + margin) | Row delete |
 
 ## 5. Case retention schedules (organization policy)
 
@@ -109,18 +112,21 @@ EU-oriented packs follow Art 18(1) "no longer than necessary and proportionate" 
 | Identity DEK (ADR-014) | wrapped to Identity Custodians + Erasure Key | same pattern |
 | Member Epoch keys | member Desks, C-12 wraps | destroyed per ADR-008/ADR-030 schedule (independent of case) |
 
-### 6.2 Erasure Key layer (makes key destruction propagate to backups)
+### 6.2 Erasure Key Vault semantics (outer layer; ADR-033(3), ADR-044(4))
 
-Problem: ADR-025 states that key destruction propagates to backups because "case keys wrapped only to member keys and quorum". But the member-key wraps themselves are stored in C-12 and therefore in backups; member private keys remain valid on devices; so a restored backup plus any current member's device would still decrypt a "deleted" case.
+Problem solved: member-key wraps live in C-12 and therefore in data backups, and member private keys persist on devices; without an extra layer a restored backup plus any current member's device would still decrypt a "deleted" case.
 
-Design (this spec; see Open Issues for ADR revision):
-- Each case has a random 256-bit **Erasure Key** E_case. All case-key wraps and identity-DEK wraps are stored as `AEAD(E_case, wrap)` in C-12.
-- E_case values are stored only in the **Erasure Key Vault** (EKV): a dedicated store in Z-CORE (CE: TPM-sealed SQLite file on the core host; EE: HSM C-29 objects or HSM-wrapped store), **excluded from regular backups**.
-- EKV has its own backup stream with a short, fixed lifetime: encrypted EKV snapshots retained ≤ 14 days (configurable 1–35 days), stored separately from C-27 data backups. After disposal, E_case is gone from all EKV snapshots within that window.
-- E_case is not a content key: it only unlocks wraps that still require a member private key. Server/admin possession of EKV does not expose content (ADR-015 preserved).
-- Disposal = delete E_case from EKV (HSM destroy object / TPM-store row delete + VACUUM) + delete wraps + delete blobs + tombstones.
+Construction (layered, never direct):
+- Each case has a random 256-bit **Erasure Key** E_case. Every member-key wrap, quorum wrap and identity-DEK wrap is stored in C-12 as `AEAD(E_case, wrap)`: E_case is an **outer** layer around wraps that still require a member (or quorum/custodian) private key to open.
+- **No wrap of the case key directly under E_case exists anywhere.** E_case alone, or E_case plus the DB, opens nothing (DEL-004, DEL-018). This is the binding reading of ADR-033(3)'s "additionally wrapped" (RVW-B-21(c)).
+- **Location:** a host-local vault file on H-CORE — never a PostgreSQL schema, so it is never in WAL, Patroni replicas or BS-CORE (RVW-C-08). CE: TPM-sealed SQLite; HIGH/GOV: sealed to the **physical** host TPM, not a vTPM (ADR-044(4)); EE: HSM (C-29) objects or HSM-wrapped store.
+- **DR replication:** the vault is replicated to the DR site within the HA RPO (ADR-044(4)); disposal is confirmed on all replicas (primary, standby, DR) before the receipt is signed.
+- **Backups:** only BS-ERASURE, retained ≤ 14 days on every tier (19 BAK-028/029). Every restore applies the signed **erasure log** (D-25) before serving (§7 B3).
+- **Infrastructure-level backups** (hypervisor, SAN, enterprise VM backup) of core hosts MUST exclude the vault volume and vTPM state; the configuration checker requires a signed attestation by the owning team (`cfg.attestation_recorded`), and without it the published deletion statement omits the 14-day backup bound (§11, DEL-020) (RVW-C-06).
+- **Availability dependency:** loss of all vault copies makes every case unreadable server-side until members' Desks re-wrap case keys they hold (re-wrap procedure owned by 04/12/19; RVW-C-07). This is a deliberate trade-off: the same property that bounds deletion makes the vault an availability dependency.
+- Disposal = destroy E_case on all vault replicas (HSM destroy object / TPM-store row delete + VACUUM) + delete wraps + delete blobs + append case ID to the erasure log + tombstones.
 
-Resulting guarantee: T_erase(backups) = disposal time + EKV snapshot lifetime (default 14 days), independent of data-backup retention (e.g., 12 months).
+Resulting bound: T_erase(backups) = disposal time + BS-ERASURE retention (≤ 14 days), independent of data-backup retention (≤ 35 days, or ≤ 12 months for ADVANCED monthly sets) — **for content only**, and **only if** infrastructure-level backups exclude the vault. Server-visible metadata follows §7 B7.
 
 ### 6.3 Physical deletion (best-effort)
 
@@ -139,20 +145,22 @@ Overwrite-based "secure deletion" is not relied upon (unreliable on SSD/CoW/clou
 ### 6.4 Tombstones and deletion receipts
 
 After disposal, remaining server-side records are:
-- Case tombstone (C-12): `case_id`, tenant, retention class, disposal date, receipt ID. No channel, recipient key IDs, dates of receipt, or states (minimize).
+- Case tombstone (C-12): `case_id`, tenant, retention class, disposal date, receipt ID. No channel, ACL, COI tags, dates of receipt, or states (minimize).
 - CASE audit tombstone (`20-LOGGING-AUDITING.md` AUD-012).
-- Deletion receipt (signed by the Audit key and by the approvers' identity keys): {receipt_id, case_id, disposal date, class, legal hold check result, approvers, list of destroyed key IDs (E_case ID, wrap IDs), number of blobs deleted, EKV snapshot expiry date, verification results (§12)}. No content, hashes of content or filenames.
+- Deletion receipt (signed by the Audit key and by the approvers' identity keys): {receipt_id, case_id, disposal date, class, legal hold check result, approvers, list of destroyed key IDs (E_case ID, wrap IDs), number of blobs deleted, BS-ERASURE expiry date, erasure-log sequence number, verification results (§12)}. No content, hashes of content or filenames.
 
 ## 7. Backups, replicas and snapshots
 
 | Rule | Detail |
 |---|---|
-| B1 | Backups contain C-08/C-12/C-13 data in its encrypted form plus infrastructure config; they never contain EKV, member private keys, Member Epoch private keys (unwrapped), or the Recovery Quorum private key (19 constrains the Backup Agent C-27). |
-| B2 | Backup encryption (outer layer) uses a backup key (EE: HSM; CE: offline key) — protects metadata only; content protection is inner (REQ-H-55). |
-| B3 | Restoring a backup older than a disposal must not resurrect cases: on restore, C-10 replays the deletion-receipt ledger (kept in the EKV-independent receipt store and in the witness-cosigned audit checkpoints) and re-applies disposals (deletes rows/blobs whose receipts exist). Wraps are already unusable (E_case missing). |
-| B4 | EE-HA replicas: disposal deletes replicate synchronously; EKV is replicated only within the HA cluster (not to backups) and deletion is confirmed on all EKV replicas before the receipt is signed. |
-| B5 | Hypervisor/cloud snapshots of Z-CORE volumes are prohibited unless their lifetime ≤ EKV snapshot lifetime and they exclude the EKV volume or are covered by B3; C-25 checks snapshot inventory where the platform API permits (PRIVATE-CLOUD/MANAGED); otherwise documented residual risk (THR-030). |
-| B6 | Z-INTAKE hosts are not backed up except configuration and onion keys per ADR-028 placement; sealed envelopes are transient and not backed up. |
+| B1 | Data backups (BS-CORE, BS-CORE-WAL, BS-INTAKE) contain C-08/C-12/C-13 data in encrypted form plus configuration; they never contain the vault, member private keys, Member Epoch private keys (unwrapped), or the Recovery Quorum private key (19 constrains the Backup Agent C-27). |
+| B2 | Backup encryption (outer layer) uses BK-DATA (19) — protects metadata only; content protection is inner (REQ-H-55). |
+| B3 | **Erasure log applied on restore (ADR-044(4)).** Before a restored instance serves any request, C-10 applies the signed erasure log (D-25, taken from the witness-cosigned audit checkpoints, not from the restored set alone): rows, blobs and wraps of every listed case are deleted and any vault entry for them is destroyed. If the erasure log cannot be verified, the instance refuses to start. |
+| B4 | EE-HA and DR: disposal deletes replicate; the vault is replicated to the standby and DR site within the HA RPO and disposal is confirmed on all vault replicas before the receipt is signed. Intake DBs are not replicated in any profile (ADR-046(1)). |
+| B5 | Hypervisor/cloud snapshots and infrastructure-level backups of Z-CORE hosts MUST exclude the vault volume (and vTPM state) — attested by the owning team, because the guest cannot detect them; C-25 checks snapshot inventories where platform APIs allow (PRIVATE-CLOUD/MANAGED). Without the attestation, §11 states that the 14-day bound does not hold (RVW-C-06). |
+| B6 | **Intake backups (19 BS-INTAKE, ≤ 14 days):** contain source account records (D-02), sealed replies (D-03) and not-yet-pulled envelopes (D-01), encrypted to BK-DATA. Source deletions are made durable across intake DR by the intake deletion list (D-26): it is included in BS-INTAKE and applied immediately after any intake restore, and C-09 re-push after DR skips replies whose mailbox or reply reference is listed (RVW-A-28). Intake onion keys are backed up only in BS-SECRETS per ADR-028 placement. |
+| B7 | **Case metadata in backups (minimized, RVW-B-21(a)).** After disposal, BS-CORE sets taken before disposal still hold the case's server-visible metadata until they expire (≤ 35 days default): channel, state, flags, ACL user IDs, SLA dates, `received_day`, `import_slot_date`, 8 blinded COI tags (not identifiable without the case key, ADR-037(3)) and pre-disposal CASE audit events. They do **not** hold: COI exclusion identities, follow-up day lists (ADR-038(3)), recipient key IDs (ADR-033(1)), batch times, or any content. EE monthly sets retained up to 12 months (ADVANCED) extend this metadata tail and the configuration dialog says so. |
+| B8 | **Object Lock.** Compliance-mode locks (19 BAK-006) cannot be shortened; an urgent purge (EU Art 17 "manifestly irrelevant", accidentally captured identity data) is executed by E_case destruction, which makes locked content unreadable after BS-ERASURE expiry; server-visible metadata in locked sets remains until the lock expires (documented, RVW-B-21(d)). |
 
 ## 8. Exported evidence
 
@@ -164,9 +172,9 @@ After disposal, remaining server-side records are:
 
 | Action | Effect | Honest message to source |
 |---|---|---|
-| "Delete my mailbox" (source logged in) | Deletes D-02 source account record and D-03 pending replies immediately; case team notified in case timeline ("source closed mailbox", day-granular); future replies impossible | "Your mailbox and any unread replies have been deleted. What you already submitted remains with the organization and is kept according to its retention policy, because it may be needed to act on your report." |
+| "Delete my mailbox" (source logged in) | Deletes D-02 source account record and D-03 replies immediately from the live intake; adds their hashes to the intake deletion list (D-26) so an intake restore cannot resurrect them; encrypted copies in BS-INTAKE expire within 14 days; the case team learns only "mailbox closed during ISO week W", released after a random 3–21 day delay (14 CASE-035, RVW-B-26); future replies impossible | "Your mailbox and its replies have been deleted from the live system now. Encrypted backup copies expire within 14 days and are never restored. The team will learn, within a few weeks, that the mailbox was closed; if you close it right after something happens at work, that timing could point to you. What you already submitted remains with the organization under its retention policy, because it may be needed to act on your report." |
 | "Withdraw my report" (message) | Creates a case task; handling per policy (e.g., stop investigation where lawful, consider Art 17 purge); not automatic deletion | "Your request has been sent to the case team. They may be legally required to keep or act on the report." |
-| Abandonment (no login for 365 days after last reply, default) | D-02/D-03 deleted automatically; case unaffected | Shown at submission: "If you do not log in for 12 months after our last reply, your mailbox will be deleted." |
+| Abandonment (365 days after the account's `activity_month`, default) | D-02/D-03 deleted automatically; case unaffected; no login tracking exists (RVW-B-11) | Shown at submission: "Your mailbox is deleted about 12 months after the last message in either direction. Replies can be read for 30 days after they arrive." |
 | Lost passphrase | Nothing to delete by identity (no recovery by design, ADR-005); account expires by abandonment rule | "We cannot recover or delete your mailbox without your passphrase." |
 
 Tier W deletion requires login (C-07 verifies passphrase); Tier V signs the deletion request with the source key.
@@ -175,8 +183,9 @@ Tier W deletion requires login (C-07 verifies passphrase); Tier V signs the dele
 
 | Aspect | Specification |
 |---|---|
-| Scope | case (all objects, wraps, identity entries), or specific evidence objects; tenant-wide hold (e.g., litigation) by COUNSEL with OVERSIGHT approval |
+| Scope | case (all objects, wraps, identity entries), or specific evidence objects; tenant-wide hold (e.g., litigation) by COUNSEL with OVERSIGHT approval. A tenant-wide hold SHALL NOT block source-initiated mailbox deletion or scheduled Sealed Identity Store deletion unless the hold order expressly names them (RVW-C-10) |
 | Set / release | DC-05 dual control (COUNSEL + CASE_LEAD or OVERSIGHT), step-up; `hold_ref` (external matter ID) encrypted in case; server stores hold flag + review date |
+| Disclosure | while any tenant-wide hold is active the source landing page shows "A legal hold currently suspends deletion" (no detail) |
 | Effect | blocks all deletion incl. DERIVED objects, Art 17 purge, source-initiated case effects (mailbox deletion still allowed: it does not delete case content), retention proposals; audit/receipt retention extended |
 | Review | every 90 days reminder to COUNSEL; unreviewed hold > 180 days escalates to OVERSIGHT |
 | Release | returns case to its retention clock; if due, disposal proposal created |
@@ -186,14 +195,14 @@ Tier W deletion requires login (C-07 verifies passphrase); Tier V signs the dele
 
 | Situation | What "delete" means there | When physical/cryptographic unrecoverability is reached | User-facing statement |
 |---|---|---|---|
-| Case disposal | Crypto-erase via E_case destruction + wraps + blobs deleted | Live: immediately. Backups/snapshots: after EKV snapshot lifetime (default 14 days). Physical blocks: when overwritten by the filesystem/SSD (unknown) | "Deleted cases become unreadable immediately on the live system and in backups within 14 days." |
+| Case disposal | Crypto-erase via E_case destruction on all vault replicas + wraps + blobs deleted + erasure-log entry | Live: immediately. Content in Candor backups: after BS-ERASURE expiry (≤ 14 days). Server-visible metadata in backups: after BS-CORE expiry (≤ 35 days; ≤ 12 months for ADVANCED monthly sets). Infrastructure-level backups: 14-day bound only if they exclude the vault (attested). Physical blocks: unknown | Generated from configuration (DEL-020). With attestation: "Deleted cases become unreadable immediately on the live system. Their content becomes unreadable in backups within 14 days; case-handling records (dates, status, who worked on it) remain in encrypted backups for up to {bs_core_retention} days." Without attestation: "…The organisation has not confirmed that its own server backups exclude the deletion keys, so copies may remain readable in those backups for longer." |
 | SSD/flash media | Blocks may persist after unlink/TRIM | Unrecoverable only via crypto-erase (LUKS + content crypto) or media Purge/Destroy (B-CR-33) | Admin docs |
 | Legal hold | Deletion suspended | After hold release + retention | Case UI banner "Deletion suspended: legal hold" |
 | Records-law disposition required | Deletion waits for disposition authority | After approval | Admin/records officer UI |
 | Exported evidence | Not deleted | Never by the system | Disposal dialog lists exports |
-| Member device offline | Cached material remains until device syncs | On next sync; if device offline > 30 days, device is revoked and treated as lost (residual) | Admin device list |
+| Member device offline | Cached material remains until device syncs | On next sync; if device offline > 30 days, the device is **suspended** (no further delivery) and OVERSIGHT decides on revocation; wraps are deleted only under DC-15 (ADR-044(1), RVW-C-03) | Admin device list |
 | Lost/stolen device | Cached ciphertext + possibly wrapped keys | Protected by device key + hardware authenticator; never "erased" | Incident procedure (31) |
-| Source mailbox deletion | Account + replies deleted | Intake backups: none (not backed up, B6); live immediately | §9 message |
+| Source mailbox deletion | Account + replies deleted; hashes added to the intake deletion list | Live: immediately. BS-INTAKE copies: expire ≤ 14 days and are never restored into service (deletion list applied on restore, B6) | §9 message |
 | Audit records | Replaced by tombstone | Backups: per SECURITY backup rotation (audit contains no content) | Audit policy |
 | Key Directory entries | Never deleted (public keys) | n/a | Transparency policy |
 | Plaintext that reached swap/hibernation/journal | Not reachable by crypto-erase | Unknown | Desk requirements forbid unencrypted swap; documented residual |
@@ -204,12 +213,13 @@ Tier W deletion requires login (C-07 verifies passphrase); Tier V signs the dele
 | Check | Method | When |
 |---|---|---|
 | V1 Wraps absent | query C-12 for any wrap rows of case_id = 0 | at disposal |
-| V2 E_case absent | EKV lookup returns NOT_FOUND on all EKV replicas; HSM object handle invalid | at disposal |
+| V2 E_case absent | vault lookup returns NOT_FOUND on all vault replicas incl. standby and DR site; HSM object handle invalid | at disposal |
 | V3 Blobs absent | C-13 list/HEAD for each blob_ref (incl. versions) = 404 | at disposal |
 | V4 Decryption impossible | test decryption with a designated verification member key is not performed (would require key access); instead: structural check that no `AEAD(E_case, …)` can be opened because E_case missing | at disposal |
-| V5 Desk purge | each member Desk acknowledges tombstone processing (signed ack); missing acks listed in receipt; devices without ack after 30 days are revoked | ≤ 30 days |
-| V6 EKV snapshot expiry | EKV snapshot inventory shows no snapshot older than disposal time + lifetime | at disposal + lifetime; recorded as receipt addendum |
-| V7 Backup restore test | quarterly: restore a backup predating a test-case disposal to an isolated host; attempt to open the test case with a test member key → must fail (E_case missing); ledger replay removes rows | quarterly (19) |
+| V5 Desk purge | each member Desk acknowledges tombstone processing (signed ack); missing acks listed in receipt; devices without ack after 30 days are suspended and escalated to OVERSIGHT | ≤ 30 days |
+| V6 BS-ERASURE expiry | BS-ERASURE inventory (all tiers) shows no set older than disposal time + 14 days | at disposal + 14 days; recorded as receipt addendum |
+| V7 Backup restore test | quarterly: restore a backup predating a test-case disposal to an isolated host; attempt to open the test case with a test member key → must fail (E_case missing); erasure-log application removes rows; intake restore test shows a deleted test mailbox is not resurrected | quarterly (19) |
+| V9 Erasure log | case ID appended to the signed erasure log and included in a witness-cosigned checkpoint | at disposal |
 | V8 Receipt integrity | receipt signatures and inclusion in witness-cosigned audit checkpoint | at disposal |
 
 ## 13. GDPR and records-law interplay
@@ -223,6 +233,8 @@ Tier W deletion requires login (C-07 verifies passphrase); Tier V signs the dele
 | Deferred notice to persons concerned (Art 14(5)(b)) | timer in case; independent of retention |
 | Records law (44 USC ch. 31/33; LAC Act s.12; state schedules) | `requires_disposition_authority=true` blocks disposal until RECORDS_OFFICER records authority reference; archival export (PDF/A + JSON/XML metadata) before disposal when schedule demands transfer (EE) |
 | FOIA/ATIP | Retention unaffected by requests except statutory preservation holds (treated as legal holds) |
+| Discoverability (FOIA/ATIP, DSAR Art 15, eDiscovery, breach scoping Art 33/34 incl. persons concerned) | Searches run only in the Desk of an authorized member or a RECORDS_CUSTODIAN holding explicit time-bounded case grants from the Triage Set, over a local index of cases it can decrypt; no server-side global search (ADR-044(5); `14-CASE-MANAGEMENT.md` §8.7). Completeness is evidenced per case by signed hit/no-hit attestations. |
+| Records custody (GOV) | GOV profile default: Organization Recovery Quorum **enabled** with custodians from independent roles, disclosed to sources on the landing page, because records law may prohibit unrecoverable loss (ADR-044(3)); CE/EE default remains disabled. Where disabled in a records-scheduled deployment, the records officer's written acceptance of device-loss risk is recorded. |
 | Conflict resolution order | Legal hold > statutory records obligation > DSAR pending hold > retention schedule > minimization defaults |
 
 ## 14. Requirements

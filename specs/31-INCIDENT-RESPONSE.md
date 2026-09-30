@@ -1,6 +1,6 @@
 # 31 — Incident Response
 
-Status: Draft v1.0 · Edition applicability: both (vendor PSIRT duties apply to the Candor project and EE vendor; operator duties apply to every deployment) · Owner: Security Team (operator IR) / Candor PSIRT (vendor IR)
+Status: Draft v1.1 (revision round 2: ADR-034..046) · Edition applicability: both (vendor PSIRT duties apply to the Candor project and EE vendor; operator duties apply to every deployment) · Owner: Security Team (operator IR) / Candor PSIRT (vendor IR)
 
 ## 1. Purpose and scope
 
@@ -10,7 +10,7 @@ This document defines incident response (IR) for Candor deployments and for the 
 - how to **preserve evidence without creating new source metadata**;
 - how to **notify sources safely**: only through the platform (onion site banner, inbox, signed notices), never through any identity channel;
 - regulatory notification hooks;
-- fourteen playbooks, each structured DETECT / CONTAIN / PRESERVE / NOTIFY / ROTATE / RECOVER / LESSONS:
+- twenty playbooks (PB-15..PB-20 added in revision round 2 for the organisation-as-adversary cases of RVW-C-22), each structured DETECT / CONTAIN / PRESERVE / NOTIFY / ROTATE / RECOVER / LESSONS:
 
 | ID | Playbook |
 |---|---|
@@ -28,6 +28,12 @@ This document defines incident response (IR) for Candor deployments and for the 
 | PB-12 | Physical seizure |
 | PB-13 | Backup theft |
 | PB-14 | Recipient workstation malware |
+| PB-15 | Organisational suppression / mass key loss |
+| PB-16 | IdP / SCIM / SOAR compromise or attribute poisoning |
+| PB-17 | Unauthorized roster change, role-label change or orphan re-key |
+| PB-18 | Recipient endpoint tampering by the organisation (MDM/EDR/IRM/VDI) |
+| PB-19 | Leadership-implicated incident (organisation as adversary) |
+| PB-20 | Notification-transport or SIEM-sink compromise |
 
 Disaster-recovery mechanics are in `19-BACKUPS-DR.md` (DR-P*). Seizure yields are in `17-INFRASTRUCTURE.md` §8. Release and update mechanics are in `33-RELEASE-UPDATE-SECURITY.md`.
 
@@ -42,7 +48,8 @@ Disaster-recovery mechanics are in `19-BACKUPS-DR.md` (DR-P*). Seizure yields ar
 | `16-TOR-I2P.md` | Onion rotation mechanics, standby address |
 | `20-LOGGING-AUDITING.md` | Evidence sources and their privacy limits |
 | `25-COMPLIANCE.md` | Legal notification duties |
-| `32-OPERATIONS.md` | Self-test alerts that feed DETECT |
+| `32-OPERATIONS.md` | Self-test alerts that feed DETECT; small-organisation mode (§4.5) |
+| ADR-035(4), 036, 037, 043, 044, 045 (revision round 2) | Independent approval and INCIDENT_NOTICE for intake memory/packet capture; roster time-locks; Triage Set and blinded COI; independent-custody devices; key-access continuity; break-glass independent approver and small-organisation mode |
 
 Research basis:
 
@@ -67,19 +74,37 @@ Research basis:
 4. **Assume seizure can become "seized and operated"** (INC-28). Rotate every key the adversary could hold, and tell sources through channels the adversary does not control (C-37 site, Source App verified notices, signed key-directory entries).
 5. **Conflict of interest applies to IR.** Persons implicated in reports, or in the incident, are excluded from the IR team and from notifications (THR-020, INC-22).
 6. **Honesty.** Notices state what may have been exposed and what was not. They never say "no data was affected" unless that is verified.
+7. **IR is not a pretext** (RVW-C-04, ADR-035(4)). The captures that could yield Tier W plaintext, passphrases or source timing (E-MEM of H-INTAKE, E-NET on N-INTAKE-EXT or RCP-ONION uplinks) require an **independent approver** in addition to the organisation's own IR roles, are encrypted to custodians that include that approver, and are **self-disclosing**: the capture tool publishes a source-visible `INCIDENT_NOTICE` entry in the key directory before it runs.
 
 ## 4. Roles
 
 | Role | Held by | Duties | Exclusions |
 |---|---|---|---|
 | IR Lead | Security team member on the IR rota | Declares the incident, sets severity, owns the timeline, approves evidence capture | Must not be a channel member of an affected case (avoids content bias) |
-| Platform Admin(s) | Candor admins (≥ 2) | Execute containment and rotation with `candorctl ir …` | An admin implicated in PB-06 is replaced by the break-glass admin set |
+| Platform Admin(s) | Candor admins (≥ 2) | Execute containment and rotation with `candorctl ir …` | An admin implicated in PB-06 is replaced by the Emergency Admin set |
+| Emergency Admin set | Persons appointed by OVERSIGHT (not by the admin chain), with hardware tokens sealed in a two-person safe; defined as a named role in `15-AUTHENTICATION-AUTHORIZATION.md` (cross-document request; v1.0 referred to an undefined "break-glass admin set") | Take over platform administration in PB-06 and PB-19 | Must not report to an implicated person |
+| Independent Approver | Channel OVERSIGHT, the GOV inspector general's designated independent official, or an external ombudsman/counsel (ADR-035(4), ADR-045); never a person in the management or legal reporting line of the organisation | Co-approves E-MEM of H-INTAKE and E-NET captures; holds one share of every intake capture key; receives the capture evidence precondition (§6.1) | Anyone named in the COI map for affected cases |
 | Channel Owner(s) | Recipients owning affected channels | Decide on SSN-ACCOUNT notices; case-level containment; any content-dependent assessment | COI list applies |
 | DPO / Privacy | Data protection officer | Breach-risk assessment; regulator and data-subject notification decisions | — |
-| Legal Counsel | Internal/external counsel | Legal holds, compelled-disclosure handling, seizure interaction, anti-retaliation | — |
-| Independent Oversight | Audit committee / ombudsman (as configured in routing, ADR-015) | Informed of SEV-0/1 involving executives or admins | Anyone named in the COI map for affected cases |
+| Legal Counsel | Internal/external counsel (tagged `internal` or `external`; only external counsel counts as independent, RVW-C-10) | Legal holds, compelled-disclosure handling, seizure interaction, anti-retaliation | — |
+| Independent Oversight | Audit committee / ombudsman (as configured in routing, ADR-015) | Informed of SEV-0/1 involving executives or admins; **runs IR** in PB-19 with an external retained IR firm under a pre-signed engagement letter | Anyone named in the COI map for affected cases |
 | Candor PSIRT | Candor project / EE vendor | Product vulnerabilities, malicious releases, CRA reporting, advisories | — |
 | Communications | Designated | Clearnet statements (C-37) | Receives no case details |
+
+### 4.1 Minimal IR roles for small organisations (RVW-C-22, ADR-045)
+
+In small-organisation mode (`32-OPERATIONS.md` §4.5) the full role set cannot be staffed. The minimum is:
+
+| Role | Small-organisation holder |
+|---|---|
+| IR Lead | The operator (SYS_ADMIN) or, if the operator is implicated, the external OVERSIGHT holder |
+| DPO / Legal | One person (or the external counsel), recorded as combined |
+| Independent Approver | The **external** OVERSIGHT holder required by small-organisation mode; never waivable |
+| Platform Admin | The operator, plus the MANAGED/consortium operator or a pre-contracted external technician for PB-06/PB-19 |
+| Emergency Admin set | The external OVERSIGHT holder holds the sealed emergency tokens |
+| IEK custodians | 2-of-3: operator, combined DPO/Legal, external OVERSIGHT |
+
+Every combination is disclosed in the Operator Statement ("Reduced separation of duties"). Tabletop cadence is twice yearly (IR-029).
 
 ## 5. Severity model (anonymity-weighted)
 
@@ -101,15 +126,17 @@ Any incident involving a possible link between a person and a report is at least
 | E-SYS | journald, SECURITY/SYSTEM audit, self-test history, config snapshots, package lists, attestation quotes | No (by design: allow-listed fields, ADR-016) | Hash, sign, store in the IR evidence vault |
 | E-HOST | Disk images of H-CORE, H-MON | Server metadata (17 §8.5–8.6) | Encrypt at capture to the IR Evidence Key; vault |
 | E-INTAKE | Disk image of H-INTAKE | Intake store metadata, onion key | As E-HOST; **onion key considered compromised thereafter** (rotate) |
-| E-MEM | RAM image of H-INTAKE | **Yes**: Tier W plaintext in flight, passphrases, derived source keys | Capture only with IR Lead + DPO approval, and only if the forensic value outweighs creating a new copy of source data. Encrypt in the capture tool before writing (never write plaintext RAM to disk). Maximum retention 90 days unless under legal hold. Analysis only on an air-gapped forensic workstation. Never shared with third parties |
+| E-MEM | RAM image of H-INTAKE | **Yes**: Tier W plaintext in flight and drafts (ADR-034), passphrases, derived source keys | Capture only with IR Lead + DPO + **Independent Approver** (ADR-035(4)), only if the forensic value outweighs creating a new copy of source data, and only after the evidence precondition below. Encrypted in the capture tool before writing (never write plaintext RAM to disk) to a **one-time capture key** split 2-of-2 between the Independent Approver and the DPO (not the standing IEK). The tool publishes an `INCIDENT_NOTICE` (§7.1) before capture starts. Maximum retention 90 days unless under legal hold. Analysis only on an air-gapped forensic workstation in the presence of the Independent Approver or their delegate. Never shared with third parties |
 | E-MEM-CORE | RAM image of H-CORE | Staff session tokens, no report plaintext | As E-HOST |
-| E-NET | Packet captures | On N-INTAKE-EXT: **Tor traffic timing = source timing metadata** | Forbidden on N-INTAKE-EXT and on RCP-ONION uplinks by default. Allowed on N-RELAY, N-CORE, N-MGMT and N-BAK (internal, ciphertext). An ext capture needs IR Lead + DPO + Legal approval, headers only, ≤ 24 h, encrypted, ≤ 30-day retention |
+| E-NET | Packet captures | On N-INTAKE-EXT: **Tor traffic timing = source timing metadata** | Forbidden on N-INTAKE-EXT and on RCP-ONION uplinks by default. Allowed on N-RELAY, N-CORE, N-MGMT and N-BAK (internal, ciphertext). An ext capture needs IR Lead + DPO + Legal + **Independent Approver**, the evidence precondition, headers only, ≤ 24 h, encrypted to a one-time capture key split with the Independent Approver, ≤ 30-day retention, and a published `INCIDENT_NOTICE` |
 | E-CASE | Case content, exported evidence | Yes | Not IR evidence. Only case members may review it, inside Candor, recorded in the CASE audit |
 | E-SRC | Submitted files (possible malware) | Yes: content and possibly identity | Never uploaded to public or third-party services (VirusTotal-class, cloud sandboxes, public hash lookups: a hash lookup reveals possession and can identify the document). Analysis only in C-17/C-18 or an air-gapped lab by case members |
 
+**Evidence precondition for E-MEM/E-NET on the intake (RVW-C-04).** A SEV-0 declared by the organisation alone does not unlock these captures. The Independent Approver SHALL be shown at least one of: an `integrity.attestation` FAIL recorded by an H-MON administered per HUM-006; an External Watcher mismatch report (ADR-035(1)); a Platform Manifest or running-manifest mismatch; or an external vulnerability advisory affecting the running release. Without it, `candorctl ir capture` for these classes is refused. An attestation mismatch that an admin can induce (e.g., a modified kernel command line) is therefore not sufficient alone when the admin chain is the suspected party (PB-19).
+
 ### 6.2 Evidence handling rules
 
-- **IR Evidence Key (IEK)**: an X-Wing keypair generated at install. Its private key is Shamir 2-of-3 split between the IR Lead, the DPO and Legal (tokens). All evidence is encrypted to the IEK at the capture point (`candorctl ir capture …`).
+- **IR Evidence Key (IEK)**: an X-Wing keypair generated at install. Its private key is Shamir 2-of-3 split between the IR Lead, the DPO and an **independent holder** (OVERSIGHT or external counsel; in-house Legal only if no independent role exists, recorded as reduced separation) (RVW-C-04). All evidence except intake E-MEM/E-NET is encrypted to the IEK at the capture point (`candorctl ir capture …`); intake E-MEM/E-NET use the one-time capture key of §6.1.
 - **Chain of custody**: every artifact gets a signed custody record containing SHA-256 and BLAKE3, capture tool version, operator identities (two), and UTC time of the **staff action**. Custody records are appended to the SECURITY audit stream (THR-037).
 - **Do not enable debug or verbose logging** on Z-INTAKE during IR. Allowed alternative: `ir diagnostic mode`, which adds only allow-listed SYSTEM fields (process states, resource counters, error codes) and never request data, circuit IDs, timestamps finer than the incident window, or payloads. It auto-expires after 24 h.
 - **No new timestamps of source actions** may be derived: do not correlate intake store `received_epoch_day` with host-level artifacts (for example filesystem inode times) to reconstruct exact submission times. Where filesystem timestamps are already present in an image, the analyst SHALL NOT extract them for data paths (analysis-tool profile excludes `/var/lib/candor/intake/**` timestamp extraction).
@@ -124,7 +151,9 @@ candorctl ir declare --sev 0 --title "intake attestation mismatch"         # ope
 candorctl ir intake stop --reason "IR-2026-014"                              # fail closed: tor onion disabled, sealer stopped
 candorctl ir isolate --host core --allow mgmt                                # nftables IR profile: only N-MGMT to IR workstation
 candorctl ir capture disk --host intake --to /media/ir-vault --two-person     # encrypted to IEK on the fly
-candorctl ir capture memory --host core --to /media/ir-vault --two-person     # H-INTAKE memory requires --dpo-approval token
+candorctl ir capture memory --host core --to /media/ir-vault --two-person     # H-MON-verified core capture
+candorctl ir capture memory --host intake --to /media/ir-vault --two-person \
+  --dpo-approval <token> --independent-approval <token> --evidence <record-id>   # appends INCIDENT_NOTICE first, then captures
 candorctl ir freeze-config                                                   # blocks config changes except IR profile
 candorctl update freeze                                                      # stops automatic updates (PB-08/PB-09)
 candorctl ir notice draft --type SSN-GLOBAL --template compromise-intake-window
@@ -140,6 +169,7 @@ candorctl ir notice draft --type SSN-GLOBAL --template compromise-intake-window
 | SSN-ACCOUNT | An E2EE message in the affected source accounts' inboxes, like a reply (to source keys), visible at next login (ADR-010: no push) | Specific sources | Signed by the channel identity; displayed with an "Official security notice" style |
 | SSN-CLEARNET | A statement on the Clearnet Information Site (C-37) plus a signed text file, and the same statement in the key directory | Everyone, including sources who cannot reach the onion | OpenPGP/Sigstore-style signature by the org roster key; fingerprints published in advance |
 | SSN-APP | Source App (C-03) shows verified notices fetched from the key directory | Tier V users | Verified against pinned trust anchors |
+| INCIDENT_NOTICE (ADR-035(4)) | A key-directory entry type appended **automatically by the capture tool** before any intake E-MEM/E-NET capture; it carries the capture class, the capture day and the approver role labels (no reasons, no case references). Tier V clients and Desks surface it; Tier W shows the `capture-performed` banner for ≥ 90 days; External Watchers republish it | All sources and staff | Signed by the capture tool's directory key **and** cosigned by the Independent Approver's key; a capture without a published, cosigned entry is refused by the tool |
 
 **Forbidden**: email, SMS, phone, postal mail, messaging apps, social media DMs, or contact through an employer, HR or managers. Also forbidden: any channel tied to an identity for **anonymous** sources. There is no push to sources (ADR-017).
 
@@ -165,7 +195,8 @@ For CONFIDENTIAL or IDENTIFIED reporters whose identity sits in the Sealed Ident
 | metadata-exposure | "Security notice. A copy of internal service records (such as counts of submissions per day and encrypted data) was taken. It did not include the contents of reports, your passphrase, or your network address, which this service never records." |
 | onion-rotated | "This address is retired. Do not submit here. The new address is published on {C37_URL} and signed by key {FPR}. Verify before use." |
 | recipient-credential | "Security notice (account). A staff credential was misused between {DAY_FROM} and {DAY_TO}. Replies you received in that period may not have come from our team. Do not act on requests received in that period to reveal your identity." |
-| passphrase-advice | "If you think someone else knows your passphrase, stop using it. Start a new submission with a new passphrase and mention that you had an earlier one, if you want to." |
+| passphrase-advice | "If you think someone else knows your passphrase, stop using it. You can change it from your inbox, or start a new submission with a new passphrase and mention that you had an earlier one, if you want to." (passphrase rotation, ADR-046(7)) |
+| capture-performed | "Security notice. On {DAY} the operator made an incident-response recording of the submission server's memory or network traffic, approved by {INDEPENDENT_ROLE_LABEL}. If you used the website (no-JavaScript) version on that day, what you typed and your passphrase may be included in that recording. Consider changing your passphrase. The Candor Source App encrypts on your device." |
 
 ## 8. Other notifications
 
@@ -179,6 +210,8 @@ For CONFIDENTIAL or IDENTIFIED reporters whose identity sits in the Sealed Ident
 | Tor Project | Onion-service or tor vulnerability discovered | Technical only |
 | Law enforcement | Only by decision of Legal + management (excluding COI persons) | Nothing that can identify sources. Consider whether the report itself exposes sources (THR-026) |
 | Upstream projects (Debian, crates) | Vulnerability in a dependency | Coordinated disclosure |
+| Persons concerned (accused persons, witnesses, other data subjects named in reports; GDPR Art 34, RVW-C-14) | A breach likely to result in high risk to them | Scoping is done **by case members in their Desks** (the only place where content is readable, ADR-044(5)): the Triage Set of each affected channel runs a signed federated search over the cases it can decrypt and records per case "persons concerned present: yes/no" as a content-free CASE event; completeness is tracked as cases × responses. Notification content is decided by the Channel Owner + DPO and never reveals the source or the existence of other reports beyond what the breach itself exposed. Target: scoping result within 72 h of awareness to support the Art 33 notification |
+| Records / FOIA / ATIP / eDiscovery requests arising from an incident | Legal requirement | Performed in authorised members' Desks or by a Records Custodian with explicit, audited, time-bounded case grants from the Triage Set (ADR-044(5)); no server-side global search exists |
 
 ## 9. Playbooks
 

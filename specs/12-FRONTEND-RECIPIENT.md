@@ -1,5 +1,5 @@
 # 12 — Recipient User Interface Specification (Candor Desk)
-Status: Draft v1.0 · Edition applicability: both (CE core; EE adds connector targets in export and SSO-bridged unlock policy) · Owner: Recipient Experience team (with Security Architecture, Case Management and Accessibility review)
+Status: Draft v1.1 (revision round 2: ADR-034..ADR-046) · Edition applicability: both (CE core; EE adds connector targets in export and SSO-bridged unlock policy) · Owner: Recipient Experience team (with Security Architecture, Case Management and Accessibility review)
 
 ## 1. Purpose and scope
 
@@ -50,7 +50,8 @@ It cannot stop a malicious authorized recipient from reading, photographing or r
 | `05-SOURCE-OPSEC.md` | Promises made to sources that this UI must honor (SOPS-033, SOPS-041) |
 | `26-ACCESSIBILITY.md` | WCAG 2.2 AA / EN 301 549 clause 11 for Desk |
 | `40-SECURITY-ASSUMPTIONS.md` | P-08, P-10, P-11, P-12, P-15, P-16, P-20; ASM-015, -019, -020, -021, -028, -031, -033; checks ASM-111 (proof verification and gossip), ASM-116 (running-binary hash warning), ASM-117 (containment probe), ASM-122 (case key-holder warnings) |
-| `DECISIONS.md` ADR-030 | Per-member epoch keys; envelope header lists recipient key IDs; COI filter before wrapping |
+| `DECISIONS.md` ADR-030, ADR-033 §1 | Per-member epoch keys; **16 anonymous HPKE slots, no recipient key IDs anywhere in cleartext** (ADR-033 §1, ADR-046 §10; the v1.0 phrase "envelope header lists recipient key IDs" is withdrawn, RVW-B-30); COI filter before wrapping |
+| `DECISIONS.md` revision ADRs | ADR-036 (directory governance, follow-up sealing rule), ADR-037 (triage-first routing, blinded COI tags), ADR-038 (fixed import schedule, constant-schedule digests, day/ISO-week dates, unopenable-envelope rejection), ADR-042 (platform tiers, plain-text rendering of hostile strings, "rendering — not evidence", OCR text layer), ADR-043 (independent-custody devices), ADR-044 (key-access continuity, local records search), ADR-045 (independent approver for break-glass), ADR-046 §10 (no key IDs from cleartext headers) |
 
 ## 3. Design principles
 
@@ -79,11 +80,11 @@ It cannot stop a malicious authorized recipient from reading, photographing or r
 | Requests  |                                                                      |
 | Guide     |                                                                      |
 +-----------+----------------------------------------------------------------------+
-| Sync: last pull batch 2026-09-30 | Keys: directory consistent ✓ | Viewer: ready  |
-| (CL-3 microVM) | Device: disk encrypted ✓ | Version 1.4.2 (current)              |
+| Sync: last import slot 2026-09-30 | Keys: directory consistent ✓ | Viewer: ready |
+| (Tier 1: KVM microVM) | Custody: independent (attested) | Version 1.4.2 (current)     |
 +----------------------------------------------------------------------------------+
 ```
-- The status bar (`role="status"`) reports sync, key-directory consistency (C-14 proofs), C-17 availability, device posture and the update state.
+- The status bar (`role="status"`) reports sync (import slot date, never a time), key-directory consistency (C-14 proofs), the Desk platform tier and C-17 availability (`10` §6.1), device custody status (§4.2), device posture and the update state.
 - Regions: navigation (`<nav>`), content (`<main>`), status bar (`<footer>`). `F6` cycles regions.
 - The window title is always "Candor Desk". It never contains a case reference or content, because OS window lists and task switchers are visible to screen-recording and EDR tools on managed hosts.
 
@@ -98,10 +99,15 @@ It cannot stop a malicious authorized recipient from reading, photographing or r
 | Desk version current per TUF metadata | block if older than the security-fix window (33) |
 | C-17 containment probe passed (ASM-117: no network route, no key-material mount, fresh disk) | block all attachment viewing (CL-2/CL-3) until it passes; text (CL-1) still available |
 | Running trust-path binaries match the transparency log (ASM-116 signed statement from C-25) | blocking warning |
+| Desk's own binary and loaded modules match the transparency-logged release; the Desk reports its release digest to C-25 (ADR-043). **Non-authoritative:** a modified build can lie; this detects accidental divergence and unsophisticated repackaging only | blocking warning |
+| Platform tier (`10` §6.1) and containment probe | Reduced tier → text-only mode (§R06); shown in status bar |
+| Managed-endpoint indicators (best effort, RVW-A-24, RVW-C-01, RVW-C-11): enterprise EDR/MDM agents, remote-assist or screen-recording tools, insider-risk agents, VDI/RDP session, OS AI screenshot features (e.g., Recall), cloud clipboard, crash-dump upload policy, sync-client roots | persistent "Managed endpoint — people who administer this computer may be able to see what you see" banner; blocking for INDEPENDENT-channel Triage Set members unless custody is attested (§4.2) |
 | System clock within ±5 min of the signed key-directory timestamp (THR-043) | warn |
 | Key-directory consistency | block on split-view detection |
 
 - Posture results are shown as a checklist with pass/warn/block states in text.
+- **Update metadata:** the Desk refreshes TUF metadata through the Z-CORE mirror endpoint on a fixed daily schedule, not on each start, so Desk starts are not visible to vendor mirrors or corporate proxies (RVW-C-02 item 4; `33-RELEASE-UPDATE-SECURITY.md`, cross-document request).
+- **Crash handling (RVW-C-11):** the Desk disables OS and webview crash reporting for its processes (Windows WER `LocalDumps` off and `DontSendAdditionalData`; WebView2 crash reporter disabled by policy; macOS `ReportCrash` exclusion), sets `PR_SET_DUMPABLE=0` / `SetProcessMitigationPolicy` equivalents, and defaults Export Package destinations to a Desk-managed encrypted folder; detected sync roots (OneDrive Known Folder Move, Dropbox, Google Drive, iCloud Drive) are refused as export destinations unless OVERSIGHT approves.
 - **Locking:**
   - The session auto-locks after `DESK_IDLE_LOCK` (default 10 min, range 2–30, SAFE config).
   - It also locks on OS lock or sleep, and on smartcard removal.

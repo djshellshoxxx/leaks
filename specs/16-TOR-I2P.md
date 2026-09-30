@@ -1,5 +1,5 @@
 # 16 — Anonymity Transport Specification (Tor, I2P, Transport Abstraction)
-Status: Draft v1.0 · Edition applicability: both (identical anonymity transport in CE and EE) · Owner: Network Anonymity team
+Status: Draft v1.1 (round-2 revision: ADR-034..046) · Edition applicability: both (identical anonymity transport in CE and EE) · Owner: Network Anonymity team
 
 ## 1. Purpose and scope
 
@@ -17,12 +17,13 @@ Out of scope: application-level cryptography (04-CRYPTOGRAPHY.md), source operat
 | NA-3 | No global passive adversary observes both the source's access link and the intake gateway's link (Tor explicitly excludes this adversary, R4 §2.1). |
 | NA-4 | The source's device and Tor client are not compromised (THR-008 out of transport scope). |
 | NA-5 | The Intake Gateway host has no network path that bypasses tor for source-facing traffic (enforced §14). |
+| NA-6 | The signed Tor consensus (directory-authority majority) and at least one of ≥ 2 independently operated Roughtime servers give an honest time floor/cross-check that Z-CORE cannot influence (04 CA-10, ADR-036(6)). |
 
 ## 2. Context and dependencies
 
 | Document | Relationship |
 |---|---|
-| DECISIONS.md | ADR-001 (Tor only + abstraction), ADR-002 (no fallback), ADR-003 (no Tor Browser fingerprinting), ADR-009 (intake/core separation), ADR-010 (timing), ADR-016 (logging), ADR-021 (per-customer onion), ADR-024 (profiles), ADR-026 (abuse), ADR-028 (secret placement), ADR-032 (onion key on ≤ 2 HA intake hosts) |
+| DECISIONS.md | ADR-001 (Tor only + abstraction), ADR-002 (no fallback), ADR-003 (no Tor Browser fingerprinting), ADR-009 (intake/core separation), ADR-010 (timing), ADR-016 (logging), ADR-021 (per-customer onion), ADR-024 (profiles), ADR-026 (abuse), ADR-028 (secret placement), ADR-032 (onion key on ≤ 2 HA intake hosts). Round 2: ADR-035(1) (External Watchers fetch over Tor), ADR-036(5)/(6) (witness endpoints, independent time from the Tor consensus + Roughtime), ADR-038(5) (no queue/rate-limit oracle; daily health band), ADR-039 (fetch-all replies), ADR-040 (tor from pinned Platform Manifest), ADR-041 (client acquisition), ADR-046(3) (intake updates via the project onion mirror), ADR-046(8) (PQ transport residual), ADR-046(9) (vanguards fallback) |
 | 02-THREAT-MODEL.md | THR-001..005, 008, 011, 016, 032, 035, 044, 047 |
 | 03-PRIVACY-ANONYMITY.md | Timing/size minimization that complements transport |
 | 04-CRYPTOGRAPHY.md | K16 onion key in key table; K01 signs onion address statements; onion TLS option (§5.1) |
@@ -84,7 +85,7 @@ Out of scope: application-level cryptography (04-CRYPTOGRAPHY.md), source operat
 | TOR + I2P | Doubles attack surface; I2P users get weaker anonymity under the same "ANONYMOUS" label (THR-040) | Splits the anonymity set | Confusing choice for sources | Two stacks to patch, monitor, audit | Rejected |
 | TRANSPORT ABSTRACTION | Enables C-tor→Arti swap and future cover-traffic transports; risk: invites weak transports | Neutral with admission criteria | Neutral | Engineering cost | **Adopted as architecture** (§6) with strict admission criteria |
 
-**Decision (conforms to ADR-001):** ANONYMOUS mode is reachable only through a Tor v3 onion service on C-05, served by C-tor ≥ 0.4.8 with PoW and vanguards-lite (full vanguards add-on required in HIGH-risk profiles) until Arti onion services meet §9 criteria. The Transport Adapter interface (§6) is implemented; the only admitted anonymous transports in v1 are `tor-onion-v3-ctor` (service) and `tor-arti` (client, in C-03). I2P is not shipped.
+**Decision (conforms to ADR-001, ADR-046(9)):** ANONYMOUS mode is reachable only through a Tor v3 onion service on C-05, served by C-tor ≥ 0.4.8 with PoW and vanguards-lite (full vanguards add-on required in HIGH-risk profiles while it is maintained; documented fallback §7.2) until Arti onion services meet §9 criteria. The Transport Adapter interface (§6) is implemented; the only admitted anonymous transports in v1 are `tor-onion-v3-ctor` (service) and `tor-arti` (client, in C-03). I2P is not shipped.
 
 ## 6. Transport Adapter interface and admission criteria
 
@@ -217,16 +218,17 @@ Notes and constraints:
 - `VanguardsLiteEnabled` is on by default in tor ≥ 0.4.7 (B-AN-11); the explicit setting documents intent.
 - IPv6: `ClientUseIPv6` follows the host's egress policy (17); no other client options are set.
 
-### 7.2 Full vanguards (HIGH-risk profiles; ADR-001)
-- `vanguards` add-on (pinned version, hash-verified, run as user `_candor-vanguards` in group `_candor-torctl`, systemd sandboxed, no network except the control socket) with its default layer-2/layer-3 guard counts and lifetimes, `rendguard`, `bandguards` and `pathverify` enabled, `close_circuits = True`, logging to syslog at NOTICE with no circuit identifiers retained beyond the journal's volatile storage. Maintenance status of the add-on in 2026 is UNVERIFIED (R4 §8); if unmaintained, HIGH profile requires Arti full-vanguards mode once §9 criteria hold (Open Issue OI-2).
-- Profiles: CE-SINGLE, CE-HARDENED, EE-ONPREM: vanguards-lite (ADR-001 baseline) with full vanguards RECOMMENDED; GOV-ONPREM, MANAGED high-risk tenants and any tenant flagged HIGH: full vanguards REQUIRED.
+### 7.2 Full vanguards (HIGH-risk profiles; ADR-001, ADR-046(9))
+- `vanguards` add-on (pinned version from the Platform Manifest, hash-verified, run as user `_candor-vanguards` in group `_candor-torctl`, systemd sandboxed, no network except the control socket) with its default layer-2/layer-3 guard counts and lifetimes, `rendguard`, `bandguards` and `pathverify` enabled, `close_circuits = True`, logging to syslog at NOTICE with no circuit identifiers retained beyond the journal's volatile storage.
+- **Maintenance gate and fallback (ADR-046(9)):** the add-on is used only while it is maintained (a release or maintainer-confirmed compatibility with the pinned tor version within the last 12 months, and no open security advisory; checked at each Platform Manifest release, 33 §4.1). If it fails this gate, HIGH profiles run C-tor's built-in **vanguards-lite** and the fallback is recorded in the Platform Manifest and shown in the admin console and the Operator Statement's configuration digest; once Arti onion services are admitted (§9), HIGH profiles use **Arti's full vanguards mode**. The fallback weakens guard-discovery resistance for long-lived services (B-AN-13); this is a documented residual (§19 #4).
+- Profiles: CE-SINGLE, CE-HARDENED, EE-ONPREM: vanguards-lite (ADR-001 baseline) with full vanguards RECOMMENDED; GOV-ONPREM, MANAGED high-risk tenants and any tenant flagged HIGH: full vanguards REQUIRED (subject to the fallback above).
 
 ### 7.3 Host and service hardening for tor
 - Separate system user per tor instance; `HiddenServiceDir` mode 0700, key files 0600; LUKS volume (04 §7).
 - systemd: `ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes`, `NoNewPrivileges=yes`, `MemoryDenyWriteExecute=yes`, `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK`, `LimitCORE=0`.
 - journald on intake hosts: `Storage=volatile`, `MaxRetentionSec=24h`; forwarding to C-25 only of allow-listed tor warnings (ADR-016).
-- tor packages from the Tor Project Debian repository with a pinned signing-key fingerprint, or the Debian stable package when it meets the version floor; the minimum version floor is published in the signed release metadata (33) and checked by C-25.
-- Patch SLA: tor security releases deployed ≤ 72 h after publication (INC-29 lesson / REQ-H-29).
+- **tor packages (ADR-040; RVW-A-12):** tor (and the vanguards add-on) come from the Tor Project repository, pinned by signing key **and exact version**, ingested into Candor's snapshot-based mirror and listed with hashes in the TUF-signed **Platform Manifest** of each Candor release (33 §4.1, 28 §5.4). Intake hosts install them only from the local verified repository built from that manifest; no direct APT source (Tor Project or Debian) is configured on H-INTAKE. The self-test verifies installed tor binaries against the manifest; trust-path components refuse to start below the signed security floor (33 §8.1).
+- Patch SLA: tor security releases are included in an emergency Platform Manifest update (≥ 2 h cooling, ≥ 2 signers from ≥ 2 organisations, 33 §10) and deployed ≤ 72 h after upstream publication (INC-29 lesson / REQ-H-29).
 
 ### 7.4 Configuration lint (CI and on-host self-test)
 `candorctl net lint` fails if: any listening TCP socket on a non-loopback address other than the C-08 relay endpoint; SocksPort/TransPort/DNSPort non-zero on the intake instance; ControlPort TCP enabled; SingleHop/NonAnonymous mode = 1; `SafeLogging` ≠ 1; log level below `warn`; `HiddenServiceVersion` ≠ 3; PoW disabled; more than one `HiddenServicePort`; torrc hash ≠ release manifest.
@@ -266,6 +268,9 @@ Each Desk device has its own x25519 client-auth key (K17, 04 §19); revocation =
 ### 9.3 Phases
 P0 (now): Arti client in C-03 only. P1: staging dual-run (Arti serves a separate test onion). P2: canary (AM-8). P3: default for new installs via Transport Adapter `tor-onion-v3-arti` (new AdmissionRecord). P4: migrate existing installs with key import; C-tor retained, disabled, as rollback for 6 months. Rollback criterion: any AT failure or unresolved security advisory.
 
+### 9.4 Post-quantum transport tracking (ADR-046(8); RVW-A-11)
+Tor circuit and onion-service handshakes are classical today (Knowledge (unverified) as of 2026-09), so recorded Tier W sessions — including passphrases at login — are exposed to harvest-now-decrypt-later (04 §5.1). Candor therefore: (1) enables onion TLS with the hybrid `X25519MLKEM768` group by default in HIGH/GOV profiles when a `.onion` certificate is obtainable (04 CRYPTO-029; §7.1 note); (2) recommends Tier V to HIGH-risk sources (05, 11); (3) tracks Tor's PQ circuit/onion handshake work at every Platform Manifest release and adopts it — in C-tor or Arti, client (C-03) and service (C-05) — in the first Candor minor release after it is available in a stable Tor release that meets §6.3, recorded in the Platform Manifest; (4) records the residual in §19.
+
 ## 10. Onion service key custody, rotation and compromise (THR-044)
 
 | Aspect | Specification |
@@ -304,12 +309,14 @@ JSON canonicalized with RFC 8785 JCS (Knowledge (unverified) RFC number), served
   "revoked": [{"address": "<56 chars>.onion", "since_day": "2026-09-30"}],
   "valid_from_day": "2026-09-30",
   "expires_day": "2027-09-30",
-  "verification_words": "<6 EFF words derived from SHA-256(active[0] ‖ org_root_fingerprint)>"
+  "verification_words": "<6 EFF words derived from SHA-256(active[0] ‖ org_root_fingerprint)>",
+  "witness_cosignatures": [{"witness": "<name from ORG_ROOT>", "sig": "<base64 Ed25519 (K39) over the canonical statement>"}]
 }
 ```
-Verification words give humans a short check across channels. The statement expires after ≤ 12 months and is re-signed.
+Verification words give humans a short check across channels. The statement expires after ≤ 12 months and is re-signed. **External witness cosignature (RVW-A-08; ADR-036(5)):** in EE, GOV and MANAGED the statement SHALL carry a cosignature by ≥ 1 witness outside the operating organisation (CE: SHOULD), so that substituting the statement on C-37 alone fails verification in the Source App (04 VR-1).
 
 ### 11.2 Publication channels (≥ 3 independent)
+0. **Offline first (RVW-B-17):** organisations SHALL be advised (05, 13 onboarding) to publish the onion address and verification words primarily offline (posters, printed cards, QR codes, letters from the ombudsman) and, on intranets, only as **non-hyperlinked text** with the line "Don't open this at work. Copy it into Tor Browser at home." — because the employer's proxy and EDR log visits to a hyperlinked clearnet page before any guidance is read.
 1. Clearnet Information Site (C-37): address, verification words, QR code, statement + signature, `Onion-Location` header on every page and `<meta http-equiv="onion-location">` (R4 §3.1; UNVERIFIED Tor Browser version detail).
 2. Printed/offline materials (posters, employee handbook, letters from the ombudsman), with address and verification words.
 3. A second, independently hosted domain or the organisation's annual report / regulator filing.
@@ -317,7 +324,10 @@ Verification words give humans a short check across channels. The statement expi
 5. Candor Source App deep link `candor-source://v1/<onion>#<org_root_fingerprint>` (QR) — the app pins K01 from the fingerprint and fetches the statement over the onion.
 
 ### 11.3 Clearnet info site rules (C-37)
-Static; no submission form for anonymous mode (ADR-002); no third-party resources or CDN terminating TLS (INC-46, INC-54); HSTS preload; Onion-Location on all pages; optional in-memory check of the client IP against the public Tor exit list refreshed hourly, used only to choose a banner ("You are not using Tor — …"), never logged or stored (ADR-003); no analytics; web server access logs disabled (ADR-016).
+Static; no submission form for anonymous mode (ADR-002); no third-party resources or CDN terminating TLS (INC-46, INC-54); HSTS preload; Onion-Location on all pages; optional in-memory check of the client IP against the public Tor exit list refreshed hourly, used only to choose a banner ("You are not using Tor — …"), never logged or stored (ADR-003); no analytics; web server access logs disabled (ADR-016). Additionally (round 2):
+- **First viewport warning (RVW-B-17):** the first screen of every page shows, above all other content, the 05 guidance "If you are on a work device or a work network, stop here" (text owned by 05).
+- **No app hosting (ADR-041; RVW-A-14):** C-37 SHALL NOT host the Candor Source App or any installer and SHALL NOT log or count downloads; it links to the Candor project's distribution (project onion service and independent mirrors, 33 §15.3) and states that downloading over Tor is safest. Branding shown in the app comes from the signed address statement at run time, never from a per-tenant build.
+- **Hosting independence (RVW-C-20):** for tenants of risk class D1/D2 (21 §6.3) and GOV-IG/IA, C-37 SHALL be hosted outside the organisation's own web stack (no corporate CMS, WAF, SSO cookies or intranet proxy in the path), as a static site with access logging disabled at the host, and the operator attests this in the quarterly C-37 review (32); for other tenants this is RECOMMENDED. A neutral multi-organisation directory run by the project MAY host C-37 pages to enlarge the anonymity set of visitors (RVW-B-17 option).
 
 ## 12. Bridges and pluggable transports — guidance for sources
 

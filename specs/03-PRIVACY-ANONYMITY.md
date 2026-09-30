@@ -595,6 +595,9 @@ Backups (`19-BACKUPS-DR.md` owns the schedule): Z-INTAKE backup = C-08 account r
 | DM-08 | **Staff data is minimized too:** staff IPs expire from audit at 90 days; no keystroke/screen monitoring features. |
 | DM-09 | **Aggregates are data:** statistics are subject to §12 before leaving the case team. |
 | DM-10 | **Inventory changes are privacy changes:** any change to §8 requires privacy review and a version bump of this document (PRIV-001). |
+| DM-11 | **Source-triggered means source-derived:** any row, event or log whose time is causally triggered by a source action (import, relay pull with arrivals, source-initiated escalation, mailbox closure) is treated as source timing and recorded at slot/day granularity or released on a fixed schedule (ADR-038, ADR-046(11); RVW-B-06). |
+| DM-12 | **Sequences and tuples are data:** minimisation is assessed for the joint tuple of all cleartext fields per envelope/case and for sequences over time (follow-up days), not per field (RVW-A-26, RVW-B-11). |
+| DM-13 | **Staff reactions are a proxy for source actions:** staff-side events exported outside Candor (SIEM, IdP, notifications) are minimised as if they were source-derived (RVW-B-31, RVW-C-02; THR-129). |
 
 ### 8.6 Server-side items not keyed to a single request (normative; added in revision round 2)
 
@@ -639,11 +642,18 @@ What an adversary learns by **combining** layers (single-layer compromise is in 
 | Combination | What becomes linkable | Bound | Residual |
 |---|---|---|---|
 | C-08 + C-12 + Intake Routing Key (both DBs and intake host) | Pseudonymous mailbox ↔ case; received day; padded sizes; channel | Nothing identifying: no IP, no exact time, no device data | Volume/topic inference from coarse category (THR-015) |
-| C-08 + C-24 + C-09 host logs | Batch sequence ↔ pull time | META-005: no persistent join of `batch_seq` with exact pull time; relay logs record pulls without sequence numbers | ≤ one pull interval (15±10 min) only for a *live* observer; HIGH profile daily import (`02` TM-013) |
+| C-08 + C-24 + C-09 host logs + C-12 WAL/backups | Batch sequence ↔ pull time ↔ arrival | META-005: no persistent join of `batch_seq` with exact pull time; imports only at fixed slots, commit/blob times equal slot time (ADR-038(1), `02` TM-015) | Import-slot granularity (≤ 6 h default; ≤ 24 h HIGH/GOV); C-08 page/WAL residue until relay (PR-09); exact time only for a *live* observer |
 | Live C-05/C-06 + Tor guard of the source | Source IP ↔ submission | Requires both a live intake compromise and control/observation of the source's guard (THR-003) | Out of design envelope for GPA |
 | Live C-06/C-07 (Tier W) | Plaintext + passphrase ↔ circuit | Circuit IDs are HMAC-keyed per boot; no IP | Tier W honesty statement |
 | Case content + employer logs | Report ↔ employee (content, access logs, Tor use) | Candor contributes only the received **day** | Content/behavior (R-01, `02` §14) |
-| Notifications + mail provider | Digest hour ↔ "something happened" | Content-free, hourly batching; not per submission | Negligible |
+| Notifications + mail provider | Digest ↔ "something happened" | Content-free, constant daily schedule to each subscribed member whether or not anything is pending, or disabled (ADR-038(2)); v1.0 hourly event-driven digest was an existence oracle (RVW-A-19, RVW-B-05) | Subscriber list reveals who holds Candor roles; low otherwise |
+| Staff reaction timing (IdP sign-ins, SIEM staff auth events, Desk update fetches, RCP-LAN flows) + employer Tor-use logs | Staff activity burst ↔ report arrival ↔ employee who used Tor | Fixed import slots (staff cannot react before a slot); constant-schedule digests; SOC sees only daily health bands (ADR-046(5)); SIEM staff-event granularity owned by `20` | Medium: day-level correlation remains; hour-level if staff react immediately to a slot (THR-129; RVW-B-31, RVW-C-02) |
+| Follow-up import-slot dates (C-12) + employer Tor-use logs | Sequence of visit days ↔ employee | Only slot dates stored; ISO week in HIGH; delayed delivery 1–3 days (ADR-038(3)/(4)); guidance to batch messages | Medium–High for sources who send several follow-ups from observable networks (THR-134; RVW-B-11) |
+| Excluded member's view (envelopes, notifications, dashboards) | "A report concerns me" + day | Triage-first: non-triage members see no intake envelopes, notifications or counts; dashboards count only cases the viewer can open (ADR-037(2); §12) | An excluded Triage Set member sees an unopenable envelope; workload side channels (THR-110) |
+| C-08 + C-12 + Intake Routing Key + live intake (operator targets one case) | Case ↔ mailbox ↔ exact return-visit times | Tier V fetch-all: no mailbox selector reaches the server (ADR-039) | Tier W: full exposure prospectively (THR-135; RVW-A-10) |
+| Everything server-visible, all customers (MANAGED vendor) | Cross-customer aggregation | Vendor holds no content keys; per-customer intake | All of §10.1 per customer, plus live Tier W capture capability (§10.3; RVW-B-19) |
+| Support bundles + vendor | Org chart of the whistleblowing function; arrival timing | No relay events, config as value hashes, vendor retention ≤ 30 d (`32`; RVW-B-18) | Low |
+| Organisation-managed recipient endpoint + case content | Everything that member reads | Independent custody for INDEPENDENT channels (ADR-043) | Full for org-managed endpoints (THR-126) |
 | Key-directory fetch + submission | Channel chosen ↔ visit | Full-snapshot fetch (META-011) | None added |
 | Program statistics across periods | Differencing to isolate a report | Fixed catalog, suppression, rounding (§12) | Low |
 
@@ -653,80 +663,102 @@ What an adversary learns by **combining** layers (single-layer compromise is in 
 
 ### 10.1 Self-hosted (CE and EE; identical unless noted)
 
+Corrected in revision round 2 (RVW-B general finding: the v1.0 table omitted data that implementing specs store). Rows marked **(r2)** are new or changed. The table is generated-in-principle from §8 and the `09` column classification (PRIV-018); where they disagree, the more disclosing statement applies until reconciled.
+
 | Data | Exists? | Where | Encrypted? | Who has key | Retention | Can operator disclose? |
 |---|---|---|---|---|---|---|
 | Source IP address (ANONYMOUS) | **No** | — | — | — | — | **No** — never received (onion) |
-| Source IP (C-38 CONFIDENTIAL) | Transient only | C-38 host RAM | — | — | Connection | **Only prospectively** (if compelled to start logging, which requires modifying trust-path code: detectable by reproducibility checks) |
+| Source IP (C-38 CONFIDENTIAL) | Transient only | C-38 host RAM | — | — | Connection | **Only prospectively** (if compelled to start logging, which requires modifying trust-path code; External Watchers see only untargeted changes) |
 | Source device/browser characteristics | **No** | — | — | — | — | **No** |
-| Exact time of source actions | **No** (RAM only) | — | — | — | — | **No** retrospectively; prospectively a live intake could be modified to record |
-| `received_epoch_day` | Yes | C-08, C-12, backups | At-rest media encryption only | Operator | Case retention | **Yes** |
+| Exact time of source actions **(r2)** | **No record.** Residues: import-slot times in core DB commit/WAL, blob metadata and backups (ADR-038(1)); C-08 page/WAL/filesystem residue until the envelope is relayed | C-12, C-13, backups; H-INTAKE disk | At rest only | Operator | Slot times: backup retention (≤ 35 d core); intake residue: until overwritten after relay | **Slot time: yes** (bounds arrival to the preceding slot interval: ≤ 6 h default, ≤ 24 h HIGH/GOV; not if delayed delivery was chosen). **Intake residue: possibly**, by forensic examination of a seized intake before relay. Prospectively a live intake could be modified to record exact times |
+| `received_epoch_day` / `received_date` | Yes | C-08, C-12, backups | At-rest media encryption only | Operator | Case retention | **Yes** |
+| Import-slot date of each follow-up message **(r2)** | Yes | C-12 (one date per follow-up record), backups | At rest only | Operator | Case retention | **Yes** — the list of days on which a source's follow-ups arrived (UTC day; equals visit day unless delayed delivery was used). Intersected with employer Tor-use logs this can narrow candidates (RVW-B-11) |
+| Delayed-delivery release date **(r2)** | Yes, only if the source chose it | C-08 | At rest | Operator | Until release | **Yes** (a day) |
 | Padded sizes, channel id, number of envelopes/day | Yes | C-08, C-12, C-13 | At rest only | Operator | Case retention | **Yes** |
-| Report text, questionnaire answers | Yes (ciphertext) | C-08 (until relayed), C-12, backups | **Yes, E2E** (epoch key → case key) | Case members' endpoint keys; Recovery Quorum if enabled | Case retention | **Ciphertext only.** Plaintext only via compelled case members/quorum holders |
+| Envelope `tier` (W/V) **(r2)** | **No** (removed, ADR-039) | — | — | — | — | **No** |
+| Header digest **(r2)** | Yes | C-08/C-12 | Hash | Operator | ≤ 24 h (ADR-039) | **Yes**, within 24 h only |
+| Report text, questionnaire answers | Yes (ciphertext) | C-08 (until relayed), C-12, backups | **Yes, E2E** (Triage Set member epoch keys → case key) | Case members' endpoint keys; Recovery Quorum if enabled | Case retention | **Ciphertext only.** Plaintext only via compelled case members/quorum holders — or from endpoints the organisation administers (THR-126) |
 | Report plaintext in transit — **Tier W** | Transient | C-06/C-07 RAM | — | — | Seconds | **Only prospectively** by modifying intake (disclosed risk, THR-026) |
 | Report plaintext in transit — **Tier V** | **No** | — | — | — | — | **No** (modification of clients detectable via transparency) |
+| Tier W drafts (unsent text, identity blocks) **(r2)** | RAM only; attachment parts on tmpfs under a RAM-only per-session key | H-INTAKE | Parts: yes (key in RAM only) | Nobody after session end | ≤ 2 h; lost on sealer restart | **No** retrospectively (never persisted, ADR-034); prospectively a live intake could capture them |
 | Attachments | Yes (ciphertext) | C-08, C-13, backups | **Yes, E2E** | As above | Case retention | Ciphertext only |
 | Filenames, MIME types | Yes (inside ciphertext) | As attachments | **Yes** | As above | Case retention | Ciphertext only |
-| Source Passphrase | **No** | — | — | — | — | **No** |
-| Source account record (`source_account_id`, `lookup_tag`, `auth_pk`, mailbox ids, `prefs_ct`) | Yes | C-08, Z-INTAKE backups | At rest only (`prefs_ct` sealed to source key) | Operator | Until mailbox closed/case disposed; backups 14 d | **Yes** — reveals nothing identifying; `lookup_tag` cannot be inverted at ≈129-bit passphrase entropy |
-| Intake Routing Key (links `routing_ct` in C-12 to mailboxes in C-08) | Yes | Intake host (TPM-sealed where available) | Yes | Operator | Service life | **Yes** — with both databases it links case ↔ pseudonymous mailbox; nothing identifying |
-| Erasure Key vault (ADR-033(3)) | Yes | C-12 separate schema/host-local file; own backup ≤ 14 d | — | Operator | Until case disposition (then destroyed) | **Yes**, but an Erasure Key alone decrypts nothing (member private keys still required) |
+| Source Passphrase **(r2)** | **No** — never stored, not even for re-display (ADR-034) | — | — | — | — | **No** retrospectively; **yes prospectively** for Tier W (captured at the next login by a modified intake) |
+| Source account record (`source_account_id`, `lookup_tag`, `auth_pk`, mailbox ids, `prefs_ct`, `activity_day`, current-day quota counter) **(r2)** | Yes | C-08, Z-INTAKE backups | At rest only (`prefs_ct` sealed to source key) | Operator | Until mailbox closed/case disposed (or inactive purge); backups 14 d | **Yes** — nothing identifying; `lookup_tag` cannot be inverted at ≈129-bit passphrase entropy; no login times, access counts, own-message history or quota history exist (ADR-038(3), ADR-039) |
+| Mailbox-closed flag **(r2)** | Yes | C-12 | At rest | Operator | Case life | **Yes** — ISO week, reported 3–21 days after the closure (META-033) |
+| Deletion tombstones **(r2)** | Yes | C-08, BS-INTAKE | Hash | Operator | 14 d | **Yes** — reveals that a deletion occurred, not whose |
+| Intake Routing Key (links `routing_ct` in C-12 to mailboxes in C-08) | Yes | Intake host (TPM-sealed where available) | Yes | Operator | Service life | **Yes** — with both databases it links case ↔ pseudonymous mailbox; nothing identifying by itself, but it lets a compelled operator target one case's mailbox prospectively (Tier W, THR-135) |
+| COI exclusions ("who the report concerns") **(r2)** | Blinded tags only (8 per case, padded) | C-12 | HMAC under a key derived from the case key | Case members | Case life | **No identities** — without the case key the tags reveal nothing; no audit event or reason code distinguishes COI removals (ADR-037(3)). Source's COI answers are inside the envelope (Triage Set only) |
+| Which members hold wraps for a case | Yes | C-12 | At rest | Operator | Case life | **Yes** — reveals who can read the case (after import the excluded set can be inferred by comparing with the channel roster) |
+| Erasure Key Vault + signed erasure log (ADR-033(3), ADR-044(4)) **(r2)** | Yes | Vault volume on the core host (physical TPM for HIGH/GOV); DR replica; vault backups | Sealed on host | Operator | Keys until disposition; vault backups ≤ 14 d | **Yes**, but an Erasure Key alone decrypts nothing. If infrastructure-level backups include the vault volume (not attested), disposed cases remain recoverable by a later holder of member keys for the life of those backups (THR-130) |
 | Mailbox replies | Yes (ciphertext) | C-08, C-12 | **Yes** (to source key; copy under case key) | Source (passphrase); case members | Mailbox life / case retention | Ciphertext only |
 | Sealed identity (CONFIDENTIAL C1) | Yes (ciphertext) | C-12/C-13 | **Yes**, to Identity Custodian key set | ≥ 2 Identity Custodians jointly | Case retention; source may withdraw | **Only via custodians** under ADR-014 procedure (dual approval, legal basis, source notice) |
 | Server-visible case metadata (state, coarse category, SLA dates, assignee ids, legal hold) | Yes | C-12 | At rest only | Operator | Case retention | **Yes** |
 | Case notes, findings, interview records | Yes (ciphertext) | C-12/C-13 | **Yes** (case key) | Case members | Case retention | Ciphertext only; via compelled members |
-| Case keys, Member Epoch private keys (ADR-030), staff private keys | Yes | Staff endpoints (wrapped by hardware) | **Yes** | Individual staff + hardware token | Member epoch keys destroyed after the 14-day window **and** import of all their envelopes (ADR-033(2)) | **Operator (as organization) cannot** without compelling individuals |
-| Recovery Quorum shares (if enabled) | Yes | Offline tokens of k-of-n holders | Yes | Holders | Until rotated | Only by compelling ≥ k holders; escrow status is public to sources |
-| Onion service private key | Yes | C-05 (TPM-sealed), offline backup | Yes | Operator | Service life | **Yes** — enables impersonation of the intake (THR-044) but not decryption of past envelopes |
-| Staff accounts, roles, device fingerprints | Yes | C-12, C-14, C-21 | At rest | Operator | Account life | **Yes** |
-| SECURITY audit (staff auth, admin actions; staff IP ≤ 90 d) | Yes | C-24 | At rest; hash-chained | Operator | 400 days | **Yes** |
-| CASE audit (staff actions with pseudonymous case ids) | Yes | C-24 | At rest; hash-chained | Operator | Case life + 12 months | **Yes** — contains no source-sensitive fields |
-| SYSTEM events, bucketed counters | Yes | C-24, C-25 | At rest | Operator | 90 days | **Yes** |
-| Notifications | Yes (outbound) | Mail/chat provider | Provider-dependent | Provider | Provider's | Content-free text + hour only |
+| Case keys, Member Epoch private keys (ADR-030), staff private keys | Yes | Staff endpoints (wrapped by hardware) | **Yes** | Individual staff + hardware token | Member epoch keys destroyed after the 14-day window **and** import or dual-approved rejection of all their envelopes (ADR-033(2), ADR-038(6)) | **Operator (as organization) cannot** without compelling individuals — unless it administers their endpoints (THR-126; ADR-043 for INDEPENDENT channels) |
+| Recovery Quorum shares (if enabled; **GOV default enabled**, ADR-044(3)) | Yes | Offline tokens of k-of-n holders | Yes | Holders | Until rotated | Only by compelling ≥ k holders; escrow status is public to sources |
+| Onion service private key | Yes | C-05 (TPM-sealed), offline backup; ≤ 2 hosts in HA (ADR-032) | Yes | Operator | Service life | **Yes** — enables impersonation of the intake (THR-044) but not decryption of past envelopes |
+| Staff accounts, roles, device fingerprints, device custody status | Yes | C-12, C-14, C-21 | At rest | Operator | Account life | **Yes** |
+| SECURITY audit (staff auth, admin actions; staff IP ≤ 90 d) | Yes | C-24 | At rest; hash-chained | Operator | 400 days | **Yes** — staff login times are staff-reaction timing (THR-129) |
+| CASE audit (staff actions with pseudonymous case ids; import events date-only) | Yes | C-24 | At rest; hash-chained | Operator | Case life + 12 months | **Yes** — no source-sensitive fields; no COI-specific reason codes |
+| SYSTEM events, SOURCE-SENSITIVE counters | Yes | C-24, C-25 | At rest | Operator | 90 days | **Yes** — source-triggered SYSTEM events at slot granularity; counters leave only as daily health bands |
+| IR captures of intake memory/traffic **(r2)** | Only if an incident capture was approved | Encrypted to independent custodians | Yes | Independent custodians jointly | Per `31` | **Only with the independent custodians**; each capture is announced by an INCIDENT_NOTICE (ADR-035(4)) |
+| Notifications **(r2)** | Yes (outbound) | Mail/chat provider | Provider-dependent | Provider | Provider's | Constant daily text to each subscribed member (or none): reveals who holds Candor roles, not when reports arrive (ADR-038(2)) |
 | Export Packages already sent | Yes | Destinations | Per package | Package recipients | Destination's | Outside Candor |
-| Backups | Yes | C-27 | Ciphertext + at-rest; content keys absent | Operator (backup key) | Z-INTAKE 14 d; Z-CORE 35 d | **Yes, but** content remains undecryptable; disposed cases undecryptable ≤ 14 days after Erasure Key destruction (ADR-033(3)) |
-| **EE only:** SIEM events via C-26 | Yes | Customer SIEM | Customer's | Customer | Customer's | SECURITY/SYSTEM events only |
-| **EE only:** Fleet Manager status (opaque instance ID, version, health, salted onion hash) | Yes | C-34 (customer or vendor hosted) | At rest | Fleet operator | 90 days | **Yes**, no content/keys/onion address |
+| Backups **(r2)** | Yes | C-27 | Ciphertext + at-rest; content keys absent | Operator (backup key) | Z-INTAKE 14 d; Z-CORE 35 d (`19`) | **Yes, but** content remains undecryptable; disposed cases undecryptable ≤ 14 days after Erasure Key destruction **only if** infrastructure-level backups exclude the vault (ADR-044(4)); server-visible **metadata** of disposed cases remains in Z-CORE backups until they expire |
+| **EE only:** SIEM events via C-26 | Yes | Customer SIEM | Customer's | Customer | Customer's | SECURITY/SYSTEM events only; staff auth events carry staff-reaction timing (THR-129; granularity owned by `20`) |
+| **EE only:** Fleet Manager status (opaque instance ID, version, health) **(r2)** | Yes | C-34 (customer or vendor hosted) | At rest | Fleet operator | 90 days | **Yes**, no content/keys/onion address **or onion hash** (v1.0 "salted onion hash" removed, RVW-B-20, aligned with `21`) |
 | **EE only:** License files | Yes | Instance + vendor records | Signed | Vendor | Contract | Contract metadata only |
-| Clearnet info site (C-37) access data | **No** (no logs) | — | — | — | — | **No** (unless a CDN is used — documented) |
-| Tor daemon logs | Notice-level, no circuit/client data | C-05 | — | — | 7 days | No source data |
+| Operator Statement, INCIDENT_NOTICE, platform/running manifests, Key Directory **(r2)** | Yes | C-14, TUF, watchers | Signed, public | — | Log life | Public; the directory reveals role labels and weekly roster changes of each channel |
+| Records-search indices (ADR-044(5)) **(r2)** | Yes, on Desks only | Authorized member endpoints | Yes | That member | Desk retention | **Not by the operator**; only via the member |
+| Clearnet info site (C-37) access data **(r2)** | **No** (no logs; no CDN, META-024) | — | — | — | — | **No** — but the organisation's own proxy/EDR logs visits from work devices (§8.2a) |
+| Tor daemon logs **(r2)** | Notice-level, no circuit/client data | C-05, volatile | — | — | ≤ 24 h (aligned with `16` NET-008; v1.0 said 7 days) | No source data |
 
 ### 10.2 Tier W vs Tier V summary
 
 | Question | Tier W | Tier V |
 |---|---|---|
 | Can a compelled operator hand over past report plaintext? | No | No |
-| Can a compelled operator capture **future** plaintext without detection? | **Yes, for Tier W submissions** (modify C-06/C-07; source cannot verify) | No — requires a signed malicious client release visible in transparency logs |
+| Can a compelled operator hand over past **replies**, link the source's reports, or read the source's COI preferences? **(r2)** | **Yes, prospectively**: at the source's next login the passphrase yields all stored replies (≤ retention), every `mailbox_id` and `prefs_ct`, and lets the adversary write as the source (RVW-A-03) | No |
+| Can a compelled operator capture **future** plaintext without detection? | **Yes, for Tier W submissions** (modify C-06/C-07). External Watchers detect only untargeted changes to static assets, CSP and running manifest; a targeted or memory-only change is not detected; an optional confidential-VM sealer may detect a changed sealer measurement (ADR-035) | No — requires a signed malicious client release visible in transparency logs |
 | Can a compelled operator capture a source's passphrase? | **Yes, prospectively** (at next login) | No |
-| Can a compelled operator add a hidden recipient for a targeted source? | **Yes, prospectively** (serve forged epoch key; Tier W cannot verify) | Detectable (roster/epoch signatures, transparency) |
+| Can a compelled operator log **when** a specific source's mailbox is checked? **(r2)** | **Yes, prospectively** (server-side lookup; RVW-A-10) | No — fetch-all retrieval (ADR-039) |
+| Can a compelled operator add a hidden recipient for a targeted source? | **Yes, prospectively** (serve forged directory; Tier W cannot verify); detectable afterwards by Desk's recipient-list check if a slot is added, not if plaintext is copied | Detectable (roster/epoch signatures, witnesses, transparency, pin) |
+| Can recorded traffic be decrypted later (harvest-now-decrypt-later)? **(r2)** | **Possibly**, if a quantum-capable adversary recorded the onion circuit (classical key exchange; ADR-046(8)) | Content no (hybrid PQ HPKE); metadata yes |
 | Can the operator identify the source's IP? | No | No |
 
 ### 10.3 MANAGED service (vendor-operated; ADR-021, ADR-024)
 
-In MANAGED, the vendor operates Z-INTAKE (dedicated per customer) and Z-CORE; the customer's staff hold all content keys on their Desk endpoints; the vendor holds no content, identity-custodian or quorum keys.
+In MANAGED, the vendor operates Z-INTAKE (dedicated per customer), Z-CORE, backups, Fleet Manager and support; the customer's staff hold all content keys on their Desk endpoints; the vendor holds no content, identity-custodian or quorum keys. **Everything in §10.1 marked "Can operator disclose: Yes" is disclosable by the vendor for every customer**, and one order can cover many customers (RVW-B-19). The table lists what differs or is vendor-specific.
 
-| Data | Exists at vendor? | Where | Encrypted? | Who has key | Retention | Can vendor disclose? |
+| Data / capability | Exists at vendor? | Where | Encrypted? | Who has key | Retention | Can vendor disclose? |
 |---|---|---|---|---|---|---|
 | Source IP | **No** | — | — | — | — | **No** |
 | Report/attachments/replies/sealed identity | Yes (ciphertext) | Vendor-hosted C-08/C-12/C-13/C-27 | **Yes, E2E** | Customer staff / custodians only | Per customer policy | **Ciphertext only** |
-| Tier W plaintext in transit | Transient | Vendor-hosted C-06/C-07 | — | — | Seconds | **Prospectively only** — the vendor is subject to the same compelled-modification risk as an operator; customers with high-risk channels SHOULD require Tier V (`02` TM-012) |
-| Case metadata, received days, padded sizes | Yes | Vendor-hosted C-12 | At rest (vendor keys) | Vendor | Per customer policy | **Yes** |
+| **Live capability:** Tier W plaintext, drafts, passphrases, replies at login, return-visit times **(r2)** | Transient | Vendor-hosted C-06/C-07 and hypervisor | — | — | Seconds | **Prospectively** — the vendor is subject to the same compelled-modification risk as an operator and additionally controls the hypervisor; customers with high-risk channels SHOULD require Tier V (`02` TM-012) |
+| **Live capability:** onion impersonation **(r2)** | Yes | Vendor-hosted C-05 | TPM-sealed | Vendor | Service life | **Yes** — customers may hold the offline backup |
+| All server-visible metadata of §10.1: received days, follow-up slot dates, padded sizes, channel ids, wrap holders, blinded COI tags, mailbox-closed flags, delayed-delivery dates **(r2)** | Yes | Vendor-hosted C-08/C-12/backups | At rest (vendor keys) | Vendor | Per customer policy | **Yes** |
+| SECURITY audit (incl. staff IPs ≤ 90 d) and CASE audit (all investigator actions, staff exact timestamps) **(r2)** | Yes | Vendor-hosted C-24 | At rest | Vendor | As §10.1 | **Yes** |
+| Notification addressees (the customer's whistleblowing staff list) **(r2)** | Yes | Vendor-hosted C-23 config | At rest | Vendor | Config life | **Yes** |
 | Customer identity ↔ onion address | Yes | Vendor contracts/ops | — | Vendor | Contract | **Yes** (unavoidable for a managed service; disclosed to customers) |
-| Staff accounts, audit logs | Yes | Vendor-hosted | At rest | Vendor | As 10.1 | **Yes** |
-| Onion private key | Yes | Vendor-hosted C-05 | TPM-sealed | Vendor | Service life | **Yes** — impersonation risk; customers may hold the offline backup |
-| Support tickets and scrubbed bundles | Yes | C-36 | Vendor | Vendor | 2 years | Yes — no content or secrets by design |
+| Fleet status, licences | Yes | C-34, C-35 | At rest | Vendor | 90 d / contract | **Yes** |
+| Support tickets and scrubbed bundles **(r2)** | Yes | C-36 | Vendor | Vendor | ≤ 30 days for bundles (aligned with `32` §8; v1.0 said 2 years); tickets per contract | Yes — no content or secrets; no relay events; config as value hashes (RVW-B-18) |
 
 ### 10.4 Prospective compulsion (orders to start collecting or modify)
 
 | Order | Technically possible? | Detectable? | Notes |
 |---|---|---|---|
 | Start logging source IPs (onion) | **No** — IPs never reach the service | — | Tor property [A:TOR] |
-| Start logging exact timestamps / circuit IDs | Yes (modify intake) | Only by independent inspection of the running system | Circuit IDs do not identify people without Tor-level attacks |
-| Capture Tier W plaintext/passphrases | Yes (modify C-06/C-07) | Sealer attestation to Desk and published source-UI digest checks may detect a naïve modification; a careful modification may not be detected | Disclosed Tier W limitation |
-| Serve targeted malicious client (Tier V) | Requires threshold release signing **and** evading transparency monitors | Yes, by monitors (THR-118) | ADR-022 forbids per-customer builds |
-| Push targeted update to one instance | Same as above | Yes | Update client sends no instance identity |
-| Unseal a CONFIDENTIAL identity | Yes, via ≥ 2 custodians | Recorded; source notified unless deferral recorded | Lawful by design |
-| Enable Recovery Quorum retroactively for existing cases | Requires case members' Desks to re-wrap | Visible to sources (escrow status) and in CASE audit | |
-| Disclose program statistics | Yes | — | k-thresholded outputs only exist |
+| Start logging exact timestamps / circuit IDs **(r2)** | Yes (modify intake) | Only if the modification changes what External Watchers are served (untargeted); otherwise no | Circuit IDs alone do not identify people; but an operator that also controls the source's likely network (employer) can resolve one case to its mailbox via the Intake Routing Key and log every Tier W return visit to intersect with its own network logs (RVW-A-10). Tier V fetch-all removes the mailbox selector (ADR-039) |
+| Capture Tier W plaintext/passphrases **(r2)** | Yes (modify C-06/C-07) | External Watchers detect changes to static assets, CSP headers or the signed running manifest **only if untargeted** (ADR-035(1)); a selector-based or memory-only modification is **not** detected by any specified control; optional confidential-VM attestation (HIGH/GOV) may detect a changed sealer measurement but has a record of side-channel breaks (ADR-035(3)); lapse of the Operator Statement is a signal only (ADR-035(2)) | Disclosed Tier W limitation (ADR-035(5)). v1.0 reliance on "sealer attestation to Desk" and "published source-UI digests" withdrawn — neither is specified (RVW-A-01) |
+| Capture intake memory/traffic under an incident-response pretext **(r2)** | Yes, if approved | Requires an independent-role approver (OVERSIGHT or external ombudsman) in addition to the IR lead, captures encrypted to independent custodians, and a source-visible INCIDENT_NOTICE (ADR-035(4)) | Collusion including the independent approver remains possible |
+| Serve targeted malicious client (Tier V) | Requires threshold release signing across ≥ 2 organisations and jurisdictions (ADR-040) **and** evading transparency monitors and witnesses | Yes, by monitors (THR-118) | ADR-022 forbids per-customer builds |
+| Push targeted update to one instance, or hold one instance on a vulnerable release **(r2)** | Targeted build: as above. Withholding: Fleet ring policies cannot hold an instance below the signed security floor (ADR-040) | Yes (transparency; running manifest compared by watchers) | Update client sends no instance identity |
+| Add a recipient or loosen COI policy for future reports **(r2)** | Yes, with dual approval incl. an independent approver | Time-locked 72 h (GOV/HIGH 7 d), content-free notice to all members and OVERSIGHT, logged in the directory (ADR-036(2)) | Tier V warns on keys < 7 days old |
+| Order the vendor's Fleet Manager to disable intake or change routing **(r2)** | **No** (ADR-045) | — | Availability-affecting actions require the customer's independent role |
+| Unseal a CONFIDENTIAL identity | Yes, via ≥ 2 custodians | Recorded; source notified unless deferral recorded (deferral capped, PRIV-008) | Lawful by design |
+| Enable Recovery Quorum retroactively for existing cases | Requires case members' Desks to re-wrap | Visible to sources (escrow status) and in CASE audit | GOV default is enabled from the start (ADR-044(3)) |
+| Disclose program statistics | Yes | — | Only outputs of the `24` §TEL regime exist |
 
 ## 11. Should Tor be required? (ADR-003 analysis)
 
@@ -744,50 +776,63 @@ In MANAGED, the vendor operates Z-INTAKE (dedicated per customer) and Z-CORE; th
 3. Guidance covers: Tor Browser at Safest; Tails for high risk; bridges (obfs4, Snowflake, WebTunnel) on hostile networks (B-AN-30, B-AN-31); jurisdictions where Tor use is itself risky (use a network not associated with you; consider not using Tor from home); iOS/Onion Browser as weaker (R4 §3.3).
 4. Tor's visibility on employer networks is disclosed on C-37 and the landing page (THR-002).
 5. The transport abstraction (ADR-001) allows future cover-traffic transports that address "Tor use is a signal"; until then that residual is stated.
+6. **First contact is itself metadata** (RVW-B-17, RVW-C-20; THR-138): the onion address SHALL also be published offline (posters, printed cards, QR codes) and on intranets only as non-hyperlinked text with "Don't open this at work. Copy it into Tor Browser at home."; C-37's first viewport shows the work-device warning above everything else; for INDEPENDENT channels C-37 SHOULD be hosted outside the organisation's web stack (a static host without access logs); operators MAY use a neutral multi-organisation directory run by the project (ANON-029).
+7. **Client acquisition** (ADR-041): the Source App is obtained from the project's onion service or independent mirrors; the organisation's clearnet site never hosts or logs it; app-store installs are documented as account-linked (§8.2a, ANON-024).
+8. **Sources who cannot use Tor** (phone-only on iOS, only a work device, Tor blocked): where a channel offers C-38 or a staffed hotline, S01-equivalent pages present it as a clearly labelled CONFIDENTIAL alternative rather than leaving sources to improvise (RVW-B-28; `11`).
 
 ## 12. Aggregation, inference and k-thresholds
 
-### 12.1 Metric classes
+**Single source of truth (ADR-046(5)).** All numeric parameters of the metrics regime — k, minimum period, suppression, magnitude statistics, channel minimums, SOC visibility — are defined **only** in `24-LICENSING-BUSINESS-MODEL.md` §TEL (§8–§9). This section defines audiences, prohibited dimensions and inference controls and quotes the ADR-046(5) values for readability; it does not restate any other number. v1.0 values that conflicted (M1 k ≥ 5; M2 quarterly with a switch to monthly at 240 reports/year; M3 k ≥ 20 yearly; M4 rolling 7-day buckets) are withdrawn (RVW-B-07, -08, -09).
 
-| Class | Audience | Threshold | Period granularity | Allowed dimensions (max 2 per table) | Prohibited dimensions |
-|---|---|---|---|---|---|
-| **M0** Case-team views | Users with access to the cases shown | none (they can see the cases) | any | any | — |
-| **M1** Channel operations | Channel members (e.g., SLA dashboard of their own channel) | k ≥ 5 for any cell that aggregates cases the viewer cannot open | Calendar month | state, SLA status, coarse category | source-behavior metrics (PRD §11) |
-| **M2** Program reporting | Program owners, management, board, internal audit (no case access) | **k ≥ 10** per cell (tenant-configurable upward only) | Calendar quarter (calendar month only if the tenant received ≥ 240 reports in the prior 12 months) | channel, coarse category, outcome, SLA met/not met, mode (ANONYMOUS vs other, as totals only) | department, location, business unit < 500 staff, accused role/level, submission weekday/hour, language/locale, Tier W/V, attachment presence/size, source follow-up counts per case |
-| **M3** External / public (transparency reports, regulator statistics, EE compliance packs) | Public, regulators | **k ≥ 20** per cell; counts rounded to nearest 5 after suppression | Calendar year (quarter allowed if ≥ 100 reports per quarter); never finer than month (REQ-H-74) | channel type, coarse category, outcome | all M2 prohibitions + channel names that identify small bodies |
-| **M4** Operational counters (SOURCE-SENSITIVE; C-25/C-26/telemetry) | Admins, SOC | Buckets only: {0, 1–4, 5–19, 20–99, ≥ 100} | Rolling 7 days | instance-wide only | per-channel, per-tenant (EE multi-tenant: per-tenant allowed only to tenant's own admins) |
+ADR-046(5) values: **k = 10**; minimum period **one calendar month**; complementary suppression; **no medians, ratios or percentiles** for cells < k; **no per-channel metrics** for channels with < 3 cases/month; **SOC sees only global daily health bands**.
 
-### 12.2 Suppression algorithm (M1–M3)
+### 12.1 Audience classes
 
-1. **Primary suppression:** any cell with 0 < count < k is shown as "< k" (e.g., "< 10").
-2. **Complementary suppression:** if a row or column contains exactly one primary-suppressed cell, the next-smallest non-zero cell in that row/column is also suppressed, repeated until no suppressed value can be derived from marginal totals.
-3. **Marginals:** totals are published only if they cannot be used with published cells to recover a suppressed cell; otherwise the total is rounded (M2: to nearest 5; M3: to nearest 10).
-4. **Zero cells** are shown as 0 only in M0/M1; in M2/M3 zero and "< k" are merged ("0–k").
-5. **Small-tenant rule:** tenants or channels with < 50 non-spam reports in the reporting period get only a single total per M2/M3 report.
-6. **Temporal differencing:** a report for period P cannot be regenerated with different filters; corrections are issued as a new version replacing the old, both retained in CASE/SECURITY audit; no "since last report" deltas finer than the period.
-7. **Fixed catalog:** only reports defined in the signed report catalog (`14-CASE-MANAGEMENT.md`) can be generated; no ad hoc query interface over case data for M1–M3 audiences.
+| Class | Audience | Threshold / period | Allowed dimensions (max 2 per table) | Prohibited dimensions |
+|---|---|---|---|---|
+| **M0** Case-team views | Users with access to the cases shown | none (they can see the cases) | any | — |
+| **M1** Channel operations | Channel members | Counts **only of cases the viewer can open** (i.e., M0) — no aggregate of cases the viewer cannot open is shown to them (RVW-B-04). Non-triage roles see **no intake counts** at all (ADR-037(2)) | state, SLA status, coarse category | source-behavior metrics (PRD §11) |
+| **M2** Program reporting | Program owners, management, board, internal audit (no case access) | `24` §TEL (k = 10, ≥ 1 calendar month, tumbling periods published only after the period closes) | channel group, coarse category, outcome, SLA met/not met, mode (ANONYMOUS vs other, as totals only) | department, location, business unit, accused role/level, submission weekday/hour, language/locale, Tier W/V, attachment presence/size, source follow-up counts per case; channels with < 3 cases/month (ADR-046(5)); channels with declared population < 50 unless merged into a channel group (PRIV-021) |
+| **M3** External / public | Public, regulators | `24` §TEL; statutory exact counts only where law requires them (documented per jurisdiction pack) | channel type, coarse category, outcome | all M2 prohibitions + channel names that identify small bodies |
+| **M4** Operational health | Admins, SOC (C-25/C-26), telemetry | **Global daily health band only** (ADR-046(5), ADR-038(5)); no per-hour, per-channel, per-tenant or rolling-window source-derived values | instance-wide only | everything else |
+
+### 12.2 Suppression and inference rules (M1–M3)
+
+1. **Primary and complementary suppression** per `24` §TEL.
+2. **Magnitude rule** (ADR-046(5); RVW-B-08): medians, percentiles and ratios are published only if the underlying cell has n ≥ k; ratios additionally only if the numerator is not 0 or n; otherwise "—". Medians of durations are rounded to whole weeks (PRIV-017).
+3. **Zero cells** are shown as 0 only in M0/M1; in M2/M3 zero and "< k" are merged.
+4. **Tumbling periods only** (RVW-B-09): all displays are fixed, non-overlapping periods published once after the period closes; no rolling windows; no intra-period cumulative figures for M1+ audiences; no daily refresh of open periods.
+5. **No regime switches within a year**: any rule that depends on volume (e.g., small-tenant single-total rule of `24` §TEL) is evaluated once per calendar year with hysteresis (switch back only after 2 consecutive years below the threshold).
+6. **Temporal differencing:** a report for period P cannot be regenerated with different filters; corrections are issued as a new version replacing the old, both retained in audit; no "since last report" deltas finer than the period.
+7. **Fixed catalog:** only reports defined in the signed report catalog (`14-CASE-MANAGEMENT.md`) can be generated; no ad hoc query interface over case data for M1–M3 audiences; `v_case_counts`-style per-channel/week views for admins are not permitted (cross-document request to `09`).
+8. **Viewer knowledge:** suppression assumes the viewer may know every case they can open; no M1–M3 figure may be derivable into "cases I am excluded from" (RVW-B-04).
+9. **Formal privacy accounting** for M3 (e.g., bounded noise with a published annual budget) is an open research item (§15 OI-08).
 
 ### 12.3 Inference risks addressed
 
 | Risk | Example | Control |
 |---|---|---|
-| Small cells | "1 fraud report from Finance in March" | M2 prohibits department; k ≥ 10 |
-| Differencing | Total(Q1) − Total(Q1 excluding category X) | Fixed catalog; complementary suppression |
-| Timing | Monthly spike after a known event | Quarter granularity for small programs |
-| Outcome linkage | "Substantiated harassment case" + a known dismissal | M3 annual; outcome × category limited to 2 dims |
-| Mode linkage | "Only CONFIDENTIAL report this quarter" | Mode only as totals |
-| Operational counters | SOC sees intake activity rise the day after a meeting | M4 buckets over 7 days |
-| Telemetry | Vendor sees instance activity | Telemetry schema excludes submission counts (ADR-023) |
+| Small cells | "1 fraud report from Finance in March" | M2 prohibits department; k = 10 (`24` §TEL) |
+| Differencing | Total(month) − Total(month excluding category X) | Fixed catalog; complementary suppression |
+| Rolling/cumulative displays | 0 → "1–4" transition pinpoints a day | Tumbling periods, published after close (rule 4) |
+| Regime switches | Before/after a volume threshold | Yearly evaluation with hysteresis (rule 5) |
+| Magnitude statistics | Median over 3 cases; 1/1 substantiation | Magnitude rule (rule 2) |
+| Subtraction by an excluded viewer | M1 total minus cases I can open | M1 shows only openable cases; non-triage roles see no intake counts (rule 8, ADR-037(2)) |
+| Small channels | "Plant 7 Safety" (14 staff) | No per-channel metrics < 3 cases/month; population-based channel groups (PRIV-021) |
+| Outcome linkage | "Substantiated harassment case" + a known dismissal | Outcome × category limited to 2 dims; k |
+| Mode linkage | "Only CONFIDENTIAL report this month" | Mode only as totals |
+| Operational counters | SOC sees intake activity rise the day after a meeting | Global daily health band only (M4) |
+| Telemetry | Vendor sees instance activity | Telemetry schema per `24` §TEL (ADR-023) |
 | Attribute exposure to recipients | Showing recipients "reporter is in a team of 3" | No such attributes exist (REQ-H-10 k ≥ 50 would apply if ever added) |
 
 ### 12.4 Operational counters (M4)
 
 | Aspect | Rule |
 |---|---|
-| What is counted | Only instance-wide event counts declared as `CTR:` in `08-API.md` (e.g., `accounts_started`, `submissions_tier_w`, `logins`, `followups`, `account_deletions`); never per account, per circuit or per channel. |
-| Storage | One integer per counter per UTC day in C-24 (SOURCE-SENSITIVE class); retained 30 days, then only 7-day bucket values are kept for 90 days. |
-| Display/export | Only as 7-day rolling totals mapped to buckets {0, 1–4, 5–19, 20–99, ≥ 100}; C-26, telemetry and dashboards receive bucket labels, not integers. |
-| Alerting | Abuse/health alerts (e.g., flood detection) evaluate raw counters inside C-24/C-25 and emit only "threshold exceeded" events. |
+| What is counted | Only instance-wide event counts declared as `CTR:` in `08-API.md` (e.g., `accounts_started`, `submissions`, `logins`, `followups`, `account_deletions`); never per account, per circuit, per channel, per tier. |
+| Storage | Raw counters exist only inside C-24/C-25 for alert evaluation, one integer per counter per UTC day, retained per `24` §TEL. |
+| Display/export | Only as a **global daily health band** (ADR-046(5)); C-26, telemetry, SOC views and dashboards receive band labels, never integers, hourly values or per-channel values. |
+| Alerting | Abuse/health alerts (e.g., flood detection) evaluate raw counters inside C-24/C-25 and emit only "threshold exceeded" events, at day granularity. |
 | Prohibited use | Counters SHALL NOT be used as product success metrics (`01` §11). |
 
 ## 13. Requirements

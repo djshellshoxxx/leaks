@@ -197,19 +197,19 @@ Published per release as part of the EE evidence set (COMP-026). It states where
 
 | ADR | Control | Primary frameworks supported |
 |---|---|---|
-| ADR-034 | Tier W drafts only in Sealer RAM | GDPR Art 5(1)(c), 25; EU Art 9(1)(a) |
-| ADR-035 | External Watchers; Operator Statement; confidential-VM Sealer; independent IR capture approval | SI-7, SA-9, IR-4; ISO 37002 7.5; EU Art 9(1)(a) |
-| ADR-036 | Key Directory change governance | CM-3, CM-5, AC-5; ISO 37002 5 |
-| ADR-037 | Triage-first routing; blinded COI | AC-3, AC-6; EU Art 9(1)(c), 16; ISO 37002 5 |
-| ADR-038 | Fixed import slots; constant-schedule notifications | GDPR Art 5, 25; EU Art 9(1)(a) |
-| ADR-039 | Fetch-all reply retrieval | GDPR Art 5, 25 |
-| ADR-040 | Platform Manifest; security floor; signer/builder spread | SI-2(7), SI-7, SR-3, SR-11 |
-| ADR-041 | Source App acquisition off the organisation's site | GDPR Art 25 |
-| ADR-042 | Desk containment tiers; OCR text layer | SC-39, SI-3 (endpoint); Section 508 / EN 301 549 |
-| ADR-043 | Independent-custody recipient devices | AC-5, SC-7 (endpoint); ISO 37002 5 |
-| ADR-044 | Key-access continuity; GOV Recovery Quorum; vault DR and backup exclusion; Desk-local records search | CP-9, CP-10, MP-6, SC-12; GDPR Art 15, 17; records law (§6.1) |
-| ADR-045 | Organisation-as-adversary controls; small-organisation mode | AC-5; ISO 37002 5 |
-| ADR-046 | Consistency fixes (single metrics regime, config labels, update paths, KDF) | CM-6; GDPR Art 5; EU Art 27 |
+| **ADR-034** | Tier W drafts only in Sealer RAM | GDPR Art 5(1)(c), 25; EU Art 9(1)(a) |
+| **ADR-035** | External Watchers; Operator Statement; confidential-VM Sealer; independent IR capture approval | SI-7, SA-9, IR-4; ISO 37002 7.5; EU Art 9(1)(a) |
+| **ADR-036** | Key Directory change governance | CM-3, CM-5, AC-5; ISO 37002 5 |
+| **ADR-037** | Triage-first routing; blinded COI | AC-3, AC-6; EU Art 9(1)(c), 16; ISO 37002 5 |
+| **ADR-038** | Fixed import slots; constant-schedule notifications | GDPR Art 5, 25; EU Art 9(1)(a) |
+| **ADR-039** | Fetch-all reply retrieval | GDPR Art 5, 25 |
+| **ADR-040** | Platform Manifest; security floor; signer/builder spread | SI-2(7), SI-7, SR-3, SR-11 |
+| **ADR-041** | Source App acquisition off the organisation's site | GDPR Art 25 |
+| **ADR-042** | Desk containment tiers; OCR text layer | SC-39, SI-3 (endpoint); Section 508 / EN 301 549 |
+| **ADR-043** | Independent-custody recipient devices | AC-5, SC-7 (endpoint); ISO 37002 5 |
+| **ADR-044** | Key-access continuity; GOV Recovery Quorum; vault DR and backup exclusion; Desk-local records search | CP-9, CP-10, MP-6, SC-12; GDPR Art 15, 17; records law (§6.1) |
+| **ADR-045** | Organisation-as-adversary controls; small-organisation mode | AC-5; ISO 37002 5 |
+| **ADR-046** | Consistency fixes (single metrics regime, config labels, update paths, KDF) | CM-6; GDPR Art 5; EU Art 27 |
 
 ## 6. Control mapping: records, accessibility, procurement, residency, privacy
 

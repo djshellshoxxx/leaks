@@ -361,5 +361,5 @@ External Watchers fetch each watched onion service over Tor and compare served s
 
 1. Foundation jurisdiction. Candidates: a Swiss association, a German e.V., a Dutch stichting, a US 501(c)(3), or a fiscal host (e.g., an existing open-source foundation). Criteria: legal compulsion exposure, CRA steward status, grant eligibility.
 2. Resolved: the TUF root includes ≥ 1 key held by an unaffiliated civil-society organisation (§3.4, OSG-019).
-4. Legal review of watcher liability (publishing mismatch evidence about identifiable organisations) per candidate Foundation jurisdiction.
 3. Bounty funding source and scale.
+4. Legal review of watcher liability (publishing mismatch evidence about identifiable organisations) per candidate Foundation jurisdiction.

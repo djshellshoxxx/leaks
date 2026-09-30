@@ -1,6 +1,6 @@
 # 07 — Backend Services
 
-Status: Draft v1.0 · Edition applicability: both (EE-only items marked **EE**) · Owner: Backend team
+Status: Draft v1.1 (revision round 2: ADR-034..046) · Edition applicability: both (EE-only items marked **EE**) · Owner: Backend team
 
 ## 1. Purpose and scope
 
@@ -22,7 +22,9 @@ Wire formats of the external APIs are in 08-API.md, and schemas in 09-DATABASE.m
 
 | Document | Relationship |
 |---|---|
-| DECISIONS.md ADR-004/005/009/010/016/019/026/027/028/029 | Binding decisions implemented here |
+| DECISIONS.md ADR-004/005/009/010/016/019/026/027/028/029, ADR-033, and ADR-034..046 (revision ADRs; supersede conflicting earlier text) | Binding decisions implemented here |
+| 11-FRONTEND-SOURCE.md §5.3–§5.6 | Canonical Source Web page contract (headers, P1/P2 size classes, cookie) implemented by `candor-web` |
+| 24-LICENSING-BUSINESS-MODEL.md §TEL | Canonical metrics regime for SOURCE-SENSITIVE counters (§9.5) |
 | 06-SYSTEM-ARCHITECTURE.md | Service boundaries §6, trust boundaries §7, segmentation §10 |
 | 08-API.md | External contracts served by these modules |
 | 09-DATABASE.md | Intake Store and Case DB schemas, job table, RLS |
@@ -70,7 +72,7 @@ Build profile for all trust-path binaries:
 | tor (C-05) | `debian-tor` | intake-gw | `/var/lib/tor` | Tor network egress | n/a | disabled |
 | `candor-web` | `candor-web` | intake-gw | read: `/usr/share/candor/web` (templates, static), `/run/candor/config` (ro); socket dirs | **AF_UNIX only** | `mlockall` of heap (Tier W buffers) | disabled |
 | `candor-sealer` | `candor-sealer` | intake-gw | read: `/run/candor/config` (ro), `/run/candor/directory` (ro); socket `/run/candor/sealer/seal.sock` | **none** (`PrivateNetwork=yes`) | `mlockall(MCL_CURRENT\|MCL_FUTURE)` | disabled + `PR_SET_DUMPABLE=0` |
-| `candor-intake-store` | `candor-istore` | intake-gw | rw: `/var/lib/candor/intake/blobs`; PG via Unix socket | TCP 7443 listen on relay interface only | no | disabled |
+| `candor-intake-store` | `candor-istore` | intake-gw | rw: `/var/lib/candor/intake/blobs`, `/run/candor/staging` (tmpfs, ADR-034); PG via Unix socket | TCP 7443 listen on relay interface only | no | disabled |
 | PostgreSQL (intake) | `postgres` | intake-gw | `/var/lib/postgresql` | Unix socket only (`listen_addresses=''`) | no | disabled |
 | `candor-relay` | `candor-relay` | core | PG role `candor_relay`; blob store write | TCP to intake 7443 only (nft `skuid`) | no | disabled |
 | `candor-case` | `candor-case` | core | PG role `candor_case`; blob store rw | Unix listeners (desk.sock, admin.sock) or TCP 8443/9443 | no | disabled |
@@ -80,7 +82,7 @@ Build profile for all trust-path binaries:
 | `candor-audit` | `candor-audit` | core | DB `candor_audit` role `candor_audit_w` (INSERT only); checkpoint key via TPM/HSM | Unix socket only | yes | disabled |
 | `candor-ekv` | `candor-ekv` | core | rw `/var/lib/candor/ekv` (0700); TPM/HSM access for the Vault Master Key | Unix socket only (`/run/candor/ekv/ekv.sock`, peers `candor-case`, `candor-worker`) | yes | disabled |
 | `candor-worker` | `candor-worker` | core | PG role `candor_worker` | calls local services via Unix sockets | no | disabled |
-| `candor-health` agent | `candor-health` | all | read-only host facts; no application data dirs | TCP 8514 to monitor | no | disabled |
+| `candor-health` agent | `candor-health` | all | read-only host facts; no application data dirs | TCP 8514 to the collector over the dedicated monitoring interface (the collector host has no clearnet egress; 06 §8.5) | no | disabled |
 | `candor-backup` | `candor-backup` | core | read DB via `pg_basebackup` role `candor_backup`; read blobs | TCP 443/22 to backup store only | no | disabled |
 
 Notes:
@@ -159,15 +161,17 @@ Process level (sealer; web for its request buffers):
 - secrets held only in `candor_core::Secret<T>` (heap, zeroize-on-drop, no `Clone`, `Debug` prints `[secret]`, no `Serialize`);
 - plaintext stream buffers are fixed 64 KiB `SecretBuf` slabs from a pre-allocated locked pool of 4096 slabs (256 MiB). No growth beyond the pool, and requests wait or fail with `BUSY` when it is exhausted.
 
-After every request:
-- Tier W session material (derived source keys, seed, passphrase bytes) is zeroized on logout, idle timeout (20 min), absolute timeout (2 h) or sealer restart.
-- The passphrase is zeroized immediately after derivation. It is never retained for the session.
+Session and draft material (ADR-034, single timer set):
+- Tier W session material (draft text, identity block, per-session part key, part DEKs, derived source keys, seed) lives only in sealer mlocked RAM and is zeroized on logout, idle timeout (20 min), absolute timeout (2 h), discard, or sealer restart. The web service drops its session entry and tells the intake store to delete the session's staged parts at the same moment.
+- A **login** passphrase is zeroized immediately after derivation.
+- A **newly generated** passphrase (S10) is held in sealer RAM only between `GEN_ACCOUNT` and `CONFIRM_PASSPHRASE`/`SEAL_FINISH`, and is zeroized then. It is never persisted, never re-displayable after the session, and never written to C-08 (ADR-034; RVW-B-13).
 
 ### 4.5 Supervisor behavior
 
 | Condition | Action |
 |---|---|
-| Crash of any intake process | systemd `Restart=on-failure`, `RestartSec=2s`, `StartLimitBurst=5/60s`. After the burst the unit stays failed and the health agent raises `SYSTEM:service_failed`. Restarting the sealer drops all in-RAM drafts and sessions, and sources see a generic "please retry" page. |
+| Crash of any intake process | systemd `Restart=on-failure`, `RestartSec=2s`, `StartLimitBurst=5/60s`. After the burst the unit stays failed and the health agent raises `SYSTEM:service_failed`. Restarting the sealer drops all in-RAM drafts and sessions; `candor-intake-store` then empties `/run/candor/staging`. Sources see a generic "please retry" page, and S04/S06 already state that a restart loses drafts (ADR-034, accepted residual). |
+| Below the signed security floor or Platform Manifest mismatch | Trust-path services refuse to start; `SECURITY:platform_mismatch` (ADR-040; BE-067) |
 | Config bundle signature invalid | Service refuses to start (§7.4) |
 | Schema version mismatch | Service refuses to start |
 
@@ -180,12 +184,12 @@ After every request:
 | HTTP stack | `hyper` 1.x server (HTTP/1.1 only on the onion socket; HTTP/2 disabled to reduce parsing surface; no pipelining: one in-flight request per connection, `Connection: close` after error). Request line ≤ 4 KiB; total headers ≤ 16 KiB; ≤ 50 headers. No compression, either inbound (`Content-Encoding` rejected) or outbound. |
 | Router | Deny-by-default registry. Each route is declared with `route!{ method, path, audience, auth, csrf, pad_class, body_limit, handler }`. A CI test (`route-registry-lint`) fails if any handler is reachable without a declaration, or if any declaration lacks `audience` or `auth` (ADR-029). The audience is `source-web` or `source-app`, and paths are prefixed `/app/v1/` for the latter. |
 | Multipart parser | In-house streaming parser (no framework auto-parse; INC-107). Allowed part names come from the route declaration. The first unexpected part aborts with 400 before any byte is forwarded. Per-part header ≤ 1 KiB. Filename ≤ 255 bytes, UTF-8, NFC-normalized, and then treated as **encrypted metadata only** (never a path). Max parts per request: 3 (message text, one file, CSRF token). |
-| Templates | `askama` compile-time templates with auto-escaping. There is no raw-HTML filter in the template set (a CI grep bans `|safe` and `PreEscaped`). There are no inline scripts or styles. One CSS file is referenced by hash path `/static/<sha256>.css`. |
-| Sessions | In-RAM map `SessionId(128-bit random) → SessionState`. Max 10,000 sessions. Idle 20 min, absolute 2 h. The cookie is `__Host-cs` (Secure; HttpOnly; SameSite=Strict; Path=/). No persistent state. A restart logs everyone out. |
+| Templates | `askama` compile-time templates with auto-escaping. There is no raw-HTML filter in the template set (a CI grep bans `|safe` and `PreEscaped`). There are no inline scripts. CSS is inline in one `<style>` element pinned by hash in the CSP (11 §5.3); there are no sub-resources (the former `/static/<sha256>.css` route is withdrawn, RVW-A-21). |
+| Sessions | In-RAM map `SessionId(128-bit random) → SessionState`. Max 10,000 sessions. One timer set: idle 20 min, absolute 2 h (ADR-034). The cookie is `__Host-s` (Secure; HttpOnly; SameSite=Strict; Path=/), as defined in 11 §5.6. No persistent state. A restart logs everyone out. |
 | CSRF | Synchronizer token (256-bit) per session per form, verified in constant time. Also: `Origin` must be absent, `null`, or equal to this onion origin. |
 | Rate limiting | Token bucket keyed by `EphemeralCircuitToken` (06 §11), in RAM only, plus global buckets. Values in §11. |
-| Padding | The response body is padded (HTML comment filler) to the route's `pad_class`: 16, 32, 64 or 128 KiB. Headers are fixed-order, fixed-set. |
-| Headers | Fixed set per 08-API.md §4.3. No `Server`, `Date`, `ETag` or `Last-Modified`. |
+| Padding | The response body is padded to the route's `pad_class` ∈ {P1 = 65,536, P2 = 131,072 bytes} exactly as 11 §5.4 defines. Headers are fixed-order, fixed-set. |
+| Headers | Fixed set per 11 §5.3 (single CSP string). No `Server`, `Date`, `ETag` or `Last-Modified`. |
 | Tier V validator | Validates canonical envelope CBOR (04-CRYPTOGRAPHY.md): exact field set and lengths, size bucket membership, and exactly 16 fixed-size anonymous recipient slots (ADR-030, ADR-033 §1). The server cannot and does not check recipients: slots carry no key IDs, and the signed recipient list is inside the AEAD payload. It never inspects ciphertext. |
 
 ### 5.2 Sealer IPC protocol (`candor-web` ↔ `candor-sealer`)
