@@ -325,3 +325,21 @@ Each ADR: CONTEXT / OPTIONS / DECISION / SECURITY EFFECT / PRIVACY EFFECT / USAB
 ### ADR-029 Audience-bound tokens and deny-by-default routes
 - DECISION: Every session/token is bound to one audience (source-web, source-app, desk-api, admin-api) and one tenant; route registry is deny-by-default with explicit authorization declaration per route checked in CI.
 - EVIDENCE: R1 CVE-2026-50000 (API token reused on web UI); R2 GlobaLeaks CVE-2026-46647 (missing admin check), CVE-2026-45020.
+
+### ADR-030 Per-member epoch keys so conflict-of-interest exclusion is cryptographic (amends ADR-008, ADR-015)
+- CONTEXT: With a single channel-wide epoch key (ADR-008 as first written), every channel member holds a key that decrypts every envelope, so excluding an accused member "before key wrapping" (ADR-015) is only policy. Raised by 21-ENTERPRISE author.
+- OPTIONS: (a) channel-wide key + policy exclusion; (b) per-role-group epoch keys within a channel; (c) per-member epoch keys, envelope content key wrapped individually to each eligible member.
+- DECISION: (c). Each channel member's Candor Desk publishes signed **Member Epoch Keys** (X-Wing, 7-day epoch, 14-day decrypt window) in the Key Directory (C-14), listed under the member's **role label** (e.g., "Audit Committee Chair", "HR Investigations Lead"; names optional per channel policy). The envelope content key is wrapped separately to each *eligible* member's current epoch key. Before wrapping, the COI filter removes (1) members the source flags ("my report concerns: …" role list shown in the UI) and (2) members listed in the tenant's pre-configured COI map for the chosen category. Tier V clients apply the filter locally; Tier W the Intake Sealer applies it in RAM. Envelope header lists recipient key IDs (pseudonymous, rotating per epoch) so recipients and auditors can verify the recipient set against the directory (THR-046). Channel Identity Keys remain for signing channel metadata only. Case keys (ADR-008) are wrapped only to members authorized after import; excluded members never receive them.
+- SECURITY EFFECT: Excluded/accused members hold no key that decrypts the envelope, even with full database access. Hidden-recipient insertion detectable via directory/transparency log.
+- PRIVACY EFFECT: Role labels in the directory reveal the org's recipient structure (acceptable; already public-facing). Envelope recipient count reveals routing breadth (padded to a fixed max recipient slot count, default 16, with dummy slots).
+- USABILITY EFFECT: Source sees a simple optional checklist "Is your report about any of these people/roles?"; default none selected.
+- OPERATIONAL EFFECT: Each member's client must be online at least once per epoch to publish next epoch keys (pre-publishes 4 epochs ahead). If no eligible member keys exist, intake for that channel shows "temporarily unavailable" (fail closed) rather than encrypting to fewer/other parties.
+- ALTERNATIVES REJECTED: (a) policy-only; (b) group keys still expose the group containing the accused.
+- EVIDENCE: INC-22 (Barclays/Staley), ADR-015, R2 CoverDrop per-journalist keys, R1 SecureDrop Protocol per-journalist one-time keys.
+
+### ADR-031 Licensing of reusable crypto/safety libraries (amends ADR-020)
+- DECISION: `candor-core` (C-11) and `candor-safefs` (ADR-027) are dual-licensed Apache-2.0 OR MIT to maximize independent reuse, review and funding; all other Trust Path code remains AGPL-3.0-or-later. Both remain in the public repository, reproducibly built and in audit scope.
+- EVIDENCE: R6 licensing analysis; Sovereign Tech Agency funds base libraries.
+
+### ADR-032 Onion service key on multiple intake hosts in HA profiles (amends ADR-024)
+- DECISION: EE-HA/GOV-ONPREM may place the same onion service private key on ≤2 intake gateway hosts (active/passive; OnionBalance-style active/active deferred). This doubles THR-044 exposure; both hosts are within the Secret Placement Manifest (ADR-028) and monitored equally. Single-host profiles keep one copy plus an offline encrypted backup.

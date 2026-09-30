@@ -619,3 +619,398 @@ LINDDUN categories: **L**inking, **I**dentifying, **N**on-repudiation, **D**etec
 | Unawareness | Source believes they are anonymous when confidential; does not understand Tier W exposure; does not know escrow is enabled | UI | THR-040, THR-115 | Mode banner; tier statement; escrow visible; comprehension testing (SM-07) | Users skip text |
 | Unawareness | Recipients unaware that opening originals, printing, cloud sync, AI assistants leak | Z-RCP | THR-041, THR-109 | Training gate; Desk warnings; export controls | Human error |
 | Non-compliance | Retention beyond necessity; unlawful unsealing; statistics violating Art 16 "indirect identification" | C-10, C-12, reports | THR-017, THR-111, THR-039 | Retention engine; unseal workflow; k-thresholds | Jurisdictional variance |
+
+## 9. Threat catalog
+
+Inherent and residual risk use §3 scale (L×I). Residual assumes the referenced mitigations are implemented and the listed assumptions hold. Tier differences are noted where they matter.
+
+### 9.1 Core threats THR-001..THR-048 (retained from DECISIONS §5)
+
+| ID | Threat (full description) | Adversaries | Assets | Components | Inherent | Principal mitigations | Residual |
+|---|---|---|---|---|---|---|---|
+| THR-001 | **Source IP/network identity observed or logged by a platform component.** Any Candor component (web server, app, proxy, WAF, logging, crash reporter, monitoring) receiving or recording a routable source address, as in Proton's compelled IP logging (INC-03) or onion services leaking via `mod_status` (INC-34). | ADV-04, ADV-10, ADV-18, ADV-26 | AST-02 | C-05, C-06, C-38, C-37 | 5×5=25 | Onion-only intake; backends bound to Unix socket; no clearnet listener; no reverse proxy on source path (ADR-001, ADR-009); C-37 exit-list check in memory only (ADR-003) | 1×5=5 (C-38 is by definition not anonymous and labelled) |
+| THR-002 | **Source network activity correlated by employer/ISP/local network.** Observer sees that a person used Tor (or a bridge) and when, and intersects with document access, print logs or submission timing (INC-31 Harvard; R4 §2.2). | ADV-07, ADV-08, ADV-09, ADV-15 | AST-02, AST-03 | C-01, C-04 | 4×5=20 | Guidance: never employer networks/devices, bridges, delay (`05`); day-granular timestamps (ADR-010); no source-visible events revealing arrival time to the org | 3×5=15 (behavior-dependent; outside platform control) |
+| THR-003 | **End-to-end traffic/timing correlation by a network adversary** observing both the source's entry and the service's entry (B-AN-01..05, INC-35). | ADV-09, ADV-19, ADV-20, ADV-21 | AST-02 | C-04, C-05 | 3×5=15 | Onion-only; full vanguards on service; padding; batching; short sessions; no always-on client (INC-35); future cover-traffic transport (ADR-001) | 2×5=10 (not defended against GPA, NG-03) |
+| THR-004 | **Website/onion fingerprinting** of a source's visit to the Candor onion by a local observer (B-AN-15..20). | ADV-07, ADV-08, ADV-09, ADV-15 | AST-03 | C-02, C-06 | 3×4=12 | Minimal, uniform, padded responses (ADR-011, PRD-056); single-origin assets; guidance to browse other onions/sites in the same session | 2×4=8 |
+| THR-005 | **Guard discovery / malicious relays against the onion service**, leading to service location and then compulsion/seizure (B-AN-09..13, INC-29/30). | ADV-13, ADV-18, ADV-19 | AST-28, AST-16 | C-05 | 3×4=12 | Full vanguards; current tor; PoW; dedicated host; no egress other than tor | 2×4=8 |
+| THR-006 | **Browser fingerprinting / tracking identifiers** (cookies, storage, CSS/JS probes, scheme flooding INC-36) used to recognize a returning source or link to a non-Tor identity. | ADV-04, ADV-07, ADV-18 | AST-01, AST-03 | C-02, C-06 | 3×4=12 | No JS required; no persistent cookies; `__Host-` session cookie only after login; no client hints; no media-query-conditional resource loads; UA/Accept-Language never stored (`03` META); CSP | 1×4=4 (malicious server could still attempt; Tier V/TB Safest limit) |
+| THR-007 | **Malicious or compelled server delivers altered client code** (Hushmail INC-01 class): modified HTML/JS or app update capturing plaintext or passphrase, possibly targeted at one source. | ADV-04, ADV-05, ADV-18, ADV-26 | AST-04, AST-07, AST-19 | C-06, C-33, C-03 | 4×5=20 | Tier V: WEBCAT-verified bundle or reproducible, threshold-signed Source App with transparency (ADR-004, ADR-022); Tier W honesty statement; no-JS Tier W limits active code; Desk-side detection of HTML digest drift via published source-UI digests (`11`) | Tier W: 3×5=15; Tier V: 1×5=5 |
+| THR-008 | **Browser exploit delivered to the source** (NIT class, INC-27/28) by a seized or compromised server. | ADV-18, ADV-04, ADV-17 | AST-02, AST-01 | C-02, C-06 | 3×5=15 | Source UI works at Safest (no JS); CSP `script-src 'none'` on Tier W pages; guidance to use Safest and Tails; TB updates | 2×5=10 (0-days in TB layout engine remain) |
+| THR-009 | **Document metadata identifies the source** (EXIF GPS, Office author, revision history, PDF XMP, embedded thumbnails) (INC-17, INC-18, INC-20). | ADV-30, ADV-06, ADV-07 | AST-01, AST-05 | C-03, C-15, C-17 | 5×5=25 | Tier V client-side strip with source review (PRD-017); sanitized derivatives default in Desk (ADR-012); guidance | 3×5=15 (Tier W and unsupported formats; PRNU not removable) |
+| THR-010 | **Content/stylometry/canary-trap/printer-dots identify the source** (B-AN-34..43; INC-16, INC-73). | ADV-06, ADV-07, ADV-30 | AST-01 | Content | 4×5=20 | Guidance (paraphrase, don't print, don't submit unique copies); DEDA-style scan anonymization option in C-17; no server/3rd-party LLM (PRD-069) | 3×5=15 (inherent to content) |
+| THR-011 | **Timing metadata identifies the source**: exact timestamps, activity patterns, reply-read timing, import timing (INC-16, INC-74, B-AN-21/22). | ADV-04, ADV-06, ADV-30, ADV-18 | AST-03 | C-06, C-08, C-09, C-10, C-12, C-24 | 4×5=20 | Day-only storage (ADR-010); no read receipts; replies visible at next login; no persistent join of batch seq↔exact time (`03`); daily-batch option for HIGH profile | 2×5=10 |
+| THR-012 | **Cryptographic design/implementation failure exposes content** (INC-61..67). | ADV-19, ADV-17, ADV-24 | AST-04, AST-05, AST-12 | C-11 | 2×5=10 | Standard constructions (HPKE, X-Wing, age-STREAM), formal models, KATs, constant-time libs, external crypto review (ADR-006, `04`) | 1×5=5 |
+| THR-013 | **Key theft** (server, recipient, backup, HSM) exposes content. | ADV-05, ADV-17, ADV-27 | AST-11..15, AST-34 | C-15, C-16, C-29, C-27, C-28 | 3×5=15 | No server content keys (ADR-007/008); hardware-bound wrapping; epoch destruction; keys not in backups (ADR-025); quorum offline | 2×5=10 (endpoint theft exposes that member's cases) |
+| THR-014 | **Server compromise exposes plaintext in memory or future submissions.** | ADV-04, ADV-05, ADV-10, ADV-16, ADV-17 | AST-04, AST-07 | C-06, C-07 | 4×5=20 | Tier V removes; Tier W: isolated sealer, mlock, no swap/core, minimal attack surface, sealer attestation (ADR-004) | Tier W 3×5=15; Tier V 1×3=3 (metadata only) |
+| THR-015 | **Database/storage theft exposes content or metadata.** | ADV-05, ADV-10, ADV-11, ADV-27 | AST-04, AST-21 | C-08, C-12, C-13 | 3×4=12 | Content E2E-encrypted; allow-listed metadata only; at-rest encryption for media | 2×2=4 |
+| THR-016 | **Log/SIEM/metrics/tracing/crash-dump leakage** of source-sensitive data (INC-58, INC-60, INC-56). | ADV-04, ADV-07, ADV-24 | AST-02..04 | C-24, C-25, C-26, all | 4×4=16 | Typed allow-list logging; prohibited-field lint; access logs off; no core dumps; no off-host crash reports (ADR-016) | 1×4=4 |
+| THR-017 | **Backup/snapshot/replica retains data beyond deletion** (INC-55). | ADV-10, ADV-11, ADV-18 | AST-25 | C-27, C-39 | 3×4=12 | Crypto-erasure propagates (ADR-025); keys absent from backups; snapshots disabled for Z-INTAKE | 2×3=6 |
+| THR-018 | **Malicious/curious administrator reads reports or identifies the source** (INC-68..71). | ADV-04, ADV-05 | AST-04, AST-01 | C-05..C-14, C-19 | 4×5=20 | Admin ≠ case access; no source metadata to find; Tier V; audit; roster signatures | Tier W 3×5=15 (in-flight); otherwise 1×5=5 |
+| THR-019 | **Malicious investigator/recipient identifies or retaliates against the source** (INC-22). | ADV-03, ADV-30 | AST-01 | C-15 | 4×5=20 | Least privilege; no metadata; audit; COI; ≥ 2 members; independent oversight | 3×4=12 |
+| THR-020 | **Accused person (incl. executives/admins) accesses, suppresses or learns of the report.** | ADV-06, ADV-04, ADV-03 | AST-06, AST-26 | C-10, C-14, C-22 | 4×5=20 | COI exclusion before wrapping; independent channels; SLA escalation to independent role; admin has no case capability; deletion requires retention rules + dual approval | 2×4=8 |
+| THR-021 | **Authorization bypass / IDOR / cross-tenant access** (GlobaLeaks CVE-2026-46647/45020, B-GL-37). | ADV-16, ADV-03 | AST-04, AST-21 | C-10, C-22, C-06 | 4×4=16 | Deny-by-default routes, audience-bound tokens (ADR-029); crypto access control (no key → no plaintext); RLS | 2×3=6 |
+| THR-022 | **Authentication compromise of recipient/admin** (phishing, credential theft, OTP reuse — Hush Line CVE-2024-38523). | ADV-16, ADV-17, ADV-05 | AST-23, AST-13 | C-21, C-15, C-20 | 4×4=16 | WebAuthn/PIV phishing-resistant; hardware-bound key unwrap; step-up for sensitive actions | 2×4=8 |
+| THR-023 | **Hostile uploaded file exploits recipient/viewer** (B-CR-56, CVE-2021-22204). | ADV-29, ADV-17 | AST-20, AST-13 | C-15, C-17, C-18 | 5×5=25 | No server parsing; network-less disposable viewer; pixels-to-PDF; safefs (ADR-012, ADR-027) | 2×4=8 |
+| THR-024 | **Supply-chain compromise** (dependency, build, CI, signing, repository) (INC-37..52). | ADV-22..25 | AST-35, AST-17, AST-19, AST-20 | C-30..C-33 | 4×5=20 | Reproducible dual builds, threshold signing, transparency, cargo-vet, pinned deps, two-person review (ADR-019, ADR-022) | 2×5=10 |
+| THR-025 | **Malicious or compromised update delivered to instances** (targeted or broad) (INC-15, INC-38, INC-49). | ADV-25, ADV-26, ADV-20, ADV-24 | AST-19, AST-20 | C-32, C-33, all | 3×5=15 | TUF threshold; identical artifacts; transparency monitors; update client sends no instance identity (ADR-022) | 1×5=5 [A:MON] |
+| THR-026 | **Legal compulsion of operator or vendor to disclose or modify** (INC-01..07, INC-12). | ADV-18, ADV-26 | All | C-05..C-14, C-34..C-36 | 4×5=20 | Minimization; keys on endpoints; Tier V; published compelled-disclosure inventory (`03` §10) | Tier W prospective modification 3×5=15; retrospective disclosure 2×2=4 |
+| THR-027 | **Vendor/support personnel access to customer data or deployment metadata.** | ADV-24, ADV-26 | AST-29, AST-04 | C-34, C-35, C-36 | 3×4=12 | No vendor access paths; opaque IDs; scrubbed bundles; MANAGED vendor holds no content keys | 2×3=6 |
+| THR-028 | **Notification content/metadata leakage** (email, SMS, push) (INC-57, INC-25). | ADV-18, ADV-07 | AST-06, AST-03 | C-23 | 4×3=12 | Content-free, hourly digest, no source notifications (ADR-017) | 1×2=2 |
+| THR-029 | **Enterprise integration exfiltrates report content to general systems.** | ADV-03, ADV-07, ADV-06 | AST-04, AST-31 | C-40, C-26 | 3×5=15 | Export Packages only (ADR-018); dual approval for originals | 2×4=8 |
+| THR-030 | **Cloud/hosting provider observes metadata, snapshots memory/disks.** | ADV-10, ADV-11 | AST-04, AST-16, AST-28 | C-39 | 3×5=15 | Dedicated hosts; FDE; Tier V; confidential VMs optional | Tier W 2×5=10; Tier V 2×2=4 |
+| THR-031 | **Physical seizure/theft** of servers, workstations, backups, HSM. | ADV-27, ADV-18 | AST-13..16, AST-25 | C-39, C-16, C-27, C-29 | 3×4=12 | FDE, tokens with PIN limits, quorum separation, ciphertext backups | 2×3=6 |
+| THR-032 | **Denial of service / resource exhaustion** against intake. | ADV-16, ADV-20, ADV-29 | AST-26 | C-05..C-08 | 4×4=16 | PoW; quotas; bounded KDF concurrency; standby onion; store-and-forward | 3×3=9 |
+| THR-033 | **Spam/abuse/flooding of intake; malicious false reports.** | ADV-02, ADV-29 | AST-26, triage capacity | C-06, C-10 | 4×3=12 | PoW, per-account quotas, triage queue with SPAM state (ADR-026) | 3×2=6 |
+| THR-034 | **Source credential loss or theft** (passphrase disclosure, device seizure). | ADV-08, ADV-28, ADV-18 | AST-07, AST-08 | C-01, C-03 | 3×4=12 | Generated passphrase, not stored; guidance on storage; no recovery (ADR-005) | 2×4=8 |
+| THR-035 | **Misconfiguration or dangerous option enables metadata collection.** | ADV-04, ADV-06 | AST-02, AST-03 | C-19, all | 4×4=16 | CFG classification; DANGEROUS needs dual approval; self-test & source-visible config digest; no option can enable IP logging on onion path (no code exists) | 2×3=6 |
+| THR-036 | **Telemetry/analytics/third-party resources expose users** (INC-53). | ADV-12, ADV-24 | AST-02, AST-03 | C-06, C-03, C-15 | 4×4=16 | No third-party resources; zero source telemetry; opt-in admin telemetry only (ADR-023) | 1×3=3 |
+| THR-037 | **Evidence tampering / chain-of-custody break.** | ADV-03, ADV-04 | AST-27 | C-13, C-15, C-24 | 3×4=12 | Hashes at import in encrypted record; immutable originals; audit | 1×4=4 |
+| THR-038 | **Audit records themselves become source-identifying** (or tampered). | ADV-04, ADV-06 | AST-22, AST-01 | C-24 | 3×4=12 | Four event classes; no SOURCE-SENSITIVE events; pseudonymous case IDs; hash chain + external witness (ADR-016) | 1×3=3 |
+| THR-039 | **Aggregate reports/metrics enable inference of source identity** (small cells) (INC-74, INC-10). | ADV-06, ADV-07 | AST-30, AST-01 | C-10, C-26 | 4×4=16 | k-thresholds, complementary suppression, coarse periods, fixed query set (`03` §12) | 2×3=6 |
+| THR-040 | **Mode confusion**: user believes they are anonymous when confidential/identified. | All | AST-01 | C-06, C-38 | 4×5=20 | Mode banner; C-38 "NOT ANONYMOUS"; explicit transitions; comprehension tests | 2×5=10 |
+| THR-041 | **Recipient/investigator operational mistake** (forwarding originals, printing, cloud upload) (INC-16, INC-24). | ADV-03 (non-malicious) | AST-05, AST-01 | C-15, C-16 | 5×5=25 | Sanitized derivatives default; dual-approval original export; training gate; Desk warnings; AIRGAP-RCP | 3×4=12 |
+| THR-042 | **Ransomware / destructive attack on case data.** | ADV-16, ADV-05 | AST-25, AST-26 | C-12, C-13, C-27 | 3×4=12 | Immutable/offline backups; content already encrypted; intake independent | 2×3=6 |
+| THR-043 | **Clock manipulation / wrong time** affects SLA, crypto epochs, logs. | ADV-04, ADV-15 | AST-33 | all | 2×3=6 | Multiple time sources (NTS), epoch validity checks with tolerance, monotonic batch seq | 1×3=3 |
+| THR-044 | **Onion service private key compromise** (impersonation/phishing of sources). | ADV-10, ADV-27, ADV-04 | AST-16 | C-05 | 2×5=10 | TPM-sealed key; offline backup custody; standby address; Tier V pins channel keys (impersonator cannot decrypt Tier V envelopes without epoch keys) | Tier W 2×5=10; Tier V 1×3=3 |
+| THR-045 | **Multi-tenant co-residency leakage.** | ADV-11, ADV-16 | AST-04, AST-21 | C-12, C-39 | 2×4=8 | EE only, low/moderate-risk tenants; RLS; per-tenant keys and onions (ADR-021) | 1×3=3 |
+| THR-046 | **Hidden recipient insertion / key substitution** (Anom INC-14; Matrix INC-62). | ADV-04, ADV-06, ADV-18 | AST-18, AST-04 | C-14, C-06, C-15 | 3×5=15 | Roster signed by member quorum, transparency log, client verification (Tier V), source-visible roster, Desk verifies wraps | Tier W 2×5=10; Tier V 1×5=5 [A:MON] |
+| THR-047 | **Resumable/chunked upload metadata correlates sessions.** | ADV-04, ADV-18 | AST-03 | C-06, C-08 | 3×3=9 | No resumable uploads in Tier W; Tier V upload tokens random, unlinkable to source account, 24 h TTL, deleted at finalization | 1×3=3 |
+| THR-048 | **Source device forensic residue** (history, downloads, codename written down). | ADV-28, ADV-08 | AST-07, AST-01 | C-01, C-02, C-03 | 4×4=16 | No downloads to source; no-store; Tails guidance; app minimal state | 3×4=12 |
+
+### 9.2 Additional threats THR-100..THR-125
+
+| ID | Threat (full description) | Adversaries | Assets | Components | Inherent | Principal mitigations | Residual |
+|---|---|---|---|---|---|---|---|
+| THR-100 | **Online guessing / brute force of source credentials** against the login endpoint or the stored verifier. | ADV-16, ADV-04 | AST-07, AST-08 | C-06, C-07, C-08 | 2×4=8 | ≈129-bit passphrase; Argon2id; PoW; per-circuit and global rate limits (ADR-005/026) | 1×4=4 |
+| THR-101 | **Replay, reordering, dropping or duplication of envelopes/replies** by a compromised intake or relay (malicious-server integrity; Threema/Telegram class INC-63/64). | ADV-04, ADV-05 | AST-04, AST-08, AST-26 | C-08, C-09 | 3×4=12 | Monotonic batch sequence signed by C-07 key; Desk gap/duplicate detection; per-mailbox message counters authenticated in envelopes; Tier V signed receipt to source | 2×3=6 (suppression detectable, not preventable) |
+| THR-102 | **Key-directory equivocation, split view or freeze** (serving a targeted source an old or forged epoch key/roster). | ADV-04, ADV-18 | AST-18 | C-14, C-06 | 3×5=15 | Signed tree heads, consistency proofs, epoch freshness (max age 14 days) checks in Tier V, gossip of tree heads via C-37 and Desk | Tier W 2×5=10; Tier V 1×4=4 [A:MON] |
+| THR-103 | **Onion-address substitution/phishing** via compromised/spoofed C-37, look-alike addresses, ads, search poisoning, fake mirrors (incl. I2P "mirrors"). | ADV-15, ADV-12, ADV-16, ADV-18 | AST-16, AST-01 | C-37, C-02 | 3×5=15 | Signed onion-address statement (channel identity key) on C-37, in Source App, printed materials; Onion-Location; HSTS; guidance to verify | 2×5=10 |
+| THR-104 | **Onion-service location disclosure** via misconfiguration or egress (DNS, NTP, apt, error pages with host IP, co-hosted services) (INC-33, INC-34). | ADV-16, ADV-18 | AST-28 | C-05, C-06, C-39 | 3×4=12 | Egress default-deny except tor; updates fetched over tor; loopback/Unix-socket binding; no status endpoints; no co-hosting (REQ-H-33/34) | 1×4=4 |
+| THR-105 | **Tracking/bait content in replies**: remote resources, links, unique facts or canary questions designed to make the source reveal themselves or to detect where the reply is re-leaked. | ADV-30, ADV-06 | AST-01 | C-15, C-06 | 3×5=15 | Plain-text replies, no links/resources (PRD-025); source warnings about questions that could identify them; ≥ 2 recipients see replies (audit) | 2×4=8 |
+| THR-106 | **Social engineering to move the source off-platform** or into identifying actions (Lamo INC-21). | ADV-30, ADV-02 | AST-01 | C-15, source | 3×5=15 | Persistent UI warning; recipient code of conduct; replies attributed to role+fingerprint | 2×5=10 |
+| THR-107 | **Document call-home beacons** (canary tokens, remote templates, tracking pixels, DNS beacons, macro callbacks) fired when evidence is opened, alerting the originating organization that the document was leaked and to whom. | ADV-07, ADV-06 | AST-06, AST-01 | C-17, C-15, C-16 | 4×5=20 | Evidence opened only in network-less VM; no opening in Desk or host OS; sanitized derivatives; guidance to sources that documents may contain canaries | 1×4=4 (source-side opening before submission is outside control) |
+| THR-108 | **Evidence hash/sample submitted to external services** (VirusTotal, cloud AV, EDR cloud sandbox, DLP) revealing the leaked document's existence. | ADV-07, ADV-12 | AST-06 | C-16, C-17 | 4×4=16 | PRD-069; Desk stores evidence only in encrypted app store; guidance to exclude Desk data dirs from cloud AV submission; AIRGAP-RCP | 2×4=8 |
+| THR-109 | **Recipient-side AI assistants, cloud sync, OS indexing** ingest decrypted content (Copilot, Spotlight, OneDrive, screenshot history features). | ADV-07, ADV-11, ADV-03 (non-malicious) | AST-04, AST-05 | C-15, C-16 | 4×4=16 | Desk marks windows as capture-protected where OS supports; plaintext never written to user-visible paths; indexing exclusion; training; recommended hardened workstation profile (`17`) | 2×4=8 |
+| THR-110 | **COI exclusion / access-change side channel** reveals to the accused that a report concerns them (e.g., they lose access they previously had, or see a case count they cannot open). | ADV-06, ADV-04 | AST-06 | C-10, C-22, C-14, C-15 | 3×4=12 | Excluded users never see existence of the case (no count, no placeholder); roster is per channel not per case; COI exclusions applied at import silently; independent channels for leadership | 2×3=6 |
+| THR-111 | **Identity-Custodian unsealing abuse or coerced unsealing.** | ADV-06, ADV-26, ADV-30 | AST-09 | C-15, C-10 | 3×5=15 | Two custodians; legal basis; source notice unless deferral recorded; CASE audit reviewed independently (ADR-014) | 2×5=10 |
+| THR-112 | **Recovery-Quorum collusion, coercion or share theft.** | ADV-06, ADV-27, ADV-26 | AST-15 | C-28 | 2×5=10 | Off by default; k-of-n from independent roles; source-visible escrow status; offline ceremony with audit (ADR-013) | 1×5=5 |
+| THR-113 | **Fleet Manager / vendor management plane used as command channel** (config push, exfiltration, instance deanonymization, compelled vendor). | ADV-24, ADV-26, ADV-20 | AST-24, AST-29 | C-34 | 3×5=15 | Fleet manager is read/status only for trust-path config; any change requires local dual approval; no onion addresses in cleartext; outbound-only | 1×4=4 |
+| THR-114 | **Phone-home**: licensing, update checks or telemetry reveal instance identity, onion address or activity levels. | ADV-26, ADV-24 | AST-29, AST-30 | C-35, C-33, C-25 | 3×4=12 | Offline license files; update client over tor with no instance ID; telemetry off by default and schema-fixed (ADR-022/023) | 1×3=3 |
+| THR-115 | **Mode/tier downgrade without informed consent**: Tier V → Tier W silently (e.g., WEBCAT or app fails), or ANONYMOUS → CONFIDENTIAL through UI trickery or confusing defaults. | ADV-04, ADV-18 | AST-04, AST-01 | C-06, C-03 | 3×5=15 | Tier V clients never fall back automatically; explicit confirmation screens; mode shown persistently | 1×5=5 |
+| THR-116 | **Coercion of individual staff** (recipients, custodians, quorum holders, admins) to decrypt, unseal or alter. | ADV-06, ADV-18, ADV-20 | AST-13..15 | People | 3×5=15 | Multi-party controls (dual approval, quorum); duress procedures; independent audit; key roles spread across jurisdictions/organizations for high-risk deployments | 2×5=10 |
+| THR-117 | **Key loss** leading to irrecoverable case data (all members lose devices/tokens, no quorum). | Non-adversarial; ADV-16 (ransomware), ADV-27 (theft) | AST-12, AST-13 | C-15, C-28 | 3×4=12 | ≥ 2 members per case; token backups (second registered token per user); optional quorum; warnings | 2×3=6 |
+| THR-118 | **Absence of independent transparency-log monitoring** nullifies mitigations for THR-007/025/046/102. | ADV-24, ADV-26 | AST-17, AST-18 | C-14, C-32 | 3×5=15 | ≥ 2 independent monitors funded/recruited (e.g., civil-society orgs); Desk and Source App gossip tree heads; public monitor status page | 2×5=10 |
+| THR-119 | **Decompression bombs and parser DoS** against viewer or client (B-CR-52). | ADV-29 | AST-20, AST-26 | C-17, C-15 | 4×2=8 | VM resource limits; per-file time budget; no automatic processing | 2×1=2 |
+| THR-120 | **Differencing/query attacks on metrics** (overlapping filters, repeated regeneration) defeating k-thresholds. | ADV-06, ADV-07 | AST-30 | C-10, C-26 | 3×4=12 | Fixed report catalog; no ad hoc queries; complementary suppression; regeneration rate limits (`03` §12) | 1×3=3 |
+| THR-121 | **Source coercion/compromise of passphrase**: adversary logs in as the source to read replies and impersonate the source to recipients. | ADV-18, ADV-08, ADV-28 | AST-07, AST-08 | C-06, C-15 | 2×4=8 | Replies minimal; recipients trained to verify unexpected behavior; source may close mailbox; no replay of old content beyond what exists | 2×3=6 |
+| THR-122 | **Fabricated/manipulated evidence** (forged documents, deepfake media) to mislead investigations or smear an accused. | ADV-02, ADV-29 | AST-27, integrity of outcomes | C-15, C-17 | 3×4=12 | Investigative procedures; provenance notes; no automatic trust in content; evidence hashes | 3×3=9 (inherent) |
+| THR-123 | **Micro-architectural/side-channel leakage** from C-07 or C-11 on shared hardware (timing, cache, speculative execution). | ADV-10, ADV-11, ADV-17 | AST-04, AST-11 | C-07, C-11, C-39 | 2×4=8 | Dedicated hosts for Z-INTAKE; constant-time crypto; microcode/kernel mitigations | 1×4=4 |
+| THR-124 | **Support/helpdesk social engineering** to reset staff credentials, obtain bundles or data (INC-26, INC-56). | ADV-02, ADV-16 | AST-23 | C-21, C-36 | 3×4=12 | No helpdesk reset of key-bearing credentials; re-enrolment requires in-person/dual approval; support never receives content or secrets | 1×4=4 |
+| THR-125 | **Investigation-action leakage**: investigative steps (who is interviewed, which records are pulled, timing of HR actions) narrow the candidate source set for the accused or management. | ADV-06, ADV-30, ADV-01 | AST-01 | Process (C-15) | 4×5=20 | Investigation-planning guidance and "source-exposure check" task in case workflow (`14`); independent investigators for leadership cases | 3×4=12 |
+
+## 10. Attack trees
+
+Notation: `[OR]` any child suffices; `[AND]` all children required. Each leaf: `{THR; primary mitigation; residual L×I}`. Tier-specific leaves are marked (W)/(V).
+
+### TREE-1 Goal: identify an anonymous source
+
+```
+G1 Identify the anonymous source of report R  [OR]
+├── 1.1 Obtain source network identity  [OR]
+│   ├── 1.1.1 Read IP from Candor components            {THR-001; onion-only, no IP present; 1×5}
+│   ├── 1.1.2 End-to-end correlation  [AND]
+│   │   ├── observe source ↔ guard (ISP/employer/relay) {THR-002/003}
+│   │   └── observe service ↔ guard or know arrival time {THR-005/011; vanguards, day-only timestamps; 2×5}
+│   ├── 1.1.3 Guard discovery of source + ISP compulsion (BKA/Ricochet pattern) {THR-003; short sessions, no always-on client; 1×5}
+│   ├── 1.1.4 Deliver exploit to source browser (NIT) [AND]
+│   │   ├── control or compel C-06                        {THR-007/008}
+│   │   └── source runs JS / vulnerable TB                 {no-JS UI, Safest guidance; 2×5}
+│   └── 1.1.5 Source uses clearnet C-38 believing anonymous {THR-040; NOT ANONYMOUS labels; 2×5}
+├── 1.2 Correlate with organizational logs  [AND]
+│   ├── 1.2.1 Know who used Tor/bridges when (proxy/EDR/Wi-Fi logs) {THR-002; guidance; 3×5}
+│   └── 1.2.2 Know when report arrived / was read [OR]
+│       ├── exact timestamps in Candor                    {THR-011; not stored; 1×5}
+│       ├── notification timing                           {THR-028; hourly content-free digest; 1×3}
+│       ├── investigation actions reveal report date     {THR-125; guidance; 3×4}
+│       └── reply-read timing                             {no read receipts; 1×4}
+├── 1.3 Identify from content  [OR]
+│   ├── 1.3.1 File metadata                               {THR-009; stripping/sanitize; 3×5}
+│   ├── 1.3.2 Stylometry vs internal corpus (LLM)          {THR-010; guidance only; 3×5}
+│   ├── 1.3.3 Canary/watermark in document                 {THR-010; guidance; 3×5}
+│   ├── 1.3.4 Printer MIC / scan artifacts                 {THR-010; DEDA option, don't-print guidance; 2×5}
+│   └── 1.3.5 Unique knowledge (only 3 people knew)        {inherent; guidance; 4×5}
+├── 1.4 Abuse platform functions  [OR]
+│   ├── 1.4.1 Bait questions / tracking content in replies {THR-105; plain text replies; 2×4}
+│   ├── 1.4.2 Lure off-platform                            {THR-106; warnings; 2×5}
+│   ├── 1.4.3 Unseal identity (CONFIDENTIAL only)          {THR-111; dual custodian; 2×5}
+│   ├── 1.4.4 Small-cell statistics / differencing         {THR-039/120; k-thresholds; 1×3}
+│   └── 1.4.5 Audit/SIEM data                              {THR-016/038; allow-list; 1×3}
+├── 1.5 Obtain source credential and device [OR]
+│   ├── 1.5.1 Seize device; forensic residue               {THR-048; Tails guidance; 3×4}
+│   └── 1.5.2 Keylogger/EDR on managed device               {ADV-08; guidance only; 3×5}
+└── 1.6 Fingerprint returning visitor                      {THR-006; no persistent identifiers; 1×4}
+```
+Dominant residual paths: 1.2 and 1.3 (behavior and content), consistent with R4's conclusion that non-network channels dominate.
+
+### TREE-2 Goal: read report content
+
+```
+G2 Read plaintext of report R without authorization  [OR]
+├── 2.1 At intake  [OR]
+│   ├── 2.1.1 (W) Compromise C-06/C-07 during submission   {THR-014; sealer isolation; 3×5}
+│   ├── 2.1.2 (W) Compel operator to modify intake          {THR-026/007; disclosure; 3×5}
+│   ├── 2.1.3 (V) Serve malicious client code                {THR-007; WEBCAT/app signatures + transparency; 1×5}
+│   ├── 2.1.4 Substitute channel epoch key (hidden recipient) [AND]
+│   │   ├── forge/equivocate key directory                   {THR-046/102}
+│   │   └── (W) source cannot verify / (V) monitors absent   {THR-118; W 2×5, V 1×5}
+│   └── 2.1.5 Impersonate onion with stolen key              {THR-044; TPM seal; (W) 2×5, (V) 1×3}
+├── 2.2 At rest  [OR]
+│   ├── 2.2.1 Steal C-08/C-12/C-13/C-27 data                 {THR-015/017; ciphertext only; 1×5}
+│   ├── 2.2.2 Break crypto                                   {THR-012; standard PQ hybrid; 1×5}
+│   └── 2.2.3 Obtain epoch private keys after window         {destroyed (ADR-008); 1×5}
+├── 2.3 At recipient  [OR]
+│   ├── 2.3.1 Compromise a member's C-16 + unlock token      {THR-013; hardware wrap; 2×5}
+│   ├── 2.3.2 Phish member credentials                       {THR-022; WebAuthn; 2×4}
+│   ├── 2.3.3 Hostile file → viewer escape → Desk            {THR-023; network-less VM; 2×4}
+│   ├── 2.3.4 Cloud sync/AI assistant ingestion              {THR-109; exclusions; 2×4}
+│   └── 2.3.5 Authorized reader leaks                         {THR-019/041; audit, dual approval; 3×4}
+├── 2.4 Via authorization system  [OR]
+│   ├── 2.4.1 Admin adds self to roster                      {THR-046; member signatures; 1×5}
+│   ├── 2.4.2 IDOR / cross-tenant                             {THR-021; no key → no plaintext; 1×3}
+│   └── 2.4.3 Break-glass abuse                                {dual authorization + post-hoc review; 2×4}
+├── 2.5 Via recovery paths  [OR]
+│   ├── 2.5.1 Collude/coerce k quorum holders                 {THR-112; off by default; 1×5}
+│   └── 2.5.2 Restore old backup with un-erased keys          {THR-017; keys not in backups; 1×5}
+└── 2.6 Via integrations/exports                               {THR-029; Export Packages only; 2×4}
+```
+
+### TREE-3 Goal: suppress a report (the accused prevents action)
+
+```
+G3 Prevent report R from being acted upon  [OR]
+├── 3.1 Prevent submission  [OR]
+│   ├── 3.1.1 DoS the onion                                    {THR-032; PoW, standby onion; 3×3}
+│   ├── 3.1.2 Block Tor on corporate network                    {guidance: personal network; 3×2}
+│   └── 3.1.3 Phish sources to a fake portal                     {THR-103; signed addresses; 2×5}
+├── 3.2 Drop/alter submission in transit  [OR]
+│   ├── 3.2.1 Intake admin deletes envelopes                     {THR-101; sequence gap detection in Desk; 2×3}
+│   └── 3.2.2 Relay withholds batches                            {Desk alarms on missing seq; C-25 alert; 2×3}
+├── 3.3 Control the recipients  [OR]
+│   ├── 3.3.1 Accused is a recipient                              {THR-020; COI exclusion before wrap; 1×4}
+│   ├── 3.3.2 Accused adds loyal recipient                         {THR-046; roster signatures, visible roster; 2×4}
+│   └── 3.3.3 Recipient sits on case                                {SLA escalation to independent role; 2×3}
+├── 3.4 Destroy case data  [OR]
+│   ├── 3.4.1 Admin deletes DB rows                                 {backups; audit; ≥2 members detect; 2×3}
+│   ├── 3.4.2 Ransomware                                             {THR-042; offline backups; 2×3}
+│   └── 3.4.3 Premature disposition via retention change            {retention changes are DANGEROUS config; legal hold; 1×4}
+└── 3.5 Discredit                                                      {THR-122 fabricated counter-evidence; process; 3×3}
+```
+
+### TREE-4 Goal: deliver malicious client code (to sources or staff)
+
+```
+G4 Get attacker-controlled code executed in C-02/C-03/C-15/C-17  [OR]
+├── 4.1 Via the live server  [OR]
+│   ├── 4.1.1 (W) Modify Tier W HTML/CSS for a targeted source    {THR-007; no JS executes at Safest; HTML-only capture of form still possible: 3×5}
+│   ├── 4.1.2 Serve JS bundle not matching WEBCAT manifest          {THR-007; WEBCAT blocks; 1×5}
+│   └── 4.1.3 Serve browser exploit                                   {THR-008; no-JS, CSP; 2×5}
+├── 4.2 Via updates  [OR]
+│   ├── 4.2.1 Compromise CI/builder  [AND]
+│   │   ├── compromise builder A                                     {THR-024}
+│   │   └── compromise independent builder B                         {ADR-022; 1×5}
+│   ├── 4.2.2 Steal threshold of signing keys                        {offline threshold; 1×5}
+│   ├── 4.2.3 Targeted update to one customer  [AND]
+│   │   ├── sign special artifact                                    {requires 4.2.2}
+│   │   └── avoid transparency log detection                          {THR-118; monitors; 1×5}
+│   ├── 4.2.4 Freeze/rollback attack via mirror                      {TUF expiry/version checks; 1×3}
+│   └── 4.2.5 Compelled vendor release                                {THR-025/026; threshold signers across jurisdictions; 1×5}
+├── 4.3 Via dependencies                                              {THR-024; cargo-vet, pinned, reviewed; 2×5}
+├── 4.4 Via distribution  [OR]
+│   ├── 4.4.1 Fake Source App download site                           {THR-103; signed hashes out of band; 2×4}
+│   └── 4.4.2 App-store account compromise                            {reproducible builds, in-app verification; 2×4}
+└── 4.5 Via Fleet Manager config push                                  {THR-113; no trust-path config push; 1×4}
+```
+
+### TREE-5 Goal: compromise recipients via a hostile upload
+
+```
+G5 Compromise a recipient endpoint or other cases via submitted content  [OR]
+├── 5.1 Exploit server-side processing                                 {none exists (ADR-012); 1×4}
+├── 5.2 Exploit Desk  [OR]
+│   ├── 5.2.1 Filename path traversal / archive header injection        {ADR-027 safefs, content-addressed names; 1×4}
+│   ├── 5.2.2 XSS/HTML injection in text fields                         {plain-text rendering; Tauri CSP; 1×4}
+│   └── 5.2.3 Malformed envelope → parser bug in candor-core            {fuzzing, Rust; 2×4}
+├── 5.3 Exploit viewer and escape  [AND]
+│   ├── 5.3.1 Exploit renderer in C-17 (e.g. CVE-2021-22204 class)       {sandboxed; assumed possible}
+│   └── 5.3.2 Escape microVM/DispVM                                       {hypervisor hardening; AIRGAP-RCP; 1×5}
+├── 5.4 Beacon/call-home when opened                                     {THR-107; network-less; 1×4}
+├── 5.5 Social engineering "please open in Word to see macros"           {training; Desk refuses host-open without dual approval; 2×4}
+├── 5.6 Resource exhaustion (zip bomb)                                    {THR-119; limits; 2×1}
+└── 5.7 Sanitizer output carries payload (polyglot survives)             {pixels-to-PDF re-rasterization; second-VM qpdf normalization; 1×4}
+```
+
+### TREE-6 Goal: unseal a CONFIDENTIAL source's identity without lawful basis
+
+```
+G6 Obtain sealed identity  [OR]
+├── 6.1 Coerce/collude two Identity Custodians                          {THR-111/116; independent custodians; 2×5}
+├── 6.2 Compromise a custodian endpoint + one other custodian's approval {THR-013; dual crypto approval (2-of-n unwrap); 1×5}
+├── 6.3 Fabricate legal basis                                           {independent review of unseal audit; source notice; 2×4}
+└── 6.4 Infer identity from case content despite sealing                 {Art 16 indirect identification; redaction; 3×4}
+```
+
+### TREE-7 Goal: insert a hidden recipient (Anom class)
+
+```
+G7 Cause future submissions to be decryptable by attacker  [OR]
+├── 7.1 Add attacker key to channel roster  [AND]
+│   ├── obtain ≥2 member signatures (coerce/compromise)                 {THR-046/116; 1×5}
+│   └── source does not notice roster change                             {roster shown; Tier V diff warning; 2×4}
+├── 7.2 Serve forged epoch key to targeted source                        {THR-102; Tier V verification; (W) 2×5, (V) 1×5}
+├── 7.3 Enable Recovery Quorum with attacker-held shares                 {DANGEROUS dual approval; escrow visible to sources; 1×5}
+└── 7.4 Malicious client release that adds a key                          {TREE-4; 1×5}
+```
+
+## 11. Abuse cases
+
+Misuse by legitimate users or of legitimate features. Each abuse case becomes a negative test (`29-SECURITY-TESTING.md`).
+
+| ID | Actor | Abuse | THR | Prevention / detection |
+|---|---|---|---|---|
+| ABUSE-01 | Admin (PER-08) | Enables verbose/debug logging on intake to capture request details | THR-035, THR-016 | Trust-path code contains no request-logging capability; log level cannot include fields outside schema; config digest change visible to sources |
+| ABUSE-02 | Admin | Adds themself or management to a channel roster | THR-046 | Roster changes require member signatures; published; sources see roster |
+| ABUSE-03 | Admin | Restores an old backup to "recover" deleted cases | THR-017 | Keys not in backups; restored ciphertext undecryptable after crypto-erasure |
+| ABUSE-04 | Management (PER-10) | Requests statistics "by department and month" to find the reporter | THR-039, THR-120 | Fixed catalog; department dimension disallowed; k-thresholds |
+| ABUSE-05 | Management | Orders SOC to correlate Tor usage with report received dates | THR-002, THR-011 | Received date is day-only; guidance to sources; audit of staff actions; legal (EU Art 19 retaliation) — technical control partial |
+| ABUSE-06 | Recipient (PER-03) | Exports originals to personal email | THR-041, THR-029 | Dual approval for originals; export audit |
+| ABUSE-07 | Recipient | Sends a reply containing a unique detail to detect re-leak | THR-105 | Second member sees replies; audit review; source guidance |
+| ABUSE-08 | Investigator | Interviews only the few people who knew a fact, exposing the source | THR-125 | Source-exposure checklist task before interviews |
+| ABUSE-09 | Custodian | Unseals identity out of curiosity | THR-111 | Dual approval; source notice; audit review |
+| ABUSE-10 | Security team (PER-09) | Adds source-sensitive fields to SIEM exporter | THR-016 | C-26 schema fixed in trust-path code; exporter cannot add fields |
+| ABUSE-11 | Source (ADV-29) | Floods with fabricated reports against a rival | THR-033, THR-122 | PoW, quotas; triage; SPAM state; no automatic action on accused |
+| ABUSE-12 | Source | Submits malware to compromise investigators | THR-023 | ADR-012 containment |
+| ABUSE-13 | Vendor support (C-36) | Requests full logs/HAR from customer for "debugging" | THR-027, THR-124 | Support bundles generated by `candorctl` with fixed scrub schema; support never requests source-side data |
+| ABUSE-14 | Fleet Manager operator | Correlates instance IDs with customer contracts to map onion addresses | THR-113, THR-027 | Fleet Manager never receives onion address in cleartext (only salted hash for health) |
+| ABUSE-15 | Accused executive | Changes retention schedule to dispose of case early | THR-020 | Retention changes DANGEROUS (dual approval, not by accused per COI), legal hold, audit |
+| ABUSE-16 | Recipient | Uses break-glass to open a case they are excluded from | THR-020 | Break-glass requires dual authorization, excludes COI-flagged users, triggers post-hoc independent review |
+
+## 12. Component compromise analysis
+
+Assumption for every row: **the component is completely compromised** (attacker has full control of code, memory and storage of that component, and its credentials), and all other components are intact unless stated. Recovery procedures are executed per `31-INCIDENT-RESPONSE.md`.
+
+### 12.1 Standard recovery primitives
+
+| ID | Primitive |
+|---|---|
+| RP-A | **Rebuild**: wipe or replace hardware/VM; reinstall from TUF-verified packages; restore only data (never binaries/config scripts) from backups; run self-test and Secret Placement Manifest check (ADR-028). |
+| RP-B | **Epoch rotation**: channel members publish new epoch keys immediately; mark compromised epochs revoked in key directory; destroy compromised epoch private keys after importing pending envelopes. |
+| RP-C | **Channel identity rotation**: new channel identity key generated on a member's Desk, cross-signed by roster quorum (and old key if not compromised); transparency-log entry; sources see "channel keys changed on YYYY-MM-DD" notice. |
+| RP-D | **Member revocation**: revoke staff device/keys in key directory; rotate case keys of affected cases for future content; re-wrap to remaining members; review CASE audit for that member. |
+| RP-E | **Onion rotation**: activate pre-generated standby onion (separately keyed); publish signed statement on C-37, in Source App config, and in key directory; old address shows nothing (key assumed attacker-held) — warn via all out-of-band channels. |
+| RP-F | **Infrastructure credential rotation**: DB roles, mTLS certs, SSH/FIDO2 registrations, at-rest keys, backup encryption keys, API tokens. |
+| RP-G | **Notification**: internal IR, regulators where required (e.g., GDPR Art 33 within 72 h — B-CO-09), affected staff; source-facing notice on landing page stating facts and recommended actions (no speculation). |
+| RP-H | **Supply-chain response**: freeze updates (TUF targets with short expiry left to lapse / signed freeze), rotate compromised signing keys via TUF root rotation, rebuild from last verified commit, publish advisory and transparency-log annotations. |
+| RP-I | **Audit verification**: verify hash chain against external witness checkpoints; identify tampering window. |
+
+### 12.2 Per-component analysis
+
+| Component | What happens if completely compromised | What the attacker learns | Blast radius | Detection | Recovery |
+|---|---|---|---|---|---|
+| **C-01 Source device + OS** | Attacker controls everything the source does: keystrokes, screen, files, network. | Source identity, passphrase, all plaintext the source types/uploads/reads, Candor usage. | That source (all their reports). Not other sources. | Not by Candor. Source-side only (AV, behavior). | Source guidance: stop using device, new device/Tails, new passphrase/new report; the old mailbox should be considered read by adversary (close mailbox from clean device). |
+| **C-02 Source browser (Tor Browser)** | Malicious browser/extension or exploited TB: can leak IP, plaintext, passphrase. | As C-01 for browsing session. | That source. | Candor cannot detect (no fingerprinting). | As C-01; guidance to reinstall TB from verified source or use Tails. |
+| **Anonymity client (tor in Tor Browser; Arti in C-03)** | Bypass Tor, reveal IP to observers, route through attacker relays. | Source IP (to network observer), visited onion. | That source. | Not by server (by design no IP check). | Reinstall verified client; reconsider exposure; new passphrase if session exposed. |
+| **C-03 Candor Source App** | Malicious build or device-level compromise of app: capture plaintext/passphrase, encrypt to attacker keys, exfiltrate outside Tor. | Everything the app handles for affected users. If malicious *release*: all app users after update. | Individual (device-level) or all app users (release-level, THR-025). | Release-level: reproducibility mismatch, transparency-log monitors, independent rebuilds. | RP-H; revoke release; in-app kill switch via TUF; advisory to sources via C-37 and landing page. |
+| **C-04 Tor network** (large fraction of relays malicious) | Correlation, guard discovery, DoS. | Source IPs of those observed at both ends; service location. | Potentially many sources over time; service location. | Tor Project bad-relay detection; not by Candor. | RP-E if service location exposed; rely on Tor Project remediation; consider moving service host. |
+| **C-05 Intake Gateway** | Attacker controls tor daemon and onion key; can impersonate intake, observe circuits, drop traffic, run own web service. | Onion private key; timing and sizes of requests; circuit IDs; (with C-06 replacement) Tier W plaintext of new submissions. **Never** source IPs. | All future Tier W submissions to this instance until detected; Tier V clients refuse forged keys. | Self-test integrity mismatch, sealer attestation failure seen by Desk, C-25 file-integrity alerts, unexpected egress. | RP-A, RP-E (onion key assumed stolen), RP-B, RP-F, RP-G; notice to sources advising any Tier W submissions in window may have been read. |
+| **C-06 Source Web Service (frontend + source API)** | Serve modified HTML (THR-007), exploit attempts (THR-008), forged roster/epoch keys to Tier W clients, capture passphrases at login (Tier W), observe Tier W plaintext as it streams to C-07. | Tier W plaintext and passphrases during window; source session activity (in RAM); no IP. Tier V: ciphertext only + sizes/timing. | All Tier W sources using the instance during compromise; Tier V: metadata only. | Published source-UI digest mismatch (checked by C-25 onion probe and Desk), sealer attestation, WEBCAT failure reports by Tier V users, integrity monitoring. | RP-A, RP-B (rotate epochs to be safe), RP-F, RP-G; recommend Tier W sources who logged in during window close mailbox and resubmit with new passphrase. |
+| **C-07 Intake Sealer (encryption service)** | Read all Tier W plaintext and derived source keys at login; encrypt to attacker keys; skip encryption; weaken randomness. | Tier W content and source private keys of sources logging in during window (can decrypt their replies). | Tier W sources during window. Tier V unaffected (sealer handles ciphertext passthrough only). | Desk verifies envelope structure and signature by sealer key registered in key directory; KAT self-tests; attestation. | RP-A; rotate sealer signing key; RP-B; RP-G; sources notified as C-06. |
+| **C-08 Intake Store (intake DB)** | Read/modify/delete sealed envelopes, source account records, pending replies. | Ciphertext; padded sizes; received days; channel IDs; number of source accounts; auth verifiers (offline guessing infeasible at ≈129 bits). | Availability/integrity of pending submissions; no content. | Batch sequence gaps/duplicates at Desk (THR-101); DB integrity checks. | Restore from last good state if needed; RP-A; RP-F; sources whose pending envelopes were dropped cannot be identified — landing-page notice with date range. |
+| **C-09 Intake Relay** | Withhold/drop/replay batches; push forged replies (cannot sign as staff); attempt to connect into intake (it initiates by design). Pivot into Z-CORE. | Ciphertext batches; sequence numbers; timing of pulls. | Availability; Z-CORE pivot attempt. | Sequence gap alarms; relay signature checks; Z-CORE network monitoring. | RP-A; RP-F (relay mTLS certs); verify Z-CORE hosts for lateral movement. |
+| **C-10 Case Service (API)** | Serve wrong data to Desk, withhold cases, modify allow-listed metadata, tamper workflow state, attempt to trick Desk into wrapping keys to attacker (blocked by Desk verification of roster), issue forged notifications. | Allow-listed case metadata for all tenants; staff identities and activity; no content. | Workflow integrity/availability; metadata of all cases. | Desk-side consistency checks (signed case objects, roster verification), audit chain mismatch vs witness, SLA anomalies. | RP-A, RP-F, RP-I; reconcile case state from Desk-signed objects; RP-G if metadata exfiltrated. |
+| **C-11 candor-core crypto library** (malicious or flawed) | Everywhere it runs: weak keys, key exfiltration, plaintext leakage. | Potentially all content protected by affected versions. | All instances running the version; long-term exposure for stored ciphertext. | KATs, differential testing vs second implementation, formal verification, audits, reproducibility. | RP-H; emergency release; re-encryption campaign (Desk re-wraps case keys and re-encrypts objects under new keys); advisory. |
+| **C-12 Case Database** | Read/modify/delete rows; tamper metadata; delete cases. | Allow-listed metadata, wrapped keys (useless without member private keys), ciphertext objects, audit if co-located. | Availability/integrity; metadata disclosure. | Checksums, Desk object signatures, audit witness mismatch. | Restore from backup; RP-F; RP-I. |
+| **C-13 Case Blob Store (object storage)** | Read/delete/replace ciphertext blobs. | Ciphertext and padded sizes only. | Availability/integrity of evidence. | AEAD failure on open; hash mismatch vs record. | Restore blobs from backup; RP-F. |
+| **C-14 Key Directory & Transparency Log** | Equivocate, add hidden keys, freeze, rollback. | Nothing secret (public data). | All Tier W sources (cannot verify); Tier V only if monitors absent (THR-118). | Consistency proofs, gossip via C-37/Desk/monitors, Desk verification of roster signatures. | Publish signed incident annotation; members re-sign roster; RP-C if channel key misuse suspected. |
+| **C-15 Candor Desk** (on one endpoint; or malicious release) | Endpoint: decrypt all cases of that member, sign as member, approve exports, alter case content. Release: all members. | Endpoint: plaintext of member's cases + their channels' pending imports (epoch keys). Release: everything recipients see. | One member's ACL, or everything (release). | Anomalous CASE audit patterns reviewed by independent role; release transparency. | RP-D for member; RP-B; RP-H for release; review exports in window; RP-G. |
+| **C-16 Recipient workstation OS** (including investigation workstations) | As C-15 endpoint compromise, plus keystroke/screen capture of token PIN; cloud sync exfil. | As C-15 endpoint. | Member's ACL. | EDR (customer), Desk integrity checks, anomaly review. | Reimage; RP-D; new hardware token; RP-B. |
+| **C-17 Evidence Viewer (malware-analysis / containment VM)** | Hostile file controls the disposable VM; can alter derivative output for that file; attempts escape. | That single file's plaintext (already in VM). | One file (per-VM disposability); escape → C-16 compromise. | Output verification in second VM; VM crash telemetry local; hypervisor alerts. | Destroy VM (automatic); if escape suspected treat as C-16 compromise; patch viewer image. |
+| **C-18 Air-gapped Viewing Station** | Attacker with physical/ supply access controls station. | All evidence viewed on it. | Cases viewed on station. | Physical tamper seals; periodic re-imaging with verified media. | Reimage from verified media; review derivatives exported during window. |
+| **C-19 Admin Console / candorctl** (malicious build or session) | Issue admin actions with admin credentials; propose DANGEROUS config (needs second approver). | Infrastructure state; no content. | Infrastructure; availability. | SECURITY audit; dual approval notifications. | RP-F; revert config from signed baseline; RP-I. |
+| **C-20 Admin workstation** | Stolen admin credentials, SSH agent hijack; pivot to servers. | As ADV-05. | Servers administered by that admin (not content). | Unusual admin actions; FIDO2 touch requirement limits silent use. | Reimage; re-enroll FIDO2; RP-F; review SECURITY audit; treat servers as possibly compromised (RP-A as indicated). |
+| **C-21 Authentication Service (auth provider)** | Issue tokens for any staff user; bypass MFA. | Staff metadata. **Not** content: case keys require member hardware tokens on Desk. | Server-side authorization (metadata, workflow actions); cannot decrypt. | Token audience/issuer checks; Desk requires hardware-bound key proof per sensitive action. | RP-A; rotate token signing keys; invalidate sessions; RP-F. |
+| **External IdP (EE OIDC/SAML)** | Assert any staff identity to C-21. | Staff directory. | As C-21 (server access), not content. | IdP logs; hardware-key binding mismatch. | Disable federation; fall back to local WebAuthn; re-establish trust. |
+| **C-22 Authorization Engine** | Grant arbitrary server-side access. | Metadata across cases/tenants. | Metadata; workflow. Content still requires keys. | Policy test suite at startup; audit anomalies. | RP-A; re-verify policy bundle signatures. |
+| **C-23 Notification Service** | Send misleading notifications; learn notification timing. | Staff contact addresses; that "something needs attention" (hourly). | Phishing staff; minimal metadata. | Staff reports; mail logs. | RP-A; RP-F (SMTP creds); warn staff. |
+| **C-24 Audit Log Service (logging)** | Drop, alter or fabricate events; read staff activity. | Staff actions (pseudonymous case IDs). No source-sensitive data. | Accountability loss for tampering window. | External witness checkpoint mismatch (RP-I). | RP-I; RP-A; restore from witnessed checkpoints; annotate gap. |
+| **Host logging (journald/syslog)** | Read/alter system logs. | System events only (no request logs exist). | Forensics degraded. | Log forwarding integrity. | RP-A. |
+| **C-25 Health/Self-test Agent + Monitor host (monitoring)** | Report false health; probe intake metrics endpoint; attempt pivot. | Bucketed counters, host health. | Detection blinded; pivot limited to metrics port. | Cross-check with Desk-side sequence monitoring; external onion probe from second vantage. | RP-A; re-verify self-test attestations. |
+| **C-26 SIEM export gateway / customer SIEM** | Read allow-listed events; inject false events; (customer SIEM) correlate with corporate data. | SECURITY/SYSTEM events, bucketed counters. No source data. | Staff activity visibility to SOC; no source data. | Schema validation at gateway. | RP-A; RP-F. |
+| **C-27 Backup Agent + Store** | Read/delete/alter backups; restore malicious data. | Ciphertext, allow-listed metadata, config (excluding keys). | Recoverability; metadata. | Signed manifests; restore tests. | Rebuild backup chain; verify manifests; RP-F (backup keys). |
+| **C-28 Organization Recovery Quorum** (≥ k shares) | Reconstruct quorum private key. | All case keys wrapped to quorum (all cases, if enabled). | Every case of the tenant. | Offline ceremony logs; share-holder attestations; sources see escrow status. | Generate new quorum key; re-wrap all cases (Desk campaign); revoke old; RP-G; publish in key directory. |
+| **C-29 HSM / PKCS#11 / TPM** | Use/extract keys it protects (at-rest keys, onion key sealing, release keys if HSM-backed). | Infrastructure keys; onion key (if sealed by that TPM). | Host at-rest data; onion impersonation. | Vendor attestation; anomaly in key usage logs. | Replace device; RP-F; RP-E if onion key sealed there. |
+| **KMS (at-rest key management: LUKS/TPM, DB TDE, cloud KMS in PRIVATE-CLOUD)** | Decrypt storage media. | Only what is on media: ciphertext and allow-listed metadata (content keys are not at-rest keys — ADR-008). | Metadata. | KMS audit logs. | RP-F; re-encrypt volumes. |
+| **Reverse proxy (staff path only)** | Intercept staff API traffic (mTLS terminates here in EE-HA). **There is no reverse proxy on the source path** (onion → Unix socket → C-06). | Staff tokens, allow-listed metadata in transit; case objects are E2E ciphertext. | Staff session hijack (mitigated by token binding). | Certificate pinning in Desk; anomalies. | RP-A; RP-F; invalidate sessions. |
+| **Operator network (Z-CORE/Z-ADM LAN, firewalls)** | MITM internal traffic; bypass segmentation. | mTLS-protected metadata; ciphertext. | Lateral movement. | mTLS failures; NIDS. | Re-segment; RP-F. |
+| **DNS (operator and public)** | Redirect C-37/mirrors/staff endpoints; intake uses no DNS. | Who resolves C-37 (visitor metadata at resolver). | Phishing of onion address via C-37 domain hijack (THR-103). | DNSSEC, CT monitoring, signed onion statements. | Restore DNS; publish incident; RP-E only if onion key also affected. |
+| **Time source (NTP/NTS)** | Skew clocks. | — | SLA errors, epoch validity edge cases, audit ordering. | Multi-source disagreement alarms. | Re-sync; review epoch/SLA decisions in window. |
+| **C-30 Source repository & review** | Insert malicious commits; rewrite history. | Source code (public anyway). | All future releases if undetected. | Signed commits, two-person review, reproducible release diffs. | RP-H; audit history from signed mirrors. |
+| **C-31 CI + builders (build runner)** | Produce malicious artifacts from one builder. | CI secrets (short-lived). | None if other builder independent (outputs mismatch). | Reproducibility mismatch blocks signing. | Rebuild builder from scratch; RP-H if any artifact signed. |
+| **C-32 Release signing + TUF + transparency log** (threshold of keys) | Sign malicious updates. | — | All instances. | Transparency monitors; reproducibility checks by third parties. | RP-H (root rotation with offline keys); advisory; forensic comparison. |
+| **C-33 Package/update mirror (package repo, update server)** | Serve stale/withheld/malicious artifacts; observe update fetches. | Fetch timing (over tor for intake; opaque for others). | DoS/freeze only (signatures enforced; update infra separate from signing, REQ-H-49). | TUF expiry/freeze detection. | Switch mirror; rebuild mirror. |
+| **C-34 Enterprise Fleet Manager (enterprise mgmt server)** | Read fleet status; attempt config pushes. | Opaque instance IDs, versions, health; no onion addresses in cleartext, no content, no keys. | Non-trust-path config proposals (require local approval). | Local approval prompts; audit. | Disconnect fleet; rotate fleet credentials; review applied changes. |
+| **C-35 Licensing service (licensing infra)** | Issue/revoke licenses. | Customer contract data; no instance identity required (offline files). | EE module availability only (PRD-004). | License validation errors. | Re-issue licenses; no security impact on trust path. |
+| **C-36 Vendor support infrastructure** | Read support tickets and bundles. | Scrubbed bundles (versions, config classes, errors); customer contact info. | Customer metadata; social-engineering material. | Vendor security monitoring. | Notify customers; rotate any credentials inadvertently shared; review bundle scrub schema. |
+| **C-37 Clearnet Information Site** | Replace onion address (phishing), inject scripts, log visitors. | Visitor IPs of the info site. | Sources directed to fake portal (Tier W at risk; Tier V verifies channel keys). | Signed onion statement mismatch detected by Source App/monitors; external integrity monitoring. | Restore site; publish signed notice; RP-E not needed unless onion key affected. |
+| **C-38 Confidential Clearnet Intake** | Read submissions in transit (TLS terminated here), log IPs. | CONFIDENTIAL sources' IPs and plaintext. | C-38 users during window. | Integrity monitoring. | RP-A, RP-B for channels reachable via C-38, RP-G incl. notice to C-38 users. |
+| **C-39 Hypervisor** | Read guest memory/disks, snapshot, inject code. | Everything on guests: Tier W plaintext in C-07, onion key, at-rest keys in memory. | All VMs on host (CE-SINGLE: intake and core together). | Measured boot/attestation; unusual snapshot activity. | Treat all guests as compromised: RP-A on new hardware, RP-E, RP-B, RP-F, RP-G. |
+| **C-39 Physical server / storage hardware** | Firmware implants, DMA, cold boot. | As hypervisor. | All data processed on that server. | Measured boot mismatch; tamper seals. | Replace hardware; as hypervisor. |
+| **C-40 Integration Connectors** | Leak Export Packages already sent; inject data into external systems. | Export Package content (what humans exported). | Exported material only. | Connector audit. | Revoke connector credentials; notify recipients of packages. |
+| **Mail relay / chat provider (notification sink)** | Read notifications. | "Action requires attention" + instance label, hourly timing. | Negligible. | — | Rotate SMTP creds. |
+
+## 13. Requirements (threat-model obligations)
+
+These rows state obligations that keep this threat model effective and traceable. Mitigation requirements themselves are owned by the documents referenced in §9 (prefixes per DECISIONS §3). Because DECISIONS §3 assigns this document only `THR-`/`ADV-`, obligations use the reserved range **THR-900..THR-999**, which SHALL never be used for threats (see Open Issues OI-02).
+
+| ID | Requirement | Evidence | Threats | Component | Verification |
+|---|---|---|---|---|---|
+| THR-900 | This threat model SHALL be reviewed and re-issued at every minor release, and within 30 days of any new ADR, new component, Candor security incident, or publication of a relevant attack (e.g., new WF/correlation result). | INC-35; B-AN-57; DECISIONS §6 | THR-003; THR-024 | C-30 | INSP: release checklist item; version history of this file |
+| THR-901 | Every threat THR-001..THR-048 and THR-100..THR-125 SHALL map to ≥ 1 mitigating requirement and ≥ 1 verification in `39-REQUIREMENTS-TRACEABILITY.md`; unmapped threats SHALL block release. | DECISIONS §1 | THR-001..THR-048; THR-100..THR-125 | C-30 | TST: traceability parser job `thr-coverage` fails on unmapped THR IDs |
+| THR-902 | Every component in DECISIONS §4 SHALL have a compromise-analysis row in §12; adding a component without a row SHALL block the ADR. | ADR-028; B-SD-22 | THR-014; THR-035 | C-30 | TST: parser compares §12 component IDs with DECISIONS §4 |
+| THR-903 | The malicious-server test harness (ADR-027) SHALL implement the capabilities of ADV-04 and ADV-05 against C-03 and C-15: altered HTML/bundles, forged rosters and epoch keys, replayed/dropped/reordered envelopes and replies, path-injection names, oversized fields. | ADR-027; B-SD-28; B-SD-33; B-SD-35; INC-62; INC-66 | THR-007; THR-046; THR-101; THR-102 | C-03; C-15 | TST: harness suite in `29` covers each listed capability |
+| THR-904 | The cryptographic protocol models (Tamarin/ProVerif) SHALL include adversary capabilities of ADV-04 (intake/core control), ADV-13 (network), and compromise of one case member, and SHALL prove secrecy of envelope content (Tier V) and authenticity of roster changes. | ADR-006; B-SD-38; B-SD-39; INC-63 | THR-012; THR-046; THR-102 | C-11 | AUD: formal-model review before 1.0 |
+| THR-905 | Attack trees TREE-1..TREE-7 SHALL be exercised by an independent red team before 1.0 and annually thereafter, with results feeding residual ratings. | B-GL-19; B-SD-40 | THR-018; THR-019; THR-023; THR-025 | C-05; C-10; C-15 | AUD: red-team scope in `37` |
+| THR-906 | Every abuse case ABUSE-01..ABUSE-16 SHALL have an automated negative test or, where not automatable, a documented procedural control with an inspection record. | INC-22; INC-68; INC-70 | THR-016; THR-020; THR-039; THR-046 | C-10; C-15; C-19 | TST: negative-test IDs listed in `29`; INSP: procedure records |
+| THR-907 | Each recovery primitive RP-A..RP-I and each §12 recovery procedure SHALL be exercised in a tabletop exercise at least annually, and RP-A, RP-B, RP-E in a live drill on a staging instance before 1.0. | INC-55; INC-58 | THR-014; THR-044; THR-042 | C-05; C-15; C-27 | DEMO: drill reports (`31`) |
+| THR-908 | A plain-language "What Candor protects against — and what it does not" statement derived from §6 residual risks SHALL be published on the onion landing page and C-37, and reviewed against this document at every release. | DECISIONS §0; INC-12 | THR-040 | C-06; C-37 | INSP: release review; TST: page presence |
+| THR-909 | Deployments SHALL NOT be declared production-ready unless at least two independent parties are registered as transparency-log monitors for release and key-directory logs, and Candor Desk and the Source App gossip signed tree heads they observe. | INC-14; INC-15; B-CR-42 | THR-118; THR-025; THR-046; THR-102 | C-14; C-32; C-03; C-15 | DEMO: monitor registry; TST: gossip consistency test |
+| THR-910 | Residual risks rated High or Critical in §9 SHALL each be listed in the operator security guide with the operator actions that reduce them (e.g., Tier V for high-risk channels, AIRGAP-RCP). | DECISIONS §0 | THR-003; THR-007; THR-014; THR-041 | C-19 | INSP: operator guide review |
+| THR-911 | Operators SHALL be able to configure a channel to **require Tier V** (Tier W submissions refused with guidance), and the admin console SHALL recommend this for channels designated high-risk. | ADR-004; INC-01 | THR-007; THR-014; THR-026 | C-06; C-19 | TST: channel-policy test rejects Tier W submissions |
+| THR-912 | For the HIGH timing profile, C-09 SHALL import envelopes into Z-CORE once per UTC day at a uniformly random time, so that import timing carries no information finer than the day. | ADR-010; INC-16; B-AN-21 | THR-011 | C-09 | TST: scheduler distribution test |
+
+## 14. Residual risks and limitations
+
+| # | Residual risk | Rating | Why it remains | Honest statement to users |
+|---|---|---|---|---|
+| R-01 | Source identified by content, knowledge, style, watermarks | High | Inherent in disclosure | "What you write and upload can identify you. Candor cannot remove that." |
+| R-02 | Source identified via employer/ISP observation of Tor use + timing | High (if guidance ignored) | Tor use is observable (THR-002) | "Do not use your work device or network." |
+| R-03 | Tier W plaintext exposure to a live-compromised or compelled intake | High | ADR-004 design limit | Tier W statement; Tier V recommended |
+| R-04 | Global/end-to-end network adversary correlation | High for targeted sources | Out of design envelope (NG-03) | "Tor does not protect against an adversary who can watch both ends." |
+| R-05 | Authorized recipient discloses or retaliates | Medium–High | Authorized access cannot be cryptographically constrained | Oversight, audit, independent channels |
+| R-06 | Recipient endpoint compromise | Medium | Endpoints are complex | Hardware tokens, containment, AIRGAP-RCP |
+| R-07 | Coercion of multiple custodians/quorum holders/staff | Medium | Human factors | Multi-party controls; visible escrow status |
+| R-08 | Transparency without monitors | Medium | Ecosystem dependency | THR-909 gating |
+| R-09 | Investigation actions reveal the source | Medium–High | Process, not technology | Investigator guidance |
+| R-10 | Hypervisor/physical compromise of intake host | Medium | Substrate trust | Dedicated hardware, measured boot |
+| R-11 | Zero-day in Tor Browser layout engine at Safest | Low–Medium | Third-party software | Tails, patch promptly |
+
+## 15. Open issues
+
+| # | Issue | Proposed resolution |
+|---|---|---|
+| OI-01 | ASM identifiers: this document uses descriptive tags `[A:…]`; `40-SECURITY-ASSUMPTIONS.md` must assign ASM IDs and back-reference. | Owner of `40` to map each tag to an ASM ID; this document to be updated in v1.1. |
+| OI-02 | **Open Issue for ADR revision:** DECISIONS §3 gives this document the `THR-`/`ADV-` prefixes only; threat-model obligations are therefore placed in THR-900..999. Mixing threats and requirements in one namespace may confuse the traceability parser. | Propose a new prefix `TM-` for threat-model obligations via an ADR amendment; until then THR-9xx are requirements, never threats. |
+| OI-03 | **Open Issue for ADR revision:** DECISIONS does not fix the staff transport (internal mTLS vs restricted-discovery onion) or sealer remote attestation to Desk; this model assumes both are available (§5.2 TB-08, §12 C-06/C-07 detection). | `06-SYSTEM-ARCHITECTURE.md` to decide; recommend an ADR "Staff access path and sealer attestation". |
+| OI-04 | **Open Issue for ADR revision:** ADR-009 fixes relay pull at 15±10 min and ADR-010 records batch time; combined, a party holding intake + core records can bound arrival to ≈ 25 min. THR-912 adds a daily-random import mode for HIGH profile. | Amend ADR-010 to state that import timestamps persisted in Z-CORE are day-granular and to adopt the HIGH-profile daily import. |
+| OI-05 | Tier W HTML-only capture (TREE-4 4.1.1) cannot be prevented even at Safest; only Tier V addresses it. | THR-911 lets operators require Tier V per channel; product decision for defaults in `01`. |
+| OI-06 | Confidential VMs (SEV-SNP/TDX) for PRIVATE-CLOUD are listed as optional hardening; their attestation and side-channel record needs evaluation. | `17-INFRASTRUCTURE.md` to evaluate. |
+| OI-07 | Research gaps flagged UNVERIFIED in R4 (Arti onion-service production status, vanguards add-on maintenance, current Tor Metrics) affect residual ratings for THR-003/005. | Re-rate after R4 follow-up (R4 §8). |
