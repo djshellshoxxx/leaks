@@ -360,14 +360,14 @@ Command: `candorctl support-bundle create --preview --out bundle.tar.age`. For C
 
 | Rule | Specification |
 |---|---|
-| Allow-list content | versions, SBOM hash, effective **non-secret** config (with secrets replaced by `<redacted:sha256-8>`), `candorctl check` output, self-test results (already privacy-safe), SYSTEM-class logs from H-CORE/H-MON (last 7 days), service states, resource bands |
+| Allow-list content | versions, SBOM hash, Platform Manifest comparison result, configuration as `{key, CFG class, value_hash}` except enumerated and boolean values, which are included in clear (RVW-B-18); **no** channel names, role labels, COI maps, SLA/jurisdiction packs, holiday calendars, timezones or display labels; `candorctl check` output (rule IDs and classes only); self-test results (already privacy-safe); SYSTEM-class logs from H-CORE/H-MON (last 7 days) **excluding all `sys.relay_*` and import events** (RVW-B-06); service states, resource bands |
 | Never included | DB contents or dumps; blobs; C-08 data; SOURCE-SENSITIVE counters; case data; onion keys or any manifest secret; tor state; memory or core dumps (none exist); HAR files; screenshots; Desk local stores; exported files; tokens or cookies |
-| Transformations | Onion addresses → `onion-<HMAC8>`. IPs → role labels (`intake.relay`, …) or `ip-<HMAC8>`. Staff usernames → `user-<HMAC8>`. Case IDs → removed. Hostnames → role labels. HMAC key: random per bundle, kept locally (`bundle.key`) so the operator can map values if support needs them, and never included |
-| Time precision | Intake-host log timestamps truncated to the hour; others to the minute |
+| Transformations | Onion addresses → `onion-<HMAC8>`. IPs → role labels (`intake.relay`, …) or `ip-<HMAC8>`. Staff usernames → **removed** (replaced by the Candor role name, e.g. `SYS_ADMIN`; no per-person pseudonyms, RVW-B-18). Case IDs → removed. Hostnames → role labels. HMAC key: random per bundle, kept locally (`bundle.key`) so the operator can map values if support needs them, never included, and deleted after 30 days |
+| Time precision | All timestamps truncated to the hour (RVW-B-06); intake-host entries additionally only as hour buckets without ordering within the hour |
 | Canary verification | Before finalizing, the tool scans the bundle for manifest secret patterns, JWT/cookie/token patterns, onion-address regexes, IPv4/IPv6, email addresses and known canary strings planted at install. Any hit aborts creation (REQ-H-56) |
 | Operator preview | Full-text preview; the operator confirms by FIDO2 touch; bundle creation is a SECURITY event |
-| Encryption | age/HPKE to the support recipient key (vendor or internal), fingerprint shown for confirmation |
-| Transport & retention | Uploaded by the operator (never automatically). Vendor retention ≤ 30 days, deletion confirmed (EE contract) |
+| Encryption | age/HPKE to the support recipient key (vendor or internal), fingerprint shown for confirmation. Desk bundles from members of INDEPENDENT channels are encrypted only to the vendor key or an OVERSIGHT-designated key, never to corporate helpdesk (RVW-C-13) |
+| Transport & retention | Uploaded by the operator (never automatically). Vendor retention ≤ 30 days, deletion confirmed (EE contract); `03-PRIVACY-ANONYMITY.md` §10.3 is to be aligned to 30 days (cross-document request) |
 | Source side | Candor never requests diagnostics from sources (REQ-H-56) |
 
 ## 9. Routine maintenance calendar

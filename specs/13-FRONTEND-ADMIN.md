@@ -1,5 +1,5 @@
 # 13 — Administration, Security Operations and Enterprise Management User Interfaces
-Status: Draft v1.0 · Edition applicability: ADMIN UI and SECURITY OPERATIONS UI: both (CE and EE); ENTERPRISE MANAGEMENT UI: EE only · Owner: Platform Experience team (with Security Architecture, Operations and Accessibility review)
+Status: Draft v1.1 (revision round 2: ADR-034..ADR-046) · Edition applicability: ADMIN UI and SECURITY OPERATIONS UI: both (CE and EE); ENTERPRISE MANAGEMENT UI: EE only · Owner: Platform Experience team (with Security Architecture, Operations and Accessibility review)
 
 ## 1. Purpose and scope
 
@@ -27,7 +27,9 @@ This implements protections P-09 (admin has no content access), P-13 (update int
 | Document | Dependency |
 |---|---|
 | `DECISIONS.md` | ADR-013 (Recovery Quorum = DANGEROUS), ADR-015 (admin ≠ case access), ADR-016 (audit classes), ADR-017, ADR-020, ADR-021 (multi-tenancy), ADR-022 (TUF, no targeted updates), ADR-023 (telemetry), ADR-024 (profiles), ADR-028 (Secret Placement Manifest), ADR-029 (audiences), ADR-030 (member epoch keys, role labels), ADR-032 (onion key on ≤ 2 HA hosts) |
-| `15-AUTHENTICATION-AUTHORIZATION.md` | Roles (SYS_ADMIN, USER_ADMIN, SECURITY_OFFICER, AUDITOR, OVERSIGHT, CHANNEL_OWNER, TENANT_ADMIN, RECOVERY_TRUSTEE), admin sessions (idle 10 min, absolute 2 h), step-up transaction confirmation (§4.7), dual-control list DC-01..DC-14 (§5.8) |
+| `DECISIONS.md` revision ADRs | ADR-035 (operator statement, External Watchers, independent approval of intake captures, INCIDENT_NOTICE), ADR-036 (CIK holders, time-locked roster changes, certified role labels, weekly publication slot), ADR-037 (Triage Set), ADR-038 (constant-schedule notifications, fixed import schedule, coarse daily health band), ADR-040 (Platform Manifest, security floors), ADR-043 (independent-custody devices), ADR-044 (suspend-only automation, ≥ 2 authenticators, GOV recovery default, EKV DR), ADR-045 (independent approvers, Fleet limits, small-organisation mode), ADR-046 §5–§6 (metrics regime in 24 §TEL; SAFE/ADVANCED/DANGEROUS labels only) |
+| `15-AUTHENTICATION-AUTHORIZATION.md` | Roles (SYS_ADMIN, USER_ADMIN, SECURITY_OFFICER, AUDITOR, OVERSIGHT, CHANNEL_OWNER, TENANT_ADMIN, RECOVERY_TRUSTEE, RECORDS_CUSTODIAN), admin sessions (idle 10 min, absolute 2 h), step-up transaction confirmation (§4.7), dual-control list DC-01..DC-17 (§5.8) |
+| `24-LICENSING-BUSINESS-MODEL.md` §TEL | Single source of truth for aggregate/metrics suppression (ADR-046 §5) |
 | `20-LOGGING-AUDITING.md` | Event classes and schemas, checkpoints, witness, `candorctl audit verify`, anomaly rule AUD-008, SIEM allow-list |
 | `21-ENTERPRISE.md` | Fleet Manager data model (§9.2), command allow-list (§9.3), tenancy rules (§6) |
 | `32-OPERATIONS.md` | CFG configuration classification catalogue (normative list of settings and classes); HUM controls |
@@ -42,12 +44,13 @@ This implements protections P-09 (admin has no content access), P-13 (update int
 | # | Rule |
 |---|---|
 | CR-1 | **No content surfaces.** No screen, export, tooltip, error or search result may contain report text, attachments, identity data, case titles, source answers or per-case metadata beyond pseudonymous IDs where explicitly specified. |
-| CR-2 | **Aggregates are k-suppressed.** Any count derived from reports (submissions, cases by state) is shown only at ≥ monthly granularity for trend views and ≥ daily for operational totals, with cells < `k` suppressed. `k` defaults to 5 for internal ops views and 20 for anything exportable (INC-70, INC-74; THR-039). |
+| CR-2 | **Aggregates follow the single metrics regime** of `24-LICENSING-BUSINESS-MODEL.md` §TEL (ADR-046 §5): k = 10, minimum period one calendar month, complementary suppression, no medians/ratios/percentiles for cells < k, no per-channel metrics for channels with < 3 cases/month. The SOC and admin dashboards show intake state only as **global daily health bands** (ADR-038 §5). No daily or hourly report-derived counts exist in any UI (INC-70, INC-74; THR-039; RVW-B-07, RVW-B-08). |
 | CR-3 | **Bundled UI, no third parties.** ADMIN and SOC UIs are modes of the signed Desk bundle. The EM UI is a server-rendered web app from C-34 with strict CSP (`default-src 'self'`; no third-party origins). There are no analytics or remote fonts (ADR-023). |
 | CR-4 | **Phishing-resistant auth and step-up.** Hardware FIDO2/PIV login (`15` §4.1). Step-up transaction confirmation for every operation in `15` §4.7, where the confirmation dialog shows the operation descriptor in human-readable form before the authenticator touch. |
 | CR-5 | **Audience separation.** ADMIN = `admin-api`; SOC = `admin-api` with SECURITY_OFFICER / AUDITOR scopes; EM UI = the separate C-34 audience. Tokens are never shared across audiences (ADR-029). |
 | CR-6 | **Everything is audited.** Every state-changing action creates a SECURITY-class event (`20`). The UI shows the event ID in the success message. |
-| CR-7 | **Honest state.** Pending approvals, cooling-off timers, failing self-tests and active DANGEROUS settings are shown persistently. They are never collapsed or hidden by default. |
+| CR-7 | **Honest state.** Pending approvals, cooling-off timers, time-locked directory changes, failing self-tests, active DANGEROUS settings, custody exceptions and reduced separation of duties are shown persistently. They are never collapsed or hidden by default. |
+| CR-9 | **Configuration labels.** Only SAFE, ADVANCED and DANGEROUS exist (ADR-046 §6; "WEAKENING" is DANGEROUS). Capabilities for which no setting exists at all are listed as "not available" (§4.5), not as a fourth class. |
 | CR-8 | **Accessibility.** WCAG 2.2 AA, keyboard-complete, screen-reader tested (`26`). Status is never shown by color alone. |
 
 ## 4. ADMIN UI (C-19)
@@ -56,10 +59,13 @@ This implements protections P-09 (admin has no content access), P-13 (update int
 ```
 +----------------------------------------------------------------------------------+
 | Candor Admin — Instance "Acme-EU-1" (CE-HARDENED)   [DANGEROUS: 1 active] [Lock]|
+| REDUCED SEPARATION OF DUTIES — external oversight: Smith & Co (counsel)          |
 +-------------+--------------------------------------------------------------------+
-| Dashboard   |  Self-test: 23 pass · 1 warn · 0 fail      Updates: 1.4.2 current  |
+| Dashboard   |  Self-test: 23 pass · 1 warn · 0 fail      Updates: 1.4.2 (floor 1.4.0) |
 | Users       |  Backups: last OK 2026-09-30 · restore test 2026-08-14             |
 | Channels    |  Pending approvals: 2   Cooling-off: 1 (Recovery Quorum, 51 h)     |
+| Custody     |  Time-locked directory changes: 1 (effective 2026-10-03)           |
+|             |  Operator statement: signed 2026-09-12 · next due 2026-10-12       |
 | Keys & cer. |                                                                    |
 | Config      |  You cannot see reports. Administrators hold no case keys.         |
 | Updates     |                                                                    |
@@ -71,6 +77,7 @@ This implements protections P-09 (admin has no content access), P-13 (update int
 ```
 - A persistent header shows the instance label, deployment profile (ADR-024), a "DANGEROUS: n active" chip (CR-7) and Lock.
 - The dashboard carries a fixed line: "You cannot see reports. Administrators hold no case keys." This sets correct expectations and discourages social-engineering requests ("can you look at report X?").
+- **Small-organisation mode banner (ADR-045; RVW-C-09):** when the instance runs in small-organisation mode (fewer than 4 distinct enrolled persons holding the roles required by `15` §5.1 separation of duties), a persistent, non-dismissable banner reads "REDUCED SEPARATION OF DUTIES — some dual controls are performed with an external party: {external_oversight_label}." Small-organisation mode cannot be activated unless at least one external party (external counsel, board member, statutory auditor or certified ombuds service) is enrolled as OVERSIGHT; the same statement is included in the published operator statement (ADR-035 §2) and shown to sources (`11` S03). Leaving the mode requires DC-09.
 
 ### 4.2 Users & enrollment (USER_ADMIN)
 - **List columns:** display name, `person_ref`, roles, status (`PENDING_ENROLLMENT` / active / deactivated), authenticator class and attestation model (ASM-114), enrolled devices, `last_staff_activity_day` (date only).
@@ -79,9 +86,10 @@ This implements protections P-09 (admin has no content access), P-13 (update int
 | Action | Rule |
 |---|---|
 | Invite | Creates `PENDING_ENROLLMENT`. Enrollment links are delivered out of band (never via a notification containing role or case data). |
-| Approve enrollment | DC-07: 2 USER_ADMINs; attestation check shown (AAGUID, model, firmware against deny-list) |
+| Approve enrollment | DC-07: 2 USER_ADMINs; for accounts joining an INDEPENDENT channel or a Triage Set, the second approver holds an independent role and records that `person_ref` was verified out of band (ADR-036 §2). Attestation check shown (AAGUID, model, firmware against deny-list). Enrollment is incomplete until **≥ 2 hardware authenticators** (primary + stored backup) are registered (ADR-044 §2); the UI shows "1 of 2 authenticators" until then. Two accounts presenting the same authenticator attestation serial are flagged as one person (RVW-C-09) |
 | Assign / remove role | DC-07. The UI **blocks** combinations violating static separation of duties (SYS_ADMIN with any case role on one account; USER_ADMIN = SYS_ADMIN person in CE-HARDENED+) with an explanation |
-| Deactivate | Single USER_ADMIN, immediate (fail-safe). Shows the consequence: "Their case-key wraps remain until re-keying; cases where they were the only key holder: {n}" (ASM-122 warning) |
+| Suspend (was "Deactivate") | Single USER_ADMIN, or SCIM/HR/IdP signal, immediate: sessions revoked, no ciphertext delivery, **keys and wraps intact** (ADR-044 §1). OVERSIGHT is notified content-free. Shows: "Suspension does not remove access to cases. Cases where this person is one of fewer than 2 key holders: {n}." |
+| Delete key wraps | DC-15 (CASE_LEAD or CHANNEL_OWNER + OVERSIGHT), executes ≥ 7 days after approval with a visible countdown and OVERSIGHT notice; blocked if < 2 key holders would remain; not used for source-requested erasure or retention expiry (ADR-044 §1; RVW-C-03) |
 | Reactivate | DC-07 |
 | Revoke device / authenticator | Immediate. Step-up required |
 

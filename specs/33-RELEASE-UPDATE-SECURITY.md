@@ -74,7 +74,7 @@ No per-customer or per-instance build of any trust-path artifact exists (ADR-022
 
 ### 5.1 Builders
 - **Builder A:** project CI on dedicated, hardened, ephemeral build workers (C-31), network egress limited to a pinned internal mirror (28).
-- **Builder B:** operated by a different organisation on different infrastructure (different cloud/hosting provider or on-premises, different administrators, different CI software), selected per 36; for EE/GOV customers an additional **customer rebuilder** may join as Builder C.
+- **Builder B:** operated by a different organisation, **in a different jurisdiction from Builder A** (ADR-040; RVW-A-16), on different infrastructure (different cloud/hosting provider or on-premises, different administrators, different CI software), selected per 36; for EE/GOV customers an additional **customer rebuilder** may join as Builder C.
 - Neither builder holds signing keys; both produce signed **rebuild attestations** (in-toto link/SLSA provenance) with their own builder keys (Ed25519, hardware-backed).
 
 ### 5.2 Reproducibility requirements
@@ -93,7 +93,7 @@ flowchart LR
   H -- no --> X["STOP: investigate (31)"]
   H -- yes --> L["Log hashes + attestations + SBOM (Sigsum)"]
   L --> S["Targets signers (2-of-3) sign after independent local verification"]
-  S --> C["Cooling period (72 h normal / 0–24 h emergency)"]
+  S --> C["Cooling period (≥ 72 h normal / ≥ 2 h emergency, ADR-040)"]
   C --> M{"Monitor / signer veto?"}
   M -- yes --> X
   M -- no --> P["Snapshot + timestamp publish → clients"]
@@ -105,9 +105,9 @@ Each targets signer, before signing, independently verifies on their own worksta
 ### 6.1 Roles
 | Role | Keys (n) | Threshold | Key storage | Metadata expiry | Signs |
 |---|---|---|---|---|---|
-| root | 5 | 3 | Offline hardware tokens/HSM; holders in ≥ 2 organisations and ≥ 2 jurisdictions; no holder has > 1 root key | 365 days (re-signed at ≥ 60 days before expiry) | Role keys and thresholds |
-| targets (top-level) | 3 | 2 | Offline hardware tokens (FIDO2/PIV-class, PIN + touch) on dedicated signing workstations (air-gapped for root; offline for targets) | 90 days | Delegations to product roles; platform-pins |
-| delegated product roles (`server`, `desk`, `source-app`, `web-bundle`, `oci`, `appliance`, `platform-pins`) | 3 | 2 | Same holders as targets or product-specific holders; hardware tokens | 90 days | Artifact hashes, lengths, custom metadata (version, channel, security floor, log proofs) |
+| root | 5 | 3 | Offline hardware tokens/HSM; holders in ≥ 2 organisations and ≥ 3 jurisdictions, no organisation or jurisdiction holding ≥ 3 keys; no holder has > 1 root key (reconciles v1.0 REL-007 with 28 SCM-042) | 365 days (re-signed at ≥ 60 days before expiry) | Role keys and thresholds |
+| targets (top-level) | 3 | 2 | Offline hardware tokens (FIDO2/PIV-class, PIN + touch) on dedicated signing workstations (air-gapped for root; offline for targets); holders in ≥ 2 organisations and ≥ 2 jurisdictions, no organisation or jurisdiction holding 2 keys (ADR-040) | 90 days | Delegations to product roles |
+| delegated product roles (`server`, `desk`, `source-app`, `web-bundle`, `oci`, `appliance`, `platform`) | 3 | 2 | Same holders as targets or product-specific holders with the same organisation/jurisdiction spread; hardware tokens | 90 days | Artifact hashes, lengths, custom metadata (version, channel, security floor, log proofs); `platform`: the Platform Manifest (§4.1) |
 | `ee-modules` | 3 | 2 | Vendor commercial team tokens | 90 days | Only paths under `ee-modules/**`; terminating delegation; cannot sign trust-path paths |
 | snapshot | 1 | 1 | Online HSM on the repository publisher (separate from update mirrors) | 7 days | Versions of all targets metadata |
 | timestamp | 1 | 1 | Online HSM on the repository publisher | 1 day (re-signed every 6 h) | Latest snapshot |
@@ -138,12 +138,18 @@ Platform signatures are never sufficient alone: clients and operators verify TUF
 - **Monitors:** (1) project monitor; (2) ≥ 2 independent monitors (e.g., a civil-society organisation and an academic group, per 36) that (a) watch the log for Candor entries, (b) check each entry corresponds to a public signed tag and a published release note, (c) independently rebuild and compare hashes within the cooling period, (d) publish results and raise a veto (§9.3) on mismatch. Monitor tooling is open source and runnable by any customer.
 - **Anti-split-view:** witnesses cosign only consistent tree heads; monitors compare tree heads with each other daily; clients reject tree heads without sufficient cosignatures (INC-14 targeted-delivery class).
 
+### 7.1 External Watchers and running manifest (ADR-035(1); RVW-A-01, RVW-A-13)
+- Each release publishes the digests of all static source-UI assets, templates and the CSP header string (28 SCM-070), logged with the release.
+- Every intake serves a K35-signed **running manifest** (04 §9.14) naming its release, the hashes of installed trust-path packages and the Platform Manifest hash, re-signed daily.
+- ≥ 2 independent watcher organisations (EE/GOV/MANAGED: ≥ 1 outside the operator's jurisdiction) fetch served assets, CSP headers and the running manifest over Tor as ordinary visitors (16 §15.1) and compare them with this log: a served asset not in the release, a running manifest naming a release below the security floor or not in the log, or a manifest older than 48 h is published as a mismatch and reported to the tenant's OVERSIGHT. Watcher tooling is open source (same repository as monitor tooling, §7).
+- Honest limit: the running manifest is self-reported; outside the Confidential-VM profile a root-level attacker can forge it. Watchers detect non-selective divergence and stale or withheld updates, not a targeted, session-specific modification.
+
 ## 8. Rollback, freeze and mix-and-match protection
 
 | Attack | Protection |
 |---|---|
 | Rollback to older signed version | TUF version monotonicity for all metadata; clients persist last trusted metadata; artifact version must be ≥ installed version unless an operator-initiated, dual-approved downgrade to a version ≥ the **security floor** is performed |
-| Install of vulnerable old version on a new host | `min_secure_version` (security floor) per product in targets custom metadata; installers refuse lower versions |
+| Install or continued operation of a vulnerable version | Signed security floor `{min_secure_version, effective_day}` per product in the Platform Manifest (§4.1); installers refuse lower versions; components refuse to start below the floor after `effective_day`; Fleet Manager and local policy cannot defer past it (ADR-040, ADR-045) |
 | Freeze (serving stale but valid metadata) | Timestamp expiry 1 day; clients alert when metadata cannot be refreshed for > 36 h; Desk and Source App policies §17; server instances raise a SYSTEM alert and show "update status unknown" in admin console |
 | Mix-and-match of artifacts from different releases | Snapshot metadata binds all targets metadata versions |
 | Endless-data / slow retrieval | TUF length limits; per-file size caps; download timeouts |
@@ -166,7 +172,7 @@ Channels are expressed as custom metadata on targets (`channels: ["stable", "lts
 SemVer; each product declares `min_secure_version`; minor releases may include format version N+1 only if N−1 compatibility is kept (04 §13.9).
 
 ### 9.3 Cooling period and veto
-Normal releases: ≥ 72 h between log publication of the release bundle and the timestamp role making it available. During cooling, any targets signer, builder operator or registered monitor may file a **veto** (signed statement to the release list citing a mismatch or concern); a veto holds the release until resolved by a root-holder quorum decision (3-of-5), recorded publicly.
+Normal releases: ≥ 72 h between log publication of the release bundle and the timestamp role making it available. Emergency releases: ≥ 2 h, never less (ADR-040). During cooling, any targets signer, builder operator or registered monitor may file a **veto** (signed statement to the release list citing a mismatch or concern); a veto holds the release until resolved by a root-holder quorum decision (3-of-5), recorded publicly.
 
 ## 10. Emergency update procedure
 

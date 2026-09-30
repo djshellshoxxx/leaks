@@ -139,15 +139,15 @@ Rules:
 | Service | Owns data | Exposes | Consumes | Must never |
 |---|---|---|---|---|
 | `candor-web` (C-06) | nothing persistent; in-RAM sessions | Source Web routes, Source App API | sealer IPC, intake-store IPC | write to disk; hold a DB credential; log request data; parse file content |
-| `candor-sealer` (C-07) | nothing persistent; RAM-only drafts and derived source keys | sealer IPC (Unix SEQPACKET) | channel roster, COI map and Member Epoch Keys (from the signed snapshot) | open a network socket; write files; outlive a request with plaintext in RAM (zeroize) |
-| `candor-intake-store` (C-08) | intake PostgreSQL DB and ciphertext blob directory | intake-store IPC (to web), relay export endpoint (TCP 7443) | — | initiate any outbound connection; hold any private decryption key except the intake routing key (§8.3) |
-| `candor-relay` (C-09) | relay cursor state | none (client only) | relay export endpoint, Case DB | accept inbound connections; transform envelope content |
+| `candor-sealer` (C-07) | nothing persistent; RAM-only drafts (text, identity block, COI ticks), per-session part keys, newly generated passphrases until confirmed, derived source keys (ADR-034) | sealer IPC (Unix SEQPACKET) | channel roster, Triage Set, COI map and Member Epoch Keys (from the verified snapshot) | open a network socket; write files; seal to recipients before Submit is finalized; outlive a session with plaintext in RAM (zeroize) |
+| `candor-intake-store` (C-08) | intake PostgreSQL DB, ciphertext blob directory, tmpfs staging area (ciphertext only) | intake-store IPC (to web), relay export endpoint (TCP 7443) | — | initiate any outbound connection; hold any private decryption key except the intake routing key (§8.2); acknowledge "received" before `fsync` (ADR-046(1)) |
+| `candor-relay` (C-09) | relay cursor state | none (client only) | relay export endpoint, Case DB | accept inbound connections; transform envelope content; import outside a fixed slot (ADR-038(1)) |
 | `candor-case` (C-10, C-22, SLA) | Case DB (C-12), blob store (C-13) | Desk API, Admin API, Export API (EE connectors) | auth, keydir, audit, notify | hold any content-decryption key |
 | `candor-auth` (C-21) | credentials, sessions (Case DB `auth` schema) | internal token service (Unix socket) | HSM/TPM (EE) | issue a token without an audience and tenant claim |
-| `candor-keydir` (C-14) | key directory log (Case DB `kd` schema) | KD API (via Desk API and snapshot push) | audit, witnesses (outbound, optional) | rewrite or delete log entries |
-| `candor-notify` (C-23) | notification queue | none | SMTP/Matrix/webhook egress (allow-list) | include case ID, count or time in a message (ADR-017) |
+| `candor-keydir` (C-14) | key directory log (Case DB `kd` schema) | KD API (via Desk API and snapshot push) | audit, witnesses (outbound; ≥ 2 required in EE/GOV/MANAGED) | rewrite or delete log entries; publish epoch keys or time-locked entries outside the weekly slot (ADR-036(7)) |
+| `candor-notify` (C-23) | notification queue | none | SMTP/Matrix/webhook egress (allow-list) | include case ID, count or time in a message (ADR-017); send anything triggered by an event (ADR-038(2)) |
 | `candor-audit` (C-24) | audit streams (separate DB `candor_audit`) | internal append IPC | checkpoint signer (TPM/HSM) | accept free-text fields |
-| `candor-ekv` (C-12 vault) | per-case Erasure Keys (ADR-033 §3), sealed under a TPM/HSM Vault Master Key | EKV IPC (Unix socket; peers `candor-case`, `candor-worker`) | TPM/HSM | release an Erasure Key outside its process; be included in routine backups |
+| `candor-ekv` (C-12 vault) | per-case Erasure Keys (ADR-033(3)) sealed under a TPM/HSM Vault Master Key; signed erasure log (ADR-044(4)) | EKV IPC (Unix socket; peers `candor-case`, `candor-worker`) | TPM/HSM (physical, never vTPM, in HIGH/GOV); DR-site vault (EE-HA replication) | release an Erasure Key outside its process; be included in routine or infrastructure-level backups |
 | `candor-worker` | job table (C-12) | none | all of the above via their APIs | bypass service authorization (it runs jobs with a system principal scoped per job type) |
 | Health agent (C-25) | none | local self-test socket | host facts | ship application payloads or anything outside the allow-list |
 
@@ -219,13 +219,13 @@ flowchart LR
 |---|---|---|---|---|---|
 | TB1 | Source device → Tor | Onion HTTP (Tier W plaintext inside Tor, Tier V ciphertext) | none (anonymous) | THR-002/003/004/006/008 | Onion only (ADR-001), no-JS UI, padding (ADR-011), guidance (05-SOURCE-OPSEC.md) |
 | TB2 | Tor → intake host | Same | onion service keys | THR-005/032/044 | PoW, vanguards, no clearnet listener, Unix socket backend (16-TOR-I2P.md) |
-| TB3 | web → sealer | Tier W plaintext stream, passphrases | SO_PEERCRED uid = `candor-web` | THR-014 | Separate process, no network (`PrivateNetwork=yes`), mlock, no core dumps (07-BACKEND.md §4) |
-| TB4 | web → intake-store | Ciphertext envelopes, account public records | SO_PEERCRED | THR-015/021 | Typed IPC, size caps, envelope canonical-format validation |
+| TB3 | web → sealer | Tier W plaintext stream, draft text, passphrases | SO_PEERCRED uid = `candor-web` | THR-014 | Separate process, no network (`PrivateNetwork=yes`), mlock, no core dumps; drafts RAM-only (07-BACKEND.md §4, ADR-034) |
+| TB4 | web → intake-store | Staged part ciphertext (tmpfs), ciphertext envelopes, Tier W account public records | SO_PEERCRED | THR-015/021 | Typed IPC, size caps, envelope canonical-format validation, `fsync` before "received" |
 | TB5 | core relay → intake | Sealed batches (down), sealed replies, signed directory and config (up) | mTLS 1.3, pinned Ed25519 certificates both ways, plus signed request bodies | THR-014 lateral movement | Core-initiated only; intake has no credential usable against core; host firewall |
 | TB6 | Desk → core | Ciphertext and workflow metadata | WebAuthn session + device-bound token (desk-api audience) + onion client auth or mTLS client certificate | THR-021/022/019 | ADR-029, per-case ACL, uniform 404 (08-API.md) |
 | TB7 | Admin → core | Configuration, users, roles | WebAuthn + admin-api audience + separate listener | THR-018/035 | No content endpoints on the admin router; DANGEROUS config needs dual approval |
 | TB8 | Desk ↔ Viewer | Ciphertext of one attachment plus a single-use per-job key in; sanitized derivative (ciphertext under a fresh per-object key) and rendered pixels out. The Desk main process never holds attachment plaintext (ADR-033 §5). | Hypervisor channel identity | THR-023 | Disposable VM, no network, no long-term keys in VM (INC-111, ADR-012) |
-| TB9 | Hosts → monitor | SYSTEM/SECURITY-class events | mTLS per agent | THR-016/038 | Allow-list schema, no application payloads |
+| TB9 | Hosts → monitor | SYSTEM/SECURITY-class events (source-influenced values only as global daily bands) | mTLS per agent | THR-016/038 | Allow-list schema, no application payloads; dedicated monitoring interface; collector host has no clearnet egress (RVW-A-23) |
 | TB10 | Core → backup | Double-encrypted ciphertext | Append-only credential | THR-017/042 | Backup key offline; write-once retention (19-BACKUPS-DR.md) |
 
 ## 8. Data flows
