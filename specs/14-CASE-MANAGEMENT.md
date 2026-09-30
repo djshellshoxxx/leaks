@@ -20,7 +20,7 @@ Specifies the lifecycle of a report from intake to deletion: intake, classificat
 | `15-AUTHENTICATION-AUTHORIZATION.md` | roles, permissions, dual control, break-glass |
 | `20-LOGGING-AUDITING.md` | CASE-class events; metrics counters |
 | `35-DATA-RETENTION-DELETION.md` | retention schedules, legal hold, disposal |
-| `04-CRYPTOGRAPHY.md` | case keys, routing-group epoch keys, re-keying |
+| `04-CRYPTOGRAPHY.md` | case keys, Member Epoch Keys (ADR-030), re-keying |
 | `25-COMPLIANCE.md` | jurisdiction packs, DSAR, statutory reporting |
 | `12-FRONTEND-RECIPIENT.md`, `13-FRONTEND-ADMIN.md` | UIs |
 | `11-FRONTEND-SOURCE.md` | source mailbox, COI selector, status display |
@@ -29,7 +29,7 @@ Components: C-10 Case Service (workflow, SLA engine), C-22 Authorization Engine,
 
 ## 3. Data model (case-level)
 
-Server-visible (C-12, cleartext; minimal): `case_id` (random 128-bit, display `CS-` + 10-char base32 prefix), `tenant_id`, `channel_id`, `routing_group_id`, `state`, `flags`, `received_day`, `import_batch`, SLA timer rows (anchor dates, due dates, status), ACL rows (user IDs, relation), COI exclusion rows (user/group IDs), approval records, legal-hold reference, retention class, `last_staff_activity_day` (date only).
+Server-visible (C-12, cleartext; minimal): `case_id` (random 128-bit, display `CS-` + 10-char base32 prefix), `tenant_id`, `channel_id`, envelope recipient key IDs (ADR-030 header), `state`, `flags`, `received_day`, `import_batch`, SLA timer rows (anchor dates, due dates, status), ACL rows (user IDs, relation), COI exclusion rows (user/group IDs), approval records, legal-hold reference, retention class, `last_staff_activity_day` (date only).
 
 Encrypted case record (case key; see `04-CRYPTOGRAPHY.md`): report text, questionnaire answers, category (fine-grained), persons concerned, detriment-risk assessment, investigation plan, notes, evidence records (10 §4), custody log (§10), decision, remediation actions, source messages.
 
@@ -41,8 +41,8 @@ Coarse category (`category_class`, ≤ 12 values, e.g., FINANCIAL, SAFETY, HR_CO
 
 | State | Meaning | ISO 37002 | Who sees content |
 |---|---|---|---|
-| `PENDING_IMPORT` | Envelope(s) in Intake Store/C-09 not yet imported; server knows only routing group, received_day, batch | 8.1 | nobody (ciphertext) |
-| `NEW` | Imported by a routing-group member; case key created and wrapped to eligible members | 8.1 | routing-group members minus COI exclusions |
+| `PENDING_IMPORT` | Envelope(s) in Intake Store/C-09 not yet imported; server knows only the channel, envelope recipient key IDs (ADR-030), received_day, batch | 8.1 | nobody (ciphertext) |
+| `NEW` | Imported by an envelope recipient; case key created and wrapped to eligible members | 8.1 | envelope recipients (ERS) minus later COI exclusions |
 | `TRIAGE` | Classification, scope, detriment-risk assessment, COI check | 8.2 | triage team |
 | `ASSESSMENT` | Assigned case lead decides whether and how to investigate | 8.2 | case members |
 | `INVESTIGATION` | Active fact-finding | 8.3 | case members |
@@ -62,7 +62,7 @@ Overlay flags (not states): `LEGAL_HOLD`, `SEALED_MATTER` (e.g., qui tam seal), 
 ```mermaid
 stateDiagram-v2
   [*] --> PENDING_IMPORT
-  PENDING_IMPORT --> NEW: import (routing-group member)
+  PENDING_IMPORT --> NEW: import (envelope recipient)
   PENDING_IMPORT --> NEW: oversight import after canary
   NEW --> TRIAGE: start triage
   TRIAGE --> ASSESSMENT: assign lead
@@ -87,7 +87,7 @@ stateDiagram-v2
 
 | Transition | Guard | Actor | Dual control | CASE audit event |
 |---|---|---|---|---|
-| import | actor holds routing-group epoch key; not COI-excluded | INTAKE_TRIAGER / OVERSIGHT (canary) | no | `case.imported` |
+| import | actor's Member Epoch Key is among the envelope recipients; not COI-excluded | INTAKE_TRIAGER / OVERSIGHT (canary) | no | `case.imported` |
 | start triage | — | INTAKE_TRIAGER | no | `case.state_changed` |
 | assign lead | assignee eligible (§7), COI attestation signed by assignee | CHANNEL_OWNER or TRIAGER | no | `case.assigned` |
 | dismiss | reason code (OUT_OF_SCOPE, SPAM, DUPLICATE, MANIFESTLY_IRRELEVANT); feedback to source queued | CASE_LEAD | yes: REVIEWER ≠ proposer, not COI-excluded | `case.dismiss_requested`, `case.dismiss_approved` |
@@ -103,7 +103,7 @@ The server enforces transitions (C-10) and the Desk enforces cryptographic prere
 
 | Stage | Key activities | Artifacts (encrypted) | Timers |
 |---|---|---|---|
-| Intake | Source submits (Tier W/V); optional auto-acknowledgement at intake (§6.4); routing-group selection incl. COI flags (§8.3) | envelope, manifest | ACK timer starts at `received_day` |
+| Intake | Source submits (Tier W/V); optional auto-acknowledgement at intake (§6.4); optional COI checklist and eligible-recipient filtering (§8.3) | envelope, manifest | ACK timer starts at `received_day` |
 | Classification | `category_class`, sub-category, jurisdiction pack, reporter relationship (EU Art 4 taxonomy), anonymous/confidential/identified mode (ADR-002) | classification record | — |
 | Triage | scope check, urgency (IMMEDIATE_DANGER flag), detriment-risk assessment (ISO 37002 8.2; low/medium/high + mitigations), COI check (§8.4), duplicate linking (staff-only, never auto-correlation across sources: REQ-H-08) | triage record | TRIAGE decision timer (e.g., Alberta 10 business days) |
 | Acknowledgement | reply to source via mailbox (template; never through notifications) | ACK message | ACK timer satisfied |
@@ -182,64 +182,65 @@ All reminders use ADR-017 content-free notifications: text "Candor: secure case-
 
 A staff user U is *eligible* for case C iff all hold (evaluated by C-22):
 1. U is active, enrolled with a registered hardware key (see 15), and has role permitting the relation.
-2. U is a member of C's routing group (or the case was explicitly granted to U by an existing member per policy).
+2. U was an envelope recipient of C, or was granted access by an existing member per policy, and U is not in the case's permanent source-derived exclusion set (§8.4).
 3. U is not in C's COI exclusion set (§8) and has signed a COI attestation for C ("I have no conflict of interest with the matters and persons in this case"; attestation text encrypted in case; signing event audited).
 4. Tenant/department boundary permits (15 AUTHZ ABAC).
 5. Any time-bounded grant has not expired.
 
 Case key wrapping to U happens only after (1)–(5) pass; revocation re-keys (§8.5).
 
-## 8. Conflict-of-interest routing (ADR-015)
+## 8. Conflict-of-interest routing (ADR-015, ADR-030)
 
 ### 8.1 Concepts
 
-- **Channel:** what the source picks (e.g., "Financial misconduct", "Report to the Audit Committee").
-- **Routing group (RG):** a set of recipients holding their own epoch keys (ADR-008 epoch keys are generated per RG). Each channel has one DEFAULT RG plus zero or more COI RGs. An envelope is encrypted to exactly one RG's current epoch key, so **excluded users never receive decryptable material** — exclusion is cryptographic, not only a server check.
-- **COI map:** signed tenant policy mapping *subject roles* (who a report may concern) → *excluded principals* (roles/groups/users) → *alternate RG*. Published in C-14 as part of the channel descriptor so sources (and Tier V clients) can see where a COI-flagged report goes and who can read it.
-- **Independent bodies:** RGs whose members are independent of management: OMBUDSMAN, INSPECTOR_GENERAL, ETHICS_COMMITTEE, BOARD_AUDIT_COMMITTEE, EXTERNAL_COUNSEL, THIRD_PARTY_INVESTIGATOR, CIVILIAN_OVERSIGHT, EXTERNAL_AUTHORITY_LIAISON.
+- **Channel:** what the source picks (e.g., "Financial misconduct", "Report to the Audit Committee"). A channel has a set of **members**, each listed in C-14 under a **role label** (e.g., "Audit Committee Chair", "HR Investigations Lead"; personal names optional per channel policy).
+- **Member Epoch Keys (ADR-030):** each member's Desk pre-publishes signed X-Wing epoch keys (7-day epoch, 14-day decrypt window, 4 epochs ahead) in C-14. The envelope content key is wrapped **individually** to each *eligible* member's current epoch key.
+- **Eligible recipient set (ERS):** channel members minus (1) members whose role labels the source ticked in "Is your report about any of these people/roles?", minus (2) members excluded by the tenant COI map for the chosen category/flags. The filter runs in the Tier V client locally or in C-07 (Tier W) in RAM, **before** wrapping. Excluded members never hold any key that decrypts the envelope, even with full database access. Channel Identity Keys sign channel metadata only.
+- **Recipient slots:** the envelope header carries recipient key IDs (pseudonymous, rotating per epoch), padded with dummy slots to a fixed maximum (default 16) (ADR-030), so recipients and auditors can verify the recipient set against C-14 (THR-046).
+- **Fail closed:** if the ERS is empty, or lacks a role the COI map marks as "must remain" (§8.2), the source is shown "temporarily unavailable" for that selection together with the suggested alternative channel and external-reporting information (EU Art 9(1)(g)); the envelope is never encrypted to fewer or other parties than the policy requires.
+- **COI map:** signed tenant policy (dual-approved, ROUTE-008) mapping *subject role* → *excluded role labels/users* → *must-remain role labels* → *suggested alternative channel*. Published in C-14 inside the channel descriptor.
+- **Independent bodies:** members (or dedicated channels) whose role labels denote independence from management: OMBUDSMAN, INSPECTOR_GENERAL, ETHICS_COMMITTEE, BOARD_AUDIT_COMMITTEE, EXTERNAL_COUNSEL, THIRD_PARTY_INVESTIGATOR, CIVILIAN_OVERSIGHT, EXTERNAL_AUTHORITY_LIAISON. Recommended configuration: every general channel includes at least one independent-body member, so that excluding management still leaves an eligible recipient.
 
-### 8.2 Default COI routing table
+### 8.2 Default COI map template
 
-| Report concerns (subject role) | Excluded before any access | Default alternate RG | Fallback if not configured |
+| Report concerns (subject role) | Excluded before wrapping | Must remain (≥1 member with this label, else fail closed) | Suggested alternative channel if unavailable |
 |---|---|---|---|
-| Source's direct manager | the manager; (EE) manager chain up to 2 levels via directory attribute | DEFAULT RG minus excluded | — |
-| HR department / HR staff | HR group | ETHICS_COMMITTEE or OMBUDSMAN | EXTERNAL_COUNSEL |
-| Compliance function / whistleblowing function staff | compliance group incl. channel owners | BOARD_AUDIT_COMMITTEE or OMBUDSMAN | EXTERNAL_COUNSEL |
-| Corporate security / investigations unit | security group; SOC readers of SECURITY logs are notified only content-free | OMBUDSMAN or EXTERNAL_COUNSEL | THIRD_PARTY_INVESTIGATOR |
-| Senior executives (C-suite) | executive group + their direct reports in whistleblowing roles | BOARD_AUDIT_COMMITTEE | EXTERNAL_COUNSEL |
-| CEO | CEO, executive group, CEO's staff office | BOARD_AUDIT_COMMITTEE (independent directors only) | EXTERNAL_COUNSEL |
-| Board members / board chair | board group (except the independent audit committee members not named) | EXTERNAL_COUNSEL | EXTERNAL_AUTHORITY_LIAISON (regulator referral guidance) |
-| System administrators / IT | admin role holders, IT group | OMBUDSMAN or ETHICS_COMMITTEE (admins have no content access anyway: ADR-015) | EXTERNAL_COUNSEL |
-| Department heads | the department head + department staff in whistleblowing roles | ETHICS_COMMITTEE or INSPECTOR_GENERAL | OMBUDSMAN |
-| Local officials (municipal) | the official's office, council staff | INSPECTOR_GENERAL or municipal ethics commissioner | EXTERNAL_AUTHORITY_LIAISON |
-| Elected officials | elected officials' offices; political staff | ETHICS_COMMITTEE (statutory ethics commission) or INSPECTOR_GENERAL | EXTERNAL_AUTHORITY_LIAISON |
-| Law enforcement / police | the agency's command and internal affairs if implicated | CIVILIAN_OVERSIGHT or INSPECTOR_GENERAL | EXTERNAL_AUTHORITY_LIAISON |
-| Accounting, internal controls, auditing (by category, not person) | management | BOARD_AUDIT_COMMITTEE (SOX §301) | EXTERNAL_COUNSEL |
-| Members of an independent body itself | the named members | another independent body | EXTERNAL_COUNSEL |
-
-If a COI RG resolves to an empty set of eligible recipients, the channel descriptor marks that option unavailable and the source is told (in Tier W/V UI) which external authority information applies (EU Art 9(1)(g)); the system SHALL NOT silently route to DEFAULT.
+| Source's direct manager | the manager's label if a member; (EE) manager chain up to 2 levels via directory attribute, applied at triage (§8.4) because intake cannot know the source's manager | any non-excluded investigator | — |
+| HR department / HR staff | all HR-labelled members | ETHICS_COMMITTEE or OMBUDSMAN | Ethics/Ombudsman channel; else EXTERNAL_COUNSEL |
+| Compliance function / whistleblowing function staff | compliance-labelled members incl. channel owners | BOARD_AUDIT_COMMITTEE or OMBUDSMAN | Audit Committee channel |
+| Corporate security / investigations unit | security-labelled members | OMBUDSMAN or EXTERNAL_COUNSEL | THIRD_PARTY_INVESTIGATOR channel |
+| Senior executives (C-suite) | executive-labelled members and their staff in whistleblowing roles | BOARD_AUDIT_COMMITTEE | EXTERNAL_COUNSEL channel |
+| CEO | CEO, executive-labelled members, CEO staff office | BOARD_AUDIT_COMMITTEE (independent directors only) | EXTERNAL_COUNSEL channel |
+| Board members / board chair | board-labelled members except independent audit-committee members | EXTERNAL_COUNSEL | EXTERNAL_AUTHORITY_LIAISON guidance (regulator) |
+| System administrators / IT | none needed for content (admins are never members: ADR-015, ROUTE-010); IT-labelled members if any | ETHICS_COMMITTEE or OMBUDSMAN | — |
+| Department heads | the department-head label and department whistleblowing staff | ETHICS_COMMITTEE or INSPECTOR_GENERAL | Ombudsman channel |
+| Local officials (municipal) | the official's office and council-staff labels | INSPECTOR_GENERAL or municipal ethics commissioner | EXTERNAL_AUTHORITY_LIAISON guidance |
+| Elected officials | elected-office and political-staff labels | ETHICS_COMMITTEE (statutory ethics commission) or INSPECTOR_GENERAL | EXTERNAL_AUTHORITY_LIAISON guidance |
+| Law enforcement / police | agency command and internal-affairs labels if implicated | CIVILIAN_OVERSIGHT or INSPECTOR_GENERAL | EXTERNAL_AUTHORITY_LIAISON guidance |
+| Accounting, internal controls, auditing (category rule, SOX §301) | management-labelled members | BOARD_AUDIT_COMMITTEE | Audit Committee channel |
+| Members of an independent body itself | the named labels | another independent body | EXTERNAL_COUNSEL channel |
 
 ### 8.3 Source-side COI selection
 
-- The channel page offers "My report concerns (optional): [ ] my manager [ ] HR [ ] compliance [ ] security [ ] senior management [ ] CEO [ ] board [ ] IT administrators [ ] department head [ ] …" (tenant-configured list from the COI map), plus "I prefer an independent body" where configured.
-- Selection deterministically maps to one RG; the client (Tier V) or C-07 (Tier W) encrypts to that RG's epoch key after verifying the RG key signature against C-14.
-- Honest disclosure shown next to the selector: the list of role labels who will be able to read the report, and "The server can see which group your report was sent to, but not its content."
-
-Metadata note: the RG key ID is visible to Z-INTAKE and Z-CORE (required for addressing). Knowing "a report went to the audit-committee RG" is itself information (see §15).
+- The channel page offers the optional checklist "Is your report about any of these people/roles?" built from the channel's role labels and COI-map subject roles (default: none selected) (ADR-030).
+- Tier V computes the ERS locally after verifying member epoch keys and the channel descriptor against C-14 (inclusion/consistency proofs, ASM-036); Tier W: C-07 computes it in RAM from its verified copy of the descriptor.
+- Honest disclosure next to the checklist: the role labels that will be able to read the report, recovery-escrow status (ADR-013), OVERSIGHT_MODE (§9.4), and "The server cannot read your report, but it can see which recipient keys it was encrypted to."
+- The source's ticked subject roles are stored inside the encrypted envelope (so the case team knows who must stay excluded) and are never sent in cleartext.
 
 ### 8.4 Triage-time COI detection
 
 Sources may not flag COI. During triage:
-1. Triager records `persons_concerned` (encrypted) and maps them to staff directory entries where they are Candor users (local directory; EE: SCIM attributes incl. `manager` chain).
-2. C-22 computes the exclusion set from the COI map + named users + their manager chain (EE) + self-declared recusals.
-3. Excluded current members are removed immediately (§8.5); if the triager themself is implicated, they must recuse (attestation) — and a non-excluded member or OVERSIGHT is alerted.
-4. A case can only be moved to an RG where no current member is excluded.
+1. On import, the case's permanent exclusion set is initialized from the source's ticked roles (read from inside the envelope) and the COI-map exclusions applied at intake; members so excluded can never be added to the case.
+2. Triager records `persons_concerned` (encrypted) and maps them to Candor users (local directory; EE: SCIM attributes incl. `manager` chain).
+3. C-22 computes additional exclusions from the COI map, named users, manager chain (EE) and self-declared recusals.
+4. Excluded current members are removed immediately (§8.5); if the triager is implicated, they must recuse (attestation) and a non-excluded member or OVERSIGHT is alerted.
+5. Case-key wraps (ADR-008) are created only for members authorized after import and not in the exclusion set (ADR-030).
 
 ### 8.5 Removal and re-keying
 
 On exclusion or revocation of member X from case C:
 1. Server removes X's ACL and wrapped-key rows immediately and blocks ciphertext delivery to X.
-2. The next member client to open C generates a new case key K', re-encrypts the case record head and wraps K' to remaining members; new evidence and records use K'. Existing blobs keep their per-object DEKs, which are re-wrapped under K' (X may retain DEKs it already cached: residual risk, §15).
+2. The next member client to open C generates a new case key K', re-encrypts the case record head and wraps K' to remaining members; new evidence and records use K'. Existing per-object DEKs are re-wrapped under K' (X may retain DEKs it already cached: residual risk, §16).
 3. Event `case.member_removed` (reason COI/REVOKED) + `case.rekeyed`.
 4. X's Desk receives a revocation tombstone and purges cached case material on next sync.
 
@@ -253,9 +254,9 @@ On exclusion or revocation of member X from case C:
 | AS-4 Tamper evidence | All transitions/approvals in the hash-chained CASE audit stream with signed checkpoints and external witness (20) | THR-037; THR-018 |
 | AS-5 Admin cannot suppress silently | Admins cannot alter case state (no permission); config changes affecting routing/SLA/COI are dual-approved and notify OVERSIGHT content-free | THR-018; THR-035 |
 | AS-6 Canary escalation | §9.4 | THR-020 |
-| AS-7 Independent visibility | OVERSIGHT metadata register: per-case pseudonymous ID, RG, state, SLA status, days since last staff activity — no content, no source data | THR-020 |
+| AS-7 Independent visibility | OVERSIGHT metadata register: per-case pseudonymous ID, channel, state, SLA status, days since last staff activity — no content, no source data | THR-020 |
 | AS-8 Auto-acknowledgement | §6.4 removes dependency on staff for first contact | THR-020 |
-| AS-9 Reassignment limits | Reassigning away from an independent RG to a management RG requires OVERSIGHT approval | THR-020 |
+| AS-9 Reassignment limits | Transferring a case from an independent-body channel to a management channel, or adding members the COI map excluded for the case, requires OVERSIGHT approval | THR-020 |
 | AS-10 Source-visible status | Source mailbox shows coarse status (RECEIVED, IN_REVIEW, CLOSED) and closure feedback; the source can escalate "I received no response" which creates an OVERSIGHT escalation | THR-020 |
 
 ### 9.4 Canary (dead-man) escalation
@@ -267,15 +268,15 @@ Triggers (configurable; defaults):
 - C4: source-initiated "no response" escalation.
 - C5: closure/dismissal approved within 24 h of import (possible rubber-stamping) — notify only.
 
-Action: C-10 sets `CANARY_ESCALATED`, sends content-free notification to the OVERSIGHT RG, and adds the case to the OVERSIGHT register with trigger code.
+Action: C-10 sets `CANARY_ESCALATED`, sends content-free notification to OVERSIGHT members, and adds the case to the OVERSIGHT register with trigger code.
 
-Access by oversight: tenant chooses per RG:
-- `OVERSIGHT_MODE=SILENT_MEMBER`: OVERSIGHT members are members of every RG (hold epoch keys) but do not see content unless they perform an audited "oversight import/open" action. Disclosed in the channel descriptor (THR-046 transparency).
+Access by oversight: tenant chooses per channel:
+- `OVERSIGHT_MODE=SILENT_MEMBER`: OVERSIGHT members are channel members (their Member Epoch Keys receive wraps unless the source excludes their role label) but do not open content unless they perform an audited "oversight import/open" action. Disclosed in the channel descriptor (THR-046 transparency).
 - `OVERSIGHT_MODE=METADATA_ONLY`: OVERSIGHT sees the register only and can compel action via governance, not decrypt.
 
 Suppression of the canary itself: OVERSIGHT Desk clients independently evaluate C1/C2 from signed register snapshots pulled at least daily, and alert locally if (a) snapshots stop arriving for > 48 h or (b) checkpoint signatures/witness cosignatures fail (20). This moves the dead-man check off infrastructure the accused could control.
 
-Epoch-key interaction: channel epoch private keys (ADR-008) are not destroyed while any envelope encrypted to that epoch remains un-imported, unless a dual-approved "abandon envelope" decision by OVERSIGHT is recorded (see 35).
+Epoch-key interaction: Member Epoch private keys (ADR-008, ADR-030) are not destroyed while any envelope wrapped to that epoch key remains un-imported, unless a dual-approved "abandon envelope" decision by OVERSIGHT is recorded (see 35).
 
 ## 10. Chain of custody
 
@@ -287,7 +288,7 @@ Epoch-key interaction: channel epoch private keys (ADR-008) are not destroyed wh
 | ACCESS | evid_id, containment level (L0–L4), purpose code, actor, ts |
 | TRANSFORM | xform_id, inputs, outputs, actor, ts |
 | EXPORT | package ID, evid_ids, destination class, approvers, reason code, PSR ID, ts |
-| TRANSFER | from RG/body → to RG/body, approvers, ts (referral) |
+| TRANSFER | from channel/body → to channel/body, approvers, ts (referral) |
 | CUSTODY_CHANGE | custodian (case lead) change, approver, ts |
 | HOLD / RELEASE | legal hold reference, ts |
 | DELETE | evid_id, method (crypto-erase), receipt ID, ts |
@@ -354,11 +355,11 @@ KPIs (ISO 37002 cl. 9): volume, % acknowledged within SLA, median days to acknow
 | CASE-015 | Remediation action owners outside the case SHALL receive only reviewer-approved action text via an Export Package, never case content or source data. | ADR-018 | THR-029; THR-020 | C-10; C-40 | TST: action export contains only approved fields |
 | CASE-016 | Closure SHALL require: feedback sent (or reviewer exception), custody verification pass, no pending export approvals, retention class set, and post-closure detriment check-ins scheduled (default 30/90/180 days). | B-CO-01 (ISO 37002 8.4); B-CO-02 (Art 9(1)(f)) | THR-037 | C-10 | TST: closure blocked for each missing precondition |
 | CASE-017 | The source mailbox SHALL show coarse status (RECEIVED, IN_REVIEW, CLOSED) and allow a "no response received" escalation that triggers canary C4. | B-CO-01 (8.4); INC-22 | THR-020 | C-06; C-10 | TST: escalation creates OVERSIGHT register entry |
-| CASE-018 | Canary triggers C1–C5 of §9.4 SHALL be evaluated at least hourly by C-10 and SHALL set `CANARY_ESCALATED` and notify the OVERSIGHT RG content-free. | INC-22; REQ-H-69 | THR-020 | C-10; C-23 | TST: time-advanced fixtures for each trigger |
+| CASE-018 | Canary triggers C1–C5 of §9.4 SHALL be evaluated at least hourly by C-10 and SHALL set `CANARY_ESCALATED` and notify OVERSIGHT members content-free. | INC-22; REQ-H-69 | THR-020 | C-10; C-23 | TST: time-advanced fixtures for each trigger |
 | CASE-019 | OVERSIGHT Desk clients SHALL independently evaluate canary triggers C1/C2 from signed register snapshots and SHALL alert locally when snapshots are missing > 48 h or checkpoint/witness verification fails. | INC-68; REQ-H-68 | THR-020; THR-018 | C-15; C-24 | TST: withheld snapshot and forged checkpoint produce local alerts |
-| CASE-020 | Channel epoch private keys SHALL NOT be destroyed while envelopes encrypted to that epoch remain un-imported, unless OVERSIGHT records a dual-approved abandon decision. | ADR-008; INC-22 | THR-020 | C-15; C-09 | TST: destruction job skips epochs with pending envelopes; abandon requires two OVERSIGHT approvals |
-| CASE-021 | The OVERSIGHT metadata register SHALL contain only case pseudonym, RG, state, flags, SLA status and days since last staff activity, and SHALL NOT contain content, persons concerned, category detail or source data. | ADR-016; ADR-015 | THR-020; THR-039 | C-10 | INSP: register schema; TST: field allow-list test |
-| CASE-022 | Reassignment of a case from an independent-body RG to a non-independent RG SHALL require OVERSIGHT approval. | ADR-015; INC-22 | THR-020 | C-10; C-22 | TST: reassignment without OVERSIGHT approval denied |
+| CASE-020 | Member Epoch private keys SHALL NOT be destroyed while envelopes encrypted to that epoch remain un-imported, unless OVERSIGHT records a dual-approved abandon decision. | ADR-008; INC-22 | THR-020 | C-15; C-09 | TST: destruction job skips epochs with pending envelopes; abandon requires two OVERSIGHT approvals |
+| CASE-021 | The OVERSIGHT metadata register SHALL contain only case pseudonym, channel, state, flags, SLA status and days since last staff activity, and SHALL NOT contain content, persons concerned, category detail or source data. | ADR-016; ADR-015 | THR-020; THR-039 | C-10 | INSP: register schema; TST: field allow-list test |
+| CASE-022 | Transfer of a case from an independent-body channel to a non-independent channel, or addition of members that the COI map excluded for the case, SHALL require OVERSIGHT approval. | ADR-015; INC-22 | THR-020 | C-10; C-22 | TST: reassignment without OVERSIGHT approval denied |
 | CASE-023 | Every custody event of §10.1 SHALL be appended to the encrypted per-case Custody Log, signed by the actor and hash-chained per evidence object, and a pseudonymous counterpart SHALL be emitted to the CASE audit stream binding the custody-log head by keyed MAC. | ADR-012; ADR-016; B-CO-02 (Art 12) | THR-037; THR-038 | C-15; C-24 | TST: custody chain verification; tampered entry detected; audit event lacks hashes/names |
 | CASE-024 | Custody records SHALL begin at import and SHALL NOT record submission time finer than `received_day`, source device, network or client information. | ADR-010; INC-16 | THR-011; THR-001 | C-15 | INSP: schema; TST: record grep for time/UA fields |
 | CASE-025 | A court/regulator custody report SHALL require an identity-deducibility review and second-reviewer approval before release. | B-CO-02 (Art 16(1)) | THR-019; THR-041 | C-15; C-10 | TST: release blocked without both records |
@@ -366,21 +367,24 @@ KPIs (ISO 37002 cl. 9): volume, % acknowledged within SLA, median days to acknow
 | CASE-027 | Identity unsealing (ADR-014) SHALL be a case action requiring legal basis, dual approval by IDENTITY_CUSTODIANs, and a queued source notice with written reasons unless a recorded deferral reason applies. | ADR-014; B-CO-02 (Art 16(2)-(3)); B-CO-13 | THR-019; THR-020 | C-10; C-15 | TST: unseal without either approval or basis denied; notice queued or deferral recorded |
 | CASE-028 | EU Art 17 "manifestly irrelevant" purge SHALL be available at triage with second-reviewer approval and SHALL crypto-erase the content while retaining only a reason-coded audit event. | B-CO-02 (Art 17) | THR-017 | C-10; C-15 | TST: purge leaves no content wrap; event present without content |
 | CASE-029 | Oral reports and meeting minutes SHALL be stored as TRANSCRIPT evidence and the source SHALL be able to review and confirm them via the mailbox, with confirmation recorded. | B-CO-02 (Art 18(2)-(4)) | — | C-10; C-15 | DEMO: transcript review flow |
-| ROUTE-001 | Each channel SHALL define a DEFAULT routing group and optional COI routing groups, each with its own epoch keys, and envelopes SHALL be encrypted to exactly one routing group so that excluded users never receive decryptable material. | ADR-015; ADR-008 | THR-020 | C-14; C-07; C-03; C-15 | TST: excluded member's client cannot decrypt a COI-routed envelope (crypto test); INSP: key-directory descriptors |
-| ROUTE-002 | The signed COI map and RG membership (role labels) SHALL be published in C-14 in the channel descriptor, and source clients SHALL display who can read a report sent to the selected RG. | ADR-015; REQ-H-14; INC-14 | THR-046; THR-020 | C-14; C-06; C-03 | TST: descriptor signature verification; UI shows labels; tampered descriptor rejected by Tier V |
+| ROUTE-001 | The envelope content key SHALL be wrapped individually to the current Member Epoch Key of each eligible member, where eligibility is computed before wrapping by removing members whose role labels the source ticked and members excluded by the tenant COI map for the chosen category. | ADR-030; ADR-015; INC-22 | THR-020 | C-03; C-07; C-14; C-15 | TST: crypto test: an excluded member's Desk with full DB access cannot decrypt the envelope; Tier V and Tier W filters produce identical ERS for the same inputs |
+| ROUTE-002 | The signed channel descriptor in C-14 SHALL publish member role labels, Member Epoch Keys, the COI map and OVERSIGHT_MODE, and source clients SHALL verify it and display which role labels will be able to read the report. | ADR-030; ADR-015; REQ-H-14; INC-14 | THR-046; THR-020 | C-14; C-06; C-03 | TST: tampered descriptor rejected by Tier V and C-07; UI shows role labels |
 | ROUTE-003 | The default COI routing table of §8.2 SHALL ship as a template covering direct manager, HR, compliance, corporate security, senior executives, CEO, board, system administrators, department heads, local officials, elected officials, law enforcement and accounting/audit matters. | ADR-015; INC-22; B-CO-69 (SOX §301) | THR-020 | C-10 | INSP: template content review; TST: template loads and validates |
-| ROUTE-004 | If a COI selection resolves to an RG with no eligible recipients, the option SHALL be shown unavailable with external-reporting information and the system SHALL NOT fall back to the DEFAULT RG. | ADR-015; B-CO-02 (Art 9(1)(g)) | THR-020 | C-06; C-03; C-10 | TST: empty-RG fixture shows unavailable option; no silent routing |
-| ROUTE-005 | Accounting, internal-control and auditing category reports SHALL be routable directly to the BOARD_AUDIT_COMMITTEE RG bypassing management, configurable per tenant. | B-CO-69 (SOX §301) | THR-020 | C-10; C-14 | TST: category routing rule test |
+| ROUTE-004 | If the eligible recipient set is empty or lacks a must-remain role, intake for that selection SHALL fail closed ("temporarily unavailable") with the suggested alternative channel and external-reporting information, and SHALL NOT encrypt to fewer or other parties. | ADR-030; B-CO-02 (Art 9(1)(g)) | THR-020 | C-06; C-07; C-03 | TST: empty-ERS and missing-must-remain fixtures in Tier W and Tier V show unavailable; no envelope stored |
+| ROUTE-005 | Accounting, internal-control and auditing category reports SHALL be configurable to exclude management-labelled members and to require a BOARD_AUDIT_COMMITTEE member in the eligible set. | B-CO-69 (SOX §301); ADR-030 | THR-020 | C-10; C-14; C-07; C-03 | TST: category rule fixture yields ERS containing only non-management members incl. audit committee |
 | ROUTE-006 | Triage-time COI detection SHALL compute exclusions from the COI map, named persons concerned, self-declared recusals and (EE) directory manager chains up to a configurable depth (default 2), and SHALL remove excluded members immediately. | ADR-015; B-CO-01 | THR-020 | C-22; C-10 | TST: fixtures for each source of exclusion |
 | ROUTE-007 | Removal of a member for COI or revocation SHALL block ciphertext delivery immediately and SHALL cause re-keying of the case key on the next member client open, with re-wrapping of object DEKs. | ADR-015; ADR-008 | THR-020; THR-019 | C-10; C-15 | TST: removed member receives 403 immediately; new records unreadable with old key |
-| ROUTE-008 | Changes to COI maps, RG membership, OVERSIGHT_MODE and SLA packs SHALL require dual approval and SHALL generate content-free notifications to OVERSIGHT and a CASE/SECURITY audit event. | ADR-015; ADR-013 | THR-018; THR-035; THR-046 | C-10; C-19; C-22 | TST: single-approver change rejected; OVERSIGHT notification observed |
+| ROUTE-008 | Changes to COI maps, channel membership and role labels, OVERSIGHT_MODE and SLA packs SHALL require dual approval and SHALL generate content-free notifications to OVERSIGHT and a CASE/SECURITY audit event. | ADR-015; ADR-030 | THR-018; THR-035; THR-046 | C-10; C-19; C-22 | TST: single-approver change rejected; OVERSIGHT notification observed |
 | ROUTE-009 | OVERSIGHT_MODE SILENT_MEMBER SHALL be disclosed in the channel descriptor, and any oversight open/import of content SHALL be an audited action visible to the case team. | ADR-015; INC-14 | THR-046; THR-018 | C-14; C-10 | TST: descriptor shows mode; oversight open emits event visible in case timeline |
-| ROUTE-010 | System administrators SHALL NOT be members of any RG by virtue of their admin role, and admin-role holders SHALL be excluded by default from all COI-alternate RGs. | ADR-015 | THR-018 | C-22 | TST: policy test; admin enrollment into RG requires separate non-admin identity |
-| ROUTE-011 | A referral to another RG, independent body or external authority SHALL preserve ORIGINAL evidence unmodified (EU Art 12(4)) and SHALL be recorded as a TRANSFER custody event. | B-CO-02 (Art 12(4)) | THR-037 | C-10; C-15 | TST: transferred case evidence hashes equal originals |
+| ROUTE-010 | System administrators SHALL NOT be channel members by virtue of their admin role, and Desks SHALL refuse to publish Member Epoch Keys for accounts holding admin roles. | ADR-015; ADR-030 | THR-018 | C-22; C-15 | TST: policy test; epoch-key publication by admin account rejected |
+| ROUTE-011 | A referral to another channel, independent body or external authority SHALL preserve ORIGINAL evidence unmodified (EU Art 12(4)) and SHALL be recorded as a TRANSFER custody event. | B-CO-02 (Art 12(4)) | THR-037 | C-10; C-15 | TST: transferred case evidence hashes equal originals |
+| ROUTE-012 | Subject roles ticked by the source SHALL be carried only inside the encrypted envelope, SHALL initialize the case's permanent exclusion set on import, and members so excluded SHALL NEVER be added to the case. | ADR-030; INC-22 | THR-020 | C-15; C-22 | TST: adding a source-excluded member rejected by Desk and C-22; cleartext envelope header contains no ticked roles |
+| ROUTE-013 | Envelope headers SHALL carry exactly the configured maximum number of recipient slots (default 16), filling unused slots with indistinguishable dummy wraps. | ADR-030; ADR-011 | THR-011; THR-020 | C-03; C-07; C-11 | TST: header length constant for ERS sizes 1..16; dummy wraps indistinguishable (statistical test) |
+| ROUTE-014 | Member Desks SHALL pre-publish Member Epoch Keys at least 4 epochs ahead, and C-10 SHALL warn channel owners content-free when a channel's default selection would have an empty eligible set within 14 days. | ADR-030 | THR-032 | C-15; C-10; C-23 | TST: expiring-key fixture triggers warning 14 days ahead |
 
 ## 16. Residual risks and limitations
 
-1. **RG metadata.** Z-INTAKE and Z-CORE learn which RG a report targets (e.g., "a report concerning the CEO went to the audit committee") and its `received_day`. In small organizations this can be highly revealing and may itself prompt retaliation hunts (THR-011, THR-020). Mitigation options (all partial): encourage independent-body channels as normal defaults; aggregate RGs; see Open Issues.
+1. **Recipient-set metadata.** The envelope header lists recipient key IDs (ADR-030), and C-14 publicly maps Member Epoch Keys to role labels. Z-INTAKE and Z-CORE can therefore infer which role labels were *excluded* from a given envelope (e.g., "this report excludes the CEO and executives"), together with `received_day`. Dummy slots hide the count, not the identity of real recipients. In small organizations this can prompt retaliation hunts (THR-011, THR-020). See Open Issues for ADR revision.
 2. **Cached keys.** A member removed for COI may retain case keys or DEKs cached before removal; re-keying protects only future material (THR-019).
 3. **Undeclared conflicts.** COI detection depends on sources and triagers naming persons concerned and on staff honesty in attestations.
 4. **Captured independent bodies.** If the accused controls the audit committee, counsel and hosting, canary escalation reaches the wrong people; external regulator reporting guidance remains the backstop (EU Art 9(1)(g)).
@@ -397,6 +401,6 @@ KPIs (ISO 37002 cl. 9): volume, % acknowledged within SLA, median days to acknow
 
 ### Open Issues for ADR revision
 
-- **ADR-008 / ADR-015: routing groups.** ADR-008 defines epoch keys per *channel*; ADR-015 requires exclusion before key wrapping. If all channel members hold the channel epoch key, an excluded member (e.g., the accused HR head who is a channel member) can decrypt the envelope before triage applies exclusions. This spec therefore introduces per-channel **routing groups** each with its own epoch keys (§8.1). Proposed ADR amendment: "Epoch keys are generated per routing group; a channel has ≥1 routing group; the source-selected COI option determines the routing group."
+- **ADR-030 recipient key IDs in the cleartext header.** ADR-030 lists recipient key IDs in the envelope header for verifiability. Because C-14 maps those key IDs to role labels, the server learns exactly which roles were excluded, i.e., whom the report is probably about (residual risk 1). Proposed amendment: outer slots carry anonymous HPKE encapsulations without key IDs (recipients trial-decrypt at most 16 slots), and the authoritative recipient key-ID list is placed *inside* the encrypted envelope, signed by the source key, so every recipient (and auditors with case access) can still verify the recipient set against C-14 (THR-046) without exposing it to Z-INTAKE/Z-CORE. This spec conforms to ADR-030 as written until revised.
 - **ADR-008 epoch-key destruction ("after window + import").** Interpreted as "after the later of the decrypt window end and import of all envelopes of that epoch"; otherwise a suppressing member could let the window lapse to destroy reports. CASE-020 codifies this; ADR text should state it explicitly.
 - **ADR-010 import batch time.** Case import "records batch time"; combined with the 15±10 min pull interval this bounds submission time to a ~25 min window in low-volume instances. Proposed: case-visible field is batch *number* and `received_day` only; exact batch time kept only in C-09 operational state for ≤ 24 h.

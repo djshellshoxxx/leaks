@@ -144,7 +144,7 @@ A fresh WebAuthn assertion with UV, whose challenge = SHA-256(canonical operatio
 | Content export | any export; ORIGINAL export (both approvers) |
 | Key operations | add case member (key wrap), rotate keys, enroll/remove authenticator, recovery quorum actions |
 | Identity | identity unseal request/approval (ADR-014) |
-| Governance | approve closure/dismissal/disposal, legal hold set/release, COI map/RG changes, SLA pack changes |
+| Governance | approve closure/dismissal/disposal, legal hold set/release, COI map, channel membership/role-label changes, SLA pack changes |
 | Admin | any DANGEROUS config change, role assignment, break-glass request/approval, user deactivation/reactivation |
 | Audit | audit export |
 
@@ -156,11 +156,11 @@ The server verifies that the signed operation descriptor matches the operation e
 
 | Role | Purpose | Case content | Notes |
 |---|---|---|---|
-| INTAKE_TRIAGER | import, triage | yes (for RG membership cases) | RG member |
+| INTAKE_TRIAGER | import, triage | yes (cases whose envelope was wrapped to their Member Epoch Key) | channel member with published Member Epoch Keys (ADR-030) |
 | INVESTIGATOR | investigate assigned cases | yes (ACL) | |
 | CASE_LEAD | owns case workflow | yes (ACL) | relation on case, derived from INVESTIGATOR |
 | REVIEWER | second reviewer for closure/dismissal/export/PSR | yes (only when reviewing, via temporary wrap) | |
-| CHANNEL_OWNER | manage channel, assign, configure RG (dual approved) | only if also RG member | whistleblowing function lead |
+| CHANNEL_OWNER | manage channel, assign, configure membership, role labels and COI map (dual approved) | only if also an eligible channel member | whistleblowing function lead |
 | IDENTITY_CUSTODIAN | hold Sealed Identity Store keys (ADR-014) | identity only, not case content | ≥ 2 required |
 | LEGAL_COUNSEL | legal holds, legal basis records | per ACL | may be external |
 | OVERSIGHT | independent body: register, canary, break-glass review | metadata; content only as SILENT_MEMBER by audited action | 14 §9.4 |
@@ -197,7 +197,7 @@ Legend: Y = allowed; A = allowed with relation on the object (member/lead); D = 
 | audit.read SECURITY/SYSTEM | — | — | — | — | — | — | — | — | — | Y | — | Y | Y (SYSTEM) | — |
 | audit.export | — | — | — | — | — | — | — | Y D S | — | Y D S | — | Y D S | — | — |
 | metrics.read (k-suppressed) | — | — | — | — | Y | — | — | Y | — | — | Y | — | — | — |
-| channel/RG/COI config | — | — | — | — | Y D S | — | — | approve | — | — | — | — | — | — |
+| channel membership/role labels/COI config | — | — | — | — | Y D S | — | — | approve | — | — | — | — | — | — |
 | user.create/deactivate | — | — | — | — | — | — | — | — | — | — | — | — | — | Y |
 | user.enroll_approve | — | — | — | — | — | — | — | — | — | — | — | — | — | Y D S |
 | role.assign | — | — | — | — | — | — | — | — | — | — | — | — | — | Y D S |
@@ -211,7 +211,7 @@ Legend: Y = allowed; A = allowed with relation on the object (member/lead); D = 
 
 | Subject attributes | Object attributes | Environment |
 |---|---|---|
-| `tenant_id`, `department`, `roles[]`, `rg_memberships[]`, `person_ref`, `authn_level` (AAL2/AAL3), `authenticator_class`, `employment_status`, `grant_expiry[]` | `tenant_id`, `channel_id`, `rg_id`, `department_scope`, `case_state`, `flags` (LEGAL_HOLD, SEALED_MATTER, HIGH_DETRIMENT_RISK, BREAK_GLASS_ACTIVE), `coi_exclusions[]`, `acl[]`, `evidence_role`, `min_containment` | request audience, device binding valid, time (trusted), dual-approval token presence, step-up freshness |
+| `tenant_id`, `department`, `roles[]`, `channel_memberships[]` (with role labels), `person_ref`, `authn_level` (AAL2/AAL3), `authenticator_class`, `employment_status`, `grant_expiry[]` | `tenant_id`, `channel_id`, `rg_id`, `department_scope`, `case_state`, `flags` (LEGAL_HOLD, SEALED_MATTER, HIGH_DETRIMENT_RISK, BREAK_GLASS_ACTIVE), `coi_exclusions[]`, `acl[]`, `evidence_role`, `min_containment` | request audience, device binding valid, time (trusted), dual-approval token presence, step-up freshness |
 
 Rules of thumb: tenant equality is mandatory for every decision (plus PostgreSQL RLS, ADR-021); department scope restricts CHANNEL_OWNER and TRIAGER to their departments' channels; `SEALED_MATTER` restricts membership changes to COUNSEL + LEAD dual approval; `authn_level=AAL3` required for any content permission unless tenant explicitly downgrades (DANGEROUS).
 
@@ -220,7 +220,8 @@ Rules of thumb: tenant equality is mandatory for every decision (plus PostgreSQL
 - ACL relations: `member`, `lead`, `reviewer(temp)`, `counsel`, `oversight(silent)`. Membership requires eligibility (14 §7).
 - Need-to-know: no role grants "all cases"; there is no global read (contrast SecureDrop's flat authorization, B-SD-20).
 - COI exclusions are evaluated **before** ACL: an excluded subject is denied even if an ACL row exists (deny overrides).
-- Evaluation order: (1) authentication/audience/tenant → (2) explicit deny (COI, deactivated, expired grant) → (3) role permission → (4) relation (ACL/RG) → (5) attribute conditions → (6) dual-control/step-up tokens. Default deny.
+- Intake-time COI exclusion is cryptographic (ADR-030): the envelope content key is wrapped only to eligible members' Member Epoch Keys, so a source-excluded or COI-map-excluded member holds no decrypting key; import is permitted only to envelope recipients; the source-derived exclusions form a permanent per-case deny list (see `14-CASE-MANAGEMENT.md` §8). Server-side COI checks after import are the second layer for exclusions discovered at triage.
+- Evaluation order: (1) authentication/audience/tenant → (2) explicit deny (COI, deactivated, expired grant) → (3) role permission → (4) relation (case ACL, or envelope recipient for import) → (5) attribute conditions → (6) dual-control/step-up tokens. Default deny.
 
 ### 5.5 Temporary access and expiry
 
@@ -247,7 +248,7 @@ Use: imminent danger to life/safety or legal deadline when all eligible case mem
 
 | Mechanism | Effect |
 |---|---|
-| Admins hold no case-key wraps and no RG epoch keys | Even with full DB and blob access, admins read only ciphertext (ADR-015) |
+| Admins hold no case-key wraps and publish no Member Epoch Keys (ADR-030; Desks refuse to publish them for admin-role accounts) | Even with full DB and blob access, admins read only ciphertext (ADR-015) |
 | Only an existing key holder's Desk can create a new wrap | Admin cannot grant themselves access by editing ACL rows; server ACL without wrap yields nothing |
 | Recipient public keys are signed into C-14 under USER_ADMIN dual approval and transparency-logged; Desks verify grantee keys against C-14 before wrapping | Admin cannot substitute a key or insert a hidden recipient without detection (THR-046) |
 | Admin API audience separate (`admin-api`), route registry deny-by-default | Admin tokens cannot call case routes (ADR-029) |
@@ -267,7 +268,7 @@ Residual: an admin controls availability (can delete ciphertext, stop services, 
 | DC-05 | Legal hold set / release | COUNSEL + LEAD or OVERSIGHT |
 | DC-06 | Break-glass | per §5.6 |
 | DC-07 | User enrollment approval, role assignment, reactivation | 2 USER_ADMINs |
-| DC-08 | COI map, RG membership, OVERSIGHT_MODE, SLA pack changes | CHANNEL_OWNER + OVERSIGHT |
+| DC-08 | COI map, channel membership and role labels, OVERSIGHT_MODE, SLA pack changes | CHANNEL_OWNER + OVERSIGHT |
 | DC-09 | DANGEROUS configuration (e.g., TOTP fallback, synced passkeys for limited roles, diagnostic logging, recovery quorum enablement) | SYS_ADMIN + SECURITY_OFFICER (+ OVERSIGHT notified) |
 | DC-10 | Audit export | 2 of {AUDITOR, OVERSIGHT, SECURITY_OFFICER} |
 | DC-11 | Recovery Quorum use | k-of-n RECOVERY_TRUSTEEs (ADR-013) |
@@ -361,12 +362,13 @@ Dual-control implementation: an `Approval` object = {operation descriptor hash, 
 | AUTHZ-020 | Role assignments SHALL expire after 365 days unless re-certified, and a quarterly access-review report SHALL be generated for USER_ADMIN and OVERSIGHT. | B-CO-49 (ISO 27001 A.5.18); B-CO-40 (AC-2) | THR-019 | C-22; C-10 | TST: expiry fixture; DEMO: report |
 | AUTHZ-021 | Attribute data used for decisions SHALL be read in the same database transaction as the protected data. | Design | THR-021 | C-10; C-22 | INSP: code review; TST: concurrent revoke-during-read test |
 | AUTHZ-022 | Content permissions SHALL require `authn_level=AAL3` unless a tenant enables a DANGEROUS downgrade with dual approval. | B-CO-41 | THR-022 | C-22 | TST: AAL2 session denied content by default |
+| AUTHZ-023 | C-22 SHALL permit `case.import` only to users whose Member Epoch Key appears in the envelope recipient set, and both C-22 and the Desk SHALL refuse any case-key wrap or ACL grant to a member in the case's permanent source-derived exclusion set. | ADR-030; ADR-015; INC-22 | THR-020 | C-22; C-15 | TST: non-recipient import denied; wrap/ACL grant to source-excluded member rejected at both layers |
 
 ## 8. Residual risks and limitations
 
 1. **Endpoint compromise.** A compromised Desk host with an unlocked session exposes all of that user's cases (keys in memory) (THR-013). Hardware keys prevent credential replay elsewhere but not same-host malware.
 2. **Coercion/collusion.** Dual control fails if two approvers collude or are coerced; COI rules reduce but do not eliminate collusion inside independent bodies.
-3. **Metadata authorization bugs.** Server-side bugs can leak metadata (RG, states, dates) even though content needs keys.
+3. **Metadata authorization bugs.** Server-side bugs can leak metadata (envelope recipient key IDs, states, dates) even though content needs keys.
 4. **Availability power of admins.** Admins can destroy ciphertext or deny service; backups and oversight monitoring mitigate (19, 20).
 5. **TOTP fallback.** Where enabled, phishing of staff remains practical; key unlock falls back to a software passphrase.
 6. **IdP attributes.** Manipulated `manager` attributes may cause wrongful removal from cases (DoS), by design never wrongful addition.

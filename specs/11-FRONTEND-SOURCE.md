@@ -16,24 +16,34 @@ It defines:
 
 Guidance **content** is owned by `05-SOURCE-OPSEC.md`. Accessibility and i18n process are owned by `26-ACCESSIBILITY.md`. This document owns how that content and those rules are rendered and enforced.
 
-**Protection statement.** The UI is designed so that C-06 learns nothing about the source beyond what the source types or uploads:
+**Protection statement.** The UI is designed so that C-06 learns nothing about the source beyond what the source types or uploads (protections P-01, P-19, P-23 in `40-SECURITY-ASSUMPTIONS.md`):
 - no fingerprinting, no third-party resources, no persistent client state, and uniform response sizes.
 - It works at Tor Browser "Safest", which removes the JavaScript attack surface exploited in INC-27 and INC-28.
 - It reduces mode confusion (THR-040).
 
-This assumes Tor Browser is current and not compromised, and that the operator deploys the reviewed release (verified via `33-RELEASE-UPDATE-SECURITY.md`). Residual risks are in §15. Specifically, Tier W cannot protect submission plaintext from a live-compromised C-06/C-07 (ADR-004).
+Conflict-of-interest exclusion chosen by the source is enforced cryptographically: excluded members receive no key (ADR-030; P-10, P-12).
+
+This assumes:
+- Tor Browser is current and not compromised (ASM-004, ASM-008);
+- the source reached the genuine onion (ASM-006);
+- for Tier W, intake is not under live adversary control during the session (ASM-013; P-05);
+- for Tier V, the client is authentic (ASM-012, ASM-040; P-04, P-14);
+- the operator deploys the reviewed release (verified via `33-RELEASE-UPDATE-SECURITY.md`).
+
+Residual risks are in §15. Specifically, Tier W cannot protect submission plaintext from a live-compromised C-06/C-07 (ADR-004).
 
 ## 2. Context and dependencies
 
 | Document | Dependency |
 |---|---|
-| `DECISIONS.md` | ADR-002, -003, -004, -005, -010, -011, -013, -014, -015, -023, -026, -027, -029 |
+| `DECISIONS.md` | ADR-002, -003, -004, -005, -010, -011, -013, -014, -015, -023, -026, -027, -029, **-030 (per-member epoch keys; source "concerns" checklist)** |
 | `05-SOURCE-OPSEC.md` | Guidance cards GC-01..GC-38, placement map (§7), assistance features (§8) |
 | `03-PRIVACY-ANONYMITY.md` | Metadata minimization, compelled-disclosure inventory |
 | `04-CRYPTOGRAPHY.md` | Passphrase derivation (Argon2id), sealing to channel epoch keys, source keys |
 | `06-SYSTEM-ARCHITECTURE.md`, `07-BACKEND.md`, `08-API.md` | C-06/C-07/C-08 behavior; routes; the draft store |
 | `10-FILE-EVIDENCE-PIPELINE.md` | Upload limits, sealing of attachments, derivatives |
-| `14-CASE-MANAGEMENT.md` | Channels, questionnaire schema, COI role lists, SLA values, source-visible status |
+| `14-CASE-MANAGEMENT.md` | Channels, questionnaire schema, COI map, SLA values, source-visible status |
+| `40-SECURITY-ASSUMPTIONS.md` | Protections P-01, P-04, P-05, P-10, P-12, P-14, P-19, P-23; assumptions ASM-004, -006, -008, -012, -013, -040; ASM-112 ("What protects you and what does not" page, implemented by S03) |
 | `16-TOR-I2P.md` | Onion service, PoW, rate limiting (ADR-026) |
 | `26-ACCESSIBILITY.md` | WCAG 2.2 AA, localization pipeline, AT test matrix |
 | `33-RELEASE-UPDATE-SECURITY.md` | Source App updates (TUF), WEBCAT manifest signing |
@@ -64,6 +74,7 @@ This assumes Tor Browser is current and not compromised, and that the operator d
 | JavaScript | None | N/A (native UI) | Required (so it cannot run at Safest) |
 | Where encryption happens | C-07 on the server, in RAM (ADR-004 honest statement) | On device | In browser |
 | Recipient key check | Server-listed recipients (labelled "as listed by this site") | Verified against C-14 transparency log; fingerprints shown | Verified against C-14 |
+| COI filter (ADR-030) | Applied by C-07 in RAM at sealing | Applied locally before wrapping | Applied locally |
 | Metadata cleaning | None; warning only (`05` SOPS-017) | Local clean + findings (`05` §8.4) | Local clean (WASM) |
 | Upload padding | Server-side after receipt (ADR-011); request size visible to network observers at Tor-cell granularity | Client pads to bucket before upload | Client pads |
 | Drafts | Server-held ciphertext keyed by a client-held cookie secret (§5.6) | Memory only; discarded on close | Memory only |
@@ -159,6 +170,7 @@ Rules:
 | `/safety` | GET | S02 Safety Check |
 | `/status` | GET | S03 Anonymity Status |
 | `/new` | GET, POST | S04 Create Report |
+| `/concerns` | GET, POST | S04b "Is your report about any of these people?" (ADR-030) |
 | `/q` | GET, POST | S05 Questionnaire (step number carried in the form body, not the URL) |
 | `/identity` | GET, POST | S05b Identity disclosure |
 | `/files` | GET, POST | S06 Attach Evidence |
@@ -248,8 +260,11 @@ flowchart TD
   S01 -->|I have a passphrase| S11L[S11 Login]
   S02 --> S03[S03 Anonymity Status]
   S03 --> S04[S04 Create Report: channel + mode]
-  S04 -->|Anonymous| S05[S05 Questionnaire steps 1..n]
-  S04 -->|Confidential / Identified| S05b[S05b Identity disclosure + confirm]
+  S04 --> S04b[S04b Is your report about any of these people? - optional checklist]
+  S04b -->|no eligible recipients left| S04x[S04b-X No one left: choose an independent channel]
+  S04x --> S04
+  S04b -->|Anonymous| S05[S05 Questionnaire steps 1..n]
+  S04b -->|Confidential / Identified| S05b[S05b Identity disclosure + confirm]
   S05b --> S05
   S05 --> S06[S06 Attach Evidence]
   S06 -->|files attached| S07[S07 Metadata Warning]
@@ -360,7 +375,9 @@ Each screen lists its purpose, content, fields, validation, no-JS behavior, erro
 | Mode | Current mode + one-line meaning |
 | How your report is protected | Tier W text (ADR-004 honest statement) |
 | Who receives reports in this channel | List of recipient roles/names from the signed key directory snapshot, labelled "(as listed by this site)". Tier V: "(checked against the public key log ✓)" plus a 16-hex-character key fingerprint per recipient |
-| People kept out | "You can name roles that must not see your report (next steps)." |
+| Who receives reports in this channel (roles) | Role labels of the channel's members from the Key Directory (ADR-030), e.g., "Audit Committee Chair", "External Counsel". Names are shown only if channel policy publishes them |
+| People kept out | "On the next pages you can tick roles your report is about. People in those roles will not get a key to open it." |
+| What protects you and what does not | The ASM-112 list: plain-language consequences of ASM-001, ASM-004..ASM-011 and ASM-013, drawn from `05-SOURCE-OPSEC.md` GC-01 (e.g., "If your computer is infected or monitored, this site can't protect you") |
 | Backup key | ADR-013 escrow statement |
 | Software | Version and release hash (for monitors), labelled "as reported by this site" |
 
@@ -389,7 +406,8 @@ Each screen lists its purpose, content, fields, validation, no-JS behavior, erro
      - "Yes, show my name to the people handling it" — only if the channel allows IDENTIFIED.
      Each option has a one-line consequence. The options have equal visual size.
 - **Validation:** the channel must be in the allow-list and active; the mode must be allowed for the channel.
-- **No-JS:** POST `/new` creates the draft and issues the cookie (§5.6). The response is S05 step 1, or S05b for a non-anonymous mode.
+- **Channel availability (ADR-030 fail-closed):** if a channel currently has no member with a valid published epoch key, it is shown disabled with "This channel can't accept reports right now. Try again later or choose another channel." A report is never encrypted to fewer or other parties.
+- **No-JS:** POST `/new` creates the draft and issues the cookie (§5.6). The response is S04b.
 - **Errors:** "Choose who should receive your report." "This channel does not accept confidential reports; choose another option."
 - **A11y:** the `legend` is the question. Consequence text is linked by `aria-describedby`.
 ```
@@ -406,6 +424,52 @@ Each screen lists its purpose, content, fields, validation, no-JS behavior, erro
 |                                         [ Continue ]          |
 ```
 
+### S04b "Is your report about any of these people?" (ADR-030)
+- **Purpose:** let the source exclude people their report concerns, cryptographically, before anything is encrypted (ADR-030, ADR-015; INC-22).
+- **Placement:** immediately after channel selection (S04), before the questionnaire.
+- **Content:**
+  - `<h1>` "Is your report about any of these people?"
+  - A plain explanation (`sui.concerns.explain`, `sec:critical`): "Tick anyone your report is about, or anyone who should not see it. People you tick will **not get a key** to open your report. This is done with encryption, not just a rule, so they can't open it even if they can see our computer systems. You don't have to tick anything."
+  - The role labels come from the chosen channel's members in the Key Directory (C-14). One checkbox per role label. Names are shown only if channel policy publishes them.
+  - Tier W labels the list "(as listed by this site)". Tier V shows it only after C-14 verification.
+  - A note: "Your organization may also automatically keep out people linked to the type of report you choose. You will see the final list before you send."
+- **Fields:** checkbox group (`fieldset`/`legend` = the question). **Default: none ticked.** An empty selection is valid, with no "Are you sure?".
+- **Validation:** values must be role IDs from the channel's signed directory snapshot. Unknown values are rejected.
+- **Eligibility check:** after POST, C-07 (Tier W) or the client (Tier V) computes the eligible members: channel members with a valid current epoch key, minus ticked roles.
+  - If ≥ 1 member remains, continue to S05, or to S05b for non-anonymous modes.
+  - If none remain, show **S04b-X**.
+  - The same check is repeated at S08 after the tenant COI map for the chosen category is applied, and at sealing time.
+- **S04b-X "No one left to receive your report":**
+  - Text: "If these roles are kept out, no one in this channel could open your report. Choose a channel that is independent of them." It then lists the other channels in this deployment that have at least one eligible member, each with its handling-body description (e.g., "Board Audit Committee (independent of management)", "External Ombudsperson").
+  - It also names any external body configured in the jurisdiction pack, as plain text (`05` GC-03; no links).
+  - Buttons: "Choose another channel" (back to S04, keeping the ticks where the roles exist there) and "Change who is kept out" (back to S04b).
+  - The source is never offered "send anyway", and the system never encrypts to fewer or other parties.
+- **No-JS:** POST `/concerns`. The draft is saved.
+- **Errors:** "We couldn't load the list of roles for this channel. Try again later." (Fail closed: continuing without the list is not offered.)
+- **A11y:**
+  - Checkboxes have role labels as accessible names.
+  - The explanation is linked by `aria-describedby`.
+  - S04b-X uses `<h1>` for the consequence and a list of channel options.
+```
+| Step 2 of 8: Who should not see it                            |
+| Is your report about any of these people?                     |
+| Tick anyone your report is about, or anyone who should not    |
+| see it. People you tick will NOT get a key to open your       |
+| report. You don't have to tick anything.                      |
+|  [ ] Chief Financial Officer                                  |
+|  [ ] Head of Internal Audit                                   |
+|  [ ] Audit Committee Chair                                    |
+|  (as listed by this site)                                     |
+|           [ Back ]                      [ Continue ]          |
++---------------------------------------------------------------+
+| No one left to receive your report                            |
+| If these roles are kept out, no one in this channel could     |
+| open your report. Choose a channel independent of them:       |
+|  * Board Audit Committee (independent of management)          |
+|  * External Ombudsperson                                      |
+| [ Choose another channel ]   [ Change who is kept out ]       |
+```
+
 ### S05 Questionnaire (steps 1..n)
 - **Purpose:** collect the report content using the channel questionnaire (`14-CASE-MANAGEMENT.md` schema).
 - **Default template:**
@@ -420,7 +484,6 @@ Each screen lists its purpose, content, fields, validation, no-JS behavior, erro
 | 4 | How do you know? | Multiple choice (saw it / was told / have documents / other) | no |
 | 5 | About how many people could know these facts? (`05` §8.7) | Single choice | no |
 | 5 | Has this been reported before? | Yes / No / Not sure | no |
-| 6 | Should anyone be kept out of this report? (COI, ADR-015) | Checkbox list of channel-configured roles, with help text "People in these roles will be kept out before anyone can open your report." | no |
 | 6 | Anything else? | Long text | no |
 
 - **Field types permitted in the builder:** short text, long text, single choice, multiple choice, month-year, yes/no/not-sure.
@@ -516,8 +579,8 @@ Each screen lists its purpose, content, fields, validation, no-JS behavior, erro
 - **Purpose:** final check before sending. Surfaces identity hints and style tips. Makes the mode unmistakable.
 - **Content (in order):**
   1. Mode summary box (banner repeated with a "Change" link).
-  2. Channel and recipients.
-  3. "People kept out".
+  2. Channel, and **"Who can open your report"**: the final eligible role labels after source ticks and the tenant COI map for the chosen category (ADR-030).
+  3. "Kept out": the roles the source ticked, plus "and {n} role(s) kept out automatically by your organization's conflict-of-interest rules" (role labels shown where the COI map is published in C-14). If the final eligible set is empty, S04b-X is shown instead of S08.
   4. Answers, each with an "Edit" link to its step.
   5. Files (neutral names, class).
   6. Identity-hint notices (`05` §8.5; non-blocking; each links to the field).
@@ -534,8 +597,9 @@ Each screen lists its purpose, content, fields, validation, no-JS behavior, erro
 ```
 | Step 7 of 7: Check and send                                   |
 | .-Your report will be sent ANONYMOUSLY--------------[Change]-.|
-| To: Audit Committee (as listed by this site)                  |
-| Kept out: Chief Financial Officer                             |
+| Who can open it: Audit Committee Chair, External Counsel      |
+|   (as listed by this site)                                    |
+| Kept out: Chief Financial Officer (+1 by org rules)           |
 | What happened?  "In March the ... "                  [Edit]   |
 | Files: file-01.pdf (PDF), file-02.jpg (Photo)        [Edit]   |
 | Check for details that could point to you                     |
@@ -740,7 +804,7 @@ Build-time enforcement: template lint, a dependency allow-list, and a crawler th
 | SUI-018 | C-38 pages SHALL display the CLEARNET "NOT ANONYMOUS" banner on every page and SHALL NOT offer an ANONYMOUS mode option. | ADR-002 | THR-040, THR-001 | C-38 | TST: C-38 template tests |
 | SUI-019 | S03 SHALL display the §7 S03 items. In Tier W, the recipient list SHALL be labelled "as listed by this site". In Tier V, recipients SHALL be shown only after successful C-14 verification, with fingerprints. | REQ-H-14, REQ-H-21 (INC-14, INC-21); ADR-013 | THR-046, THR-040 | C-06, C-03, C-14 | TST: Tier V malicious-server harness injects an extra recipient → client aborts (ADR-027 harness) |
 | SUI-020 | The questionnaire builder SHALL permit only the §7 S05 field types and SHALL reject identity field types for ANONYMOUS-capable channels. Date input SHALL be month-year only. | REQ-H-05; ADR-010 | THR-040, THR-011 | C-06, C-19 | TST: builder API negative tests |
-| SUI-021 | The COI question (S05 step 6) SHALL list only channel-configured absolute roles, and its answers SHALL be applied before key wrapping per ADR-015. | ADR-015; INC-22 | THR-020 | C-06, C-10, C-22 | TST: flagged role member never receives case key (14/15 integration test) |
+| SUI-021 | Immediately after channel selection, the UI SHALL present the optional S04b checklist "Is your report about any of these people?". Role labels SHALL come from the channel's member entries in the Key Directory, and none SHALL be ticked by default. Ticked roles, plus the tenant COI map for the chosen category, SHALL be removed from the recipient set before any wrapping, so that excluded members receive no wrapped key (applied in C-07 RAM for Tier W, locally for Tier V). | ADR-030; ADR-015; INC-22 | THR-020, THR-046 | C-06, C-07, C-03, C-14 | TST: flagged role member never receives case key (14/15 integration test) |
 | SUI-022 | Server-side validation SHALL be authoritative, and error presentation SHALL follow §5.7 (error summary with `autofocus`, field `aria-invalid`, linked messages, "Error:" title prefix, preserved values). | WCAG 3.3.1, 3.3.3; B-CO-28 | — | C-06 | TST: a11y assertions; DEMO: NVDA/Orca error walkthrough |
 | SUI-023 | All user and recipient content SHALL be HTML-escaped and rendered as plain text without auto-linking, Markdown or HTML interpretation. | B-GL-39 (CVE-2024-38521); REQ-H-36 | THR-008 | C-06 | ST: XSS corpus against every rendering path; TST |
 | SUI-024 | Text inputs SHALL enforce the §5.7 limits server-side. Long text SHALL be ≤ 65,536 bytes UTF-8, and total report text ≤ 256 KiB. | ADR-011 | THR-032 | C-06, C-07 | TST: boundary tests |
@@ -776,6 +840,10 @@ Build-time enforcement: template lint, a dependency allow-list, and a crawler th
 | SUI-054 | Source-visible case status SHALL be limited to the configured coarse set and SHALL NOT reveal assignee identities, internal notes or timestamps finer than a day. | ADR-010; INC-09 | THR-011, THR-019 | C-06, C-10 | TST: API contract test (08) diff vs allow-list |
 | SUI-055 | `Date`, `ETag`, `Last-Modified` and `Server` headers SHALL be absent from C-06 responses, pending confirmation in `16-TOR-I2P.md`. | INC-34; Knowledge (unverified) clock-skew fingerprinting | THR-005, THR-044 | C-06 | TST: header test |
 | SUI-056 | Only GET, HEAD and POST SHALL be accepted. Other methods SHALL receive 405 in class P1. | B-SD-04 | THR-032 | C-06 | TST |
+| SUI-057 | If the eligible recipient set after exclusions is empty (at S04b, at S08 after COI-map application, or at sealing), the UI SHALL show S04b-X. S04b-X SHALL explain the consequence plainly and list independent channels with ≥ 1 eligible member. The system SHALL NOT offer "send anyway" and SHALL NOT encrypt to fewer or other parties. | ADR-030; ADR-015; INC-22 | THR-020, THR-040 | C-06, C-07, C-03 | TST: fixture where ticks exclude all members → S04b-X; sealing-time re-check blocks a race where members changed |
+| SUI-058 | A channel with no member holding a valid current epoch key SHALL be shown as unavailable ("can't accept reports right now") and SHALL NOT accept submissions (fail closed). | ADR-030 | THR-046, THR-040 | C-06, C-07 | TST: expire all member epoch keys in fixture → channel disabled; submit rejected |
+| SUI-059 | S08 SHALL display the final "Who can open your report" role list (after source ticks and COI map) and the kept-out roles. Tier V SHALL show it only after verifying each role's member epoch key in C-14. | ADR-030; REQ-H-14, REQ-H-21 | THR-046, THR-040 | C-06, C-03, C-14 | TST: render tests; malicious-server harness adds a hidden member key → Tier V aborts |
+| SUI-060 | S03 SHALL include the ASM-112 "What protects you and what does not" section in plain language, without JavaScript. | ASM-112 (40); ADR-004 | THR-040 | C-06 | INSP: content check against ASM-112 list; TST: no-JS render |
 
 ## 14. Page-weight and size verification matrix
 

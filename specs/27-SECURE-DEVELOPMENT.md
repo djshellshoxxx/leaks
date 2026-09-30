@@ -232,7 +232,7 @@ Mandatory sections:
 2. **STRIDE** per element.
 3. **LINDDUN** (privacy: Linkability, Identifiability, Non-repudiation, Detectability, Disclosure, Unawareness, Non-compliance) per data flow (Knowledge (unverified) taxonomy).
 4. Mapping to THR-001..THR-048 (new threats are proposed to 02).
-5. "What does this feature add to the compromise-drill answers?": for each drill AT-020..AT-031 in 30, the new data an adversary would learn. Answering "nothing" requires justification.
+5. "What does this feature add to the compromise-drill answers?": for each drill AT-020..AT-032 in 30, the new data an adversary would learn. Answering "nothing" requires justification.
 6. New canary markers and sinks to add to AT-001.
 7. Abuse cases, including a malicious insider (THR-018/019/020) and a malicious server against clients (ADR-027).
 8. Tests added (ST/AT IDs).
@@ -363,7 +363,7 @@ Every release candidate of any trust-path artefact passes all applicable gates. 
 | SG-08 | Authorization & tenancy | ST-060..ST-070, ST-077, ST-078 = 100% pass; route registry has 0 routes without declarations | all | test report |
 | SG-09 | Malicious-server harness | ST-090..ST-097 = 100% pass on all client builds (C-15 Linux/macOS/Windows, C-03, C-17 bridge) | all | harness report |
 | SG-10 | Anonymity canary | AT-001..AT-019: 0 hits in any sink (any hit = release blocker, see 30) | all | canary report |
-| SG-11 | Compromise-drill regression | AT-020..AT-031 answers ⊆ documented expected answers (30); any new datum requires an approved update to 03's compelled-disclosure inventory | minor, major | drill report |
+| SG-11 | Compromise-drill regression | AT-020..AT-032 answers ⊆ documented expected answers (30); any new datum requires an approved update to 03's compelled-disclosure inventory | minor, major | drill report |
 | SG-12 | Timing/size/fingerprint | AT-040..AT-058 pass | all | test report |
 | SG-13 | Reproducibility | ≥2 independent builders produce bit-identical artefacts; diffoscope report empty (28) | all | builder attestations |
 | SG-14 | Provenance & SBOM | SLSA Build L3 provenance and CycloneDX + SPDX SBOM for every artefact, signed, logged (28) | all | attestations |
@@ -408,7 +408,7 @@ Every fix PR includes a regression test (SDL-051) and a variant analysis (SDL-05
 | SDL-008 | The project SHALL maintain `security/asvs-map.csv` recording PASS / N/A (rationale) / GAP (ticket) for every ASVS 5.0.0 requirement at L3 for T0/T1 components and L2 for T2 components, and SHALL verify chapter titles and IDs against the official ASVS 5.0.0 release. | B-CR-49 | THR-021; THR-023 | C-06; C-10; C-15; C-03 | TST: `asvs-map-lint` (no blank rows); AUD: pentest verifies sample (37) |
 | SDL-009 | The Source App (C-03) SHALL additionally be verified against OWASP MASVS including its PRIVACY category. | Knowledge (unverified) | THR-006; THR-036; THR-048 | C-03 | AUD: mobile pentest (37); INSP |
 | SDL-010 | A feature threat model per §10.2 SHALL be written and approved before merge for every change meeting a §10.1 trigger. | B-CR-47; B-SD-04 | THR-016; THR-021; THR-024 (plus per-feature threats) | C-30 | TST: `tm-link` PR check; INSP: sample audit of 10% of T1 PRs quarterly |
-| SDL-011 | Every feature threat model SHALL state the incremental answer to each compromise drill AT-020..AT-031 and SHALL add canary markers/sinks to AT-001 where new data flows exist. | INC-60; B-SD-22 | THR-016; THR-015; THR-014 | C-30 | INSP: threat-model review; AT-001 sink-list diff |
+| SDL-011 | Every feature threat model SHALL state the incremental answer to each compromise drill AT-020..AT-032 and SHALL add canary markers/sinks to AT-001 where new data flows exist. | INC-60; B-SD-22 | THR-016; THR-015; THR-014 | C-30 | INSP: threat-model review; AT-001 sink-list diff |
 | SDL-012 | T0 designs SHALL undergo crypto design review before implementation, and any change to protocol message flow SHALL update the Tamarin/ProVerif model before merge. | ADR-006; INC-62; INC-63; INC-66; B-CR-25 | THR-012 | C-11 | TST: ST-030; AUD: crypto review (37) |
 | SDL-013 | The master threat model in 02 SHALL be re-versioned at every minor and major release incorporating merged feature models. | B-SD-04 | THR-001; THR-015; THR-016; THR-021; THR-024 | C-30 | INSP: SG-01 |
 | SDL-014 | T0 changes SHALL require two approvals excluding the author, including one Crypto Reviewer and one reviewer from a different team or organization than the author. | INC-50; INC-51; B-CR-46 | THR-012; THR-024 | C-11; C-30 | TST: branch-protection-as-code check `bp-verify`; SG-02 forge-API audit |

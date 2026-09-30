@@ -251,7 +251,7 @@ flowchart LR
 | Step | Data at rest after step | Encryption state | Time metadata |
 |---|---|---|---|
 | 1–3 | none | Tor circuit encryption. Tier W: HTTP plaintext inside the onion connection. | none |
-| 4 | none (RAM only) | Tier W: sealer encrypts to channel epoch key (04-CRYPTOGRAPHY.md envelope). Tier V: client already encrypted. | none |
+| 4 | none (RAM only) | Tier W: the sealer applies the COI filter and wraps the envelope content key separately to each eligible member's Member Epoch Key, in 16 fixed recipient slots with dummies (ADR-030; envelope format in 04-CRYPTOGRAPHY.md). Tier V: the client did the same before upload. | none |
 | 5 | `envelope` and `envelope_part` rows plus blobs in C-08 | HPKE envelope; parts padded (ADR-011) | `received_epoch_day` only |
 | 6 | relay claims batch; intake deletes after ack | unchanged ciphertext | `batch_no` |
 | 7–8 | `import_envelope` in C-12, blobs in C-13; intake copy deleted | unchanged ciphertext; **new random ID** assigned (intake ID not retained, §14) | `received_epoch_day`, `import_batch_no` |
@@ -344,22 +344,26 @@ sequenceDiagram
   participant W as candor-web C-06
   participant L as candor-sealer C-07
   participant I as intake-store C-08
-  S->>T: GET /new over onion
+  S->>T: GET /c/{channel_id} over onion
   T->>W: unix socket
+  W-->>S: channel page with optional COI checklist (role labels, categories from the verified snapshot)
+  S->>W: POST /new (channel_id, COI selection, CSRF)
   W->>L: GEN_ACCOUNT (session handle)
-  L-->>W: passphrase words (display only), pending account id in RAM
+  L-->>W: passphrase words (display only), pending account in RAM
   W-->>S: page shows 10-word passphrase once, CSRF token, padded
-  S->>W: POST /submit/{channel_id}/message (text, CSRF)
-  W->>L: SEAL_BEGIN(channel, routing_group from COI choice)
+  S->>W: POST /submit/message (text, CSRF)
+  W->>L: SEAL_BEGIN(channel, COI selection)
+  L->>L: eligible = roster minus selected roles minus COI-map category exclusions
+  Note over L: zero eligible member keys means NO_ELIGIBLE_RECIPIENTS and a fail-closed busy page
   W->>L: SEAL_CHUNK stream
   L-->>W: ciphertext chunks (STREAM 64 KiB)
   W->>I: PUT_PART(draft, ciphertext)
-  S->>W: POST /submit/{channel_id}/file (multipart, one file per request)
+  S->>W: POST /submit/file (multipart, one file per request)
   W->>L: SEAL_CHUNK stream, no disk writes
   L-->>W: ciphertext
   W->>I: PUT_PART
-  S->>W: POST /submit/{channel_id}/send
-  W->>L: SEAL_FINISH (manifest, header incl. source reply pubkey)
+  S->>W: POST /submit/send
+  W->>L: SEAL_FINISH (manifest incl. source reply pubkey and COI selection, header with 16 recipient slots)
   L-->>W: envelope header ct, manifest ct, account public record
   W->>I: COMMIT_ENVELOPE(account record if new, envelope, day)
   I-->>W: ok
@@ -381,8 +385,10 @@ sequenceDiagram
   participant W as candor-web C-06 (source-app API)
   participant I as intake-store C-08
   A->>W: GET /app/v1/directory/checkpoint + channel lookup with proofs
-  A->>A: verify checkpoint sigs, witness cosigs, inclusion proofs, epoch key sig by channel identity key
+  A->>A: verify checkpoint sigs, witness cosigs, inclusion proofs, roster sig by channel identity key, member epoch key sigs by member identity keys
+  A->>A: show optional COI checklist, compute eligible members locally (ADR-030)
   A->>A: derive keys from passphrase (Argon2id), encrypt message and files (STREAM), pad
+  A->>A: wrap content key to each eligible member epoch key, fill 16 recipient slots with dummies
   A->>W: POST /app/v1/uploads (upload_id = H(U), chunk_count, size bucket)
   loop each chunk, new circuit allowed, resumable
     A->>W: PUT /app/v1/uploads/{upload_id}/chunks/{n} + chunk MAC from U
@@ -444,11 +450,11 @@ sequenceDiagram
   R->>C: insert import_envelope (new random id), blobs to C-13
   R->>I: POST ack (digests)
   I->>I: delete acked envelopes and blobs
-  C->>C: enqueue content-free notification to routing-group members
-  D->>C: GET /desk/v1/intake/envelopes (routing groups the user belongs to)
-  C->>Z: authorize(list_intake, user, routing_group)
+  C->>C: map recipient slot key IDs to members via C-14, enqueue content-free notification to those members
+  D->>C: GET /desk/v1/intake/envelopes (only envelopes whose slots contain the caller's key IDs)
+  C->>Z: authorize(intake.list, user) + slot-membership filter
   D->>C: GET envelope header + parts (ciphertext)
-  D->>D: unwrap epoch private key (hardware-bound), decrypt, show triage view
+  D->>D: open own recipient slot with own member epoch private key (local, hardware-bound), decrypt, show triage view
   D->>C: POST triage decision (import | spam)
   D->>C: POST /desk/v1/cases/eligibility (channel, flags)
   C->>Z: compute eligible members minus COI exclusions
@@ -470,21 +476,25 @@ sequenceDiagram
   participant C as candor-case C-10
   participant Z as authz C-22
   participant D as Desk (eligible recipient)
-  K-->>W: channel COI map (flag → routing_group) + per-group epoch keys, signed
-  S->>W: select "My report concerns: Executive leadership"
-  W->>W: routing_group = map(flags), encrypt to that group's epoch key
-  Note over W: members of excluded roles never hold that group's epoch key
-  W->>C: (via intake + relay) envelope tagged with opaque routing_group_id
-  D->>C: list intake (only members of routing_group)
-  D->>C: request eligibility for case creation
-  C->>Z: apply COI: source flags (from group), channel COI map, recipient self-declarations, admin COI registry
+  K-->>W: signed channel roster (role labels), COI map (category to excluded labels), member epoch keys
+  W-->>S: optional checklist "Is your report about any of these people or roles?" (default none)
+  S->>W: select role label "CFO" and category "Executive leadership"
+  W->>W: eligible = roster minus CFO minus COI-map exclusions for the category
+  W->>W: wrap content key to each eligible member epoch key, 16 slots incl. dummies (Tier V in app, Tier W in sealer)
+  Note over W: excluded members hold no key that opens any slot
+  W->>C: (via intake + relay) envelope with cleartext recipient key IDs in the header
+  D->>C: list intake (only envelopes whose slots contain the caller's key IDs)
+  D->>D: open slot, read source COI selection from the encrypted manifest
+  D->>C: request eligibility for case creation with the excluded role labels
+  C->>Z: apply COI: source selection, channel COI map, recipient self-declarations, admin COI registry
   Z-->>D: eligible members (excluded users absent)
   D->>C: create case, key wraps only for eligible members
   C->>Z: on later member add, re-evaluate COI, deny if excluded
 ```
 
-- Excluded users never receive a case key or epoch key (ADR-015).
-- The routing-group ID is visible to servers and administrators as an opaque ID. Its meaning is visible to administrators who configure the COI map. See §15, residual risk R-3.
+- Excluded members never receive an envelope slot or a case key wrap (ADR-015, ADR-030).
+- Recipient key IDs in the envelope header are pseudonymous and rotate per epoch. The directory maps them to role labels, so operators and recipients can infer which roles were excluded. See §16, residual risk R-3.
+- Channel roster size is capped at the slot count (default 16) by the Admin API (08-API.md AP-11).
 
 ### 9.6 Export package
 
@@ -605,7 +615,7 @@ pub trait TransportAdapter: Send + Sync {
 | Intake processes | 1 set | **per tenant** set of `candor-web`, `candor-sealer`, `candor-intake-store` under distinct OS users | 1 set | per customer |
 | Intake DB | 1 | **separate PostgreSQL database per tenant** | 1 | per customer |
 | Case DB | 1 | shared DB with RLS on `tenant_id` (FORCE RLS, no BYPASSRLS roles); per-tenant DB is an ADVANCED option | 1 | per customer DB, shared cluster forbidden for high-risk customers |
-| Channel and epoch keys | per channel | per tenant channel; never shared | per channel | per channel |
+| Channel identity keys / Member Epoch Keys | per channel / per member per channel | per tenant channel; never shared across tenants | same | same |
 | Blob store | 1 root | per-tenant prefix/bucket with per-tenant credential | 1 | per customer bucket |
 | Cross-tenant operations | n/a | only `candorctl root-maint`, audited, dual approval, never via the Admin API | n/a | vendor has no content access |
 
@@ -618,7 +628,7 @@ Tenant context: every request resolves `tenant_id` from the authenticated princi
 | CE-SINGLE | VM on shared host | VM on same host | VM or omitted (agent-only local) | external disk or remote SFTP | Desk (RCP-ONION) | Documented reduced isolation: a hypervisor escape joins zones |
 | CE-HARDENED | dedicated physical host | dedicated physical host | dedicated small host | dedicated store | Desk + DispVM viewer; optional AIRGAP | Reference profile for this document |
 | EE-ONPREM | dedicated host or VM cluster (not shared with other workloads) | dedicated host(s) | customer SOC via C-26 | customer backup with Candor encryption | Desk (RCP-LAN) | SSO bridge (C-21) optional |
-| EE-HA | 2 intake hosts, active/standby, one onion key (manual failover) or distinct onions per host | Kubernetes permitted (ADR-024); PG HA (sync replica) | C-26 | as EE | RCP-LAN | Replicas carry ciphertext only |
+| EE-HA | 2 intake hosts, active/passive, same onion key on both (≤ 2 hosts, ADR-032), both in the Secret Placement Manifest | Kubernetes permitted (ADR-024); PG HA (sync replica) | C-26 | as EE | RCP-LAN | Replicas carry ciphertext only |
 | GOV-ONPREM | dedicated hardware; FIPS profile | dedicated; HSM (C-29) for audit checkpoint and relay identity | C-26 | offline media rotation | RCP-LAN; AIRGAP optional | CANDOR-FIPS-1 suite |
 | AIRGAP-RCP | any | any | any | any | offline Desk + transfer Desk | Media-bundle import/export |
 | PRIVATE-CLOUD | dedicated VMs; provider sees RAM/disk (THR-030) | VMs or K8s | C-26 | provider object store (ciphertext) | RCP-LAN / RCP-ONION | Tier W plaintext exposure to hypervisor documented; Tier V recommended |
@@ -655,7 +665,7 @@ Tenant context: every request resolves `tenant_id` from the authenticated princi
 | `source_account_id` | C-08 only | nowhere | Never leaves Z-INTAKE in cleartext. Replies are routed via `routing_ct` sealed to the intake routing key. |
 | `intake_envelope_id` | C-08 | relay, transiently (manifest) | C-09 assigns a fresh random `import_envelope_id` on insert and does not persist the intake ID (acks are by content digest and batch number). |
 | `locator_hash` | C-08 | nowhere | Lookup handle only |
-| `routing_group_id` | C-08, C-12, C-14 | yes | Opaque random; meaning known to channel admins |
+| Recipient slot key IDs (Member Epoch Key IDs) | C-08, C-12 (envelope header), C-14 | yes | Pseudonymous, rotate per epoch; mapping to role labels is public in C-14 (ADR-030) |
 | `case_id` | C-12, C-15 | Desk only | Never shown to the source; the source sees no ID (ADR-010) |
 | `thread_tag` (source-side, inside encrypted envelope) | ciphertext only | — | Lets Desk attach follow-ups to a case without any server-visible link |
 
@@ -686,7 +696,7 @@ Tenant context: every request resolves `tenant_id` from the authenticated princi
 | ARCH-021 | Confidential Clearnet Intake (C-38), when enabled, SHALL run on separate hosts with separate onion/TLS keys, DB, sealer and channels, and SHALL display "NOT ANONYMOUS" on every page. It SHALL NOT share any process or store with anonymous intake. | ADR-002 | THR-040 | C-38 | TST: deploy check; DEMO: usability review of labeling |
 | ARCH-022 | Tenant context SHALL be derived from the authenticated principal or the onion listener binding, never from request input. EE shared instances SHALL use per-tenant onion services, per-tenant intake process sets and DBs, and RLS-enforced Case DB tenancy. | ADR-021; INC-113; B-GL-37 | THR-021; THR-045 | C-06; C-10; C-12 | TST: two-tenant isolation harness (tenant B snapshot unchanged after all tenant-A actions) |
 | ARCH-023 | High-risk customers (as defined in ADR-021) SHALL be deployed only on dedicated instances. The installer SHALL require an explicit risk classification at tenant creation. | ADR-021 | THR-045; THR-020 | C-10 | INSP: tenant creation flow; TST: `root-maint tenant create` without a risk class fails |
-| ARCH-024 | COI exclusions from source flags SHALL be applied at intake encryption time by selecting the routing-group epoch key. Case-level COI SHALL be re-evaluated by C-22 before every key wrap. Excluded users SHALL never receive a wrap. | ADR-015; INC-22 | THR-020 | C-06; C-07; C-22; C-15 | TST: COI scenario suite (excluded user cannot list, fetch, or be added); TST (security, 29): attempt to add excluded member via API |
+| ARCH-024 | COI exclusions (source-selected role labels and COI-map categories) SHALL be applied before wrapping. Tier V clients SHALL apply them locally and the Tier W sealer in RAM. The envelope content key SHALL be wrapped only to eligible members' Member Epoch Keys. Case-level COI SHALL be re-evaluated by C-22 before every case key wrap. Excluded members SHALL never receive a slot or a wrap. | ADR-015; ADR-030; INC-22 | THR-020 | C-06; C-07; C-22; C-15 | TST: COI scenario suite (excluded user cannot list, fetch, or be added); TST (security, 29): attempt to add excluded member via API |
 | ARCH-025 | Break-glass SHALL require a requester and an approver who are distinct users with distinct roles, a time limit ≤ 72 h, notification to all case members, and a post-hoc independent review within 7 days. It SHALL grant content access only via a key wrap by an existing member or the Recovery Quorum. | ADR-015; ADR-013 | THR-018; THR-019 | C-10; C-22; C-15 | TST: break-glass state machine tests; DEMO: tabletop exercise |
 | ARCH-026 | Export of report content to any external system SHALL occur only through an Export Package created in C-15. Exports of originals SHALL require approval by two distinct users. | ADR-018; INC-16 | THR-029; THR-041 | C-15; C-10; C-40 | TST: connector cannot fetch unapproved packages; TST: single-approver original export denied |
 | ARCH-027 | The segmentation matrix (§10) SHALL be implemented as owner-matched nftables rules generated from one machine-readable policy file, and verified by an automated probe after every deploy. | ADR-028; INC-118 | THR-035 | C-39; C-25 | TST: `seg-matrix` probe CI and post-deploy |
@@ -699,6 +709,10 @@ Tenant context: every request resolves `tenant_id` from the authenticated princi
 | ARCH-034 | The Clearnet Information Site (C-37) SHALL be hosted separately from all Candor zones, SHALL have no network path to them, and SHALL carry no third-party resources. | REQ-H-53; INC-53; INC-118 | THR-036; THR-004 | C-37 | TST: external header/resource probe; INSP |
 | ARCH-035 | The AIRGAP-RCP profile SHALL move data only as signed, encrypted transfer bundles processed through `candor-safefs`. The online transfer Desk SHALL hold no private keys. | ADR-027; INC-109; INC-111 | THR-023; THR-013 | C-15; C-18 | TST: malicious bundle fuzzing; INSP: key inventory of the transfer Desk |
 | ARCH-036 | Each deployment profile SHALL publish, in the key directory, a machine-readable "protection statement" (tiers enabled, escrow state, clearnet intake state, profile). Sources and the Source App SHALL be able to read it. | ADR-013; ADR-002 | THR-040; THR-035 | C-14; C-06 | TST: directory entry present and signed; DEMO: source UI displays it |
+| ARCH-037 | If a channel has zero eligible member epoch keys valid for today after the COI filter (or fewer than the channel's `min_recipients`, default 1), intake for that selection SHALL fail closed with a "temporarily unavailable" page or response. It SHALL NOT encrypt to other or fewer parties or to expired keys. | ADR-030; ADR-002 | THR-020; THR-046 | C-03; C-06; C-07 | TST: COI selection excluding all members yields the busy page and no stored envelope; TST: expired-key-only roster fails closed |
+| ARCH-038 | Every envelope SHALL carry exactly 16 recipient slots (configurable only upward as ADVANCED), real slots wrapped to eligible Member Epoch Keys and the remainder dummies indistinguishable in size. Recipient key IDs SHALL be verifiable against C-14 by Desk and auditors. | ADR-030; ADR-011; INC-14 | THR-046; THR-011 | C-03; C-07; C-14; C-15 | TST: envelope conformance (slot count, dummy size); TST: Desk flags a slot key ID absent from the directory |
+| ARCH-039 | Each channel member's Desk SHALL pre-publish signed Member Epoch Keys ≥ 4 epochs ahead. The health agent SHALL alert when any member's runway is < 14 days, and when a channel's runway (members with valid keys) would drop below `min_recipients`. | ADR-030 | THR-032; THR-020 | C-15; C-14; C-25 | TST: runway alert tests |
+| ARCH-040 | In EE-HA and GOV-ONPREM, the onion service private key MAY reside on at most 2 intake hosts, both listed in the Secret Placement Manifest and equally monitored. All other profiles SHALL hold exactly one online copy plus one offline encrypted backup. | ADR-032; ADR-028 | THR-044 | C-05; C-25 | TST: manifest check counts onion-key locations per profile |
 
 ## 16. Residual risks and limitations
 
@@ -706,7 +720,7 @@ Tenant context: every request resolves `tenant_id` from the authenticated princi
 |---|---|---|---|
 | R-1 | A live-compromised intake host (C-05/C-06/C-07) reads Tier W submissions and the passphrases of Tier W sources who log in during the compromise window. | Inherent to server-rendered no-JS intake (ADR-004). | Tier V recommended for high-risk sources. Honest statement shown on the Tier W page. Intake minimized and monitored. Assumes ASM for intake-host integrity monitoring. |
 | R-2 | End-to-end timing correlation by an adversary observing both the source's network and the intake host's Tor traffic (THR-003). | Tor does not defend against a global passive adversary. | Coarse time stored (ADR-010). Relay decoupling. No push. Guidance (05-SOURCE-OPSEC.md). |
-| R-3 | Routing-group IDs reveal to server operators that a report was routed with particular COI flags (e.g., "concerns executives"), and when (day granularity). | Server-side routing needs a routing key selector. | Opaque IDs. Counts per group are SOURCE-SENSITIVE aggregates with k-anonymity. Admins who configure COI maps are a distinct role from accused-prone roles. Open issue O-2. |
+| R-3 | Recipient key IDs in cleartext envelope headers let server operators, admins and recipients infer which role labels were excluded, and therefore that a report concerns a particular role, on a given day. | ADR-030 requires recipient sets verifiable against the directory (THR-046). | Key IDs rotate per epoch; 16 fixed slots with dummies hide the count; admins have no content access; COI-heavy channels should route to independent bodies. Open issue O-2. |
 | R-4 | CE-SINGLE collapses zones onto one hypervisor. | Cost trade-off. | Warning in admin console and protection statement. Tier V still protects content. |
 | R-5 | PRIVATE-CLOUD and MANAGED providers can snapshot RAM (Tier W plaintext) and observe traffic volumes. | Provider has physical control (THR-030). | Tier V recommended. Documented in the protection statement. |
 | R-6 | A compromised Desk device exposes all cases its user can access. | Keys must be usable where decryption happens (ADR-007). | Hardware-bound unlock, case-scoped ACLs, device revocation (15-AUTHENTICATION-AUTHORIZATION.md). |
@@ -719,11 +733,11 @@ Tenant context: every request resolves `tenant_id` from the authenticated princi
 | # | Issue | Proposed resolution |
 |---|---|---|
 | O-1 | ADR-029 lists four token audiences. Machine-to-machine channels (relay, connector, fleet, SIEM gateway, health collector) use mTLS peer identity rather than tokens. | Amend ADR-029 to state that machine channels are identified by mTLS SAN and never accept user tokens (see 08-API.md O-1). |
-| O-2 | COI flag privacy (R-3). | Evaluate "dummy multi-group encryption": the envelope key is wrapped to all routing groups' epoch keys, with group-specific decryptability hidden. That needs a crypto design in 04-CRYPTOGRAPHY.md. Record as ADR candidate "COI routing privacy". |
+| O-2 | COI exclusion privacy (R-3). | Evaluate anonymous recipient slots (key-private HPKE wraps with trial decryption) plus a separate auditor-only commitment to the recipient set. This keeps THR-046 detection without exposing exclusions to operators. Needs a crypto design in 04-CRYPTOGRAPHY.md; ADR candidate. |
 | O-3 | Intake Routing Key is a new key type not named in ADR-008. | Add it to the ADR-008 key hierarchy: X-Wing, generated on intake at install, public key in C-14, used only for reply routing. |
-| O-4 | EE-HA intake failover with a single onion key means two hosts hold the onion key. | Prefer distinct onion keys per intake host, both published. Decide in 16-TOR-I2P.md. |
+| O-4 | Resolved by ADR-032: the onion key may be on ≤ 2 intake hosts in EE-HA and GOV-ONPREM (ARCH-040). | — |
 
 ### Open Issues for ADR revision
 - **ADR-008:** add the Intake Routing Key and Backup Key to the hierarchy (O-3).
 - **ADR-029:** machine audiences (O-1).
-- **ADR-015:** the COI routing-group mechanism leaks flag choice at the metadata level (O-2). This document conforms to ADR-015 ("exclusions applied before key wrapping") and records the leakage.
+- **ADR-030:** cleartext recipient key IDs leak the COI exclusion pattern to operators (R-3, O-2). This document conforms and records the leakage.

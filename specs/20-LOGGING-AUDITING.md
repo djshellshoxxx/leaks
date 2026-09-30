@@ -102,7 +102,7 @@ Payload fields not listed are forbidden. Types: `CaseRef` (pseudonymous case ID)
 
 | Type | Payload fields |
 |---|---|
-| `case.imported` | CaseRef, rg_id, received_day (date), import_batch_bucket (batch number rounded down to multiple of 10) |
+| `case.imported` | CaseRef, channel_id, received_day (date), import_batch_bucket (batch number rounded down to multiple of 10) |
 | `case.state_changed` | CaseRef, from_state, to_state |
 | `case.assigned` / `case.member_added` / `case.member_removed` | CaseRef, target UserRef, relation, reason_code (COI/REVOKED/EXPIRED/REQUESTED) |
 | `case.rekeyed` | CaseRef, key_generation |
@@ -125,7 +125,7 @@ Payload fields not listed are forbidden. Types: `CaseRef` (pseudonymous case ID)
 | `case.disposed` | CaseRef, receipt_id |
 | `case.data_purged` | CaseRef, reason_code (EU_ART17_IRRELEVANT) |
 | `oversight.opened` | CaseRef, mode |
-| `rg.config_changed` / `coi_map.changed` / `sla_pack.changed` | channel_id, rg_id, approvers, policy_hash |
+| `channel.membership_changed` / `coi_map.changed` / `sla_pack.changed` | channel_id, approvers, policy_hash |
 
 `case.imported` note: `received_day` is already server-known (ADR-010); `import_batch_bucket` coarsens the batch number so the audit stream does not reproduce the C-09 pull timeline.
 

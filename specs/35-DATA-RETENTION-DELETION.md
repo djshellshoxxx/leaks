@@ -38,11 +38,11 @@ Specifies how long every class of data is kept, how organizations configure rete
 
 | # | Data object | Location | Protection | Retention class / default | Deletion mechanism |
 |---|---|---|---|---|---|
-| D-01 | Sealed submission envelope (ciphertext) | C-08 Intake Store | RG epoch key (ADR-008) | Until C-09 pull acknowledged + 24 h | Delete row/blob; epoch-key destruction makes all copies unreadable |
+| D-01 | Sealed submission envelope (ciphertext) | C-08 Intake Store | Member Epoch Keys (ADR-008, ADR-030) | Until C-09 pull acknowledged + 24 h | Delete row/blob; epoch-key destruction makes all copies unreadable |
 | D-02 | Source account record (`lookup_id`, public keys, verifier) | C-08 | none needed beyond minimization | `SRC-ACCOUNT`: until case disposed, or 365 days after last reply delivered, or source deletion (§9) — whichever first | Row delete + backup expiry |
 | D-03 | Sealed replies awaiting source | C-08 | source key | `SRC-REPLY`: until read + 30 days, max 365 days | Row delete |
 | D-04 | Source `received_day` / batch metadata | C-08, C-12 | — | with D-02 / case | with parent |
-| D-05 | RG epoch private keys | member Desks (wrapped), C-12 wraps | member keys | decrypt window (14 d) and until all envelopes of the epoch imported or abandoned (CASE-020) | Destroy wraps + Desk zeroize |
+| D-05 | Member Epoch private keys (ADR-030) | member Desks (wrapped), C-12 wraps | member keys | decrypt window (14 d) and until all envelopes of the epoch imported or abandoned (CASE-020) | Destroy wraps + Desk zeroize |
 | D-06 | Case record (encrypted) | C-12 | case key | by outcome (§5) | Crypto-erase case key (§6) |
 | D-07 | Evidence blobs (ORIGINAL, DERIVED) | C-13 | per-object DEK wrapped under case key | with case; DERIVED may be deleted earlier | Crypto-erase + blob delete |
 | D-08 | Case-key wraps (member, quorum) | C-12 (erasure-layer encrypted, §6.2) | member X-Wing keys + Erasure Key | with case | Destroy Erasure Key + delete wraps |
@@ -107,7 +107,7 @@ EU-oriented packs follow Art 18(1) "no longer than necessary and proportionate" 
 | Case key K (and generations K', K''…) | wrapped to each member X-Wing key (C-12), wrapped to Recovery Quorum key (C-12, optional), cached in member Desks (D-12), in backups of C-12 | (a) delete wraps in C-12; (b) destroy the case's Erasure Key (§6.2), rendering wraps in backups/replicas/snapshots undecryptable; (c) Desk tombstone → zeroize |
 | Per-object DEKs | wrapped under K inside case record | unreachable once K is unreachable |
 | Identity DEK (ADR-014) | wrapped to Identity Custodians + Erasure Key | same pattern |
-| RG epoch keys | member Desks, C-12 wraps | destroyed per ADR-008 schedule (independent of case) |
+| Member Epoch keys | member Desks, C-12 wraps | destroyed per ADR-008/ADR-030 schedule (independent of case) |
 
 ### 6.2 Erasure Key layer (makes key destruction propagate to backups)
 
@@ -139,7 +139,7 @@ Overwrite-based "secure deletion" is not relied upon (unreliable on SSD/CoW/clou
 ### 6.4 Tombstones and deletion receipts
 
 After disposal, remaining server-side records are:
-- Case tombstone (C-12): `case_id`, tenant, retention class, disposal date, receipt ID. No channel, RG, dates of receipt, or states (minimize).
+- Case tombstone (C-12): `case_id`, tenant, retention class, disposal date, receipt ID. No channel, recipient key IDs, dates of receipt, or states (minimize).
 - CASE audit tombstone (`20-LOGGING-AUDITING.md` AUD-012).
 - Deletion receipt (signed by the Audit key and by the approvers' identity keys): {receipt_id, case_id, disposal date, class, legal hold check result, approvers, list of destroyed key IDs (E_case ID, wrap IDs), number of blobs deleted, EKV snapshot expiry date, verification results (§12)}. No content, hashes of content or filenames.
 
@@ -147,7 +147,7 @@ After disposal, remaining server-side records are:
 
 | Rule | Detail |
 |---|---|
-| B1 | Backups contain C-08/C-12/C-13 data in its encrypted form plus infrastructure config; they never contain EKV, member private keys, RG epoch private keys (unwrapped), or the Recovery Quorum private key (19 constrains the Backup Agent C-27). |
+| B1 | Backups contain C-08/C-12/C-13 data in its encrypted form plus infrastructure config; they never contain EKV, member private keys, Member Epoch private keys (unwrapped), or the Recovery Quorum private key (19 constrains the Backup Agent C-27). |
 | B2 | Backup encryption (outer layer) uses a backup key (EE: HSM; CE: offline key) — protects metadata only; content protection is inner (REQ-H-55). |
 | B3 | Restoring a backup older than a disposal must not resurrect cases: on restore, C-10 replays the deletion-receipt ledger (kept in the EKV-independent receipt store and in the witness-cosigned audit checkpoints) and re-applies disposals (deletes rows/blobs whose receipts exist). Wraps are already unusable (E_case missing). |
 | B4 | EE-HA replicas: disposal deletes replicate synchronously; EKV is replicated only within the HA cluster (not to backups) and deletion is confirmed on all EKV replicas before the receipt is signed. |
