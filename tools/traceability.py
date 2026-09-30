@@ -11,6 +11,9 @@ import pathlib
 import re
 import sys
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import constants_lint  # noqa: E402  (ADR-047(11): canonical constants registry + SG-25 lint)
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SPECS = ROOT / "specs"
 OUT = SPECS / "39-REQUIREMENTS-TRACEABILITY.md"
@@ -126,8 +129,22 @@ def main():
             out.append(f"| {f[0]} | {f[1]} | {esc(f[2])} | {f[3]} |")
     else:
         out.append("None.")
+    registry = constants_lint.load_registry()
+    c_conf, c_style, c_missing = constants_lint.run_lint(registry)
+    out.append("\n## 6. Canonical constants registry\n")
+    out.append("Owned by this document per ADR-047(11). Source: `tools/constants.json` "
+               "(machine-readable; entries carry conflict and required patterns). Specifications reference "
+               "these values and SHALL NOT restate divergent literals.\n")
+    out.append(constants_lint.registry_markdown(registry))
+    out.append("\n## 7. Constants lint\n")
+    out.append("Spec-constant consistency lint (`tools/constants_lint.py`; ST-167, SG-25). ERROR = a literal in "
+               "`specs/*.md` conflicting with the registry; WARN = same value in a divergent unit/spelling, or the "
+               "owner document no longer states the canonical value. History lines (withdrawn/superseded/v1.0) "
+               "are skipped.\n")
+    out.append(constants_lint.lint_markdown(c_conf, c_style, c_missing))
     OUT.write_text("\n".join(out) + "\n", encoding="utf-8")
-    print(f"{len(reqs)} requirements, {errs} errors, {len(findings) - errs} warnings -> {OUT.relative_to(ROOT)}")
+    print(f"{len(reqs)} requirements, {errs} errors, {len(findings) - errs} warnings; "
+          f"constants lint: {len(c_conf)} conflicts -> {OUT.relative_to(ROOT)}")
     return 1 if errs else 0
 
 

@@ -231,7 +231,7 @@ Notes and constraints:
 - Patch SLA: tor security releases are included in an emergency Platform Manifest update (≥ 2 h cooling, ≥ 2 signers from ≥ 2 organisations, 33 §10) and deployed ≤ 72 h after upstream publication (INC-29 lesson / REQ-H-29).
 
 ### 7.4 Configuration lint (CI and on-host self-test)
-`candorctl net lint` fails if: any listening TCP socket on a non-loopback address other than the C-08 relay endpoint and the exporter endpoint (§14.2 F3/F4); a SocksPort on the source onion instance; an onion service on the `candor-client` instance; SocksPort/TransPort/DNSPort non-zero on the intake instance; ControlPort TCP enabled; SingleHop/NonAnonymous mode = 1; `SafeLogging` ≠ 1; log level below `warn`; `HiddenServiceVersion` ≠ 3; PoW disabled; more than one `HiddenServicePort`; torrc hash ≠ release manifest.
+`candorctl net lint` fails if: any listening TCP socket on a non-loopback address other than the C-08 relay endpoint (§14.2 I1) and the optional sshd (I2); a SocksPort on the source onion instance; an onion service on the `candor-update` instance; SocksPort/TransPort/DNSPort non-zero on the intake instance; ControlPort TCP enabled; SingleHop/NonAnonymous mode = 1; `SafeLogging` ≠ 1; log level below `warn`; `HiddenServiceVersion` ≠ 3; PoW disabled; more than one `HiddenServicePort`; torrc hash ≠ release manifest.
 
 ## 8. Staff access onion (optional)
 
@@ -364,58 +364,64 @@ No third-party CAPTCHA or CDN (ADR-026; INC-54).
 
 ### 14.2 Host enforcement (Intake Gateway)
 - C-06 and C-07 run with `PrivateNetwork=yes` (only loopback in their namespace) and communicate via Unix sockets; they have no route to any network.
-- **Normative H-INTAKE flow matrix (RVW-A-23; single source of truth for 06/17):**
+- **H-INTAKE flow matrix (RVW-A-23; final round: aligned with `17-INFRASTRUCTURE.md` §4.3.1, which is normative for initiated flows E1–E5; `06-SYSTEM-ARCHITECTURE.md` §8.5 references the same table).** Interface names (`ext0`, `relay0`, `mgmt0`) and ports are those of 06 and 17.
 
 | # | Direction | Process / UID | Interface | Peer | Port | Purpose |
 |---|---|---|---|---|---|---|
-| F1 | out | `_tor-candor-intake` (source onion instance) | ext0 | Tor relays | any TCP | onion service circuits |
-| F2 | out | `_tor-candor-client` (client instance, §14.3) | ext0 | Tor relays | any TCP | TUF updates from the project onion mirror (ADR-046(3)); Roughtime over Tor; nothing else |
-| F3 | in | C-08 relay endpoint | int0 | C-09 relay host only | 8443 | core-initiated pull/push (ADR-009) |
-| F4 | in | health exporter | int0 | C-25 collector host only | 9443 (mTLS) | monitoring **pull**; the intake never pushes to the monitor (inverts 06 §8.5 agent push) |
-| F5 | in (optional) | sshd | mgmt0 | admin jump host | 22 | administration (or admin over the staff onion) |
+| E1 | out | `_tor-candor-intake` (source onion instance `candor-intake`, §7.1) | ext0 | Tor relays | any TCP | onion service circuits |
+| E2 | out | `_tor-candor-update` (client-only instance `candor-update`, §14.3) | ext0 | Tor relays | any TCP | TUF updates from the project onion mirror (ADR-046(3)); Roughtime over Tor; nothing else |
+| E3 | out | `candor-health` (C-25 agent) | mgmt0 | H-MON collector only | 8514 (mTLS) | self-test and daily health-band **push** (ARCH-014 push-only; the monitor never connects to the intake) |
+| E4 | out | `_chrony` | mgmt0 | H-MON internal NTS source only | UDP 123, TCP 4460 | time discipline from the internal source (17 INFRA-007); never Z-CORE |
+| E5 | out (initramfs only) | root (clevis) | mgmt0 | H-MON / off-site Tang | 7500 | boot-time Tang unlock; rule absent after switch-root |
+| I1 | in | C-08 relay endpoint `candor-istore` | relay0 | C-09 relay host only | 7443 (mTLS) | core-initiated pull and reply push (ADR-009); the intake never initiates this flow |
+| I2 | in (optional) | sshd | mgmt0 | admin jump host | 22 | administration (or admin over the staff onion, §8) |
 | — | any other | — | — | — | — | dropped and counted |
 
-The C-25 collector reachable in F4 SHALL NOT be the host that relays mail or has any other clearnet egress (H-MON mail relay on a separate host; RVW-A-23). No NTP, DNS or other clearnet flow exists.
-- nftables (normative ruleset; interface names per 17):
+H-MON (E3–E5 destination) SHALL satisfy 17 §4.3.2: no IP forwarding, no default route, no mail daemon, no clearnet egress except via its own tor client (RVW-A-23). No clearnet DNS or NTP flow exists; E4 reaches only the internal H-MON source. The v1.0 rows "F3 8443/int0" and "F4 exporter pull on 9443" are withdrawn (final round, DISP-G6 item 1).
+- nftables (normative ruleset; interface names per 06/17; 17 §4.3 holds the full host ruleset including initramfs rules):
 ```
 table inet candor_intake {
   chain input {
     type filter hook input priority 0; policy drop;
     iif "lo" accept
     ct state established,related accept
-    iifname "int0" ip saddr $RELAY_IP tcp dport 8443 ct state new accept      # F3: C-09 pull only (ADR-009)
-    iifname "int0" ip saddr $COLLECTOR_IP tcp dport 9443 ct state new accept  # F4: C-25 pull of exporter
-    iifname "mgmt0" ip saddr $ADMIN_JUMP tcp dport 22 ct state new accept      # F5: optional; or admin over staff onion
+    iifname "relay0" ip saddr @core_relay tcp dport 7443 ct state new accept   # I1: C-09 core-initiated pull/push (ADR-009)
+    iifname "mgmt0"  ip saddr @admin_jump tcp dport 22   ct state new accept   # I2: optional; or admin over staff onion
   }
   chain output {
     type filter hook output priority 0; policy drop;
     oif "lo" accept
-    ct state established,related accept                                         # replies to F3/F4/F5
-    meta skuid "_tor-candor-intake" oifname "ext0" tcp dport 1-65535 accept     # F1
-    meta skuid "_tor-candor-client" oifname "ext0" tcp dport 1-65535 accept     # F2
-    meta skuid { "_tor-candor-intake", "_tor-candor-client" } udp dport 53 drop # tor needs no DNS here
+    ct state established,related accept                                         # replies to I1/I2
+    oifname "ext0"  meta skuid "_tor-candor-intake" meta l4proto tcp ct state new accept   # E1
+    oifname "ext0"  meta skuid "_tor-candor-update" meta l4proto tcp ct state new accept   # E2
+    oifname "mgmt0" meta skuid "candor-health" ip daddr @mon_hosts tcp dport 8514 accept   # E3 agent push
+    oifname "mgmt0" meta skuid "_chrony" ip daddr @mon_hosts udp dport 123 accept          # E4 NTP (internal)
+    oifname "mgmt0" meta skuid "_chrony" ip daddr @mon_hosts tcp dport 4460 accept         # E4 NTS-KE
+    meta skuid { "_tor-candor-intake", "_tor-candor-update" } udp dport 53 drop            # tor needs no DNS here
     log prefix "candor-egress-deny " level warn limit rate 1/minute drop        # counters only; no payload
   }
   chain forward { type filter hook forward priority 0; policy drop; }
 }
 ```
-- No DNS resolver configured for application users; no NTP over clearnet; host time per §14.3 (the v1.0 chrony SOCK refclock fed by C-09 timestamps is removed; RVW-A-04, ADR-036(6)).
+- No DNS resolver configured for application users; no clearnet NTP; host time per §14.3. The v1.0 chrony SOCK refclock fed by C-09 timestamps is **withdrawn** (ADR-036(6)); no Z-CORE-supplied timestamp sets or validates the intake clock.
 - Cloud metadata endpoints (169.254.169.254, fd00:ec2::254) and IPv6 router advertisements blocked/disabled (PRIVATE-CLOUD profile; THR-030).
-- **Updates (ADR-046(3); RVW-C-08):** intake hosts fetch TUF metadata and artifacts only through the `_tor-candor-client` instance (F2) from the Candor project's onion mirror, verifying TUF and log proofs themselves (33 §14); the v1.0 option of bundles pushed by C-09 is withdrawn, so each zone has exactly one update path; never via direct clearnet.
-- Fail-closed checks: `candorctl net selftest` asserts no non-loopback TCP listeners except the relay and exporter endpoints, that an egress attempt by any UID other than the two tor UIDs fails, that no packet from H-INTAKE can reach a host with a default route to the Internet except via tor (probe to a canary host behind int0/mgmt0), and that the onion is the only path to C-06; runs at boot and every 15 min; failure stops C-06.
+- **Updates (ADR-046(3); RVW-C-08):** intake hosts fetch TUF metadata and artifacts only through the `candor-update` instance (UID `_tor-candor-update`, E2) from the Candor project's onion mirror, verifying TUF and log proofs themselves (33 §14); the v1.0 option of bundles pushed by C-09 is **withdrawn** (ADR-046(3)), so Z-INTAKE has exactly one update path; never via direct clearnet, never relay-pushed.
+- Fail-closed checks: `candorctl net selftest` asserts no non-loopback TCP listeners except the relay endpoint (I1, 7443 on relay0) and the optional sshd (I2), that an Internet egress attempt by any UID other than the two tor UIDs fails, that only `candor-health`/`_chrony` reach H-MON on the E3/E4 ports, that no packet from H-INTAKE can reach a host with a default route to the Internet except via tor (probe to a canary host behind relay0/mgmt0), and that the onion is the only path to C-06; runs at boot and every 15 min; failure stops C-06.
 
-### 14.3 Independent time source (ADR-036(6); RVW-A-04)
-- **Client instance.** A second tor instance `candor-client` (user `_tor-candor-client`; `SocksPort unix:/run/tor-instances/candor-client/socks.sock`, group `_candor-net`; no onion services; `ControlSocket` readable only by `_candor-time`; `SafeLogging 1`) serves the updater and the time checker. It holds no onion service key.
-- **Floor from the Tor consensus.** `_candor-time` reads the `valid-after` of the latest consensus that the `candor-client` instance has verified (directory-authority signatures checked by tor; Knowledge (unverified): `GETINFO consensus/valid-after`, else the cached consensus file). Rule: `valid_after ≤ now ≤ valid_after + 27 h` (3 h validity + 24 h "reasonably live" tolerance; Knowledge (unverified) exact tor tolerance).
-- **Cross-check with Roughtime.** Every hour at a random minute the time checker queries ≥ 3 Roughtime servers from ≥ 2 independent operators over the client instance (Roughtime over TCP; Knowledge (unverified) server support, 04 OI-16), verifies their signatures against pinned server keys shipped in the Platform Manifest, and takes the median of valid responses.
-- **Clock discipline.** chrony runs with no network sources; `_candor-time` feeds it the Roughtime median through a local SOCK refclock when Roughtime is available, otherwise only enforces the consensus floor. The host clock is accepted if it satisfies the consensus rule and is within ± 10 min of the Roughtime median; if skew to Roughtime exceeds 2 h or the consensus rule fails, the time checker signals C-07, which fails closed for sealing (04 §12.1 step 3, §12.6) until resolved; C-25 alerts. Z-CORE-supplied timestamps (C-09 pulls, checkpoint `issued`) are never used to set or validate the clock.
-- **Residual:** the consensus floor bounds rollback of time to ≈ 1 day; an adversary controlling a directory-authority majority, or all configured Roughtime operators, can skew time within those bounds (04 CA-10).
+### 14.3 Independent time source (ADR-036(6); RVW-A-04; values aligned with 17 §4.5)
+- **Client instance.** A second tor instance `candor-update` (user `_tor-candor-update`; `SocksPort unix:/run/tor-instances/candor-update/socks.sock`, group `_candor-net`; no onion services; `ControlSocket` readable only by `_candor-time`; `SafeLogging 1`; started by `candor-update.timer` and `candor-roughtime.timer`, never sharing a data directory with `candor-intake`) serves the updater and the time checker. It holds no onion service key.
+- **Clock discipline.** chrony disciplines the clock only from the internal H-MON NTS source (E4; 17 INFRA-007). There is no SOCK refclock and no Z-CORE time input. The checks below do not steer the clock; they decide whether C-07 may seal.
+- **Floor from the Tor consensus.** `_candor-time` reads the `valid-after` of the latest consensus verified by tor (directory-authority signatures checked by tor; Knowledge (unverified): `GETINFO consensus/valid-after`, else the cached consensus file). Rule: `valid_after − 5 min ≤ now ≤ valid_after + 27 h` (3 h validity + 24 h "reasonably live" tolerance; Knowledge (unverified) exact tor tolerance).
+- **Roughtime over Tor.** Every 6 h ± 30 min the time checker queries ≥ 2 Roughtime servers from ≥ 2 independent operators through the `candor-update` SOCKS socket (Roughtime over TCP; Knowledge (unverified) server support, 04 OI-16), verifies signatures against pinned server keys shipped in the Platform Manifest (updated through TUF), and requires two agreeing responses.
+- **Fail closed.** If the consensus rule fails, the host clock is > 30 min from the agreeing Roughtime responses, or the persisted monotonic high-water mark of accepted time steps backwards by > 5 min, the time checker signals C-07, which fails closed for sealing (04 §12.1 step 3, §12.6) until resolved; the C-25 agent pushes an alert (E3). Z-CORE-supplied timestamps (C-09 pulls, checkpoint `issued`) are never used to set or validate the clock.
+- **Feasibility.** If no TCP-capable Roughtime server is reachable over Tor, the intake operates on the consensus floor plus H-MON NTS and reports "Roughtime unavailable" in the daily health band (OI-7).
+- **Residual:** the consensus floor bounds rollback of time to ≈ 1 day; an adversary controlling a directory-authority majority, or all configured Roughtime operators and H-MON, can skew time within those bounds (04 CA-10).
 
 ## 15. Monitoring onion reachability without observing source traffic
 
 - **Active probing from C-25 (Z-SOC host), not from the intake host:** a separate tor client on the monitor host fetches `/.well-known/candor/health` (fixed-size static response served by C-06 without touching C-07/C-08) at exponentially distributed intervals (mean 10 min); records success/failure, descriptor fetch time and total latency; retains results ≤ 30 days.
 - **Descriptor integrity check:** C-25 fetches the service descriptor via its own tor client and compares intro points / revision counter with values exported by the intake's health exporter (§10.1).
-- **Intake health exporter** (runs as `_candor-torctl`, reads control socket, **pulled** by C-25 over mTLS on flow F4): tor bootstrap state, whether the current descriptor was published (yes/no), intro-point count, PoW active flag (public in the descriptor anyway). Load-related values (descriptor uploads, rendezvous circuits, suggested PoW effort, Argon2 queue) are exported only as a **coarse daily health band** (normal / elevated / overloaded, computed over the UTC day and emitted after the day ends; ADR-038(5), ADR-046(5); RVW-A-27). No per-circuit data, no event timestamps finer than 1 day for load values, no stream counts per circuit.
+- **Intake health exporter** (runs as `_candor-torctl`, reads the control socket and hands the values to the local C-25 agent `candor-health`, which **pushes** them to the collector over mTLS on flow E3; ARCH-014 push-only, the collector never connects to the intake): tor bootstrap state, whether the current descriptor was published (yes/no), intro-point count, PoW active flag (public in the descriptor anyway). Load-related values (descriptor uploads, rendezvous circuits, suggested PoW effort, Argon2 queue) are exported only as a **coarse daily health band** (normal / elevated / overloaded, computed over the UTC day and emitted after the day ends; ADR-038(5), ADR-046(5); RVW-A-27). No per-circuit data, no event timestamps finer than 1 day for load values, no stream counts per circuit.
 - **Never:** packet capture, NetFlow/sFlow, eBPF per-connection tracing, or tor `Log info/debug` on intake hosts in production; debugging requires a documented change with dual approval and a volatile, time-boxed (≤ 1 h) window, with sources warned via the info site only if the intake stays open (20, 32).
 - Alerts are content-free (ADR-017).
 
@@ -493,12 +499,12 @@ table inet candor_intake {
 | NET-028 | The Source App SHALL support obfs4, Snowflake and WebTunnel bridges with hash-pinned PT binaries and SHALL never fall back to non-Tor connectivity. | B-AN-30; B-AN-31 | THR-002 | C-03 | TST: bridge connectivity tests; network capture |
 | NET-029 | C-06 SHALL enforce per-CircuitToken rate limits and global concurrency limits (§13), queue waiting requests without revealing queue state, and serve a no-JS busy page only on queue overflow. | ADR-026; ADR-038(5); RVW-A-27 | THR-032; THR-033; THR-011 | C-06, C-07 | TST: load test (34); responses below overflow indistinguishable in size class and latency floor |
 | NET-030 | No third-party CAPTCHA, CDN or WAF SHALL be placed in the source path. | ADR-026; INC-54 | THR-036; THR-001 | C-05, C-06 | INSP; TST: resource origin scan |
-| NET-031 | Intake-host network flows SHALL be exactly the matrix F1–F5 of §14.2 (default-deny; only the two tor UIDs reach ext0; inbound only the C-09 relay endpoint, the C-25 exporter pull and the optional admin path; no push to monitoring; no clearnet DNS/NTP). | ADR-009; INC-33; RVW-A-23 | THR-001; THR-035; THR-104 | C-05, C-39 | TST: egress test as every other UID fails; ruleset diff against template; canary-host reachability probe |
+| NET-031 | Intake-host network flows SHALL be exactly the matrix of §14.2 (= 17 §4.3.1 E1–E5 plus inbound I1 relay TCP 7443 on `relay0` and optional I2 sshd): default-deny; only the two tor UIDs reach ext0; only the C-25 agent push (E3) and chrony (E4) reach H-MON; no inbound monitoring pull; no clearnet DNS/NTP. | ADR-009; INC-33; RVW-A-23 | THR-001; THR-035; THR-104 | C-05, C-39 | TST: egress test as every other UID fails; ruleset diff against template; canary-host reachability probe |
 | NET-032 | C-06 and C-07 SHALL run in a network namespace with only loopback and communicate through Unix sockets. | INC-33 | THR-014; THR-001 | C-06, C-07 | TST: namespace inspection in self-test |
 | NET-033 | Intake hosts SHALL use no clearnet DNS or NTP; host time SHALL satisfy the Tor-consensus floor rule and the Roughtime cross-check of §14.3, SHALL NOT be set or validated from Z-CORE-supplied timestamps, and violations SHALL make C-07 fail closed. | ADR-036(6); INC-33; RVW-A-04 | THR-043; THR-035 | C-05, C-07 | TST: no resolver; clock-skew injection; Z-CORE-supplied wrong time ignored |
 | NET-034 | `candorctl net selftest` SHALL run at boot and every 15 minutes and stop C-06 on any failure of §14.2 checks. | ADR-002 | THR-035 | C-05, C-06, C-25 | TST: fault injection |
 | NET-035 | If the onion service is unavailable, no alternative anonymous path SHALL be offered; the info site SHALL display an outage notice. | ADR-002; INC-03 | THR-040 | C-37, C-06 | DEMO; TST |
-| NET-036 | Reachability monitoring SHALL be performed from C-25 using its own tor client against a static health endpoint; intake hosts SHALL export only the liveness fields and daily load bands of §15, pulled by C-25. | ADR-016; ADR-038(5); ADR-046(5); INC-60 | THR-016; THR-011 | C-25, C-05 | INSP: exporter schema; TST: exporter output contains only allowed fields and no sub-day load values |
+| NET-036 | Reachability monitoring SHALL be performed from C-25 using its own tor client against a static health endpoint; intake hosts SHALL export only the liveness fields and daily load bands of §15, pushed by the local C-25 agent (E3); the collector SHALL NOT initiate connections to the intake (ARCH-014). | ADR-016; ADR-038(5); ADR-046(5); INC-60 | THR-016; THR-011 | C-25, C-05 | INSP: exporter schema; TST: exporter output contains only allowed fields and no sub-day load values |
 | NET-037 | Packet capture, flow export, per-connection tracing and tor info/debug logging SHALL be disabled on intake hosts in production, except in a dual-approved, time-boxed (≤ 1 h), volatile debugging window. | ADR-016; INC-60 | THR-016 | C-05, C-39 | INSP: config; TST: flow-export absent |
 | NET-038 | Source-facing pages SHALL be minimal and uniform in size class to reduce website fingerprinting (targets in 11). | B-AN-16; B-AN-19 | THR-004 | C-06 | TST: size-class test (30) |
 | NET-039 | Each tenant/customer SHALL have a dedicated onion service and intake gateway; onion services SHALL NOT be shared across customers. | ADR-021 | THR-045 | C-05 | INSP: deployment inventory |
@@ -506,8 +512,8 @@ table inet candor_intake {
 | NET-041 | Intake hosts SHALL block cloud metadata endpoints and IPv6 router advertisements. | INC-59 | THR-030 | C-39 | TST: probe from host |
 | NET-042 | The optional onion TLS mode SHALL replace (not add to) the HTTP onion port and SHALL NOT permit downgrade to HTTP. | B-CR-08 | THR-003 | C-05, C-06 | TST: port scan over Tor |
 | NET-043 | An onion service private key SHALL be present on exactly one intake host in single-host profiles and on at most two intake hosts (active/passive, only one tor instance publishing at a time) in EE-HA/GOV-ONPREM, both listed in the Secret Placement Manifest and monitored identically. | ADR-032; ADR-028 | THR-044 | C-05, C-25 | TST: placement self-test counts key copies; failover test shows single publisher |
-| NET-044 | Intake hosts SHALL fetch updates only through the `candor-client` tor instance from the Candor project's onion mirror and SHALL verify TUF and log proofs themselves; no other update path SHALL exist for Z-INTAKE. | ADR-046(3); ADR-009; RVW-C-08 | THR-001; THR-025 | C-05, C-10 | TST: egress capture during update; bundle push from C-09 refused |
-| NET-045 | A separate `candor-client` tor instance without onion keys SHALL serve updates and time checks; the source onion instance SHALL have no SocksPort and its control socket SHALL NOT be readable by the updater or time checker. | ADR-028; RVW-A-23 | THR-044; THR-035 | C-05 | TST: lint; permission check |
+| NET-044 | Intake hosts SHALL fetch updates only through the `candor-update` tor instance from the Candor project's onion mirror and SHALL verify TUF and log proofs themselves; no other update path SHALL exist for Z-INTAKE. | ADR-046(3); ADR-009; RVW-C-08 | THR-001; THR-025 | C-05, C-10 | TST: egress capture during update; bundle push from C-09 refused |
+| NET-045 | A separate `candor-update` tor instance (UID `_tor-candor-update`) without onion keys SHALL serve updates and time checks; the source onion instance SHALL have no SocksPort and its control socket SHALL NOT be readable by the updater or time checker. | ADR-028; RVW-A-23 | THR-044; THR-035 | C-05 | TST: lint; permission check |
 | NET-046 | External Watchers (≥ 2 organisations, ≥ 1 outside the operator's jurisdiction for EE/GOV/MANAGED) SHALL fetch the source UI, headers, running manifest and directory over Tor per §15.1 with Tor Browser-identical request shapes and fresh circuits at random intervals, compare them with the transparency log and publish mismatches. | ADR-035(1); RVW-A-01; RVW-A-13 | THR-007; THR-026; THR-025 | C-06, C-25 (external) | DEMO: watcher report per release; TST: injected asset change detected within 24 h in staging |
 | NET-047 | The signed onion address statement SHALL carry a cosignature by ≥ 1 external witness in EE, GOV and MANAGED (CE: SHOULD). | ADR-036(5); RVW-A-08 | THR-044; THR-046 | C-37, C-14 | TST: Source App rejects statement without required cosignature |
 | NET-048 | C-37 SHALL NOT host or log downloads of the Source App and SHALL link to the project distribution; its first viewport SHALL show the "work device or work network: stop here" warning; for D1/D2 and GOV-IG/IA tenants it SHALL be hosted outside the organisation's web stack with host access logging disabled. | ADR-041; RVW-A-14; RVW-B-17; RVW-C-20 | THR-002; THR-036 | C-37 | INSP: hosting attestation (quarterly C-37 review); TST: page scan; no installer served |
@@ -538,3 +544,4 @@ table inet candor_intake {
 | OI-5 | Cover-traffic transport (CoverDrop/Nym-style) evaluation for "using the channel is not a signal"; decoy uploads for HIGH (RVW-A-22). | Separate research track; admission per §6.3. |
 | OI-6 | Active/active HA with one onion address (OnionBalance-style) is deferred by ADR-032; the passive host doubles THR-044 exposure. | Security review before any active/active design (21). |
 | OI-7 | Roughtime-over-TCP server availability and the exact tor control query for consensus `valid-after` (Knowledge (unverified)). | Integration test; if no TCP Roughtime server is reachable, operate on the consensus floor alone and record it in the health band. |
+| OI-8 | Final round: 17 §4.3.1 row E1 names the source onion UID `debian-tor`; this document and the §7.1 per-instance layout use `_tor-candor-intake` (Debian `tor-instance-create` convention). Ports, interfaces and flows are otherwise identical. | 17 to rename E1 and its ruleset UID to `_tor-candor-intake` (logged in `process/DISP-FINAL-F2.md`). |
