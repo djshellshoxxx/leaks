@@ -153,6 +153,7 @@ Reference ruleset, installed as `/etc/nftables.d/10-candor-intake.nft` and gener
 flush ruleset
 table inet candor_intake {
   set mon_hosts   { type ipv4_addr; elements = { 10.30.0.5 } }
+  set admin_jump  { type ipv4_addr; elements = { 10.30.0.9 } }
   set core_relay  { type ipv4_addr; elements = { 10.20.0.3 } }
 
   chain input {
@@ -161,8 +162,8 @@ table inet candor_intake {
     ct state established,related accept
     ct state invalid drop
     iifname "relay0" ip saddr @core_relay tcp dport 7443 ct state new accept   # F3 core-initiated pull
-    iifname "mgmt0"  ip saddr @mon_hosts  tcp dport 9443 ct state new accept   # F4 monitor pull
-    # No SSH, no HTTP on any NIC: sshd and source web listen on loopback/unix sockets reached via tor
+    iifname "mgmt0"  ip saddr @admin_jump tcp dport 22   ct state new accept   # F12 SSH from admin jump (omit at remote sites: SSH onion)
+    # No HTTP on any NIC: the source web listens only on a unix socket reached via tor
     counter comment "input-dropped"
   }
 
@@ -173,6 +174,7 @@ table inet candor_intake {
     ip daddr 169.254.0.0/16 counter drop comment "no cloud metadata service"
     ip6 daddr fe80::/10 udp dport 547 drop
     oifname "ext0" meta skuid "debian-tor" meta l4proto tcp ct state new accept   # F2/F14: tor only
+    oifname "mgmt0" meta skuid "candor-health" ip daddr @mon_hosts tcp dport 8514 accept  # F4 agent push
     oifname "mgmt0" meta skuid "_chrony" ip daddr @mon_hosts udp dport 123 accept  # F5 NTP
     oifname "mgmt0" meta skuid "_chrony" ip daddr @mon_hosts tcp dport 4460 accept # F5 NTS-KE
     oifname "mgmt0" ip daddr @mon_hosts tcp dport 7500 meta skuid 0 accept         # F6 Tang (initramfs/clevis only)
