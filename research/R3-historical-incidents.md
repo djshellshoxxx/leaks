@@ -8,7 +8,7 @@
 - **UNVERIFIED** marks a fact or URL that comes from the author's prior knowledge and could not be re-checked in this session. The session hit its web-search quota, and the egress proxy blocked direct fetches of many primary domains (justice.gov, usenix.org, eprint.iacr.org, wikipedia.org, ftc.gov, openwall.com). Re-verify these items before relying on them. No URL was invented. Where a URL could not be confirmed, the bibliography gives only title, venue and date.
 - Corrections to the brief: the Yik Yak precise-location flaw was **2022**, not 2024. The Sky ECC decryption method was never officially detailed.
 
-**Requirement ID scheme:** `REQ-H-xx` (H = historical). Each requirement uses "shall" and comes with a test. Architectural themes that recur across incidents are collected in §9.
+**Requirement ID scheme:** `REQ-H-xx` (H = historical). Each requirement uses "shall" and comes with a test. Architectural themes that recur across incidents are collected in §10.
 
 ---
 
@@ -732,7 +732,7 @@ Format: `[ID] Title — Publisher. URL — Date — Relevance`. "UNVERIFIED" mea
 - [B-INC-55] "Simple Google search outed alleged Silk Road founder" — Computerworld. https://www.computerworld.com/article/2875655/simple-google-search-outed-alleged-silk-road-founder.html — 2015-01 — "altoid" linkage.
 - [B-INC-56] "Is Tor still safe to use?" — Tor Project. https://blog.torproject.org/tor-is-still-safe/ — 2024-09-18 (upd. 2024-10-10) — Ricochet guard-discovery case.
 - [B-INC-57] "Tor police Germany" — The Register. https://www.theregister.com/2024/09/19/tor_police_germany/ — 2024-09-19 — BKA timing analysis / CCC review.
-- [B-INC-58] "Dread Pirate Sunk By Leaky CAPTCHA" (Krebs on Security) — https://krebsonsecurity.com/?p=27719 — 2014-09-06 — Silk Road IP leak dispute. (Title from recall; URL confirmed by search.)
+- [B-INC-58] "Dread Pirate Sunk By Leaky CAPTCHA" (Krebs on Security) — https://krebsonsecurity.com/?p=27719 — 2014-09-06 — Silk Road IP leak dispute. (title UNVERIFIED; URL confirmed by search)
 - [B-INC-59] "Reading the Silk Road configuration" — Errata Security. https://blog.erratasec.com/2014/10/reading-silk-road-configuration.html — 2014-10-03 — nginx configuration analysis.
 - [B-INC-60] "How bad are Apache mod_status leaks anyway?" — Mascherari Press (S.J. Lewis). https://mascherari.press/how-bad-are-apache-mod_status-leaks-anyway-2/ — 2016 — OnionScan findings.
 - [B-INC-61] "Simple mistake exposes businessman's secret dark web drug store" — Sophos Naked Security. https://news.sophos.com/en-us/2016/10/18/simple-mistake-exposes-businessmans-secret-dark-web-drug-store/ — 2016-10-18 — Co-hosting leak.
@@ -787,4 +787,4 @@ Format: `[ID] Title — Publisher. URL — Date — Relevance`. "UNVERIFIED" mea
 - [B-INC-110] DOJ seizure of Associated Press phone records — disclosed 2013-05 — UNVERIFIED.
 - [B-INC-111] Strava global heatmap exposing military sites — 2018-01 — UNVERIFIED.
 
-**Items requested but not covered as separate blocks:** "Apple?", "Boeing/other retaliation", "Guardian?" and "Canadian?" cases had no specific, verifiable incident to anchor them in this session. Boeing-type retaliation is covered in principle by INC-22 and INC-26. Candidates to research next: Terry Albury (FBI, 2018), Daniel Hale (2019–2021), Jeffrey Sterling (metadata-based conviction, 2015), James Wolfe/Ali Watkins records seizure (2018), and Canada's "Operation Crystal"-type cases.
+**Items requested but not covered as separate blocks:** "Apple?", "Boeing/other retaliation", "Guardian?" and "Canadian?" cases had no specific, verifiable incident to anchor them in this session. Boeing-type retaliation is covered in principle by INC-22 and INC-26. Candidates to research next: Terry Albury (FBI, 2018), Daniel Hale (2019–2021), Jeffrey Sterling (metadata-based conviction, 2015), and the James Wolfe/Ali Watkins records seizure (2018).
