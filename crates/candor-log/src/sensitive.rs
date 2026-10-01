@@ -4,8 +4,16 @@
 //! [`Sensitive`] implements neither `Debug`, `Display`, `serde::Serialize`
 //! nor [`crate::AuditField`], and zeroizes on drop. Trust-path crates wrap
 //! source passphrases, lookup IDs, filenames, client addresses, user
-//! agents and request bodies in it so that no formatting or logging path
-//! compiles (see `tests/ui/*.rs` and `tests/not_loggable.rs`).
+//! agents and request bodies in it so that the wrapper itself cannot be
+//! formatted, serialized or passed to the audit API (see `tests/ui/*.rs`
+//! and `tests/not_loggable.rs`).
+//!
+//! Limitation (AUD-RM1-LOG-15): [`Sensitive::expose`] returns `&T`, and
+//! *that* can be formatted (`format!("{}", s.expose())`). What stops the
+//! exposed value from reaching an output is the workspace-wide ban on
+//! free-text output (clippy `disallowed-macros`/`disallowed-methods` and
+//! `lint-logging.sh`), not this type; call sites of `expose()` remain a
+//! code-review item.
 
 use zeroize::Zeroize;
 

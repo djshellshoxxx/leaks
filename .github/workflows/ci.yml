@@ -406,3 +406,26 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: zizmor --persona=auditor .github
+
+  repo-lints:
+    # AUD-RM1-SFS-01 / AUD-RM1-LOG-09: the ADR-027 safe-path lint and the
+    # LOG-001 free-text-logging lint run on the real workspace (the clippy
+    # job enforces the workspace clippy.toml disallowed-* bans; these cover
+    # renamed/table-form dependencies, opt-outs and crate-local clippy.toml).
+    # Both fail closed (exit 2) if a tool they need errors.
+    name: repo-lints (safefs-lint, deny-free-text-logging)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt
+      - name: safefs-lint (ST-005, ADR-027)
+        run: bash crates/candor-safefs/scripts/lint-safefs.sh
+      - name: deny-free-text-logging (LOG-001)
+        run: bash crates/candor-log/scripts/lint-logging.sh

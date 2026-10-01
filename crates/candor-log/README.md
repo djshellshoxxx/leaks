@@ -13,16 +13,17 @@ timestamps and the `24-LICENSING-BUSINESS-MODEL.md` §TEL metrics regime.
 | Module | Purpose | Spec |
 |---|---|---|
 | `event` | `AuditEvent`: one variant per catalog type (20 §5.1–§5.3, §5.5) with an allow-listed field schema | LOG-001, LOG-020, LOG-024 |
-| `field`, `ids`, `codes` | sealed `AuditField` trait; pseudonymous IDs (`CaseRef`, `UserRef`, …), hashes, `DayStamp`, closed code enums and numeric `Code<T>` registries. No type for IPs, UAs, filenames, sizes or source times exists | LOG-001, LOG-002, P-01..P-17 |
-| `sensitive` | `Sensitive<T>`: no `Debug`/`Display`/`Serialize`/`AuditField`, zeroized on drop | LOG-002 |
+| `field`, `ids`, `codes` | sealed `AuditField` trait; pseudonymous IDs (`CaseRef`, `UserRef`, …) derived only with a keyed HMAC (`AuditIdKey`), keyed purpose-separated value hashes, bounded counters, `DayStamp`, closed code enums and compile-time-only numeric `Code<T>` registries. No type for IPs, UAs, filenames, sizes or source times exists, and no raw constructor lets one be laundered in | LOG-001, LOG-002, P-01..P-17 |
+| `sensitive` | `Sensitive<T>`: no `Debug`/`Display`/`Serialize`/`AuditField`, zeroized on drop (the exposed `&T` is guarded by the output bans, not the type) | LOG-002 |
 | `envelope` | 20 §4 envelope; timestamp policy (staff ms, import/system-actor CASE date-only, SYSTEM second, Z-INTAKE hour) | LOG-004, LOG-012, LOG-013, LOG-021 |
 | `cbor` | hand-rolled deterministic CBOR (RFC 8949 §4.2.1) encoder + strict decoder | 20 §4 |
-| `chain` | `AuditLog`: class-separated `sec`/`case`/`sys` streams, `h_i = SHA-256("candor/v1/audit/chain" ‖ h_{i-1} ‖ bytes_i)`, RFC 6962 Merkle checkpoints every ≤1000 events / ≤5 min, Ed25519-signed (`CheckpointSigner`; TPM/HSM in production) | AUD-001, AUD-002 |
-| `verify` | `verify_stream`: detects modification, deletion, reordering, non-canonical records, forged/missing checkpoints, truncation, witness rollback/fork | AUD-004 |
-| `retention` | §12 bounds; whole-interval deletion after a tombstone; per-case redaction stubs | AUD-005, AUD-011, AUD-012 |
-| `sink` | `AuditSink` trait, `MemorySink`, `JsonlFileSink` (over a caller-provided `JsonlTarget`; no path handling here, ADR-027), JSONL reader | — |
+| `chain` | `AuditLog`: class-separated `sec`/`case`/`sys` streams, salted record commitments (per-case keys destroyed at disposal), `h_i = SHA-256("candor/v1/audit/chain\0" ‖ h_{i-1} ‖ c_i)`, RFC 6962 Merkle checkpoints on a fixed data-independent schedule (SECURITY 5 min / Z-INTAKE hourly, CASE and SYSTEM daily), Ed25519-signed (`CheckpointSigner`; TPM/HSM in production); one primary commit-point sink, secondaries fed from an outbox | AUD-001, AUD-002 |
+| `verify` | `verify_stream`: detects modification, deletion, reordering, non-canonical records, forged/missing checkpoints, truncation, witness rollback/fork, redaction stubs not bound to a checkpointed `case.disposed` tombstone, and pruned prefixes not bound to a checkpointed retention tombstone | AUD-004 |
+| `retention` | §12 bounds; whole-interval deletion after a checkpointed tombstone in the pruned stream | AUD-005, AUD-011 |
+| `sink` | `AuditSink` trait, `MemorySink` (+ per-case `RedactionPlan`, AUD-012), `JsonlFileSink` (over a caller-provided `JsonlTarget`; no path handling here, ADR-027), bounded JSONL reader with metadata cross-checks | — |
 | `export` | `ScrubbedExport`: C-26 SIEM allow-list, HMAC actor pseudonyms, date-only staff times, daily batches, daily health bands, break-glass daily counts | AUD-010, LOG-022, TEL-018 |
-| `metrics` | SOURCE-SENSITIVE counters (in-memory, monthly), k = 10 primary + complementary suppression, per-channel folding, cross-report differencing audit, magnitude rules, M3 rounding | LOG-011, LOG-025, TEL-010/011/015/016/020 |
+| `metrics` | SOURCE-SENSITIVE counters (in-memory, monthly), k = 10 primary + complementary suppression audited by exact rational LP against an attacker who knows the suppression pattern, per-channel folding, release history persisted through a caller `ReleaseHistory` (differencing defence survives restarts), magnitude statistics only through the registry, M3 rounding | LOG-011, LOG-025, TEL-010/011/015/016/020 |
+| `fuzz/` | cargo-fuzz targets: CBOR decode round-trip, checkpoint parse, JSONL read+verify, mutated signed stream (ST-051); seeds in `fuzz/seeds/` | ST-051 |
 | `scripts/lint-logging.sh` | deny-free-text-logging gate over trust-path crates; exceptions in `scripts/lint-logging.allow` | LOG-001 |
 
 ## Usage
@@ -30,17 +31,21 @@ timestamps and the `24-LICENSING-BUSINESS-MODEL.md` §TEL metrics regime.
 ```rust
 use candor_log::{AuditEvent, AuditLog, CheckpointPolicy, EventContext, SoftwareSigner, SystemClock};
 use candor_log::codes::HostRole;
-use candor_log::ids::{CaseRef, TenantRef, UserRef};
-use candor_log::sink::MemorySink;
+use candor_log::ids::{AuditIdKey, CaseRef, TenantRef, UserRef};
 
+let ids = AuditIdKey::new(deployment_key);          // keyed pseudonyms
+let case = CaseRef::derive(&ids, raw_case_id);
 let mut log = AuditLog::new(tenant, HostRole::Core, signer, SystemClock, CheckpointPolicy::DEFAULT);
-log.add_sink(Box::new(MemorySink::new()));
+log.set_primary_sink(Box::new(durable_sink));         // commit point
+log.set_case_keys(Box::new(case_key_store));          // per-case redaction keys
 log.emit(EventContext::staff(user), AuditEvent::CaseOpened { case })?;
+log.tick()?;                                          // at least every SECURITY slot
 ```
 
 There is no way to log a string: payload fields are sealed types, events have
-no message field, and `Sensitive<T>` cannot be formatted (see
-`tests/ui/*.rs`, `tests/not_loggable.rs`).
+no message field, identifiers and codes have no raw constructors, and the
+workspace clippy.toml bans every free-text output path (see `tests/ui/*.rs`,
+`tests/not_loggable.rs`).
 
 ## Checks
 
@@ -48,7 +53,7 @@ no message field, and `Sensitive<T>` cannot be formatted (see
 cargo fmt --all
 cargo clippy -p candor-log --all-targets -- -D warnings
 cargo test -p candor-log
-crates/candor-log/scripts/lint-logging.sh            # workspace gate
+crates/candor-log/scripts/lint-logging.sh            # workspace gate (also in CI: repo-lints)
 ```
 
 See `SPEC-NOTES.md` for implementation decisions and spec feedback.
