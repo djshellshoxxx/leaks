@@ -286,8 +286,23 @@ jobs:
         # the PR tree, and it reads .dco-epoch from the base revision itself.
         run: |
           set -euo pipefail
-          git show "$BASE_SHA:scripts/check-dco.sh" > "$RUNNER_TEMP/check-dco.sh"
-          sh "$RUNNER_TEMP/check-dco.sh" "$BASE_SHA" "$HEAD_SHA"
+          if git cat-file -e "$BASE_SHA:scripts/check-dco.sh" 2>/dev/null; then
+            git show "$BASE_SHA:scripts/check-dco.sh" > "$RUNNER_TEMP/check-dco.sh"
+            sh "$RUNNER_TEMP/check-dco.sh" "$BASE_SHA" "$HEAD_SHA"
+          else
+            # Bootstrap (policy-introducing PR only): the base predates the DCO
+            # policy, so there is no base checker or epoch to trust. Commits after
+            # the epoch named by this PR must all be signed off; the epoch must be
+            # an ancestor of HEAD and a descendant of BASE. Once the policy is on the
+            # base branch this path can never run again.
+            EPOCH=$(git show "$HEAD_SHA:.dco-epoch" | grep -v '^[[:space:]]*#' | grep -v '^[[:space:]]*$' | head -n 1 | tr -d '[:space:]')
+            printf '%s\n' "$EPOCH" | grep -Eqx '[0-9a-f]{40}'
+            git merge-base --is-ancestor "$EPOCH" "$HEAD_SHA"
+            git merge-base --is-ancestor "$BASE_SHA" "$EPOCH"
+            echo "DCO bootstrap: base has no DCO policy; checking $EPOCH..$HEAD_SHA"
+            git show "$HEAD_SHA:scripts/check-dco.sh" > "$RUNNER_TEMP/check-dco.sh"
+            sh "$RUNNER_TEMP/check-dco.sh" "$EPOCH" "$HEAD_SHA"
+          fi
 
   reproducibility:
     name: reproducibility (build twice, compare sha256)
