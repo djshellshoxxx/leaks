@@ -18,9 +18,10 @@
 )] // safefs-lint: allow(compiled config-check reader, ADR-055(3), same rules as candor-safefs)
 
 use md5::{Digest, Md5};
-use rustix::fs::{
+use rfs::{
     AtFlags, CWD, FileType, Mode, OFlags, ResolveFlags, Stat, fstat, openat, openat2, statat,
 };
+use rustix::fs as rfs; // safefs-lint: allow(openat2 RESOLVE_NO_SYMLINKS|BENEATH reader, ADR-055(3))
 use rustix::io::Errno;
 use std::os::fd::{AsFd, OwnedFd};
 
@@ -113,7 +114,7 @@ fn open_parent(root: &OwnedFd, dirs: &[&str]) -> Result<OwnedFd, Status> {
     let rel = if dirs.is_empty() {
         ".".to_string()
     } else {
-        dirs.join("/")
+        dirs.join("/") // safefs-lint: allow(string join of validated components, not a path API)
     };
     let resolve = ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS | ResolveFlags::BENEATH;
     match openat2(root, rel.as_str(), dflags, Mode::empty(), resolve) {
