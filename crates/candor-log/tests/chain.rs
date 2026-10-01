@@ -459,7 +459,10 @@ fn checkpoint_timing_independent_of_date_only_events() {
             .collect()
     };
     let d = diff(&cps_with, &cps_without);
-    assert!(!d.is_empty() && d.iter().all(|s| *s == StreamId::CaseSlot), "{d:?}");
+    assert!(
+        !d.is_empty() && d.iter().all(|s| *s == StreamId::CaseSlot),
+        "{d:?}"
+    );
     // Same for a source-load-derived (date-only) SYSTEM health event.
     let flood = AuditEvent::SysHealth {
         service: Service::Upload,
@@ -472,7 +475,10 @@ fn checkpoint_timing_independent_of_date_only_events() {
     );
     assert_eq!(with_sys, without);
     let d = diff(&cps_sys, &cps_without);
-    assert!(!d.is_empty() && d.iter().all(|s| *s == StreamId::SysSlot), "{d:?}");
+    assert!(
+        !d.is_empty() && d.iter().all(|s| *s == StreamId::SysSlot),
+        "{d:?}"
+    );
     // SECURITY: a staff event does not move SECURITY checkpoint times either.
     let (with_sec, _) = schedule_trace(
         HostRole::Core,
@@ -930,7 +936,10 @@ fn stub_in_security_stream_rejected() {
         .clone();
     let key = log.verifying_key();
     let mut st = sink.0.lock().unwrap();
-    assert!(danger.to_stub(1).is_none(), "SECURITY records are not redactable");
+    assert!(
+        danger.to_stub(1).is_none(),
+        "SECURITY records are not redactable"
+    );
     assert!(st.tamper_replace(StreamId::Sec, 0, forged_stub(&danger, case(9), 1)));
     let mut p = params(&key, StreamId::Sec);
     p.trusted_latest = Some(&witness);
@@ -1015,7 +1024,11 @@ fn case_stub_without_matching_tombstone_rejected() {
     // A tombstone cannot cover a later record.
     let later = rec(log.emit(EventContext::staff(user(1)), opened(3)).unwrap());
     st = sink.0.lock().unwrap().clone();
-    assert!(st.tamper_replace(StreamId::Case, later.header().seq, later.to_stub(tseq).unwrap()));
+    assert!(st.tamper_replace(
+        StreamId::Case,
+        later.header().seq,
+        later.to_stub(tseq).unwrap()
+    ));
     let e = verify_stream(
         &params(&key, StreamId::Case),
         &st.chain(StreamId::Case),
@@ -1741,8 +1754,7 @@ fn checkpoint_values_cannot_be_laundered() {
         .unwrap_err(),
         LogError::ForeignArtefact
     );
-    let e = verify_stream(&params(&log.verifying_key(), StreamId::Case), &[], &[real])
-        .unwrap_err();
+    let e = verify_stream(&params(&log.verifying_key(), StreamId::Case), &[], &[real]).unwrap_err();
     log.emit(
         EventContext::staff(user(1)),
         AuditEvent::AuditVerificationFailed {

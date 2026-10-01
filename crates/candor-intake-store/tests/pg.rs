@@ -1695,7 +1695,7 @@ fn count_hits(pages: &[Vec<u8>], pats: &HashSet<[u8; 8]>) -> usize {
 /// xid]` headers) and old TOAST chunk ids (`[chunk_id][chunk_seq 0]` in TOAST
 /// tuples and index entries, `[va_valueid][toastrelid]` in heap pointers)
 /// still sit in page free space (positive control); after the daily
-/// `VACUUM FULL` (VACUUM login) no page of any intake table, TOAST table or
+/// `VACUUM FULL` (maintenance role) no page of any intake table, TOAST table or
 /// index holds any of them, every relation has a new file, and the store's
 /// content is unchanged.
 #[tokio::test]

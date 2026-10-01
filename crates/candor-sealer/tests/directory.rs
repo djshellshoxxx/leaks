@@ -336,7 +336,13 @@ fn entries_need_their_own_signers_even_under_a_compromised_log() {
     // makes the epoch ambiguous, so neither key is used).
     let bd = compromised(&f, |log| {
         let v = mek_value(u1, &evil, log);
-        log.append(ty::MEMBER_EPOCH, &mek_subject(u1), 0, v, &[&f.members[0].k08]);
+        log.append(
+            ty::MEMBER_EPOCH,
+            &mek_subject(u1),
+            0,
+            v,
+            &[&f.members[0].k08],
+        );
     });
     let s = verify(&f, bd).unwrap();
     assert!(

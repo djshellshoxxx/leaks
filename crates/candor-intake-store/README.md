@@ -43,11 +43,11 @@ store.apply_replies(today, replies).await?;
 store.rebuild_published_set(slot).await?;                       // K new entries
 store.acknowledge_deletion_head(&signed_core_head, &core_pk).await?;     // RL-11
 store.uniform_rewrite(slot, &counter_deltas, &active_accounts).await?;   // last
-vacuum_after_rewrite(&vacuum_opts).await?;  // as candor_intake_vacuum (database owner, no table), right after
+vacuum_after_rewrite(&maint_opts).await?;   // as candor_intake_maint (database owner, no table), right after
 // Daily job, separate process as candor_intake_maint:
-PgIntakeMaintenance::open(maint_opts, tenant, core_pk).await?.prune_deletion_list(today).await?;
-// Daily, fixed maintenance window (intake serving paused), as candor_intake_vacuum:
-vacuum_full_daily(&vacuum_opts).await?;
+PgIntakeMaintenance::open(maint_opts.clone(), tenant, core_pk).await?.prune_deletion_list(today).await?;
+// Daily, fixed maintenance window (intake serving paused), as candor_intake_maint:
+vacuum_full_daily(&maint_opts).await?;
 
 // Tests of other crates:
 let mem = MemoryStore::new()?;
