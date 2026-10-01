@@ -1905,7 +1905,8 @@ async fn pg_staged_ack_after_commit() {
         rustix::fs::SealFlags::WRITE
             | rustix::fs::SealFlags::GROW
             | rustix::fs::SealFlags::SHRINK
-            | rustix::fs::SealFlags::SEAL,
+            | rustix::fs::SealFlags::SEAL
+            | rustix::fs::SealFlags::EXEC,
     )
     .unwrap();
     let h = StagedHeader {
@@ -2036,7 +2037,8 @@ async fn pg_staged_crash_between_copy_and_commit() {
         rustix::fs::SealFlags::WRITE
             | rustix::fs::SealFlags::GROW
             | rustix::fs::SealFlags::SHRINK
-            | rustix::fs::SealFlags::SEAL,
+            | rustix::fs::SealFlags::SEAL
+            | rustix::fs::SealFlags::EXEC,
     )
     .unwrap();
     let h = StagedHeader {
@@ -2152,7 +2154,8 @@ async fn pg_staged_stalled_commit_refused() {
         rustix::fs::SealFlags::WRITE
             | rustix::fs::SealFlags::GROW
             | rustix::fs::SealFlags::SHRINK
-            | rustix::fs::SealFlags::SEAL,
+            | rustix::fs::SealFlags::SEAL
+            | rustix::fs::SealFlags::EXEC,
     )
     .unwrap();
     let h = StagedHeader {

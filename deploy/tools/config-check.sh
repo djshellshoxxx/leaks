@@ -144,7 +144,7 @@ if is_root; then
     echo "config-check: unsafe work directory base $WBASE (must be root 0700, not a symlink)" >&2; exit 2
   fi
   # AUD-RM2-DEP-30: nobody but root may rename or replace the base or any ancestor.
-  case "/$WBASE/" in */./*|*/../*) echo "config-check: --work-base must not contain . or .." >&2; exit 2 ;; esac
+  case "/$WBASE/" in */./*|*/../*) echo "config-check: unsafe work directory base $WBASE (no . or .. components)" >&2; exit 2 ;; esac
   wb_a=$WBASE
   while [ "$wb_a" != / ]; do
     wb_a=$(dirname -- "$wb_a")

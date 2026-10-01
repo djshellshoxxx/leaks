@@ -25,7 +25,7 @@
 //! (`MSG_TRUNC`/`MSG_CTRUNC`), any length other than 41, an unknown version,
 //! `len = 0` or above the bound, credentials or a second control message, zero
 //! or more than one descriptor, a non-regular file, a file without all four
-//! seals (this also excludes FUSE/NFS/disk files, which cannot be sealed, so
+//! seals plus `F_SEAL_EXEC` (this also excludes FUSE/NFS/disk files, which cannot be sealed, so
 //! the copy reads RAM only and cannot stall), `fstat` size ≠ `len`, a file that
 //! shrinks or grows during the copy, and a hash mismatch.
 //!
@@ -86,9 +86,11 @@ pub const STAGED_MAX_TIMEOUT: Duration = Duration::from_secs(60);
 /// Blobs received but not yet committed or swept, per receiver; more are
 /// refused with [`StoreError::Capacity`] (bounded memory and disk).
 pub const STAGED_MAX_IN_FLIGHT: usize = 64;
-/// Required seals (ADR-055(1)).
+/// Required seals (ADR-055(1), plus `F_SEAL_EXEC`: the sealer creates its
+/// memfds with `MFD_NOEXEC_SEAL`).
 const REQUIRED_SEALS: SealFlags = SealFlags::WRITE
     .union(SealFlags::GROW)
+    .union(SealFlags::EXEC)
     .union(SealFlags::SHRINK)
     .union(SealFlags::SEAL);
 /// Reference lookups per sweep.
@@ -725,7 +727,7 @@ fn io_err<E>(_e: E) -> StoreError {
     StoreError::Backend
 }
 
-/// Regular file, all four seals, `fstat` size = `len`.
+/// Regular file, all five seals, `fstat` size = `len`.
 fn check_descriptor(fd: &OwnedFd, len: u64) -> Result<()> {
     let st = fstat(fd).map_err(io_err)?;
     if FileType::from_raw_mode(st.st_mode) != FileType::RegularFile {

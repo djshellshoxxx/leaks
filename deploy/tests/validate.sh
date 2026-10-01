@@ -454,17 +454,17 @@ if [ -x "$TOOLS/candor-safe-read" ] && have timeout && have mkfifo; then
   }
   srcase "regular file copied"                0  "$D/real/f" out 4096 "$me" 002
   if cmp -s "$D/real/f" "$D/o/out"; then pass "candor-safe-read: copy equals the input"; else bad "candor-safe-read: copy differs"; fi
-  srcase "symlinked parent directory refused" 10 "$D/link/f" "$D/out" 4096 "0,$me" 002
-  srcase "symlink as last component refused"  10 "$D/real/l" "$D/out" 4096 "0,$me" 002
-  srcase "'..' component refused"             10 "$D/real/../secretdir/f" "$D/out" 4096 "0,$me" 002
-  srcase "FIFO refused without blocking"      12 "$D/real/fifo" "$D/out" 4096 "0,$me" 002
-  srcase "device node refused"                12 /dev/null "$D/out" 4096 "0,$me" 002
-  srcase "directory refused"                  12 "$D/real" "$D/out" 4096 "0,$me" 002
-  srcase "owner not allowed"                  13 "$D/real/f" "$D/out" 4096 4242 002
-  chmod o+w "$D/real/f"; srcase "world-writable input refused" 13 "$D/real/f" "$D/out" 4096 "0,$me" 002; chmod o-w "$D/real/f"
-  ln "$D/real/f" "$D/real/hard"; srcase "hard-linked input refused" 13 "$D/real/f" "$D/out" 4096 "0,$me" 002; rm -f "$D/real/hard"
-  srcase "larger than the cap refused"        14 "$D/real/f" "$D/out" 2 "0,$me" 002
-  srcase "missing input"                      11 "$D/real/nope" "$D/out" 4096 "0,$me" 002
+  srcase "symlinked parent directory refused" 10 "$D/link/f" out 4096 "0,$me" 002
+  srcase "symlink as last component refused"  10 "$D/real/l" out 4096 "0,$me" 002
+  srcase "'..' component refused"             10 "$D/real/../secretdir/f" out 4096 "0,$me" 002
+  srcase "FIFO refused without blocking"      12 "$D/real/fifo" out 4096 "0,$me" 002
+  srcase "device node refused"                12 /dev/null out 4096 "0,$me" 002
+  srcase "directory refused"                  12 "$D/real" out 4096 "0,$me" 002
+  srcase "owner not allowed"                  13 "$D/real/f" out 4096 4242 002
+  chmod o+w "$D/real/f"; srcase "world-writable input refused" 13 "$D/real/f" out 4096 "0,$me" 002; chmod o-w "$D/real/f"
+  ln "$D/real/f" "$D/real/hard"; srcase "hard-linked input refused" 13 "$D/real/f" out 4096 "0,$me" 002; rm -f "$D/real/hard"
+  srcase "larger than the cap refused"        14 "$D/real/f" out 2 "0,$me" 002
+  srcase "missing input"                      11 "$D/real/nope" out 4096 "0,$me" 002
   timeout 10 "$TOOLS/candor-safe-read" --md5 md5 4096 "0,$me" 002 "$D/real/f" "$D/link/f" "$D/real/fifo" > "$D/stdout" 2>&1 3<"$D/o"
   [ -s "$D/stdout" ] && bad "candor-safe-read --md5 printed output"
   got=$(tr '\n' ';' < "$D/o/md5")

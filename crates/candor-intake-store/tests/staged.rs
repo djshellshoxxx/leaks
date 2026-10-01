@@ -38,6 +38,7 @@ use sha2::{Digest, Sha256};
 const MAX: u64 = 8 << 20;
 const ALL_SEALS: SealFlags = SealFlags::WRITE
     .union(SealFlags::GROW)
+    .union(SealFlags::EXEC)
     .union(SealFlags::SHRINK)
     .union(SealFlags::SEAL);
 
@@ -95,17 +96,26 @@ fn pair() -> (OwnedFd, OwnedFd) {
 /// An anonymous file holding `data`, sealed with `seals` (the sealer's form
 /// with all four seals).
 fn memfile_sealed(name: &str, data: &[u8], seals: SealFlags) -> OwnedFd {
-    let fd = rustix::fs::memfd_create(
-        name,
-        rustix::fs::MemfdFlags::CLOEXEC | rustix::fs::MemfdFlags::ALLOW_SEALING,
-    )
-    .unwrap();
+    // As the sealer: `MFD_NOEXEC_SEAL` (sets `F_SEAL_EXEC`, no exec mode
+    // bits). Adding `F_SEAL_EXEC` to an executable memfd would make the
+    // kernel imply WRITE/GROW/SHRINK, hiding the missing-seal variants.
+    let mut flags = rustix::fs::MemfdFlags::CLOEXEC | rustix::fs::MemfdFlags::ALLOW_SEALING;
+    if seals.contains(SealFlags::EXEC) {
+        flags |= rustix::fs::MemfdFlags::NOEXEC_SEAL;
+    }
+    let fd = rustix::fs::memfd_create(name, flags).unwrap();
     let mut f = std::fs::File::from(fd);
     f.write_all(data).unwrap();
     let fd: OwnedFd = f.into();
-    if !seals.is_empty() {
-        rustix::fs::fcntl_add_seals(&fd, seals).unwrap();
+    let rest = seals.difference(SealFlags::EXEC);
+    if !rest.is_empty() {
+        rustix::fs::fcntl_add_seals(&fd, rest).unwrap();
     }
+    assert_eq!(
+        rustix::fs::fcntl_get_seals(&fd).unwrap(),
+        seals,
+        "fixture seals"
+    );
     fd
 }
 
@@ -308,6 +318,7 @@ fn staged_bundle_hostile_variants_refused() {
         SealFlags::GROW,
         SealFlags::SHRINK,
         SealFlags::SEAL,
+        SealFlags::EXEC,
     ]
     .iter()
     .map(|s| memfile_sealed("staged", &data, ALL_SEALS.difference(*s)))
@@ -385,6 +396,7 @@ fn staged_bundle_hostile_variants_refused() {
             "no SEAL_GROW",
             "no SEAL_SHRINK",
             "no SEAL_SEAL",
+            "no SEAL_EXEC",
         ][i];
         cases.push((why, g.clone(), vec![vec![m.as_fd()]]));
     }
@@ -466,7 +478,9 @@ async fn staged_commit_failure_refused_and_swept() {
     e.rx.refuse(store_sock.as_fd()).unwrap();
     assert_eq!(try_recv_byte(&sealer), Some(STAGED_ACK_REFUSED));
     assert_eq!(e.rx.blobs().list().unwrap().len(), 1);
-    assert_eq!(e.rx.sweep(&s, next_slot()).await.unwrap(), 1);
+    // The sweep needs an initialised store (fail closed otherwise).
+    let m = mem_store().await;
+    assert_eq!(e.rx.sweep(&m, next_slot()).await.unwrap(), 1);
     assert_clean(&e, "commit failure");
 }
 
@@ -821,5 +835,20 @@ async fn staged_sweep_fails_closed() {
         e.rx.sweep(&Broken, next_slot()).await.unwrap_err(),
         StoreError::Backend
     );
+    assert_eq!(e.rx.blobs().list().unwrap().len(), 1);
+}
+
+/// Round 6: the in-memory store's reference check fails closed when it is
+/// uninitialised (like PostgreSQL), so the sweep deletes nothing.
+#[tokio::test]
+async fn staged_sweep_uninitialised_memory_store_fails_closed() {
+    let e = env();
+    drop(received(&e));
+    let m = MemoryStore::with_config(common::TEST_DEADDROP, Box::new(RandomDummyReplies)).unwrap();
+    assert_eq!(
+        m.blob_referenced(BlobId([1; 16])).await,
+        Err(StoreError::NotInitialized)
+    );
+    assert!(e.rx.sweep(&m, next_slot()).await.is_err());
     assert_eq!(e.rx.blobs().list().unwrap().len(), 1);
 }

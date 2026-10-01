@@ -1111,6 +1111,9 @@ impl IntakeMaintenance for MemoryStore {
 
     async fn blob_referenced(&self, blob: BlobId) -> Result<bool> {
         let st = self.state.lock().await;
+        // Fail closed like the PostgreSQL store (AUD-RM2-STO-28): an
+        // uninitialised store is `NotInitialized`, never "unreferenced".
+        st.meta()?;
         Ok(st
             .envelopes
             .values()
