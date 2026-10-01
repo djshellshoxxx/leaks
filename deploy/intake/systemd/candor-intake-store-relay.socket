@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# C-08 relay export endpoint (I1; 07 §5.3, 16 §14.2, 17 §4.3.1): TCP 7443 on relay0 only,
+# reachable only from the C-09 relay host (core-initiated pull, ADR-009). PID 1 binds the
+# socket, so candor-intake-store itself runs with RestrictAddressFamilies=AF_UNIX and
+# PrivateNetwork=yes and can never open an outbound IP connection (ADR-009: "no connection
+# may be initiated from Z-INTAKE to Z-CORE").
+#
+# Fail closed: IPAddressDeny=any with no allow entry. The installer writes the drop-in
+# /etc/systemd/system/candor-intake-store-relay.socket.d/site.conf containing exactly
+#   [Socket]
+#   IPAddressAllow=<core relay address>/32
+# (07 §4.2 per-unit delta for candor-intake-store). nftables (I1) enforces the same peer.
+[Unit]
+Description=Candor intake relay endpoint socket (C-08 I1, relay0:7443)
+Requires=nftables.service
+After=nftables.service
+
+[Socket]
+ListenStream=0.0.0.0:7443
+BindToDevice=relay0
+BindIPv6Only=ipv6-only
+FreeBind=no
+Transparent=no
+ReusePort=no
+Accept=no
+Backlog=16
+NoDelay=yes
+IPAddressDeny=any
+FileDescriptorName=relay
+Service=candor-intake-store.service
+
+[Install]
+WantedBy=sockets.target
