@@ -18,7 +18,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 SPECS = ROOT / "specs"
 OUT = SPECS / "39-REQUIREMENTS-TRACEABILITY.md"
 
-ID_RE = re.compile(r"^[A-Z][A-Z0-9]{1,6}-\d{3}[a-z]?$")
+ID_RE = re.compile(r"^[A-Z][A-Z0-9]{1,6}(-[A-Z][A-Z0-9]{1,5})?-\d{3}[a-z]?$")
 THR_RE = re.compile(r"THR-\d{3}")
 COMP_RE = re.compile(r"C-\d{2}")
 EVID_RE = re.compile(r"(B-[A-Z]{2,3}-\d{2,3}|INC-\d{2,3}|F-\d{3}|ADR-\d{3}|REQ-H-\d{2,3}b?)")
@@ -36,7 +36,7 @@ def split_row(line):
 def parse():
     reqs = []
     catalog = collections.defaultdict(set)  # ids defined as catalog rows (THR, ST, AT, ...)
-    for path in sorted(SPECS.glob("*.md")):
+    for path in sorted(list(SPECS.glob("*.md")) + list(SPECS.glob("impl/*.md"))):
         if path.name in (OUT.name, "DECISIONS.md"):
             continue
         for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):

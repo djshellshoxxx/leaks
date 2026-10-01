@@ -359,3 +359,64 @@ mod tests {
         assert_eq!(CoreReplyHasher.object_hash(&[0u8; 400]), None);
     }
 }
+
+#[cfg(test)]
+mod props {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
+    use super::*;
+    use proptest::prelude::*;
+
+    fn arb_entry() -> impl Strategy<Value = DeletionEntry> {
+        (
+            any::<u64>(),
+            0u8..3,
+            any::<[u8; 32]>(),
+            any::<u32>(),
+            any::<[u8; 32]>(),
+            proptest::collection::vec(any::<u8>(), 64),
+        )
+            .prop_map(|(seq, k, h, d, p, s)| DeletionEntry {
+                seq,
+                kind: [
+                    DeletionKind::Account,
+                    DeletionKind::Mailbox,
+                    DeletionKind::Reply,
+                ][usize::from(k)],
+                del_hash: h,
+                del_day: Day(d),
+                prev_hash: p,
+                sig: s.try_into().unwrap(),
+                relayed: false,
+            })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+        /// Hostile pushed lists never panic and never verify without K31.
+        #[test]
+        fn arbitrary_lists_rejected(entries in proptest::collection::vec(arb_entry(), 1..8)) {
+            prop_assert!(verify_chain(&entries, &[9u8; 32], None).is_err());
+        }
+
+        /// Any single-bit flip in a valid entry breaks verification.
+        #[test]
+        fn bit_flip_detected(byte in 0usize..(ENTRY_LEN + 32 + 64), bit in 0u8..8) {
+            let s = Ed25519DeletionSigner::new(candor_core::sig::SigningKey::from_seed(&[3u8; 32]));
+            let a = make_entry(None, DeletionKind::Account, [1; 32], Day(5), &s).unwrap();
+            let b = make_entry(Some(&a), DeletionKind::Reply, [2; 32], Day(6), &s).unwrap();
+            let mut t = b;
+            let mask = 1u8 << bit;
+            if byte < 8 { let mut x = t.seq.to_be_bytes(); x[byte] ^= mask; t.seq = u64::from_be_bytes(x); }
+            else if byte == 8 { t.kind = if t.kind == DeletionKind::Reply { DeletionKind::Mailbox } else { DeletionKind::Reply }; }
+            else if byte < 41 { t.del_hash[byte - 9] ^= mask; }
+            else if byte < 45 { let mut x = t.del_day.0.to_be_bytes(); x[byte - 41] ^= mask; t.del_day = Day(u32::from_be_bytes(x)); }
+            else if byte < 77 { t.prev_hash[byte - 45] ^= mask; }
+            else { t.sig[byte - 77] ^= mask; }
+            prop_assert!(verify_chain(&[a, t], &s.verifying_key(), None).is_err());
+        }
+    }
+}

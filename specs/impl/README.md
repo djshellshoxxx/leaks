@@ -15,7 +15,7 @@ Research basis: `../../research/R7-secure-implementation.md` (rules `SI-x-nn`, b
 | [IMPL-RM1-CORE-LIBRARIES.md](IMPL-RM1-CORE-LIBRARIES.md) | RM-1 | candor-core, formats, key directory, safefs, log, source-ui, formal model | T1, T2, T3, T7 |
 | [IMPL-RM2-INTAKE.md](IMPL-RM2-INTAKE.md) | RM-2 | Intake gateway, source web service (no-JS), sealer, intake store | T2 |
 | [IMPL-RM3-CORE-ZONE.md](IMPL-RM3-CORE-ZONE.md) | RM-3 | Relay, case service, DB/RLS, authz/COI, audit log, vault, retention | T3 |
-| IMPL-RM4 (Desk & Viewer; parallel writer, file `IMPL-RM4-*.md`) | RM-4 | Candor Desk, hardware-bound keys, viewer microVM, export | T4 |
+| [IMPL-RM4-DESK-VIEWER](IMPL-RM4-DESK-VIEWER.md) | RM-4 | Candor Desk, hardware-bound keys, viewer microVM, export | T4 |
 | [IMPL-RM5-OPERATIONS.md](IMPL-RM5-OPERATIONS.md) | RM-5 | Installers, config checker, self-test, backup/restore and drills, signed auto-update, Platform Manifest and floors, support bundles | T6, T7 |
 | [IMPL-RM6-RELEASE-CANDIDATE.md](IMPL-RM6-RELEASE-CANDIDATE.md) | RM-6 | i18n with translation security, safety guidance, accessibility, usability studies, LLM-assisted pre-audit (SL-R-013), external audits RM6-A1..A4 | T9, T7 |
 | [IMPL-RM7-GA-RELEASE.md](IMPL-RM7-GA-RELEASE.md) | RM-7 | Threshold key ceremonies, TUF repository, transparency log and witnesses, two-builder verification, VDP/advisories/CVE, bug bounty, LTS | T7, Security Lead |

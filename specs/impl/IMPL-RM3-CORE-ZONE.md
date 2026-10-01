@@ -96,7 +96,7 @@ Status: Draft v1.0 · Edition applicability: both (EE-HA variants deferred to RM
 | # | Check | Threat |
 |---|---|---|
 | A1 | Every tenant table has `FORCE RLS`. No app role has `BYPASSRLS` or ownership. A missing context raises an error. Uniqueness and FKs are scoped by tenant | THR-021, THR-045 |
-| A2 | `TenantTx` sets `SET LOCAL` per transaction from the principal only, never from request input. Raw pool use is impossible | THR-021 |
+| A2 | `TenantTx` sets `SET LOCAL` per transaction from the principal only, never from request input. Raw pool use is rejected by lint | THR-021 |
 | A3 | Every route is declared with action, resource derivation and audience. Deny → uniform 404. No 403/404 existence oracle | THR-021, THR-020 |
 | A4 | Authz loops (recipient wraps, members, approvals) check **every** element (mutation and property evidence) | THR-046, THR-021 |
 | A5 | COI: C-22 never learns tag ownership. No COI reason code in audit, errors or notifications. Excluded members never receive wraps | THR-020, THR-019 |

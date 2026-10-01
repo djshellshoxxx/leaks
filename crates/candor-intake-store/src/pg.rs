@@ -2,7 +2,7 @@
 //! PostgreSQL implementation of [`IntakeStore`] (09 §5.1, §10, §11).
 //!
 //! - Every SQL statement is a `&'static str` constant: sqlx 0.9 only accepts
-//!   `SqlSafeStr`, and this crate never uses `AssertSqlSafe` (a test enforces it),
+//!   `SqlSafeStr`, and this crate never opts out of that check (a test enforces it),
 //!   so no runtime string is ever spliced into SQL. Values are always bound.
 //! - Statement logging is disabled on every connection; driver errors are reduced
 //!   to content-free [`StoreError`] values (a PostgreSQL error detail can echo row

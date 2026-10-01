@@ -97,7 +97,7 @@ Status: Draft v1.0 · Edition applicability: both · Owner: T2 Intake (sealer ke
 | A11 | Store: unix-socket PG, no `host` lines in pg_hba, no bind values logged, `query!` only, date-only columns, random IDs, fixed blob mtimes | THR-015, THR-011 |
 | A12 | Chaff indistinguishable in format, size, commit path and DB residue. Never counted | THR-011, THR-003 |
 | A13 | Fail-closed: snapshot stale, clock insane, staging full, sealer down → busy page, never unsealed storage or a degraded mode | THR-035, THR-014 |
-| A14 | systemd exposure ≤ 1.5. Seccomp and Landlock active. Core dumps impossible. ptrace denied | THR-014, THR-030 |
+| A14 | systemd exposure ≤ 1.5. Seccomp and Landlock active. Core dumps disabled (ST-110). ptrace denied | THR-014, THR-030 |
 | A15 | Onion key only on the intake host, 0700 tor-owned, on the encrypted volume. Secret placement manifest passes | THR-044 |
 
 ## 5. Test plan

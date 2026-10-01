@@ -39,7 +39,7 @@ def load_registry(path=REGISTRY):
 
 
 def spec_files():
-    return [p for p in sorted(SPECS.glob("*.md")) if not EXCLUDED_FILES.match(p.name)]
+    return [p for p in sorted(list(SPECS.glob("*.md")) + list(SPECS.glob("impl/*.md"))) if not EXCLUDED_FILES.match(p.name)]
 
 
 def run_lint(registry=None):

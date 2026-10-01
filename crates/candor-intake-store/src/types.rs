@@ -584,3 +584,26 @@ mod tests {
         assert!(!format!("{t:?}").contains("cd"));
     }
 }
+
+#[cfg(test)]
+mod props {
+    #![allow(clippy::arithmetic_side_effects)]
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// Month arithmetic is total and consistent for every u32 day number.
+        #[test]
+        fn month_start_properties(d in 0u32..3_000_000) {
+            let day = Day(d);
+            let m = day.month_start();
+            prop_assert!(m <= day);
+            prop_assert!(m.is_month_start());
+            prop_assert!(day.0 - m.0 < 31);
+            let n = day.next_month_start();
+            prop_assert!(n > day);
+            prop_assert!(n.is_month_start());
+            prop_assert!(n.0 - m.0 >= 28 && n.0 - m.0 <= 31);
+        }
+    }
+}

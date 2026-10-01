@@ -53,6 +53,7 @@ Every requirement is a row in a Markdown table with EXACTLY these columns:
 | 10-FILE-EVIDENCE-PIPELINE | FILE-, EVID- |
 | 11-FRONTEND-SOURCE | SUI- |
 | 11a-SOURCE-SAFETY-TIPS | TIP- |
+| impl/IMPL-* (secure implementation specs) | IMP- (IMP-STD-, IMP-RMn-) |
 | 12-FRONTEND-RECIPIENT | RUI- |
 | 13-FRONTEND-ADMIN | AUI-, SOCUI-, EMUI- |
 | 14-CASE-MANAGEMENT | CASE-, ROUTE- |
