@@ -448,7 +448,7 @@ async fn full_tier_w_flow() {
     let mut members = f.members;
     members.push(member(5, 5, true));
     let snap2 = snapshot_for(&members, &f.custodian, &f.disposition, 2, TODAY);
-    f.sealer.install_snapshot(snap2).unwrap();
+    f.install(snap2).unwrap();
     ok(
         &f.sealer,
         Request::DraftSet(DraftSet {

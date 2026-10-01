@@ -21,6 +21,7 @@ use crate::proto::cbor::Value;
 use crate::proto::{Mode, PendingReply, SecretText};
 use candor_core::header::{CoreHeader, HEADER_LEN, HEADER_MAC_LEN, ObjectType, object_hash};
 use candor_core::kdf::{ct_eq, derive_payload_key, derive_stage_part_key};
+use candor_core::secret::AeadKey;
 use candor_core::kem::{self, KemPublicKey};
 use candor_core::object::{self, SealRequest, SealedObject};
 use candor_core::passphrase::SourceKeys;
@@ -57,6 +58,50 @@ impl SealCtx<'_> {
 
 fn io_err<E>(_: E) -> Error {
     Error::Internal
+}
+
+// ---------------------------------------------------------------------------
+// STREAM constructors. AUD-RM1-CORE-04 replaces candor-core's raw-key STREAM
+// constructor; these three functions are the only call sites, so integration is
+// a one-line swap each (`StreamEncryptor::for_staged_part(k36, part_id)`, …).
+
+fn stream_key<T>(r: Result<AeadKey, Error>, f: impl FnOnce(AeadKey) -> T) -> Result<T, Error> {
+    r.map(f)
+}
+
+/// STREAM encryptor for a staged Tier W part under
+/// `K_stage = HKDF(K36, part_id, "candor/v1/stage/part")` (§9.13).
+pub(crate) fn staged_part_encryptor(
+    k36: &Secret32,
+    part_id: &[u8; 16],
+    padded_len: u64,
+) -> Result<StreamEncryptor, Error> {
+    stream_key(derive_stage_part_key(k36, part_id), |k| {
+        StreamEncryptor::new(k, padded_len)
+    })
+}
+
+/// STREAM decryptor for a staged Tier W part (§9.13).
+pub(crate) fn staged_part_decryptor(
+    k36: &Secret32,
+    part_id: &[u8; 16],
+    padded_len: u64,
+) -> Result<StreamDecryptor, Error> {
+    stream_key(derive_stage_part_key(k36, part_id), |k| {
+        StreamDecryptor::new(k, padded_len)
+    })
+}
+
+/// STREAM encryptor for an object payload under the CK (§13.3).
+fn payload_encryptor(
+    suite: Suite,
+    ck: &ContentKey,
+    payload_nonce: &[u8; 16],
+    padded_len: u64,
+) -> Result<StreamEncryptor, Error> {
+    stream_key(derive_payload_key(suite, ck, payload_nonce), |k| {
+        StreamEncryptor::new(k, padded_len)
+    })
 }
 
 /// Start a staging file under a caller-known id, so a failed `commit` (which
@@ -267,7 +312,7 @@ pub(crate) fn seal_bundle(
     let (staged_id, mut w) = stage_create(ctx.staging)?;
     w.write_all(&header_bytes).map_err(io_err)?;
     w.write_all(&mac).map_err(io_err)?;
-    let enc = StreamEncryptor::new(derive_payload_key(ctx.suite, &ck, &payload_nonce)?, padded);
+    let enc = payload_encryptor(ctx.suite, &ck, &payload_nonce, padded)?;
     let mut sink = StreamSink::new(enc, w, padded);
     sink.push(&BUNDLE_MAGIC)?;
     sink.push(&count.to_be_bytes())?;
@@ -275,8 +320,7 @@ pub(crate) fn seal_bundle(
     let mut offset: u64 = 8;
     for p in parts {
         let reader = ctx.staging.open_read(&p.object).map_err(io_err)?;
-        let key = derive_stage_part_key(k36, &p.part_id)?;
-        let mut chunks = StreamDecryptor::new(key, p.padded_len).reader(reader);
+        let mut chunks = staged_part_decryptor(k36, &p.part_id, p.padded_len)?.reader(reader);
         let mut left = p.real_len;
         for chunk in chunks.by_ref() {
             let c = chunk?;

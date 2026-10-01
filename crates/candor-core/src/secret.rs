@@ -72,6 +72,13 @@ secret_key_type!(
     Secret32,
     32
 );
+secret_key_type!(
+    /// Tier W per-session staging key K36 (§9.13). Staged-part STREAM keys are derived
+    /// from it only through `stream::StreamEncryptor::for_staged_part` /
+    /// `stream::StreamDecryptor::for_staged_part`.
+    SessionKey,
+    32
+);
 
 impl ContentKey {
     /// Generate a fresh random content key from the OS CSPRNG.
@@ -96,6 +103,17 @@ impl ContentKey {
 
 impl CaseKey {
     /// Generate a fresh random case key from the OS CSPRNG.
+    pub fn generate() -> crate::error::Result<Self> {
+        let mut k = [0u8; 32];
+        crate::rand::fill(&mut k)?;
+        let out = Self(k);
+        k.zeroize();
+        Ok(out)
+    }
+}
+
+impl SessionKey {
+    /// Generate a fresh random session staging key from the OS CSPRNG.
     pub fn generate() -> crate::error::Result<Self> {
         let mut k = [0u8; 32];
         crate::rand::fill(&mut k)?;

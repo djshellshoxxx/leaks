@@ -16,6 +16,8 @@ StartLimitBurst=5
 Type=notify
 User=postgres
 Group=postgres
+# MAC layer (AUD-RM2-DEP-08; 17 §5.2, R7 SI-B-04). No '-' prefix: fail closed.
+AppArmorProfile=candor-intake-pg
 # Socket group candor-istore (unix_socket_group): only candor-istore (and postgres) may
 # connect; pg_hba additionally allows only peer candor-istore -> candor_istore.
 SupplementaryGroups=candor-istore
@@ -74,11 +76,15 @@ SystemCallFilter=~@privileged @resources @mount @debug @cpu-emulation @obsolete 
 SystemCallFilter=fchown fchownat chown
 TemporaryFileSystem=/var:ro
 BindPaths=/var/lib/postgresql/16/candor-intake
+# /var/tmp: PrivateTmp's /var/tmp is disk-backed on the host; nothing may be written there
+# (AUD-RM2-DEP-12).
+InaccessiblePaths=-/var/tmp
 InaccessiblePaths=-/run/tor-instances -/run/candor/source-web -/run/candor/sealer -/run/candor/istore -/run/candor/staging -/run/credentials/candor-intake-store.service -/run/credentials/candor-sealer.service -/etc/credstore.encrypted -/etc/tor -/boot
-# ---- Logging (AUD-RM2-STO-02, DB-021, LOG-004/008, ADR-016) ----
+# ---- Logging (AUD-RM2-STO-02, AUD-RM2-DEP-05/06, DB-021, LOG-004/008, ADR-016) ----
 # PostgreSQL output is discarded entirely: even with log_min_messages = panic nothing it
 # writes may reach any journal, because every server log line carries a precise timestamp
 # that can coincide with a source action. Liveness is visible through the unit state only.
+# LogLevelMax=emerg also suppresses the service manager's own messages about this unit.
 StandardInput=null
 StandardOutput=null
 StandardError=null

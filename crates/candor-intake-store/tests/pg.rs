@@ -318,7 +318,8 @@ async fn pg_roles_and_grants() {
         vec![
             ("deletion_list".into(), "DELETE".into()),
             ("deletion_list".into(), "SELECT".into()),
-            ("intake_meta".into(), "SELECT".into())
+            ("intake_meta".into(), "SELECT".into()),
+            ("schema_migration".into(), "SELECT".into())
         ]
     );
     let app = of("candor_istore");
@@ -743,15 +744,17 @@ async fn pg_uniform_rewrite_xmin() {
     let (rows2, distinct2) = distinct_xmin(&mut c).await;
     assert!(rows2 >= rows);
     assert_eq!(distinct2, 1, "all source-linkable rows share one xmin");
-    let locked: i64 = sqlx::query(AssertSqlSafe(format!(
-        "SELECT count(*) FROM ({}) t(x) WHERE x <> '0'",
-        XMIN_UNION.replace("xmin::text", "xmax::text")
+    // A row whose table has a BEFORE UPDATE trigger keeps the rewriting
+    // transaction's own id as a lock-only xmax: it reveals nothing beyond xmin.
+    let foreign: i64 = sqlx::query(AssertSqlSafe(format!(
+        "SELECT count(*) FROM ({}) t(n, x) WHERE x <> '0' AND x <> n",
+        XMIN_UNION.replace("xmin::text", "xmin::text, xmax::text")
     )))
     .fetch_one(&mut c)
     .await
     .unwrap()
     .get(0);
-    assert_eq!(locked, 0, "no row carries a lock xmax after the rewrite");
+    assert_eq!(foreign, 0, "no row carries another transaction's xmax");
 }
 
 /// AUD-RM2-STO-02: the whole conformance suite runs without a single server-side
@@ -792,6 +795,15 @@ async fn pg_no_server_errors_on_expected_paths() {
         .filter(|l| l.contains("ERROR") || l.contains("WARNING") || l.contains("FATAL"))
         .collect();
     assert!(bad.is_empty(), "server log lines: {bad:?}");
+    // Positive control: a real server error in such a database is captured
+    // (with the pre-fix duplicate handling, every DuplicateEnvelope and
+    // AccountExists produced a line like this).
+    let b = base().unwrap();
+    let db = fresh_db_with(&b, true).await;
+    assert!(!try_as(&b, &db, "candor_istore", "SELECT 1 / 0").await);
+    let text = std::fs::read(&log).unwrap();
+    let all = String::from_utf8_lossy(&text);
+    assert!(all.contains("ERROR"), "log capture does not work");
 }
 
 /// ADR-010 / DB-008: after a full workload, every date-typed value in the intake

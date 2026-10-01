@@ -35,6 +35,14 @@ impl KemPublicKey {
         if bytes.len() != XWING_NPK {
             return Err(Error::Length);
         }
+        // AUD-RM1-CORE-14 (defence in depth, IMPL-RM1 §4 A8): reject an X25519
+        // component that is non-canonical or of low order.
+        let (_, pk_x) = bytes
+            .split_last_chunk::<32>()
+            .ok_or(Error::Length)?;
+        if !x25519_public_ok(pk_x) {
+            return Err(Error::InvalidKey);
+        }
         XPk::from_bytes(bytes)
             .map(Self)
             .map_err(|_| Error::InvalidKey)
@@ -45,6 +53,49 @@ impl KemPublicKey {
     pub fn to_bytes(&self) -> Vec<u8> {
         self.0.to_bytes().to_vec()
     }
+}
+
+/// Little-endian encodings (top bit clear) of the X25519 u-coordinates of low order
+/// that are below p = 2^255 − 19: 0, 1, the two points of order 8, and p − 1
+/// (RFC 7748 §6.1 / libsodium blocklist). Values ≥ p are rejected separately as
+/// non-canonical; this also covers p and p + 1.
+const X25519_LOW_ORDER: [[u8; 32]; 5] = [
+    [0; 32],
+    [
+        1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0,
+    ],
+    [
+        0xe0, 0xeb, 0x7a, 0x7c, 0x3b, 0x41, 0xb8, 0xae, 0x16, 0x56, 0xe3, 0xfa, 0xf1, 0x9f, 0xc4,
+        0x6a, 0xda, 0x09, 0x8d, 0xeb, 0x9c, 0x32, 0xb1, 0xfd, 0x86, 0x62, 0x05, 0x16, 0x5f, 0x49,
+        0xb8, 0x00,
+    ],
+    [
+        0x5f, 0x9c, 0x95, 0xbc, 0xa3, 0x50, 0x8c, 0x24, 0xb1, 0xd0, 0xb1, 0x55, 0x9c, 0x83, 0xef,
+        0x5b, 0x04, 0x44, 0x5c, 0xc4, 0x58, 0x1c, 0x8e, 0x86, 0xd8, 0x22, 0x4e, 0xdd, 0xd0, 0x9f,
+        0x11, 0x57,
+    ],
+    [
+        0xec, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0x7f,
+    ],
+];
+
+/// `true` iff `u` is a canonical (top bit clear, value < p) X25519 public key that is
+/// not of low order. Public data: no constant-time requirement.
+fn x25519_public_ok(u: &[u8; 32]) -> bool {
+    // Top bit set: non-canonical encoding (RFC 7748 masks it; we refuse it).
+    if u.last().is_some_and(|b| b & 0x80 != 0) {
+        return false;
+    }
+    // Value ≥ p = 2^255 − 19 ⇔ bytes 1..31 are 0xff (byte 31 = 0x7f) and byte 0 ≥ 0xed.
+    let (first, rest) = u.split_first().map_or((0, &[][..]), |(f, r)| (*f, r));
+    let (top, mid) = rest.split_last().map_or((0, &[][..]), |(t, m)| (*t, m));
+    if top == 0x7f && mid.iter().all(|b| *b == 0xff) && first >= 0xed {
+        return false;
+    }
+    !X25519_LOW_ORDER.contains(u)
 }
 
 /// An X-Wing private key (32-byte seed). Zeroized on drop by the underlying type.
@@ -71,7 +122,11 @@ impl KemPrivateKey {
     /// Export the private seed (for sealing into a keystore record only).
     #[must_use]
     pub fn to_bytes(&self) -> Zeroizing<Vec<u8>> {
-        Zeroizing::new(self.0.to_bytes().to_vec())
+        // AUD-RM1-CORE-07: the intermediate `Array` is zeroized before it is dropped.
+        let mut arr = self.0.to_bytes();
+        let out = Zeroizing::new(arr.to_vec());
+        arr.as_mut_slice().zeroize();
+        out
     }
 
     /// The matching public key.
@@ -121,7 +176,7 @@ impl KemKeyPair {
     fn pairwise_consistency_test(&self, rng: &mut dyn RandomSource) -> Result<()> {
         let mut r = [0u8; ENCAP_RANDOMNESS_LEN];
         rng.fill(&mut r)?;
-        let mut erng = ExactBytesRng::new(r);
+        let mut erng = ExactBytesRng::new(&r);
         r.zeroize();
         let (ss1, enc) = XWing::encap_with_rng(&self.public.0, None, &mut erng)
             .map_err(|_| Error::InvalidKey)?;
@@ -140,7 +195,7 @@ impl KemKeyPair {
 /// `SHA-256(pk ‖ ct ‖ ss)` after checking both shared secrets agree.
 pub(crate) fn xwing_kat_digest(
     seed: &[u8; 32],
-    eseed: [u8; ENCAP_RANDOMNESS_LEN],
+    eseed: &[u8; ENCAP_RANDOMNESS_LEN],
 ) -> Result<[u8; 32]> {
     let sk = KemPrivateKey::from_bytes(Suite::CandorStd1, seed)?;
     let pk = sk.public_key();
@@ -167,7 +222,7 @@ pub(crate) fn seal_base_with_randomness(
     info: &[u8],
     aad: &[u8],
     pt: &[u8],
-    randomness: [u8; ENCAP_RANDOMNESS_LEN],
+    randomness: &[u8; ENCAP_RANDOMNESS_LEN],
 ) -> Result<(Vec<u8>, Vec<u8>)> {
     let mut rng = ExactBytesRng::new(randomness);
     let (enc, ct) = hpke::single_shot_seal_with_rng::<ChaCha20Poly1305, HkdfSha256, XWing>(
@@ -197,7 +252,7 @@ pub(crate) fn seal_base_with(
 ) -> Result<(Vec<u8>, Vec<u8>)> {
     let mut r = [0u8; ENCAP_RANDOMNESS_LEN];
     rng.fill(&mut r)?;
-    let out = seal_base_with_randomness(pk, info, aad, pt, r);
+    let out = seal_base_with_randomness(pk, info, aad, pt, &r);
     r.zeroize();
     out
 }

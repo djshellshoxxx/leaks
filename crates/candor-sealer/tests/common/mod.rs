@@ -30,10 +30,14 @@ use candor_safefs::{RootPolicy, SafeRoot};
 use candor_sealer::proto::{Request, Response, SecretWords, SessionHandle};
 use candor_sealer::server::clock::{Clock, ClockError};
 use candor_sealer::server::directory::{
-    ChannelView, CoiPolicy, DirectorySnapshot, MemberEpochKey, RosterMember, UserKeyEntry,
+    ChannelView, CoiPolicy, DirectorySnapshot, DirectoryTrust, MemberEpochKey, RosterMember,
+    SignedCheckpoint, SnapshotBundle, UserKeyEntry, merkle,
 };
-use candor_sealer::server::sink::{Blob, CommitRequest, EnvelopeSink, RotationRequest, SinkError};
-use candor_sealer::server::{ChaffConfig, Limits, Sealer, SealerConfig};
+use candor_sealer::server::hardening::InsecureDevMode;
+use candor_sealer::server::sink::{
+    AccountUpsert, Blob, EnvelopeGroup, EnvelopeObject, EnvelopeSink, SinkError,
+};
+use candor_sealer::server::{ChaffConfig, Limits, Sealer, SealerConfig, SnapshotError};
 
 pub const TENANT: [u8; 16] = [0x11; 16];
 pub const CHANNEL: [u8; 16] = [0x22; 16];
@@ -69,74 +73,89 @@ pub struct StoredObject {
 #[derive(Clone)]
 pub struct StoredEnvelope {
     pub channel_id: [u8; 16],
+    /// Always `[main, bundle, identity]`.
     pub objects: Vec<StoredObject>,
     pub disposition_ct: Vec<u8>,
+    pub epoch_id: u32,
+    pub received_day: u32,
     pub release_offset_days: u8,
-    pub account: Option<candor_sealer::server::sink::AccountRecord>,
 }
 
+/// Store operations in order: `'A'` account upsert, `'G'` envelope group.
 pub struct MemorySink {
     pub staging: &'static SafeRoot,
     pub envelopes: Mutex<Vec<StoredEnvelope>>,
-    pub rotations: Mutex<Vec<(RotationRequest, Vec<StoredEnvelope>)>>,
+    pub accounts: Mutex<Vec<AccountUpsert>>,
+    pub ops: Mutex<Vec<char>>,
     pub fail: AtomicBool,
+    /// Fail only account upserts.
+    pub fail_accounts: AtomicBool,
 }
 
 impl MemorySink {
-    fn take(&self, req: &CommitRequest) -> StoredEnvelope {
-        let objects = req
-            .objects
-            .iter()
-            .map(|o| {
-                let bytes = match &o.blob {
-                    Blob::Inline(b) => b.clone(),
-                    Blob::Staged { id, len } => {
-                        let b = self.staging.read_to_vec(id, *len).unwrap();
-                        assert_eq!(b.len() as u64, *len);
-                        self.staging
-                            .remove(id, candor_safefs::SlotTime::utc_day_start(0))
-                            .unwrap();
-                        b
-                    }
-                };
-                StoredObject {
-                    object_type: o.object_type,
-                    object_hash: o.object_hash,
-                    slot_block: o.slot_block.clone(),
-                    bytes,
-                }
-            })
-            .collect();
-        StoredEnvelope {
-            channel_id: req.channel_id,
-            objects,
-            disposition_ct: req.disposition_ct.clone(),
-            release_offset_days: req.release_offset_days,
-            account: req.account.clone(),
+    fn take(&self, o: &EnvelopeObject) -> StoredObject {
+        let bytes = match &o.blob {
+            Blob::Inline(b) => b.clone(),
+            Blob::Staged { id, len } => {
+                let b = self.staging.read_to_vec(id, *len).unwrap();
+                assert_eq!(b.len() as u64, *len);
+                self.staging
+                    .remove(id, candor_safefs::SlotTime::utc_day_start(0))
+                    .unwrap();
+                b
+            }
+        };
+        StoredObject {
+            object_type: o.object_type,
+            object_hash: o.object_hash,
+            slot_block: o.slot_block.clone(),
+            bytes,
         }
     }
 
     pub fn envelopes(&self) -> Vec<StoredEnvelope> {
         self.envelopes.lock().unwrap().clone()
     }
+
+    pub fn accounts(&self) -> Vec<AccountUpsert> {
+        self.accounts.lock().unwrap().clone()
+    }
+
+    pub fn ops(&self) -> String {
+        self.ops.lock().unwrap().iter().collect()
+    }
 }
 
 impl EnvelopeSink for MemorySink {
-    fn commit(&self, req: CommitRequest) -> Result<(), SinkError> {
+    fn commit_envelope_group(
+        &self,
+        group: EnvelopeGroup,
+        epoch_id: u32,
+        received_day: u32,
+        release_offset_days: u8,
+    ) -> Result<(), SinkError> {
         if self.fail.load(Ordering::SeqCst) {
             return Err(SinkError);
         }
-        let env = self.take(&req);
-        self.envelopes.lock().unwrap().push(env);
+        let objects = group.objects().iter().map(|o| self.take(o)).collect();
+        self.envelopes.lock().unwrap().push(StoredEnvelope {
+            channel_id: group.channel_id,
+            objects,
+            disposition_ct: group.disposition_ct.clone(),
+            epoch_id,
+            received_day,
+            release_offset_days,
+        });
+        self.ops.lock().unwrap().push('G');
         Ok(())
     }
 
-    fn rotate_account(&self, req: RotationRequest) -> Result<(), SinkError> {
-        if self.fail.load(Ordering::SeqCst) {
+    fn upsert_account(&self, op: AccountUpsert) -> Result<(), SinkError> {
+        if self.fail.load(Ordering::SeqCst) || self.fail_accounts.load(Ordering::SeqCst) {
             return Err(SinkError);
         }
-        let envs = req.envelopes.iter().map(|e| self.take(e)).collect();
-        self.rotations.lock().unwrap().push((req, envs));
+        self.accounts.lock().unwrap().push(op);
+        self.ops.lock().unwrap().push('A');
         Ok(())
     }
 }
@@ -165,6 +184,95 @@ pub struct Fixture {
     pub snapshot: DirectorySnapshot,
 }
 
+/// LOG_KEY of the test directory.
+pub fn log_key() -> SigningKey {
+    SigningKey::from_seed(&[0x4c; 32])
+}
+
+pub fn trust() -> DirectoryTrust {
+    DirectoryTrust {
+        tenant_id: TENANT,
+        log_keys: vec![log_key().verifying_key_bytes()],
+        witnesses: vec![],
+        min_cosignatures: 0,
+        min_external: 0,
+    }
+}
+
+/// Leaves of the test directory log (deterministic).
+pub fn log_leaves(n: u64) -> Vec<[u8; 32]> {
+    (0..n).map(|i| merkle::leaf_hash(&i.to_be_bytes())).collect()
+}
+
+/// Sign `view`'s checkpoint with the LOG_KEY and attach the consistency proof
+/// from a high-water mark at `from` (0 = none).
+pub fn signed_bundle(view: DirectorySnapshot, from: u64) -> SnapshotBundle {
+    let leaves = log_leaves(view.tree_size);
+    let mut cp = SignedCheckpoint {
+        tree_size: view.tree_size,
+        root_hash: view.root_hash,
+        issued_hour: view.issued_hour,
+        log_sig: [0; 64],
+        cosignatures: vec![],
+    };
+    cp.log_sig = log_key().sign(&cp.note_body(&TENANT).unwrap());
+    let proof = if from == 0 || from == view.tree_size {
+        vec![]
+    } else {
+        merkle::consistency_proof(from as usize, &leaves)
+    };
+    SnapshotBundle {
+        view,
+        checkpoint: cp,
+        consistency_proof: proof,
+    }
+}
+
+/// Change a view's tree size (and root) to a consistent extension of the log.
+pub fn resize(v: &mut DirectorySnapshot, tree_size: u64) {
+    v.tree_size = tree_size;
+    v.root_hash = merkle::root(&log_leaves(tree_size));
+}
+
+impl Fixture {
+    /// Install a view with a valid checkpoint and proof from the current mark.
+    pub fn install(&self, view: DirectorySnapshot) -> Result<(), SnapshotError> {
+        let from = self.sealer.high_water_mark().tree_size;
+        self.sealer
+            .install_snapshot(signed_bundle(view, from), |_| true)
+    }
+}
+
+/// The audit-logged developer override (tests run unhardened, as root, with
+/// the client in the same process).
+pub fn dev_mode() -> InsecureDevMode {
+    use candor_log::codes::HostRole;
+    use candor_log::ids::{AuditIdKey, TenantRef};
+    let mut log = candor_log::AuditLog::new(
+        TenantRef::derive(&AuditIdKey::new([3; 32]), b"tenant"),
+        HostRole::Intake,
+        candor_log::SoftwareSigner::from_seed(&zeroize::Zeroizing::new([9; 32])),
+        candor_log::SystemClock,
+        candor_log::CheckpointPolicy::DEFAULT,
+    );
+    log.set_primary_sink(Box::new(candor_log::sink::MemorySink::new()));
+    InsecureDevMode::acknowledge(&mut log).unwrap()
+}
+
+pub fn config(chaff: ChaffConfig, limits: Limits, peer_uid: u32) -> SealerConfig {
+    SealerConfig {
+        tenant_id: TENANT,
+        deployment_salt: SALT,
+        suite: Suite::CandorStd1,
+        allowed_peer_uid: peer_uid,
+        limits,
+        chaff,
+        directory_trust: trust(),
+        enable_note_real: false,
+        insecure_dev: Some(dev_mode()),
+    }
+}
+
 pub fn member(n: u8, role_label: u16, read_intake: bool) -> Member {
     let k08 = SigningKey::generate().unwrap();
     let entry_hash = sha256(&[b"user-keys", &[n]]);
@@ -185,10 +293,11 @@ pub fn snapshot_for(
     version: u64,
     issued_day: u32,
 ) -> DirectorySnapshot {
+    let tree_size = 100 + version;
     DirectorySnapshot {
         snapshot_version: version,
-        tree_size: 100 + version,
-        root_hash: [version as u8; 32],
+        tree_size,
+        root_hash: merkle::root(&log_leaves(tree_size)),
         issued_hour: u64::from(issued_day) * 24 + 3,
         suite: Suite::CandorStd1,
         epoch_origin_day: TODAY - 2,
@@ -261,8 +370,10 @@ pub fn fixture_full(chaff: ChaffConfig, limits: Limits, peer_uid: u32) -> Fixtur
     let sink = Arc::new(MemorySink {
         staging,
         envelopes: Mutex::new(Vec::new()),
-        rotations: Mutex::new(Vec::new()),
+        accounts: Mutex::new(Vec::new()),
+        ops: Mutex::new(Vec::new()),
         fail: AtomicBool::new(false),
+        fail_accounts: AtomicBool::new(false),
     });
     // Triage Set: labels 1 (ombudsman), 2 (audit chair), 3 (counsel); label 4 is
     // a non-triage investigator.
@@ -275,14 +386,7 @@ pub fn fixture_full(chaff: ChaffConfig, limits: Limits, peer_uid: u32) -> Fixtur
     let custodian = KemKeyPair::generate(Suite::CandorStd1).unwrap();
     let disposition = KemKeyPair::generate(Suite::CandorStd1).unwrap();
     let k35 = [0x35; 32];
-    let cfg = SealerConfig {
-        tenant_id: TENANT,
-        deployment_salt: SALT,
-        suite: Suite::CandorStd1,
-        allowed_peer_uid: peer_uid,
-        limits,
-        chaff,
-    };
+    let cfg = config(chaff, limits, peer_uid);
     let sealer = Sealer::new(
         cfg,
         SigningKey::from_seed(&k35),
@@ -292,7 +396,9 @@ pub fn fixture_full(chaff: ChaffConfig, limits: Limits, peer_uid: u32) -> Fixtur
     )
     .unwrap();
     let snapshot = snapshot_for(&members, &custodian, &disposition, 1, TODAY);
-    sealer.install_snapshot(snapshot.clone()).unwrap();
+    sealer
+        .install_snapshot(signed_bundle(snapshot.clone(), 0), |_| true)
+        .unwrap();
     Fixture {
         dir,
         staging_path,

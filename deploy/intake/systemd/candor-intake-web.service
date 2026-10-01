@@ -71,20 +71,23 @@ SystemCallFilter=~@privileged @resources @mount @debug @cpu-emulation @obsolete 
 SystemCallFilter=seccomp landlock_create_ruleset landlock_add_rule landlock_restrict_self
 # Nothing else on Z-INTAKE is visible (defence in depth on top of DAC/AppArmor).
 TemporaryFileSystem=/var:ro
+# /var/tmp: PrivateTmp's /var/tmp is disk-backed on the host; nothing may be written there
+# (AUD-RM2-DEP-12).
+InaccessiblePaths=-/var/tmp
 InaccessiblePaths=-/run/tor-instances -/run/candor/staging -/run/candor/intake-pg -/run/credentials/candor-intake-store.service -/run/credentials/candor-sealer.service -/etc/credstore.encrypted -/etc/tor -/etc/candor/intake/postgresql -/boot
-# ---- Logging (ADR-016, LOG-004, LOG-007, NET-008) ----
-# stdout discarded; stderr carries only candor-log formatted codes (07 §4.2). It goes to the
-# separate journald namespace "candor-intake" (journald@candor-intake.conf: Storage=volatile,
-# MaxRetentionSec=24h, no forwarding). Un-prefixed stderr lines are stored at level warning
-# (SyslogLevel); anything a program explicitly marks below warning is dropped (LogLevelMax).
+# ---- Logging (ADR-016, LOG-004/005, LOG-007, NET-008; AUD-RM2-DEP-05/06) ----
+# No output of this service reaches any journal: journald stamps every stored line to the
+# microsecond, so a source-triggerable event would record the exact time of a source action
+# (LOG-004 asks for hour granularity, which journald cannot provide). stdout and stderr are
+# discarded; LogLevelMax=emerg also suppresses the service manager's own messages about this
+# unit (start/stop/crash records) in the host journal. Liveness is visible through the unit
+# state only (SPEC-NOTES D-28). LogNamespace keeps any syslog()/journal-socket write of the
+# process out of the host journal.
 StandardInput=null
 StandardOutput=null
-StandardError=journal
-SyslogLevel=warning
+StandardError=null
 LogNamespace=candor-intake
-LogLevelMax=warning
-LogRateLimitIntervalSec=30s
-LogRateLimitBurst=200
+LogLevelMax=emerg
 SyslogIdentifier=candor-web
 
 [Install]

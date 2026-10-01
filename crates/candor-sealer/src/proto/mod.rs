@@ -77,9 +77,38 @@ impl core::fmt::Debug for SessionHandle {
     }
 }
 
-/// Secret bytes (passphrase, attachment data): zeroized on drop, redacted `Debug`.
-#[derive(Clone, PartialEq, Eq, Default)]
+/// Equality without data-dependent early exit (AUD-RM2-SEA-11). Lengths are
+/// not secret here (they are bounded and visible on the wire).
+fn ct_eq_iter<T: Copy + core::ops::BitXor<Output = T> + Into<u32>>(a: &[T], b: &[T]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let d = a
+        .iter()
+        .zip(b)
+        .fold(0u32, |acc, (x, y)| acc | (*x ^ *y).into());
+    core::hint::black_box(d) == 0
+}
+
+/// Implements constant-time `PartialEq`/`Eq` for a secret wrapper. `Clone` is
+/// kept on the wrappers because every copy is itself `Zeroizing`.
+macro_rules! ct_partial_eq {
+    ($t:ty, $m:ident) => {
+        impl PartialEq for $t {
+            fn eq(&self, other: &Self) -> bool {
+                ct_eq_iter(self.0.$m(), other.0.$m())
+            }
+        }
+        impl Eq for $t {}
+    };
+}
+
+/// Secret bytes (passphrase, attachment data): zeroized on drop, redacted `Debug`,
+/// constant-time equality.
+#[derive(Clone, Default)]
 pub struct SecretBytes(pub Zeroizing<Vec<u8>>);
+
+ct_partial_eq!(SecretBytes, as_slice);
 
 impl core::fmt::Debug for SecretBytes {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -95,9 +124,12 @@ impl SecretBytes {
     }
 }
 
-/// Secret text (draft text, names, reply bodies): zeroized on drop, redacted `Debug`.
-#[derive(Clone, PartialEq, Eq, Default)]
+/// Secret text (draft text, names, reply bodies): zeroized on drop, redacted
+/// `Debug`, constant-time equality.
+#[derive(Clone, Default)]
 pub struct SecretText(pub Zeroizing<String>);
+
+ct_partial_eq!(SecretText, as_bytes);
 
 impl core::fmt::Debug for SecretText {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -119,9 +151,12 @@ impl SecretText {
     }
 }
 
-/// Passphrase word indices (into the shipped wordlist): zeroized, redacted.
-#[derive(Clone, PartialEq, Eq, Default)]
+/// Passphrase word indices (into the shipped wordlist): zeroized, redacted,
+/// constant-time equality.
+#[derive(Clone, Default)]
 pub struct SecretWords(pub Zeroizing<Vec<u16>>);
+
+ct_partial_eq!(SecretWords, as_slice);
 
 impl core::fmt::Debug for SecretWords {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -152,14 +187,25 @@ impl Mode {
 }
 
 /// COI ticks (ADR-030/037): role labels the source flagged and report categories.
-/// Both strictly ascending. Draft-sensitive: zeroized, redacted.
-#[derive(Clone, PartialEq, Eq, Default)]
+/// Both strictly ascending. Draft-sensitive: zeroized, redacted, constant-time
+/// equality.
+#[derive(Clone, Default)]
 pub struct Coi {
     /// Flagged role-label ids (≤ 16).
     pub excluded_labels: Zeroizing<Vec<u16>>,
     /// Selected category ids (≤ 8).
     pub categories: Zeroizing<Vec<u16>>,
 }
+
+impl PartialEq for Coi {
+    fn eq(&self, other: &Self) -> bool {
+        let a = ct_eq_iter(&self.excluded_labels, &other.excluded_labels);
+        let b = ct_eq_iter(&self.categories, &other.categories);
+        a & b
+    }
+}
+
+impl Eq for Coi {}
 
 impl core::fmt::Debug for Coi {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -169,7 +215,7 @@ impl core::fmt::Debug for Coi {
 
 /// `DRAFT_SET` body: `{1: sess, 2: mode, 3: message, 4: [[field_id, text]…],
 /// 5: identity | null, 6: {1: [label…], 2: [category…]} | null}`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DraftSet {
     /// Session.
     pub sess: SessionHandle,
@@ -196,7 +242,7 @@ pub struct PartView {
 
 /// `DRAFT_GET` response body: `{1: mode, 2: message, 3: fields, 4: identity | null,
 /// 5: coi | null, 6: [[part, size_bucket]…]}`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DraftView {
     /// Mode.
     pub mode: Mode,
@@ -213,7 +259,7 @@ pub struct DraftView {
 }
 
 /// A pending reply to re-wrap at rotation: `[object_hash, stanza]`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PendingReply {
     /// `object_hash` of the REPLY object.
     pub object_hash: [u8; 32],
@@ -222,7 +268,7 @@ pub struct PendingReply {
 }
 
 /// A verified reply for rendering: `{1: reply_seq, 2: day, 3: role_label, 4: body}`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ReplyView {
     /// Per-mailbox sequence number.
     pub reply_seq: u64,
@@ -316,8 +362,8 @@ impl Op {
     }
 }
 
-/// Requests from `candor-web`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Requests from `candor-web`. `Debug` prints only the op (AUD-RM2-SEA-11).
+#[derive(Clone, PartialEq, Eq)]
 pub enum Request {
     /// `{1: proto}` → [`Response::Hello`]. First message on every connection.
     Hello {
@@ -530,8 +576,9 @@ impl ErrorCode {
     }
 }
 
-/// Responses from the sealer.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Responses from the sealer. `Debug` prints only the variant (and an error's
+/// code), never values such as `lookup_tag` (AUD-RM2-SEA-11).
+#[derive(Clone, PartialEq, Eq)]
 pub enum Response {
     /// `{1: proto, 2: snapshot_version}`.
     Hello {
@@ -603,6 +650,50 @@ pub enum Response {
         /// The channel's independent route (NO_ELIGIBLE_TRIAGE / UNAVAILABLE).
         alternative_channel_id: Option<[u8; 16]>,
     },
+}
+
+macro_rules! redacted_debug {
+    ($($t:ty => $name:literal),* $(,)?) => {
+        $(impl core::fmt::Debug for $t {
+            fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                f.write_str(concat!($name, "(<redacted>)"))
+            }
+        })*
+    };
+}
+
+redacted_debug!(
+    DraftSet => "DraftSet",
+    DraftView => "DraftView",
+    PendingReply => "PendingReply",
+    ReplyView => "ReplyView",
+);
+
+impl core::fmt::Debug for Request {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "Request::{:?}(<redacted>)", self.op())
+    }
+}
+
+impl core::fmt::Debug for Response {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let name = match self {
+            Self::Hello { .. } => "Hello",
+            Self::Empty => "Empty",
+            Self::Draft(_) => "Draft",
+            Self::Words { .. } => "Words",
+            Self::Locator { .. } => "Locator",
+            Self::Signature { .. } => "Signature",
+            Self::Confirm { .. } => "Confirm",
+            Self::Part { .. } => "Part",
+            Self::Sealed { .. } => "Sealed",
+            Self::Disposition { .. } => "Disposition",
+            Self::Reply(_) => "Reply",
+            Self::Status { .. } => "Status",
+            Self::Error { code, .. } => return write!(f, "Response::Error({code:?})"),
+        };
+        write!(f, "Response::{name}(<redacted>)")
+    }
 }
 
 impl Response {

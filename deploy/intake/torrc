@@ -36,20 +36,20 @@ BridgeRelay 0
 PublishServerDescriptor 0
 
 ## ---------------------------------------------------------------- Control interface
-## NET-009: no TCP ControlPort; Unix socket only with cookie auth; group _candor-torctl
-## (health exporter only - the vanguards add-on is not deployed, ADR-049(1)).
+## NET-009 / AUD-RM2-DEP-04: no control interface at all - no TCP ControlPort and no
+## ControlSocket. tor has no per-command ACL, so any control access would expose circuit and
+## stream events (exact visit times, LOG-005) and SETCONF of path-selection options. Health is
+## derived from process liveness and an external onion fetch (SPEC-NOTES D-27).
+## config-check.sh rejects any ControlSocket/ControlPort in the effective configuration.
 ControlPort 0
-ControlSocket /run/tor-instances/candor-intake/control.sock
-ControlSocketsGroupWritable 1
 CookieAuthentication 1
-CookieAuthFile /run/tor-instances/candor-intake/control.authcookie
-CookieAuthFileGroupReadable 1
 
 ## ---------------------------------------------------------------- Logging: minimal, no client/circuit data
-## NET-008 / LOG-005 / 32 `tor.log_level`: level warn, never a file. stderr is captured
-## by journald in the volatile `candor-intake` namespace (journald@candor-intake.conf,
-## Storage=volatile, <= 24 h). LOG-005 asks for stderr; 16 §7.1 says syslog - stderr is
-## used so that no syslog daemon can ever receive tor output (SPEC-NOTES D-02).
+## NET-008 / LOG-005 / 32 `tor.log_level`: level warn, never a file. LOG-005 asks for stderr;
+## 16 §7.1 says syslog - stderr is used so that no syslog daemon can ever receive tor output
+## (SPEC-NOTES D-02). AUD-RM2-DEP-05: the unit discards stderr (StandardError=null) because
+## journald stamps every stored line to the microsecond, which LogTimeGranularity cannot
+## coarsen; tor output therefore reaches no journal at all (SPEC-NOTES D-28).
 Log warn stderr
 SafeLogging 1
 LogMessageDomains 0

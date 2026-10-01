@@ -190,7 +190,7 @@ pub struct HighWaterMark {
 }
 
 /// One pinned witness key (ORG_ROOT witness list, 04 §14.3).
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WitnessKey {
     /// K39 Ed25519 public key.
     pub pk: [u8; 32],

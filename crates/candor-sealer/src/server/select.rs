@@ -403,12 +403,10 @@ mod tests {
         let dup = s.channels[0].meks[1].clone();
         s.channels[0].meks.push(dup);
         let e = select(&s, &CH, T, choice(&[], &[], None));
-        assert_eq!(
-            e.unwrap_err(),
-            SelectError::NoEligible {
-                alternative: Some([5; 16])
-            }
-        );
+        assert!(matches!(
+            e,
+            Err(SelectError::NoEligible { alternative: Some(a) }) if a == [5; 16]
+        ));
         // Follow-up rule: intersection with the original set.
         let (s, _) = snap(3);
         let sel = select(&s, &CH, T, choice(&[], &[], Some(&[[2; 16], [9; 16]]))).unwrap();

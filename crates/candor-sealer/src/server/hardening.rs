@@ -149,6 +149,7 @@ pub enum LandlockLevel {
     /// Do not apply Landlock (development only).
     Off,
     /// Apply what the kernel supports; succeed even if not enforced (development).
+    BestEffort,
     /// Require full enforcement (production).
     Required,
 }

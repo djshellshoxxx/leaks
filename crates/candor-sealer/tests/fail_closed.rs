@@ -103,11 +103,12 @@ async fn no_valid_member_epoch_key_fails_closed() {
     let f = fixture();
     let mut snap = f.snapshot.clone();
     snap.snapshot_version = 2;
-    snap.tree_size += 1;
+    let n = snap.tree_size + 1;
+    resize(&mut snap, n);
     for k in &mut snap.channels[0].meks {
         k.valid_until_day = TODAY; // expired today
     }
-    f.sealer.install_snapshot(snap).unwrap();
+    f.install(snap).unwrap();
     let s = sess(1);
     confirmed(&f, s, None).await;
     let r = f
@@ -187,28 +188,195 @@ async fn independent_time_failure_fails_closed() {
     assert_nothing_written(&f);
 }
 
+/// ADR-036(6), ADR-052(6), AUD-RM2-SEA-07: only a verified snapshot is ever
+/// installed — rollback, fork at an equal or larger size, bad checkpoint
+/// signature, unmet cosignature policy, a view not bound to its checkpoint, a
+/// structurally invalid view and a failed high-water-mark persist are refused,
+/// and nothing changes.
 #[tokio::test]
-async fn snapshot_rollback_and_suite_mismatch_rejected() {
+async fn snapshot_rollback_fork_signature_and_invariants_rejected() {
     let f = fixture();
+    let cur = f.sealer.high_water_mark();
+    assert_eq!(cur.tree_size, f.snapshot.tree_size);
+    assert_eq!(cur.root_hash, f.snapshot.root_hash);
+    // Rollback: smaller tree, older checkpoint hour.
     let mut older = f.snapshot.clone();
-    older.tree_size -= 1;
-    assert_eq!(
-        f.sealer.install_snapshot(older),
-        Err(SnapshotError::Rollback)
-    );
+    resize(&mut older, f.snapshot.tree_size - 1);
+    assert_eq!(f.install(older), Err(SnapshotError::Rollback));
     let mut older = f.snapshot.clone();
     older.issued_hour -= 1;
-    assert_eq!(
-        f.sealer.install_snapshot(older),
-        Err(SnapshotError::Rollback)
-    );
+    assert_eq!(f.install(older), Err(SnapshotError::Rollback));
+    // Suite.
     let mut fips = f.snapshot.clone();
     fips.suite = candor_core::Suite::CandorFips1;
-    assert_eq!(f.sealer.install_snapshot(fips), Err(SnapshotError::Suite));
-    // Restoring a persisted high-water mark also blocks the current snapshot's
-    // predecessors.
-    let hwm = f.sealer.high_water_mark();
-    assert_eq!(hwm.tree_size, f.snapshot.tree_size);
+    assert_eq!(f.install(fips), Err(SnapshotError::Suite));
+    // Fork at the same size (a different root, validly signed).
+    let mut fork = f.snapshot.clone();
+    fork.root_hash = [0xee; 32];
+    assert_eq!(f.install(fork), Err(SnapshotError::Fork));
+    // Fork at a larger size: a validly signed checkpoint whose tree does not
+    // extend ours (the proof cannot verify).
+    let mut fork = f.snapshot.clone();
+    fork.tree_size += 5;
+    fork.root_hash = [0xef; 32];
+    assert_eq!(f.install(fork), Err(SnapshotError::Fork));
+    // A consistent extension with a broken proof.
+    let mut next = f.snapshot.clone();
+    resize(&mut next, f.snapshot.tree_size + 7);
+    let mut b = signed_bundle(next.clone(), cur.tree_size);
+    b.consistency_proof[0][0] ^= 1;
+    assert_eq!(f.sealer.install_snapshot(b, |_| true), Err(SnapshotError::Fork));
+    // Bad LOG_KEY signature.
+    let mut b = signed_bundle(next.clone(), cur.tree_size);
+    b.checkpoint.log_sig[0] ^= 1;
+    assert_eq!(f.sealer.install_snapshot(b, |_| true), Err(SnapshotError::Signature));
+    // View not bound to the checkpoint.
+    let mut b = signed_bundle(next.clone(), cur.tree_size);
+    b.view.issued_hour += 1;
+    assert_eq!(f.sealer.install_snapshot(b, |_| true), Err(SnapshotError::Invalid));
+    // Two COI policies with the same effective day: invalid.
+    let mut bad = next.clone();
+    let p = bad.channels[0].coi_policies[0].clone();
+    bad.channels[0].coi_policies.push(p);
+    assert_eq!(f.install(bad), Err(SnapshotError::Invalid));
+    // More than 16 Triage Set persons: invalid.
+    let mut bad = next.clone();
+    for i in 0..16u8 {
+        bad.channels[0].members.push(candor_sealer::server::directory::RosterMember {
+            user_id: [100 + i; 16],
+            role_label: 70,
+            read_intake: true,
+            effective_day: 0,
+        });
+    }
+    assert_eq!(f.install(bad), Err(SnapshotError::Invalid));
+    // Persist failure: nothing installed, mark unchanged.
+    let b = signed_bundle(next.clone(), cur.tree_size);
+    assert_eq!(f.sealer.install_snapshot(b, |_| false), Err(SnapshotError::Persist));
+    assert_eq!(f.sealer.high_water_mark(), cur);
+    // Nothing above changed the mark; a valid extension is accepted and the
+    // mark persisted before use.
+    let mut persisted = None;
+    let b = signed_bundle(next.clone(), cur.tree_size);
+    f.sealer
+        .install_snapshot(b, |m| {
+            persisted = Some(*m);
+            true
+        })
+        .unwrap();
+    assert_eq!(persisted, Some(f.sealer.high_water_mark()));
+    assert_eq!(f.sealer.high_water_mark().tree_size, next.tree_size);
+    // The same checkpoint again (equal size, equal root) is fine.
+    assert!(f.install(next).is_ok());
+}
+
+/// VR-2 cosignature policy: two valid witness cosignatures incl. one external.
+#[tokio::test]
+async fn witness_cosignature_policy_enforced() {
+    use candor_core::sig::SigningKey;
+    use candor_sealer::server::directory::{
+        Cosignature, DirectoryTrust, VerifiedSnapshot, WitnessKey, cosignature_message,
+    };
+    let f = fixture();
+    let w_int = SigningKey::from_seed(&[0x71; 32]);
+    let w_ext = SigningKey::from_seed(&[0x72; 32]);
+    let trust = DirectoryTrust {
+        witnesses: vec![
+            WitnessKey { pk: w_int.verifying_key_bytes(), external: false },
+            WitnessKey { pk: w_ext.verifying_key_bytes(), external: true },
+        ],
+        min_cosignatures: 2,
+        min_external: 1,
+        ..trust()
+    };
+    let cosign = |k: &SigningKey, b: &candor_sealer::server::directory::SnapshotBundle| {
+        let body = b.checkpoint.note_body(&TENANT).unwrap();
+        Cosignature {
+            witness_pk: k.verifying_key_bytes(),
+            timestamp: 1_700_000_000,
+            sig: k.sign(&cosignature_message(&body, 1_700_000_000)),
+        }
+    };
+    let hwm = Default::default();
+    let suite = candor_core::Suite::CandorStd1;
+    let base = signed_bundle(f.snapshot.clone(), 0);
+    // No cosignatures, one, a duplicate, a forged one: refused.
+    assert_eq!(
+        VerifiedSnapshot::verify(base.clone(), &trust, suite, &hwm).unwrap_err(),
+        SnapshotError::Signature
+    );
+    let mut b = base.clone();
+    b.checkpoint.cosignatures = vec![cosign(&w_ext, &b), cosign(&w_ext, &b)];
+    assert_eq!(
+        VerifiedSnapshot::verify(b, &trust, suite, &hwm).unwrap_err(),
+        SnapshotError::Signature
+    );
+    let mut b = base.clone();
+    let mut forged = cosign(&w_int, &b);
+    forged.timestamp += 1;
+    b.checkpoint.cosignatures = vec![cosign(&w_ext, &b), forged];
+    assert_eq!(
+        VerifiedSnapshot::verify(b, &trust, suite, &hwm).unwrap_err(),
+        SnapshotError::Signature
+    );
+    // Two internal-only witnesses do not satisfy w_external = 1.
+    let t2 = DirectoryTrust {
+        witnesses: vec![
+            WitnessKey { pk: w_int.verifying_key_bytes(), external: false },
+            WitnessKey { pk: w_ext.verifying_key_bytes(), external: false },
+        ],
+        ..trust.clone()
+    };
+    let mut b = base.clone();
+    b.checkpoint.cosignatures = vec![cosign(&w_int, &b), cosign(&w_ext, &b)];
+    assert_eq!(
+        VerifiedSnapshot::verify(b.clone(), &t2, suite, &hwm).unwrap_err(),
+        SnapshotError::Signature
+    );
+    // Policy met.
+    assert!(VerifiedSnapshot::verify(b, &trust, suite, &hwm).is_ok());
+}
+
+/// AUD-RM2-SEA-03 regression (the auditor's PoC, ADR-052(3)): member 2 holds
+/// label 2 (excluded by the category COI_POLICY) and is also listed under
+/// label 9. The submission must not be sealed to member 2's MEK.
+#[tokio::test]
+async fn coi_excluded_person_listed_under_two_labels_gets_no_slot() {
+    let f = fixture();
+    let mut snap = f.snapshot.clone();
+    snap.snapshot_version = 2;
+    let n = snap.tree_size + 1;
+    resize(&mut snap, n);
+    snap.channels[0].members.push(candor_sealer::server::directory::RosterMember {
+        user_id: f.members[1].user_id,
+        role_label: 9,
+        read_intake: true,
+        effective_day: TODAY - 30,
+    });
+    f.install(snap).unwrap();
+    let s = sess(1);
+    let coi = Coi {
+        excluded_labels: zeroize::Zeroizing::new(vec![]),
+        categories: zeroize::Zeroizing::new(vec![CATEGORY_FRAUD]),
+    };
+    confirmed(&f, s, Some(coi)).await;
+    assert!(matches!(
+        f.sealer
+            .handle(Request::SealFinish {
+                sess: s,
+                delayed_delivery: false,
+            })
+            .await,
+        Response::Sealed { .. }
+    ));
+    let env = &f.sink.envelopes()[0];
+    for o in &env.objects[..2] {
+        assert!(
+            open_intake(o, member_ctx(0), &f.members[1].mek.private).is_none(),
+            "COI-excluded person can open the submission"
+        );
+        assert!(open_intake(o, member_ctx(0), &f.members[0].mek.private).is_some());
+    }
 }
 
 #[tokio::test]

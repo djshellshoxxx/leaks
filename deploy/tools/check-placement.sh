@@ -14,6 +14,7 @@
 #     --flags     enabled feature flags (e.g. sshd,ssh_onion); "always" is implicit
 #     --mode      light = manifest light_roots (5-min check), full = whole filesystem (daily)
 #     --root      treat DIR as the filesystem root (offline image / tests); default /
+#                 (with --root the encrypted-volume check is reported as SKIP)
 #
 # Must run as root on a host (it reads every file). Output: "RULE STATUS DETAIL" lines. Paths
 # of misplaced files are printed so the operator can act; file contents never are.
@@ -115,7 +116,8 @@ pattern_regex() {
   case "$1" in
     pem_private_key)         printf '%s' '-----BEGIN ([A-Z0-9]+ )*PRIVATE KEY-----' ;;
     openssh_private_key)     printf '%s' '-----BEGIN OPENSSH PRIVATE KEY-----' ;;
-    tor_hs_secret_key)       printf '%s' '== ed25519v1-secret: type0 ==' ;;
+    # File format, and the control-port/ADD_ONION export format (AUD-RM2-DEP-10).
+    tor_hs_secret_key)       printf '%s' '== ed25519v1-secret: type0 ==|ED25519-V3:[A-Za-z0-9+/]{86}==' ;;
     tor_client_auth_private) printf '%s' '[a-z2-7]{56}:descriptor:x25519:[A-Z2-7]{52}' ;;
     age_or_hpke_identity)    printf '%s' 'AGE-SECRET-KEY-1[0-9A-Z]{58}' ;;
     openpgp_secret_packet)   printf '%s' '-----BEGIN PGP PRIVATE KEY BLOCK-----' ;;
@@ -123,6 +125,37 @@ pattern_regex() {
     *) return 1 ;;
   esac
 }
+
+# Any path component below ROOT that is a symlink (AUD-RM2-DEP-10): a symlinked parent
+# directory can move a secret to another (unencrypted) disk while the leaf looks correct.
+symlinked_component() { # absolute-path -> prints the first symlinked component, if any
+  local rest=${1#/} cur="" comp
+  while [ -n "$rest" ]; do
+    comp=${rest%%/*}
+    if [ "$comp" = "$rest" ]; then rest=""; else rest=${rest#*/}; fi
+    cur="$cur/$comp"
+    if [ -L "$ROOT$cur" ]; then printf '%s' "$cur"; return 0; fi
+  done
+  return 1
+}
+
+# The onion key must sit on a dm-crypt backed filesystem (IMPL-RM2 A15, 09 §10 LUKS volume).
+on_encrypted_fs() { # path -> 0 if the backing block device stack contains a crypt device
+  local src
+  src=$(findmnt -n -o SOURCE -T "$1" 2>/dev/null | head -n 1)
+  case "$src" in /dev/*) ;; *) return 1 ;; esac
+  lsblk -n -s -o TYPE -- "$src" 2>/dev/null | grep -qx crypt
+}
+
+# ------------------------------------------------------------------ [forbidden]
+# A manifest entry whose id is forbidden on any server is itself a violation (AUD-RM2-DEP-10).
+FORBIDDEN=$(awk -F'\t' '$1=="F" && $2=="ids" {print $3}' "$WORK/parsed")
+if [ -z "$FORBIDDEN" ]; then echo "check-placement: [forbidden] ids missing (fail closed)" >&2; exit 2; fi
+nforb=0
+while IFS= read -r fid; do
+  case ",$FORBIDDEN," in *",$fid,"*) report manifest.forbidden FAIL "entry id is forbidden on servers: $fid"; nforb=$((nforb + 1)) ;; esac
+done < <(awk -F'\t' '$1=="S" && $3=="id" {print $4}' "$WORK/parsed")
+[ "$nforb" -eq 0 ] && report manifest.forbidden OK "no forbidden id among the entries"
 
 # ------------------------------------------------------------------ active entries
 NSEC=$(awk -F'\t' '$1=="S" {n=$2} END {print n+0}' "$WORK/parsed")
@@ -151,6 +184,7 @@ while [ "$i" -le "$NSEC" ]; do
 
   f="$ROOT$path"
   if [ -L "$f" ]; then report "entry.$id" FAIL "is a symlink: $path"; continue; fi
+  if lnk=$(symlinked_component "$path"); then report "entry.$id" FAIL "path component is a symlink: $lnk"; continue; fi
   if [ ! -e "$f" ]; then
     if [ "$req" = true ]; then report "entry.$id" FAIL "missing: $path"; else report "entry.$id" OK "absent (optional)"; fi
     continue
@@ -171,6 +205,11 @@ EOF
   [ "$sh" = 1 ] || problems="$problems links=$sh(want 1)"
   if [ "$pat" != none ] && ! grep -qaE -- "$(pattern_regex "$pat")" "$f"; then problems="$problems content!=$pat"; fi
   if [ -n "$problems" ]; then report "entry.$id" FAIL "$path:$problems"; else report "entry.$id" OK "$path"; fi
+  if [ "$pat" = tor_hs_secret_key ]; then
+    if [ -n "$ROOT" ]; then report "entry.$id.encrypted_volume" SKIP "offline root: backing device not checked"
+    elif on_encrypted_fs "$f"; then report "entry.$id.encrypted_volume" OK "dm-crypt backed"
+    else report "entry.$id.encrypted_volume" FAIL "$path is not on a dm-crypt (LUKS) backed filesystem"; fi
+  fi
 done
 
 # ------------------------------------------------------------------ scan

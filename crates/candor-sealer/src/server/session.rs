@@ -86,6 +86,8 @@ impl Drop for StagedPart {
 /// `K_stage = HKDF(K36, part_id, "candor/v1/stage/part")` as it arrives (§9.13).
 pub(crate) struct Upload {
     pub part_id: [u8; 16],
+    /// Staging id chosen up front, so a failed commit can be cleaned up.
+    pub object_id: ObjectId,
     pub declared_len: u64,
     pub padded_len: u64,
     pub received: u64,
@@ -135,9 +137,15 @@ impl Session {
     /// Drop the draft, staged parts, upload and K36 (SEAL_ABORT, successful
     /// submit). Login keys and prefs are kept.
     pub(crate) fn clear_draft(&mut self, fresh_k36: Secret32) {
+        self.clear_draft_contents();
+        self.k36 = fresh_k36;
+    }
+
+    /// Drop the draft, staged parts and upload, keeping K36 (used only when the
+    /// session is about to be removed because no fresh K36 could be drawn).
+    pub(crate) fn clear_draft_contents(&mut self) {
         self.draft = Draft::default();
         self.parts.clear();
         self.upload = None;
-        self.k36 = fresh_k36;
     }
 }

@@ -18,10 +18,13 @@ StartLimitBurst=5
 Type=notify
 NotifyAccess=main
 User=_tor-candor-intake
-# Primary group _candor-torctl: tor creates control.sock / control.authcookie with its
-# primary gid, so the health agent (sole member) can use them (NET-009). DataDirectory and
-# HiddenServiceDir stay 0700/0600 and are never group-accessible (HiddenServiceDirGroupReadable 0).
-Group=_candor-torctl
+# Primary group _tor-candor-intake: it owns /run/candor/source-web (0750) and http.sock (0660),
+# so tor can reach the onion target (AUD-RM2-DEP-11). There is no control socket and no
+# control group (AUD-RM2-DEP-04). DataDirectory and HiddenServiceDir stay 0700/0600.
+Group=_tor-candor-intake
+# MAC layer for the network-facing parser (AUD-RM2-DEP-08; 17 §5.2, R7 SI-B-04). No '-' prefix:
+# the unit fails to start if the profile is not loaded (fail closed).
+AppArmorProfile=candor-tor-intake
 ExecStartPre=/usr/bin/tor --defaults-torrc /dev/null -f /etc/tor/instances/candor-intake/torrc --verify-config --quiet
 ExecStart=/usr/bin/tor --defaults-torrc /dev/null -f /etc/tor/instances/candor-intake/torrc
 ExecReload=/bin/kill -HUP $MAINPID
@@ -31,8 +34,6 @@ TimeoutStopSec=60
 Restart=on-failure
 RestartSec=5s
 LimitNOFILE=65536
-RuntimeDirectory=tor-instances/candor-intake
-RuntimeDirectoryMode=0750
 # ---- 16 §7.3 / 07 §4.2 / R7 SI-B-01 hardening (do not weaken; config-check.sh) ----
 NoNewPrivileges=yes
 ProtectSystem=strict
@@ -81,20 +82,22 @@ SocketBindDeny=any
 # Only its own state plus the web socket directory are visible.
 TemporaryFileSystem=/var:ro
 BindPaths=/var/lib/tor-instances/candor-intake
+# /var/tmp: PrivateTmp's /var/tmp is disk-backed on the host; nothing may be written there
+# (AUD-RM2-DEP-12).
+InaccessiblePaths=-/var/tmp
 InaccessiblePaths=-/run/candor/sealer -/run/candor/istore -/run/candor/staging -/run/candor/intake-pg -/run/candor/config -/run/candor/directory -/run/credentials/candor-intake-store.service -/run/credentials/candor-sealer.service -/etc/credstore.encrypted -/etc/candor -/boot
-# ---- Logging (ADR-016, LOG-004, LOG-007, NET-008) ----
-# stdout discarded; stderr goes to the
-# separate journald namespace "candor-intake" (journald@candor-intake.conf: Storage=volatile,
-# MaxRetentionSec=24h, no forwarding). Un-prefixed stderr lines are stored at level warning
-# (SyslogLevel); anything a program explicitly marks below warning is dropped (LogLevelMax).
+# ---- Logging (ADR-016, LOG-004/005, LOG-007, NET-008; AUD-RM2-DEP-05/06) ----
+# No output of tor reaches any journal: journald stamps every stored line to the microsecond,
+# so a source-triggerable warning would record the exact time of a source action. stdout and
+# stderr are discarded; LogLevelMax=emerg also suppresses the service manager's own messages
+# about this unit (start/stop/crash records) in the host journal. Liveness is visible through
+# the unit state only (SPEC-NOTES D-28). LogNamespace keeps any syslog()/journal-socket write
+# of the process out of the host journal.
 StandardInput=null
 StandardOutput=null
-StandardError=journal
-SyslogLevel=warning
+StandardError=null
 LogNamespace=candor-intake
-LogLevelMax=warning
-LogRateLimitIntervalSec=30s
-LogRateLimitBurst=200
+LogLevelMax=emerg
 SyslogIdentifier=tor-candor-intake
 
 [Install]

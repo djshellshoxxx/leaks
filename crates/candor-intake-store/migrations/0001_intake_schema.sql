@@ -311,7 +311,7 @@ CREATE POLICY p_tenant ON candor.counter_month
   USING (EXISTS (SELECT 1 FROM candor.intake_meta)) WITH CHECK (EXISTS (SELECT 1 FROM candor.intake_meta));
 
 -- Grants (09 §5.1 readers; §7; DB-002: app roles own nothing). No TRUNCATE anywhere.
-GRANT SELECT ON candor.schema_migration TO candor_istore;
+GRANT SELECT ON candor.schema_migration TO candor_istore, candor_intake_maint;
 GRANT SELECT, INSERT ON candor.intake_meta TO candor_istore;
 -- No UPDATE of tenant_id, schema_hash, kdf_salt or config_version (AUD-RM2-STO-08).
 GRANT UPDATE (relay_req_counter, last_batch_no, directory_version, kd_tree_size_hwm,

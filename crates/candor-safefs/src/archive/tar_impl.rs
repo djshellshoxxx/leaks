@@ -177,7 +177,8 @@ fn tripped_or(meter: &Meter, e: ArchiveError) -> ArchiveError {
 struct Pending {
     name: Option<Result<Vec<u8>, RejectReason>>,
     sparse: bool,
-    ext_headers: u64,
+    /// A local pax header was already seen for this entry.
+    local_pax: bool,
 }
 
 fn run_tar<R: Read>(src: R, s: &mut Session<'_>, meter: &Meter) -> Result<(), ArchiveError> {
@@ -260,6 +261,9 @@ fn run_tar_inner<R: Read>(ar: &mut Archive<R>, s: &mut Session<'_>) -> Result<()
         .unwrap_or(u64::MAX)
         .saturating_add(1);
     let mut pending = Pending::default();
+    // Archive-wide count of extension headers (AUD-RM1-SFS-06: a per-entry
+    // count was reset at every real entry).
+    let mut ext_headers: u64 = 0;
     let mut idx: u64 = 0;
     let entries = ar
         .entries()
@@ -279,9 +283,15 @@ fn run_tar_inner<R: Read>(ar: &mut Archive<R>, s: &mut Session<'_>) -> Result<()
             || et.is_pax_local_extensions()
             || et.is_pax_global_extensions()
         {
-            pending.ext_headers = pending.ext_headers.saturating_add(1);
-            if pending.ext_headers > max_ext_headers {
+            ext_headers = ext_headers.saturating_add(1);
+            if ext_headers > max_ext_headers {
                 return Err(ArchiveError::LimitHit(LimitKind::Entries));
+            }
+            if et.is_pax_local_extensions() {
+                if pending.local_pax {
+                    return Err(ArchiveError::Malformed("repeated pax header"));
+                }
+                pending.local_pax = true;
             }
             if et.is_gnu_longname() {
                 if pending.name.is_some() {

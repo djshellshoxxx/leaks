@@ -2,10 +2,12 @@
 //! The Intake Sealer process (C-07): session table, operations, Argon2id gate,
 //! chaff scheduler, Unix-socket listener and process hardening.
 //!
-//! Entry points: [`Sealer::new`] → [`Sealer::install_snapshot`] →
-//! [`Sealer::spawn_background`] → [`Sealer::serve`]. Call
-//! [`hardening::harden_process`] on the main thread before starting the tokio
-//! runtime (see the crate README for the systemd unit).
+//! Entry points: [`hardening::harden_process`] (main thread, before the tokio
+//! runtime) → [`Sealer::new`] → [`Sealer::set_high_water_mark`] (persisted mark)
+//! → [`Sealer::install_snapshot`] → [`Sealer::spawn_background`] →
+//! [`Sealer::serve`] (refuses to serve unless the hardening self-check passes or
+//! an audit-logged [`hardening::InsecureDevMode`] token is configured). See the
+//! crate README for the systemd unit.
 
 pub mod clock;
 pub mod directory;
@@ -20,6 +22,7 @@ mod select;
 mod session;
 
 use std::collections::HashMap;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::Duration;
 
@@ -33,24 +36,25 @@ use crate::proto::{
 };
 use candor_core::hash::EvidenceHasher;
 use candor_core::header::ObjectType;
-use candor_core::kdf::{ct_eq, derive_stage_part_key};
+use candor_core::kdf::ct_eq;
 use candor_core::kem::KemPublicKey;
 use candor_core::passphrase::{self, SourceKeys, Wordlist};
 use candor_core::record::{RecordAad, open_record, seal_record};
-use candor_core::secret::Secret32;
+use candor_core::secret::{AeadKey, Secret32};
 use candor_core::sig::SigningKey;
-use candor_core::stream::StreamEncryptor;
 use candor_core::{Suite, padding};
 use candor_safefs::{SafeRoot, SlotTime};
 
-pub use seal::ChaffBuckets;
+pub use directory::SnapshotError;
+pub use seal::{CHAFF_BUNDLE_MAX, ChaffBuckets};
 
 use clock::Clock;
-use directory::{DirectorySnapshot, HighWaterMark};
+use directory::{DirectoryTrust, HighWaterMark, SnapshotBundle, VerifiedSnapshot};
+use hardening::InsecureDevMode;
 use inner::{MessageKind, Prefs, ReportPrefs};
 use select::{Choice, SelectError, Selection};
 use session::{PendingPhrase, Phase, Purpose, Session, StagedPart, Upload};
-use sink::{AccountRecord, CommitRequest, EnvelopeSink, RotationRequest};
+use sink::{AccountRecord, AccountUpsert, EnvelopeGroup, EnvelopeSink};
 
 /// `prefs_ct` record key version and AAD `prefs_version` (04 §9.9).
 const PREFS_VERSION: u32 = 1;
@@ -84,6 +88,16 @@ pub struct Limits {
     pub max_confirm_failures: u8,
     /// Passphrase (re)generations per session (SW-25: 5).
     pub max_phrase_generations: u8,
+    /// Concurrent IPC connections (ADR-052(4)); ≥ the C-06 pool size.
+    pub max_connections: usize,
+    /// Time from connect to a complete `HELLO` frame.
+    pub handshake_timeout: Duration,
+    /// Time from a frame's length prefix to its last byte.
+    pub frame_timeout: Duration,
+    /// An established connection with no new frame for this long is closed.
+    pub idle_timeout: Duration,
+    /// Deadline for writing one response.
+    pub write_timeout: Duration,
 }
 
 impl Default for Limits {
@@ -100,6 +114,11 @@ impl Default for Limits {
             max_parts: 20,
             max_confirm_failures: 5,
             max_phrase_generations: 5,
+            max_connections: 128,
+            handshake_timeout: Duration::from_secs(5),
+            frame_timeout: Duration::from_secs(5),
+            idle_timeout: Duration::from_secs(120),
+            write_timeout: Duration::from_secs(5),
         }
     }
 }
@@ -113,7 +132,12 @@ pub struct ChaffConfig {
     pub mean_interval: Duration,
     /// `CHAFF_FOLLOWUP_SHARE` in permille (default 300).
     pub followup_share_permille: u16,
-    /// Bucket distributions.
+    /// Share of chaff envelopes given a delayed-delivery offset U{1,2,3}, in
+    /// permille. Set it to the observed share of sources choosing delayed
+    /// delivery, so the store's `release_day` column carries no signal
+    /// (ADR-052(2)). Default 500.
+    pub delayed_share_permille: u16,
+    /// Bundle-size distribution.
     pub buckets: ChaffBuckets,
 }
 
@@ -123,6 +147,7 @@ impl Default for ChaffConfig {
             enabled: true,
             mean_interval: Duration::from_secs(2 * 60 * 60),
             followup_share_permille: 300,
+            delayed_share_permille: 500,
             buckets: ChaffBuckets::default(),
         }
     }
@@ -144,6 +169,14 @@ pub struct SealerConfig {
     pub limits: Limits,
     /// Chaff.
     pub chaff: ChaffConfig,
+    /// Directory trust anchors pinned at install (VR-1).
+    pub directory_trust: DirectoryTrust,
+    /// Serve `NOTE_REAL` (Tier V; off until RM-8, AUD-RM2-SEA-12).
+    pub enable_note_real: bool,
+    /// Developer override (tests only): serve without the hardening self-check,
+    /// accept a same-UID peer and allow disabled chaff. Obtainable only through
+    /// an audit-logged acknowledgement.
+    pub insecure_dev: Option<InsecureDevMode>,
 }
 
 /// Start-up failure (the process must refuse to start).
@@ -159,6 +192,8 @@ pub enum StartError {
     Staging,
     /// The CSPRNG failed.
     Rng,
+    /// A protection is disabled without [`hardening::InsecureDevMode`].
+    Insecure,
 }
 
 impl core::fmt::Display for StartError {
@@ -169,31 +204,12 @@ impl core::fmt::Display for StartError {
             Self::Config => "invalid sealer configuration",
             Self::Staging => "staging area could not be emptied",
             Self::Rng => "CSPRNG failure",
+            Self::Insecure => "protection disabled without the developer override",
         })
     }
 }
 
 impl std::error::Error for StartError {}
-
-/// Snapshot rejected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SnapshotError {
-    /// Below the high-water mark (rollback, ADR-036(6)).
-    Rollback,
-    /// Suite mismatch.
-    Suite,
-}
-
-impl core::fmt::Display for SnapshotError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(match self {
-            Self::Rollback => "directory snapshot below high-water mark",
-            Self::Suite => "directory snapshot suite mismatch",
-        })
-    }
-}
-
-impl std::error::Error for SnapshotError {}
 
 struct Entry {
     sess: Arc<tokio::sync::Mutex<Session>>,
@@ -214,13 +230,14 @@ pub(crate) struct State {
     staging: &'static SafeRoot,
     clock: Arc<dyn Clock>,
     sink: Arc<dyn EnvelopeSink>,
-    snapshot: RwLock<Option<Arc<DirectorySnapshot>>>,
+    snapshot: RwLock<Option<Arc<VerifiedSnapshot>>>,
     hwm: Mutex<HighWaterMark>,
     sessions: Mutex<HashMap<SessionHandle, Entry>>,
     argon: ArgonGate,
     chaff_seed: Secret32,
     chaff_counter: Mutex<u64>,
     chaff_cancels: Mutex<HashMap<[u8; 16], u32>>,
+    accept_errors: Arc<AtomicU64>,
 }
 
 /// The sealer.
@@ -266,6 +283,8 @@ fn core_err(e: candor_core::Error) -> Response {
     }
 }
 
+/// A fresh 256-bit secret from the CSPRNG. Callers never substitute a fixed
+/// value on failure (AUD-RM2-SEA-05).
 fn random_secret32() -> Result<Secret32, Response> {
     let mut k = Zeroizing::new([0u8; 32]);
     candor_core::fill_random(k.as_mut()).map_err(core_err)?;
@@ -342,9 +361,18 @@ impl Sealer {
             || cfg.chaff.mean_interval.is_zero()
             || cfg.chaff.mean_interval > Duration::from_secs(2 * 60 * 60)
             || cfg.chaff.followup_share_permille > 1000
+            || cfg.chaff.delayed_share_permille > 1000
             || cfg.limits.argon_permits == 0
+            || cfg.limits.max_connections == 0
+            || cfg.directory_trust.tenant_id != cfg.tenant_id
+            || cfg.directory_trust.log_keys.is_empty()
+            || cfg.directory_trust.min_external > cfg.directory_trust.min_cosignatures
         {
             return Err(StartError::Config);
+        }
+        // Disabled chaff only with the audit-logged developer override (SEA-15).
+        if !cfg.chaff.enabled && cfg.insecure_dev.is_none() {
+            return Err(StartError::Insecure);
         }
         let slot = SlotTime::utc_day_start(0);
         staging
@@ -374,45 +402,73 @@ impl Sealer {
                 chaff_seed,
                 chaff_counter: Mutex::new(0),
                 chaff_cancels: Mutex::new(HashMap::new()),
+                accept_errors: Arc::new(AtomicU64::new(0)),
             }),
         })
     }
 
-    /// Restore the persisted high-water mark (09 owns its storage).
-    pub fn set_high_water_mark(&self, hwm: HighWaterMark) {
-        let mut h = lock(&self.st.hwm);
-        *h = HighWaterMark {
-            tree_size: h.tree_size.max(hwm.tree_size),
-            issued_hour: h.issued_hour.max(hwm.issued_hour),
-        };
+    pub(crate) fn limits(&self) -> &Limits {
+        &self.st.cfg.limits
     }
 
-    /// The current high-water mark (to persist after each accepted snapshot).
+    /// `accept()` failures survived by the listener (health reporting).
+    #[must_use]
+    pub fn accept_errors(&self) -> u64 {
+        self.st
+            .accept_errors
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Restore the persisted high-water mark at start (09 owns its storage).
+    /// A mark below the current one is ignored.
+    pub fn set_high_water_mark(&self, hwm: HighWaterMark) {
+        let mut h = lock(&self.st.hwm);
+        if hwm.tree_size > h.tree_size {
+            *h = hwm;
+        }
+    }
+
+    /// The current high-water mark.
     #[must_use]
     pub fn high_water_mark(&self) -> HighWaterMark {
         *lock(&self.st.hwm)
     }
 
-    /// Install a verified snapshot. Rejects rollbacks below the high-water mark.
-    pub fn install_snapshot(&self, snap: DirectorySnapshot) -> Result<(), SnapshotError> {
-        if snap.suite != self.st.cfg.suite {
-            return Err(SnapshotError::Suite);
-        }
+    /// Verify a snapshot bundle ([`VerifiedSnapshot::verify`] against the pinned
+    /// trust and the current high-water mark), persist the new mark through
+    /// `persist` **before** anything uses the snapshot, then swap it in
+    /// atomically: sessions survive, and in-flight seals keep the snapshot they
+    /// selected with (ADR-052(6)). Nothing changes on any error.
+    pub fn install_snapshot(
+        &self,
+        bundle: SnapshotBundle,
+        persist: impl FnOnce(&HighWaterMark) -> bool,
+    ) -> Result<(), SnapshotError> {
         let mut h = lock(&self.st.hwm);
-        if !h.admits(&snap) {
-            return Err(SnapshotError::Rollback);
+        let verified = VerifiedSnapshot::verify(
+            bundle,
+            &self.st.cfg.directory_trust,
+            self.st.cfg.suite,
+            &h,
+        )?;
+        if verified.base() != *h {
+            return Err(SnapshotError::Stale);
         }
-        *h = h.after(&snap);
+        let mark = verified.mark();
+        if !persist(&mark) {
+            return Err(SnapshotError::Persist);
+        }
+        *h = mark;
         let mut s = self
             .st
             .snapshot
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *s = Some(Arc::new(snap));
+        *s = Some(Arc::new(verified));
         Ok(())
     }
 
-    fn snapshot(&self) -> Option<Arc<DirectorySnapshot>> {
+    fn snapshot(&self) -> Option<Arc<VerifiedSnapshot>> {
         self.st
             .snapshot
             .read()
@@ -427,10 +483,21 @@ impl Sealer {
     }
 
     /// Drop every expired session now (also done by the background reaper).
+    /// Expired entries are taken out under the table lock and dropped (zeroize,
+    /// unlink staged files) after it is released (AUD-RM2-SEA-13).
     pub fn reap_expired(&self) {
         let now = Instant::now();
         let lim = &self.st.cfg.limits;
-        lock(&self.st.sessions).retain(|_, e| !expired(e, now, lim));
+        let gone: Vec<Entry> = {
+            let mut t = lock(&self.st.sessions);
+            let dead: Vec<SessionHandle> = t
+                .iter()
+                .filter(|(_, e)| expired(e, now, lim))
+                .map(|(h, _)| *h)
+                .collect();
+            dead.iter().filter_map(|h| t.remove(h)).collect()
+        };
+        drop(gone);
     }
 
     /// Handle one request.
@@ -479,7 +546,13 @@ impl Sealer {
             Request::NoteReal {
                 channel_id,
                 first_object_hash,
-            } => self.note_real(channel_id, first_object_hash),
+            } => {
+                if self.st.cfg.enable_note_real {
+                    self.note_real(channel_id, first_object_hash)
+                } else {
+                    err(ErrorCode::BadState)
+                }
+            }
             Request::OpenReply { sess, entry } => self.open_reply(sess, entry).await,
             Request::Touch { sess } => match self.session(&sess) {
                 Ok(_) => Response::Empty,
@@ -900,21 +973,22 @@ impl Sealer {
             Ok(p) => p,
             Err(e) => return core_err(e),
         };
-        let key = match derive_stage_part_key(&g.k36, &part_id) {
-            Ok(k) => k,
+        let enc = match seal::staged_part_encryptor(&g.k36, &part_id, padded_len) {
+            Ok(e) => e,
             Err(e) => return core_err(e),
         };
-        let pending = match self.st.staging.create_random() {
+        let (object_id, pending) = match seal::stage_create(self.st.staging) {
             Ok(p) => p,
             // Staging full or unavailable: the uniform busy page (07 §5.3).
             Err(_) => return err(ErrorCode::Busy),
         };
         g.upload = Some(Upload {
             part_id,
+            object_id,
             declared_len,
             padded_len,
             received: 0,
-            sink: seal::StreamSink::new(StreamEncryptor::new(key, padded_len), pending, padded_len),
+            sink: seal::StreamSink::new(enc, pending, padded_len),
             hasher: EvidenceHasher::new(),
             name: display_name,
             media_type,
@@ -968,13 +1042,19 @@ impl Sealer {
             Ok(g) => g,
             Err(e) => return e,
         };
-        let k36 = match random_secret32() {
-            Ok(k) => k,
-            Err(e) => return e,
-        };
-        g.clear_draft(k36);
-        g.pending = None;
-        Response::Empty
+        match random_secret32() {
+            Ok(k36) => {
+                g.clear_draft(k36);
+                g.pending = None;
+                Response::Empty
+            }
+            Err(e) => {
+                // Cannot re-key: drop the whole session instead (SEA-05).
+                drop(g);
+                self.remove_session(&sess);
+                e
+            }
+        }
     }
 
     // -- sealing -------------------------------------------------------------
@@ -985,7 +1065,7 @@ impl Sealer {
         channel_id: &[u8; 16],
     ) -> Result<
         (
-            Arc<DirectorySnapshot>,
+            Arc<VerifiedSnapshot>,
             u32,
             SlotTime,
             KemPublicKey,
@@ -1048,21 +1128,23 @@ impl Sealer {
         // Fix the recipient set now (ADR-034, RVW-A-07).
         let sel = {
             let coi = g.draft.coi.clone().unwrap_or_default();
-            let original: Option<Vec<[u8; 16]>> = if initial {
-                None
-            } else {
-                g.prefs
-                    .as_ref()
-                    .and_then(|p| p.reports.first())
-                    .map(|r| r.original_eligible.clone())
-            };
-            if !initial && original.is_none() {
+            let report = g.prefs.as_ref().and_then(|p| p.reports.first());
+            if !initial && report.is_none() {
                 return err(ErrorCode::BadState);
             }
-            let choice = Choice {
-                flagged_labels: if initial { &coi.excluded_labels } else { &[] },
-                categories: if initial { &coi.categories } else { &[] },
-                original_eligible: original.as_deref(),
+            // Follow-ups re-apply the active COI_POLICY for the report's
+            // categories (AUD-RM2-SEA-10) within the original eligible set.
+            let choice = match (initial, report) {
+                (false, Some(r)) => Choice {
+                    flagged_labels: &[],
+                    categories: &r.categories,
+                    original_eligible: Some(&r.original_eligible),
+                },
+                _ => Choice {
+                    flagged_labels: &coi.excluded_labels,
+                    categories: &coi.categories,
+                    original_eligible: None,
+                },
             };
             match select::select(&snap, &channel_id, today, choice) {
                 Ok(s) => s,
@@ -1094,6 +1176,7 @@ impl Sealer {
         let job = SealJob {
             snap,
             sel,
+            today,
             slot,
             custodian,
             disposition,
@@ -1101,7 +1184,11 @@ impl Sealer {
             initial,
         };
         let r = tokio::task::spawn_blocking(move || seal_blocking(g, &st, job)).await;
-        let resp = r.unwrap_or_else(|_| err(ErrorCode::Internal));
+        let (resp, drop_session) = r.unwrap_or_else(|_| (err(ErrorCode::Internal), false));
+        if drop_session {
+            // Committed, but K36 could not be replaced: the session ends (SEA-05).
+            self.remove_session(&sess);
+        }
         if matches!(resp, Response::Sealed { .. }) {
             self.cancel_next_chaff(channel_id);
         }
@@ -1139,7 +1226,7 @@ impl Sealer {
             today,
             Choice {
                 flagged_labels: &[],
-                categories: &[],
+                categories: &report.categories,
                 original_eligible: Some(&report.original_eligible),
             },
         ) {
@@ -1158,6 +1245,7 @@ impl Sealer {
         let job = SealJob {
             snap,
             sel,
+            today,
             slot,
             custodian,
             disposition,
@@ -1275,13 +1363,18 @@ impl Sealer {
         }
     }
 
-    /// Build and commit one chaff envelope for `channel_id` now (the scheduler
-    /// calls this at each Poisson event). Fails closed (no write) without a
-    /// directory snapshot, K41 or independent time.
+    /// Build and commit one chaff envelope group for `channel_id` now (the
+    /// scheduler calls this at each Poisson event). Fails closed (no write) on
+    /// exactly the conditions under which real sealing refuses (SEA-15): no or
+    /// stale snapshot, unknown or disabled channel, suite mismatch, invalid K13
+    /// or K41, no independent time. Initial-shaped chaff also creates a dummy
+    /// account and every chaff group draws a delivery delay like real ones
+    /// (ADR-052(2)).
     pub async fn chaff_event(&self, channel_id: [u8; 16]) -> Result<(), ErrorCode> {
         let (today, slot) = self.slot_today().map_err(|_| ErrorCode::Unavailable)?;
         let snap = self.snapshot().ok_or(ErrorCode::Unavailable)?;
-        if snap.channel(&channel_id).is_none() || snap.suite != self.st.cfg.suite {
+        let enabled = snap.channel(&channel_id).is_some_and(|c| c.enabled);
+        if !enabled || snap.suite != self.st.cfg.suite || !snap.is_fresh(today) {
             return Err(ErrorCode::Unavailable);
         }
         let epoch = snap.epoch_for_day(today).ok_or(ErrorCode::Unavailable)?;
@@ -1289,8 +1382,16 @@ impl Sealer {
             .map_err(|_| ErrorCode::Unavailable)?;
         let disposition = KemPublicKey::from_bytes(snap.suite, &snap.disposition_pk)
             .map_err(|_| ErrorCode::Unavailable)?;
-        let followup = rand::bernoulli_permille(self.st.cfg.chaff.followup_share_permille)
-            .map_err(|_| ErrorCode::Internal)?;
+        let chaff = &self.st.cfg.chaff;
+        let followup =
+            rand::bernoulli_permille(chaff.followup_share_permille).map_err(|_| ErrorCode::Internal)?;
+        let delay = if rand::bernoulli_permille(chaff.delayed_share_permille)
+            .map_err(|_| ErrorCode::Internal)?
+        {
+            rand::release_offset().map_err(|_| ErrorCode::Internal)?
+        } else {
+            0
+        };
         let st = self.st.clone();
         let r = tokio::task::spawn_blocking(move || {
             let ctx = seal::SealCtx {
@@ -1302,7 +1403,12 @@ impl Sealer {
                 custodian_pk: custodian,
                 disposition_pk: disposition,
             };
-            let req = {
+            let account = if followup {
+                None
+            } else {
+                Some(dummy_account(&st).map_err(|_| ErrorCode::Internal)?)
+            };
+            let group = {
                 let mut counter = lock(&st.chaff_counter);
                 seal::build_chaff(
                     &ctx,
@@ -1315,7 +1421,13 @@ impl Sealer {
                 )
                 .map_err(|_| ErrorCode::Internal)?
             };
-            commit(&ctx, st.sink.as_ref(), req)
+            if let Some(a) = account
+                && st.sink.upsert_account(a).is_err()
+            {
+                seal::remove_staged(&ctx, &group.bundle);
+                return Err(ErrorCode::Internal);
+            }
+            commit_group(&ctx, st.sink.as_ref(), group, epoch, today, delay)
         })
         .await;
         r.unwrap_or(Err(ErrorCode::Internal))
@@ -1330,7 +1442,9 @@ impl Sealer {
             let mut iv = tokio::time::interval(Duration::from_secs(10));
             loop {
                 iv.tick().await;
-                me.reap_expired();
+                // Unlinks happen off the async workers (AUD-RM2-SEA-13).
+                let m = me.clone();
+                let _ = tokio::task::spawn_blocking(move || m.reap_expired()).await;
             }
         }));
         if self.st.cfg.chaff.enabled {
@@ -1391,8 +1505,24 @@ impl Sealer {
     /// Serve the IPC protocol on an already bound listener (systemd socket or a
     /// socket in a 0700 RuntimeDirectory). Peers whose UID is not
     /// `allowed_peer_uid` are disconnected before any byte is read.
+    ///
+    /// Start-up self-check (ADR-052(5), AUD-RM2-SEA-06/18): unless an
+    /// [`InsecureDevMode`] token is configured, refuses (`PermissionDenied`)
+    /// before accepting anything when [`hardening::self_check`] fails or the
+    /// peer UID is 0 or the sealer's own UID. Otherwise never returns.
     pub async fn serve(&self, listener: tokio::net::UnixListener) -> std::io::Result<()> {
-        listener::serve(self.clone(), listener, self.st.cfg.allowed_peer_uid).await
+        if self.st.cfg.insecure_dev.is_none() {
+            let denied = |_| std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+            hardening::self_check().map_err(denied)?;
+            hardening::check_peer_uid(self.st.cfg.allowed_peer_uid).map_err(denied)?;
+        }
+        listener::serve(
+            self.clone(),
+            listener,
+            self.st.cfg.allowed_peer_uid,
+            self.st.accept_errors.clone(),
+        )
+        .await
     }
 }
 
@@ -1443,6 +1573,7 @@ fn part_chunk_blocking(
     };
     let Upload {
         part_id,
+        object_id,
         padded_len,
         received,
         sink,
@@ -1455,7 +1586,7 @@ fn part_chunk_blocking(
         Ok(p) => p,
         Err(_) => return err(ErrorCode::Internal),
     };
-    let object = match pending.commit(slot) {
+    let object = match seal::stage_commit(st.staging, pending, &object_id, slot) {
         Ok(id) => id,
         Err(_) => return err(ErrorCode::Busy),
     };
@@ -1474,8 +1605,9 @@ fn part_chunk_blocking(
 }
 
 struct SealJob {
-    snap: Arc<DirectorySnapshot>,
+    snap: Arc<VerifiedSnapshot>,
     sel: Selection,
+    today: u32,
     slot: SlotTime,
     custodian: KemPublicKey,
     disposition: KemPublicKey,
@@ -1495,22 +1627,59 @@ fn seal_ctx<'a>(st: &'a State, job: &SealJob) -> seal::SealCtx<'a> {
     }
 }
 
-/// Hand a request to the sink; on failure delete its staged objects.
-fn commit(
+/// Hand an envelope group to the sink; on failure delete its staged bundle.
+fn commit_group(
     ctx: &seal::SealCtx<'_>,
     sink: &dyn EnvelopeSink,
-    req: CommitRequest,
+    group: EnvelopeGroup,
+    epoch_id: u32,
+    today: u32,
+    release_offset_days: u8,
 ) -> Result<(), ErrorCode> {
-    let staged: Vec<_> = req.objects.clone();
-    match sink.commit(req) {
+    let bundle = group.bundle.clone();
+    match sink.commit_envelope_group(group, epoch_id, today, release_offset_days) {
         Ok(()) => Ok(()),
         Err(_) => {
-            for o in &staged {
-                seal::remove_staged(ctx, o);
-            }
+            seal::remove_staged(ctx, &bundle);
             Err(ErrorCode::Internal)
         }
     }
+}
+
+/// A dummy account for initial-shaped chaff (ADR-052(2)): random `lookup_tag`
+/// and mailbox id, a real Ed25519 `auth_pk`, and a `prefs_ct` of the real fixed
+/// length under a random key that is dropped at once. The store expires it like
+/// an abandoned account.
+fn dummy_account(st: &State) -> Result<AccountUpsert, candor_core::Error> {
+    let mut lookup_tag = [0u8; 32];
+    candor_core::fill_random(&mut lookup_tag)?;
+    let mut mailbox = [0u8; 32];
+    candor_core::fill_random(&mut mailbox)?;
+    let auth = SigningKey::generate()?;
+    let mut k = Zeroizing::new([0u8; 32]);
+    candor_core::fill_random(k.as_mut())?;
+    let key = AeadKey::from_bytes(*k);
+    let pt = inner::length_prefixed_pad_to(&[], inner::PREFS_PADDED_LEN)?;
+    let prefs_ct = seal_record(
+        &key,
+        PREFS_VERSION,
+        &RecordAad::SourcePrefs {
+            tenant_id: st.cfg.tenant_id,
+            lookup_tag,
+            prefs_version: PREFS_VERSION,
+        },
+        &pt,
+    )?;
+    Ok(AccountUpsert {
+        replaces: None,
+        account: AccountRecord {
+            lookup_tag,
+            auth_pk: auth.verifying_key_bytes(),
+            prefs_ct,
+            mailbox_ids: vec![mailbox],
+        },
+        rewrapped_replies: Vec::new(),
+    })
 }
 
 fn prefs_ct(st: &State, keys: &SourceKeys, prefs: &Prefs) -> Result<Vec<u8>, candor_core::Error> {
@@ -1527,17 +1696,18 @@ fn prefs_ct(st: &State, keys: &SourceKeys, prefs: &Prefs) -> Result<Vec<u8>, can
     )
 }
 
-fn seal_blocking(mut g: OwnedMutexGuard<Session>, st: &State, job: SealJob) -> Response {
+/// Returns the response and whether the session must be removed (SEA-05).
+fn seal_blocking(mut g: OwnedMutexGuard<Session>, st: &State, job: SealJob) -> (Response, bool) {
     let ctx = seal_ctx(st, &job);
     let sel = &job.sel;
     let sess = &mut *g;
     let Some(keys) = sess.keys.as_ref() else {
-        return err(ErrorCode::BadState);
+        return (err(ErrorCode::BadState), false);
     };
     let coi = sess.draft.coi.clone().unwrap_or_default();
     let identity = sess.draft.identity.as_ref().map(|t| t.expose().to_owned());
     let identity = identity.map(Zeroizing::new);
-    let (objects, account) = if job.initial {
+    let (group, account) = if job.initial {
         let draft = seal::DraftInput {
             mode: sess.draft.mode.unwrap_or(Mode::Anonymous),
             message: sess.draft.message.expose(),
@@ -1546,16 +1716,16 @@ fn seal_blocking(mut g: OwnedMutexGuard<Session>, st: &State, job: SealJob) -> R
             flagged_labels: &coi.excluded_labels,
             categories: &coi.categories,
         };
-        let (objects, sub_hash) =
+        let (group, sub_hash) =
             match seal::seal_initial(&ctx, sel, keys, 0, &draft, &sess.parts, &sess.k36) {
                 Ok(v) => v,
-                Err(e) => return core_err(e),
+                Err(e) => return (core_err(e), false),
             };
         let mailbox_id = match keys.mailbox_id(0) {
             Ok(m) => m,
             Err(e) => {
-                objects.iter().for_each(|o| seal::remove_staged(&ctx, o));
-                return core_err(e);
+                group.remove_staged(&ctx);
+                return (core_err(e), false);
             }
         };
         let prefs = Prefs {
@@ -1566,26 +1736,31 @@ fn seal_blocking(mut g: OwnedMutexGuard<Session>, st: &State, job: SealJob) -> R
                 roster_version: sel.roster_version,
                 channel_id: sel.channel_id,
                 original_submission_hash: sub_hash,
+                categories: coi.categories.clone(),
             }],
         };
         let ct = match prefs_ct(st, keys, &prefs) {
             Ok(c) => c,
             Err(e) => {
-                objects.iter().for_each(|o| seal::remove_staged(&ctx, o));
-                return core_err(e);
+                group.remove_staged(&ctx);
+                return (core_err(e), false);
             }
         };
-        let account = AccountRecord {
-            lookup_tag: keys.lookup_tag(),
-            auth_pk: keys.auth_key().verifying_key_bytes(),
-            prefs_ct: ct,
-            mailbox_ids: vec![mailbox_id],
+        let account = AccountUpsert {
+            replaces: None,
+            account: AccountRecord {
+                lookup_tag: keys.lookup_tag(),
+                auth_pk: keys.auth_key().verifying_key_bytes(),
+                prefs_ct: ct,
+                mailbox_ids: vec![mailbox_id],
+            },
+            rewrapped_replies: Vec::new(),
         };
         sess.prefs = Some(prefs);
-        (objects, Some(account))
+        (group, Some(account))
     } else {
         let Some(report) = sess.prefs.as_ref().and_then(|p| p.reports.first()) else {
-            return err(ErrorCode::BadState);
+            return (err(ErrorCode::BadState), false);
         };
         let sm = seal::SourceMessageInput {
             keys,
@@ -1596,55 +1771,75 @@ fn seal_blocking(mut g: OwnedMutexGuard<Session>, st: &State, job: SealJob) -> R
         };
         match seal::seal_source_message(&ctx, sel, &sm, &sess.parts, &sess.k36) {
             Ok(o) => (o, None),
-            Err(e) => return core_err(e),
+            Err(e) => return (core_err(e), false),
         }
-    };
-    let first = match objects.first() {
-        Some(o) => o.object_hash,
-        None => return err(ErrorCode::Internal),
     };
     let disposition_ct = match seal::disposition_ct(
         ctx.suite,
         &ctx.tenant_id,
         &ctx.disposition_pk,
-        &first,
+        &group.main.object_hash,
         false,
     ) {
         Ok(d) => d,
         Err(e) => {
-            objects.iter().for_each(|o| seal::remove_staged(&ctx, o));
-            return core_err(e);
+            group.remove_staged(&ctx);
+            return (core_err(e), false);
         }
     };
-    let req = CommitRequest {
-        channel_id: sel.channel_id,
-        objects,
-        disposition_ct,
-        release_offset_days: job.release_offset_days,
-        account,
+    let group = group.into_group(sel.channel_id, disposition_ct);
+    // ADR-052(2): the account is a separate store operation, written first so a
+    // "received" answer implies both are durable. An account left behind by a
+    // failed envelope commit is indistinguishable from a chaff dummy account.
+    let committed = match account {
+        Some(a) => match st.sink.upsert_account(a) {
+            Ok(()) => commit_group(&ctx, st.sink.as_ref(), group, sel.epoch_id, job.today, job.release_offset_days),
+            Err(_) => {
+                seal::remove_staged(&ctx, &group.bundle);
+                Err(ErrorCode::Internal)
+            }
+        },
+        None => commit_group(
+            &ctx,
+            st.sink.as_ref(),
+            group,
+            sel.epoch_id,
+            job.today,
+            job.release_offset_days,
+        ),
     };
-    if let Err(code) = commit(&ctx, st.sink.as_ref(), req) {
+    if let Err(code) = committed {
         if job.initial {
-            // Not committed: no account exists; the source must restart.
+            // Not committed: the source must restart (§11.1).
             sess.prefs = None;
             sess.keys = None;
         }
-        return err(code);
+        return (err(code), false);
     }
     // Committed and fsynced: zeroize K36, the draft and staged parts (§9.13).
-    let fresh = match random_secret32() {
-        Ok(k) => k,
-        Err(_) => Secret32::from_bytes([0u8; 32]),
+    // On CSPRNG failure the draft is still dropped and the whole session is
+    // removed; a fixed key is never installed (AUD-RM2-SEA-05).
+    let drop_session = match random_secret32() {
+        Ok(fresh) => {
+            sess.clear_draft(fresh);
+            false
+        }
+        Err(_) => {
+            sess.clear_draft_contents();
+            true
+        }
     };
-    sess.clear_draft(fresh);
     if job.initial {
         sess.phase = Phase::Authenticated;
     }
     // Keep the snapshot alive until here (selection consistency).
     drop(job.snap);
-    Response::Sealed {
-        release_offset_days: job.release_offset_days,
-    }
+    (
+        Response::Sealed {
+            release_offset_days: job.release_offset_days,
+        },
+        drop_session,
+    )
 }
 
 fn rotate_blocking(
@@ -1659,9 +1854,12 @@ fn rotate_blocking(
     let (Some(old), Some(prefs)) = (sess.keys.as_ref(), sess.prefs.as_ref()) else {
         return err(ErrorCode::BadState);
     };
+    // Entries that do not open (corrupt, foreign or planted by a compromised
+    // store) are skipped: they stay unreadable and cannot block the source's
+    // recovery action (AUD-RM2-SEA-14).
     let mut rewrapped = Vec::with_capacity(replies.len());
     for r in replies {
-        match seal::rewrap_reply(
+        if let Ok(s) = seal::rewrap_reply(
             st.cfg.suite,
             st.cfg.tenant_id,
             old,
@@ -1669,11 +1867,10 @@ fn rotate_blocking(
             prefs,
             r,
         ) {
-            Ok(s) => rewrapped.push((r.object_hash, s)),
-            Err(_) => return err(ErrorCode::Crypto),
+            rewrapped.push((r.object_hash, s));
         }
     }
-    let mut envelopes = Vec::with_capacity(prefs.reports.len());
+    let mut groups = Vec::with_capacity(prefs.reports.len());
     for report in &prefs.reports {
         let sm = seal::SourceMessageInput {
             keys: old,
@@ -1682,39 +1879,38 @@ fn rotate_blocking(
             message: "",
             new_keys: Some(&new_keys),
         };
-        let objects = match seal::seal_source_message(&ctx, &job.sel, &sm, &[], &sess.k36) {
+        let group = match seal::seal_source_message(&ctx, &job.sel, &sm, &[], &sess.k36) {
             Ok(o) => o,
-            Err(e) => return core_err(e),
+            Err(e) => {
+                groups.iter().for_each(|g: &EnvelopeGroup| seal::remove_staged(&ctx, &g.bundle));
+                return core_err(e);
+            }
         };
-        let first = match objects.first() {
-            Some(o) => o.object_hash,
-            None => return err(ErrorCode::Internal),
-        };
-        let disposition_ct = match seal::disposition_ct(
+        match seal::disposition_ct(
             ctx.suite,
             &ctx.tenant_id,
             &ctx.disposition_pk,
-            &first,
+            &group.main.object_hash,
             false,
         ) {
-            Ok(d) => d,
-            Err(e) => return core_err(e),
-        };
-        envelopes.push(CommitRequest {
-            channel_id: report.channel_id,
-            objects,
-            disposition_ct,
-            release_offset_days: 0,
-            account: None,
-        });
+            Ok(d) => groups.push(group.into_group(report.channel_id, d)),
+            Err(e) => {
+                group.remove_staged(&ctx);
+                groups.iter().for_each(|g| seal::remove_staged(&ctx, &g.bundle));
+                return core_err(e);
+            }
+        }
     }
     let new_prefs = prefs.clone();
     let ct = match prefs_ct(st, &new_keys, &new_prefs) {
         Ok(c) => c,
-        Err(e) => return core_err(e),
+        Err(e) => {
+            groups.iter().for_each(|g| seal::remove_staged(&ctx, &g.bundle));
+            return core_err(e);
+        }
     };
-    let req = RotationRequest {
-        old_lookup_tag: old.lookup_tag(),
+    let upsert = AccountUpsert {
+        replaces: Some(old.lookup_tag()),
         account: AccountRecord {
             lookup_tag: new_keys.lookup_tag(),
             auth_pk: new_keys.auth_key().verifying_key_bytes(),
@@ -1722,9 +1918,17 @@ fn rotate_blocking(
             mailbox_ids: new_prefs.reports.iter().map(|r| r.mailbox_id).collect(),
         },
         rewrapped_replies: rewrapped,
-        envelopes,
     };
-    if st.sink.rotate_account(req).is_err() {
+    // KEY_ROTATION groups first, then the account (ADR-052(2)): if the account
+    // update fails the source keeps a working old passphrase and can retry.
+    let mut groups = groups.into_iter();
+    while let Some(group) = groups.next() {
+        if commit_group(&ctx, st.sink.as_ref(), group, job.sel.epoch_id, job.today, 0).is_err() {
+            groups.for_each(|g| seal::remove_staged(&ctx, &g.bundle));
+            return err(ErrorCode::Internal);
+        }
+    }
+    if st.sink.upsert_account(upsert).is_err() {
         return err(ErrorCode::Internal);
     }
     let lookup_tag = new_keys.lookup_tag();

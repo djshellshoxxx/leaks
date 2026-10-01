@@ -82,9 +82,11 @@ pub(crate) struct ExactBytesRng {
 }
 
 impl ExactBytesRng {
-    pub(crate) fn new(buf: [u8; 64]) -> Self {
+    /// Copy the pre-drawn bytes into the adaptor (the adaptor zeroizes its copy on
+    /// drop; the caller keeps ownership of, and zeroizes, its own buffer).
+    pub(crate) fn new(buf: &[u8; 64]) -> Self {
         Self {
-            buf,
+            buf: *buf,
             pos: 0,
             overrun: false,
         }
@@ -196,14 +198,14 @@ mod tests {
 
     #[test]
     fn exact_bytes_rng_detects_overrun() {
-        let mut r = ExactBytesRng::new([1; 64]);
+        let mut r = ExactBytesRng::new(&[1; 64]);
         let mut a = [0u8; 64];
         r.try_fill_bytes(&mut a).ok();
         assert!(r.check().is_ok());
         let mut b = [0u8; 1];
         r.try_fill_bytes(&mut b).ok();
         assert!(r.check().is_err());
-        let r2 = ExactBytesRng::new([1; 64]);
+        let r2 = ExactBytesRng::new(&[1; 64]);
         assert!(
             r2.check().is_err(),
             "under-consumption must be detected too"
