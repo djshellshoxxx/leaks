@@ -198,10 +198,10 @@ mutate "profile drop-in allows swap"   profiles/ce-hardened/run-candor-staging.m
 # Sealer memory budget (lead decision after round 5): (a) budget <= MemoryMax - 1024 MiB,
 # (b) staging tmpfs size >= budget, each with the profile's own values (c). Every case must
 # exit 30 AND name the expected rule; the hardened profile also gets one accepted case.
-SU=systemd/candor-sealer.service; HD=profiles/ce-hardened/candor-sealer.service.d/50-profile.conf
+MEMN=0; SU=systemd/candor-sealer.service; HD=profiles/ce-hardened/candor-sealer.service.d/50-profile.conf
 memcase() { # name want-rule(s, |-separated, or "OK") file sed-expr [--profile p]
   local name=$1 want=$2 file=$3 expr=$4 rc; shift 4
-  MUTN=$((MUTN + 1)); local d="$T/mem.$MUTN"; cp -a "$INTAKE" "$d"
+  MEMN=$((MEMN + 1)); local d="$T/mem.$MEMN"; cp -a "$INTAKE" "$d"
   sed -i "$expr" "$d/$file"
   if cmp -s "$INTAKE/$file" "$d/$file"; then bad "memory case '$name' did not change its file (test bug)"; return; fi
   cc -q --dir "$d" --only units "$@" > "$d.out" 2>&1; rc=$?

@@ -931,7 +931,7 @@ check_sealer_memory() { # eff-sealer eff-mount
         else if (s < b) printf "FAIL\tunit.candor-sealer.staging_vs_budget\tstaging tmpfs %d MiB < budget %d MiB (ENOSPC before the budget)\n", s/1048576, b/1048576
         else printf "OK\tunit.candor-sealer.staging_vs_budget\tstaging tmpfs %d MiB >= budget %d MiB\n", s/1048576, b/1048576 } }' "$1" "$2" 2>/dev/null)
   if [ -z "$res" ]; then fail unit.candor-sealer.memory_budget "effective sealer/staging units not available"; return; fi
-  printf '%s\n' "$res" | report_lines
+  report_lines <<< "$res"
 }
 
 # Effective sealer syscall allow-set (AUD-RM2-DEP-16). systemd semantics: the first non-empty

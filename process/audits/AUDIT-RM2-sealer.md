@@ -626,3 +626,54 @@ Regression: a stalled `PART_BEGIN` followed by `PART_DROP` returns the budget, a
 - **Low (ack binding):** the sealer closes the socket on any error or timeout. Hash echo comes with C-5 (wave 2).
 - **Budget vs MemoryMax:** config-check rule assigned to deploy (budget + staging ≤ MemoryMax − 256 MiB).
 - **Info (seal failure loses parts):** the sealer keeps the parts if no byte was handed over, where that is simple; otherwise documented.
+
+---
+
+## Re-test (round 5, delta)
+
+| Item | Value |
+|---|---|
+| Re-tested revision | Live tree, HEAD `35f851d` (on top of `d7931cf`); the working tree is clean for the sealer |
+| Results | `cargo test -p candor-sealer --locked`: 81 pass, plus the hardening re-exec binary. `clippy --all-targets --all-features -D warnings`: clean. `lint-safefs.sh --include-tests`: 0 sealer hits. `lint-logging.sh`: ok. `cargo vet --locked`: **Vetting Succeeded** (SEA-30 exemptions, expiry 2027-03-30). One PoC ran in a scratch `git archive` copy, which has been removed |
+
+### Status
+
+| ID | Status | Evidence / note |
+|---|---|---|
+| SEA-29 | **Fixed as dispositioned**; residual → SEA-31 | Per-session quotas and stall handling, with the coordinator's questions answered:<br>• The first `PART_BEGIN` reserves a fixed quota (default 768 MiB; 5 drafts within 3,840 MiB). If no quota is free, the source gets the session-level `BUSY`. Inside its own quota a draft only ever sees `LIMIT` (`need > quota`), and that check depends only on the draft's own parts, so per-session answers do not depend on other sessions (`budget.rs::per_session_quotas_…`).<br>• Stall handling is in `reap_expired`, which runs every 10 s and uses `try_lock`. A part with no bytes for 120 s is aborted, and the quota is released **only if the draft then has no parts and no upload** (`release_quota_if_idle`).<br>• **Q: does a draft holding a quota without uploading release it at 120 s?** Only when it holds no completed part. A draft with one completed part, even a single byte, keeps its quota until the draft ends (20 min idle, renewed by `TOUCH`, up to 2 h absolute; PoC below)<br>• Declared-length enforcement is unchanged and correct |
+| Env configuration | **OK** | `Sealer::new` reads `CANDOR_SEALER_MEMORY_BUDGET_MIB` / `…_SESSION_UPLOAD_MIB`. Parsing is strict: digits only, at most 6 characters, 1..=262,144 MiB, quota ≤ budget; any problem gives `StartError::Config` with no detail. Both variables are required without the dev override; with the override they are optional but validated. These are not secrets, so B3.5 does not apply. The value check against `MemoryMax` is deploy's config-check rule (assigned) |
+| Hardening test `Command::new` | **Passes the lints** | `tests/hardening.rs` re-executes `current_exe()` with the two variables set. The file has a module-level `#![allow(clippy::disallowed_methods)]` with a `safefs-lint: allow(…)` marker, plus a per-line marker; clippy (workspace `disallowed-methods` lists `Command::new`) and lint-safefs are both clean. It is test-only, and no `Command` appears in `src` |
+| Ack binding (Low) | **Fixed** | `handover::{send, await_ack_within}` are now `pub(crate)`. The only public path is `StoreConnection::hand_over`, which drops (closes) the socket on any send, acknowledgement or timeout error, and a closed connection refuses all further hand-overs. A late `0x01` therefore cannot be credited to a later bundle. The hash echo is wave 2 (C-5) |
+| Outage keeps parts (Info) | **Fixed** | `seal_blocking` checks `sink.is_available()` before the parts are taken. A known-down store gives the uniform `INTERNAL` and the parts are kept (`budget.rs::known_store_outage_keeps_the_attachments`). A store that fails after the check still loses the parts (documented) |
+| SEA-30 | **Accepted** (lead) | Vet passes; `ml-dsa` is in `crypto-set.txt` for the release gate |
+
+### Cross-source leak assessment (SEA-29 design)
+
+- **Inside a quota:** none. `LIMIT`/`Part` depend only on the draft's own declared and staged sizes, and the timing is unchanged (no shared lock beyond the budget mutex, which is taken only on admission).
+- **Admission:** by design (lead, ADR-038), a `BUSY` on a draft's first `PART_BEGIN` reveals that all `budget/quota` slots (5 by default) are held. A prober who holds `slots − 1` quotas and polls admission learns *when* another draft releases its quota. A release happens when the victim's draft ends (submit, abort, zeroize, expiry) or at a stall abort (10 s reaper granularity). That is a submission-time signal about an otherwise unknown source, at minute resolution, and it is more useful in combination with network-level observation. With 5 slots this is far from the "≥ 10× design peak" sizing of ADR-038(5).
+- **Cheap exhaustion:** confirmed below.
+
+### New finding (round 5)
+
+**AUD-RM2-SEA-31 — A few tiny uploads hold every upload slot for up to 2 h; admission polling reveals other drafts' end times (Medium).**
+
+PoC (`r5_tiny_parts_hold_quota_until_draft_end`, scratch only, paused clock): budget = 2 × quota. Two sessions each complete a 1-byte part, then `TOUCH` every 10 min. After 60 min a third source's `PART_BEGIN` still returns `BUSY`, with `memory_reserved = 16 MiB`. The 120 s stall abort does not help, because the parts are complete.
+- **Cost of the attack:** in the default configuration, 5 sessions (session-open PoW) and 5 one-byte uploads deny attachment uploads to every other source for 2 h, renewable with new sessions.
+- **Same mechanism as an oracle:** it provides the admission-timing oracle described above.
+
+Fix options (lead's choice):
+- Size the quota from the bytes actually staged: reserve on demand per part, so a 1-byte draft holds about 1 byte plus the bundle minimum. Keep the fixed quota only as a per-draft upper bound, with admission BUSY only when real reserved bytes exceed the budget.
+- Or raise the slot count (`budget/quota`) to at least 10× the design peak of concurrent uploading drafts.
+- Or release a draft's quota after the idle timeout of *upload* activity even when it holds parts, re-admitting at seal (sealing needs no reservation; SEA-26).
+
+Regression: the PoC (a third source is admitted while two 1-byte drafts stay alive). Alternatively, the lead may accept this residual in writing, with an expiry, as part of the ADR-038 capacity-revealing decision.
+
+### Gate (round 5)
+
+| Severity | Open |
+|---|---|
+| Critical / High | 0 / 0 |
+| Medium | 1 (SEA-31). SEA-30 is accepted |
+| Low / Info | SEA-17 (workspace); deploy config-check rule (assigned); C-5 hash echo (wave 2); the post-check store failure losing parts is documented |
+
+**Gate: FAIL 2026-10-01 35f851d**: SEA-31 (Medium) needs a fix or the lead's written acceptance with an expiry. Everything else in scope is fixed or accepted. With SEA-31 fixed or accepted, the sealer gate is **PASS**.
