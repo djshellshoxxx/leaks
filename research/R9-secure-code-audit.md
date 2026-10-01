@@ -15,7 +15,7 @@
 4. **Crypto-failure advisories in Rust are mostly misuse and side channels in otherwise memory-safe code.** Examples: a non-constant-time tag check (libcrux-aesgcm), unauthenticated nonce increment (snow), a counter overflow repeating keystream (chacha20), a low-level GCM that ignores the operation nonce (dcrypt), timing in curve25519-dalek `Scalar::sub` (RUSTSEC-2024-0344), and the Ed25519 "double public key" signing oracle (RUSTSEC-2022-0093, a key/role-confusion API) [B-AU-05, B-AU-06, B-AU-12].
 5. **Archive and path handling is still a live bug class in 2025–2026.** Examples: `zip` path canonicalization leading to arbitrary write (RUSTSEC-2025-0168), `tar` `unpack_in` chmod through symlinks, and a tar PAX-size parser differential (RUSTSEC-2026-0067/0068). In std itself, `remove_dir_all` had a TOCTOU (CVE-2022-21658) [B-AU-03, B-AU-07, B-AU-08]. This validates ADR-027 / `candor-safefs`, and the audit must check that nothing bypasses it.
 6. **The HTTP layer's DoS and smuggling history is in hyper/h2.** Examples: Transfer-Encoding smuggling (RUSTSEC-2021-0020), HTTP/2 rapid reset (CVE-2023-44487), and h2 unbounded empty DATA frames (RUSTSEC-2026-0258, 2026-08-17) [B-AU-09, B-AU-10]. Candor must set explicit header/body/time limits and not rely on defaults.
-7. **Tooling that runs here today** (verified 2026-10-01): clippy 0.1.94 (incl. restriction lints), cargo-deny 0.20.2, cargo-vet 0.10.2, zizmor 1.26.1 (incl. `--persona=auditor`), Miri (nightly-2026-09-28, `miri 0.1.0 d080e7dff1`), shellcheck 0.9.0, systemd-analyze 255 (`security --offline=true`), lynis 3.0.9 (apt), and also cargo-audit, cargo-geiger, cargo-careful, cargo-fuzz and semgrep if the §7 table marks them verified. See the §7 table for pins and status.
+7. **Tooling that runs here today** (verified 2026-10-01): clippy 0.1.94 (incl. restriction lints), cargo-deny 0.20.2, cargo-vet 0.10.2, zizmor 1.26.1 (incl. `--persona=auditor`), Miri (nightly-2026-09-28, `miri 0.1.0 d080e7dff1`), shellcheck 0.9.0, systemd-analyze 255 (`security --offline=true`), lynis 3.0.9 (apt), cargo-audit 0.22.1, cargo-geiger 0.13.0, cargo-careful 0.4.10, cargo-fuzz 0.13.1 and semgrep 1.178.0. Semgrep works with local rules only, because the registry is blocked by the proxy. See §7 for pins and status.
 
 ---
 
@@ -178,7 +178,17 @@ Anything that records or emits: IP, User-Agent, Accept-Language, exact time, siz
 | dudect-style timing tests | Constant-time checks (ST-026) | `dudect-bencher` (pin when adopted) | cargo | not installed (adopt with ST-026) |
 
 ### 7.1 Install results for the late-installed tools
-(Filled in at the end of this research session; see the checklist's tool table for the authoritative status.)
+All five installed with `cargo install --locked --version =…` (or pip in a venv) from crates.io/PyPI through the proxy, on 2026-10-01:
+
+| Tool | Installed | Smoke run in this repo | Result |
+|---|---|---|---|
+| cargo-audit | 0.22.1 (0.22.2 is latest; pin bump pending) | `cargo audit --db <local advisory-db clone> --no-fetch` | **Verified**: loaded 1,277 advisories and scanned 296 lockfile crates |
+| cargo-geiger | 0.13.0 | `cargo geiger --manifest-path /home/user/leaks/crates/candor-log/Cargo.toml --output-format Ratio` | **Verified**: needs an *absolute* `--manifest-path` (the workspace root is virtual); exits non-zero when it emits warnings |
+| cargo-careful | 0.4.10 | `cargo +nightly-2026-09-28 careful test -p candor-log --lib` | **Verified**: 21/21 passed |
+| cargo-fuzz | 0.13.1 (0.13.2 is latest; pin bump pending) | `cd crates/candor-core && cargo +nightly-2026-09-28 fuzz run fuzz_header -- -max_total_time=10` | **Verified**: 5 targets listed; ~4.6 M runs in 11 s, no crash |
+| semgrep | 1.178.0 (venv) | `semgrep scan --metrics=off --config <local.yml> crates/` | **Verified with local rules only.** The registry (`--config p/rust`) is **blocked** by the egress proxy (semgrep.dev 403). The `p/rust` rules must be vendored as local YAML in the repo for offline/pinned use. |
+
+These were tool smoke runs, not an audit. No output from them has been triaged as a finding.
 
 ---
 

@@ -187,11 +187,11 @@ Run from the repo root on the audited commit. Status was verified in this enviro
 | cargo-deny | `=0.20.2` | `cargo deny --offline check` (refresh the DB first: `cargo deny fetch`) | yes |
 | cargo-audit | `=0.22.1` installed (latest `0.22.2`; bump via reviewed PR) | `cargo audit --db <mirrored advisory-db> --no-fetch --deny warnings` | yes |
 | cargo-vet | `=0.10.2` | `cargo vet --locked` | yes |
-| cargo-geiger | `=0.13.0` | `cargo geiger -p <crate> --all-features --output-format Ratio` | see R9 §7.1 |
+| cargo-geiger | `=0.13.0` | `cargo geiger --manifest-path "$PWD/crates/<crate>/Cargo.toml" --all-features --output-format Ratio` (absolute path required; workspace root is virtual) | yes |
 | Miri | `nightly-2026-09-28` + `miri,rust-src` | `cargo +nightly-2026-09-28 miri setup && cargo +nightly-2026-09-28 miri test -p <crate> --lib` (required for allowlisted `unsafe` crates; optional elsewhere; FS/syscall tests may be unsupported, so mark them `#[cfg_attr(miri, ignore)]`) | yes (candor-log 17/17) |
-| cargo-careful | `=0.4.10` | `cargo +nightly-2026-09-28 careful test -p <crate>` | see R9 §7.1 |
-| cargo-fuzz | `=0.13.2` | `cargo +nightly-2026-09-28 fuzz run <target> -- -max_total_time=600 -rss_limit_mb=2048 -timeout=10` per parser (ST-040.. thresholds) | see R9 §7.1 |
-| semgrep | `semgrep==1.178.0` (venv, `--require-hashes`) | `semgrep scan --metrics=off --config p/rust --error crates/` plus Candor custom rules once added under `process/semgrep/` (not yet created; ST-008). `p/rust` needs network; vendor it for offline runs | see R9 §7.1 |
+| cargo-careful | `=0.4.10` | `cargo +nightly-2026-09-28 careful test -p <crate>` | yes (candor-log 21/21) |
+| cargo-fuzz | `=0.13.1` installed (latest `0.13.2`; bump via reviewed PR) | `cargo +nightly-2026-09-28 fuzz run <target> -- -max_total_time=600 -rss_limit_mb=2048 -timeout=10` per parser (ST-040.. thresholds) | yes (candor-core fuzz_header 10 s smoke) |
+| semgrep | `semgrep==1.178.0` (venv, `--require-hashes`) | `semgrep scan --metrics=off --config p/rust --error crates/` plus Candor custom rules once added under `process/semgrep/` (not yet created; ST-008). `p/rust` registry download is **blocked here** (semgrep.dev 403), so vendor the rules as local YAML | yes (local rules only) |
 | zizmor | `=1.26.1` (CI pin) | `zizmor --offline --persona=auditor .github/` | yes |
 | shellcheck | `0.9.0` | `shellcheck -S style $(git ls-files '*.sh')` | yes |
 | systemd-analyze | systemd 255 | `systemd-analyze security --offline=true --threshold=<n> <unit files>` | yes |

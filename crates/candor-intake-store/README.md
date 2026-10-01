@@ -1,0 +1,56 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+# candor-intake-store
+
+This crate is the Candor Intake Store (component C-08), licensed AGPL-3.0-or-later. It owns the `IntakeStore` trait, which is the persistence interface of the intake zone, and ships two implementations:
+
+- **`PgIntakeStore`** is for production. It uses PostgreSQL 16 over a Unix socket through sqlx 0.9, with static SQL only, row-level security (RLS) and DB-enforced invariants.
+- **`MemoryStore`** is for tests of other crates. It follows the same rules and passes the same conformance suite.
+
+Specs: `specs/09-DATABASE.md` §5.1/§8/§10/§11, `specs/07-BACKEND.md` §5.3/§5.4/§6.3, `specs/08-API.md` RL-01..RL-12 and SA-19/SA-20. Decisions and residual risks are in [SPEC-NOTES.md](SPEC-NOTES.md).
+
+## Guarantees
+
+- The store never reads a wall clock. It stores only UTC day numbers (`Day`) supplied by the caller's `SourceClock`.
+- No timestamp, time, interval or network-typed column exists anywhere in the intake DB. A static lint and a live lint enforce this.
+- Accounts are created only together with their first envelope (ADR-034).
+- Real and chaff envelopes are stored identically.
+- No kind, tier or arrival date leaves through RL-02.
+- Source deletions append a K31-signed, hash-chained deletion-list entry in the same transaction. A restored store refuses service until the newest verified list is applied.
+- The Key Directory snapshot high-water mark never decreases. The store checks this, and a DB trigger enforces it as well.
+- The fetch-all reply set is served as fixed 64 × 70,000-byte pages. The page count is a power of two, and every requester gets byte-identical pages.
+- Errors and `Debug` output are content-free.
+
+## API sketch
+
+```rust
+use candor_intake_store::*;
+
+// Production: migrate with `candorctl migrate` (database owner), then:
+let store = PgIntakeStore::open(opts.username("candor_istore").database(db), tenant, 8).await?;
+store.init(tenant, kdf_salt).await?;
+let r = store.commit_envelope(CommitEnvelope { account: AccountLink::None, /* … */ }).await?;
+let batch = store.claim_batch(today, ClaimLimits { max_objects: 500, max_bytes: MAX_CLAIM_BYTES }).await?;
+let ack = store.ack_batch(batch.batch_no, &digests).await?;     // then delete ack.blobs_to_delete
+store.apply_replies(today, replies).await?;
+store.rebuild_published_set(today).await?;                      // at import slots only
+let page = store.reply_page(0).await?;
+store.install_directory_snapshot(verified, today).await?;       // rejects rollback
+
+// Tests of other crates:
+let mem = MemoryStore::new()?;
+```
+
+## Tests
+
+```sh
+cargo test -p candor-intake-store                                          # PG tests skip with a message
+crates/candor-intake-store/scripts/pg-test.sh                              # throwaway PG 16 cluster + full suite
+crates/candor-intake-store/scripts/pg-test.sh cargo test -p candor-intake-store --test pg
+```
+
+`scripts/pg-test.sh` works as follows:
+
+1. It creates the unprivileged OS user `pgtest` if needed and runs `initdb` as that user in a private 0700 directory.
+2. The cluster listens only on a Unix socket, with peer authentication through an ident map.
+3. It applies the intake settings: `wal_level=minimal`, `max_wal_senders=0`, `archive_mode=off`, `track_commit_timestamp=off`, and no SQL text or bind parameters in logs.
+4. It exports `CANDOR_TEST_PG=<socket dir>`, runs the given command, and always deletes the cluster afterwards.

@@ -258,7 +258,7 @@ pub enum AccountLink {
 }
 
 /// One stored part of an envelope (09 §5.1 `envelope_part`).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct PartRef {
     /// Blob object id (blob written and fsynced by the caller before commit).
     pub blob_id: BlobId,
@@ -306,7 +306,7 @@ pub struct ClaimLimits {
 
 /// One RL-02 object descriptor. Carries neither `received_date`, `release_day`,
 /// account link nor any kind/tier marker (ADR-038(3), API-047, API-057).
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ClaimedObject {
     /// Intake-local ref.
     pub envelope_ref: EnvelopeRef,
@@ -327,7 +327,7 @@ pub struct ClaimedObject {
 }
 
 /// An RL-02 batch.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ClaimedBatch {
     /// Monotonic batch number.
     pub batch_no: u64,
@@ -349,7 +349,7 @@ pub enum PartSelector {
 }
 
 /// RL-03 result.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum ObjectData {
     /// Inline ciphertext (header or manifest).
     Bytes(Vec<u8>),
@@ -358,7 +358,7 @@ pub enum ObjectData {
 }
 
 /// RL-04 result.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct AckResult {
     /// Envelopes deleted.
     pub deleted: u32,
@@ -511,7 +511,7 @@ impl CounterName {
 }
 
 /// One monthly counter cell (aggregate; suppression is applied by the exporter).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct CounterCell {
     /// Channel.
     pub channel_id: ChannelId,
@@ -605,5 +605,41 @@ mod props {
             prop_assert!(n.is_month_start());
             prop_assert!(n.0 - m.0 >= 28 && n.0 - m.0 <= 31);
         }
+    }
+}
+
+impl fmt::Debug for PartRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("PartRef(<redacted>)")
+    }
+}
+
+impl fmt::Debug for ClaimedObject {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ClaimedObject(<redacted>)")
+    }
+}
+
+impl fmt::Debug for ClaimedBatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ClaimedBatch(<redacted>)")
+    }
+}
+
+impl fmt::Debug for ObjectData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ObjectData(<redacted>)")
+    }
+}
+
+impl fmt::Debug for AckResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("AckResult(<redacted>)")
+    }
+}
+
+impl fmt::Debug for CounterCell {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("CounterCell(<redacted>)")
     }
 }
