@@ -160,8 +160,8 @@ A1 10 % · A2 10 % · A3 manual review 50 % · A4 tools + PoCs 25 % · A5 report
 - Severity: Info
 - Location: crates/candor-safefs/src/store.rs:222-241; SPEC-NOTES "Open items" (commit 60e732f)
 - Category: B12.1, B2.9
-- Description: Writes use named `.tmp-<random>` files in the root instead of `O_TMPFILE`, so the inode is visible before validation (SL-R-001). The inotify "no inode outside root" test is absent. The four fuzz targets exist but are not run in CI (the smoke results are below). `ContentKey` derives `Clone` (B3.1: only if needed).
-- Fix recommendation: Implement `O_TMPFILE` + `linkat(AT_EMPTY_PATH)` on Linux, with a fallback to the current path. Add the inotify test. Add a nightly fuzz job. Drop `Clone` from `ContentKey` if it is unused.
+- Description: Writes use named `.tmp-<random>` files in the root instead of `O_TMPFILE`, so the inode is visible before validation (SL-R-001). The inotify "no inode outside root" test is absent. The four fuzz targets exist but are not run in CI. They also have no seed corpus or dictionary, so the 60 s smoke run reached only cov 160–273 on the archive targets (see §C). `ContentKey` derives `Clone` (B3.1: only if needed).
+- Fix recommendation: Implement `O_TMPFILE` + `linkat(AT_EMPTY_PATH)` on Linux, with a fallback to the current path. Add the inotify test. Add a nightly fuzz job with seed corpora (the `tests/archives.rs` fixtures) and a tar/zip dictionary. Drop `Clone` from `ContentKey` if it is unused.
 - Spec / requirement reference: IMPL-RM1 §1.6 Build/Verify, §9.1.
 - Status: Open
 
@@ -349,8 +349,8 @@ A1 10 % · A2 10 % · A3 manual review 50 % · A4 tools + PoCs 25 % · A5 report
 | cargo-audit 0.22.1 | `cargo audit --db ~/.cargo/advisory-dbs/advisory-db-3157b0e258782691 --no-fetch --deny warnings` (DB commit `9b3a3b73`, 2026-09-30) | 0 vulnerabilities/warnings (300 crates; tar 0.4.46, zip 4.6.1, flate2 1.1.5 clean) |
 | cargo-vet 0.10.2 | `cargo vet --locked` | fails on unvetted workspace deps (yoke, zerovec-derive, … `safe-to-deploy` missing). Workspace-wide supply-chain gap, not specific to these crates; tracked by the RM-0 gate |
 | cargo-geiger 0.13.0 | `cargo geiger --manifest-path $PWD/crates/<c>/Cargo.toml --all-features --output-format Ratio` | Both crates have 0 `unsafe` (workspace `forbid(unsafe_code)`). Dependency ratios (functions safe/total): safefs 4217/5066, expressions 145322/184883 (cap-std/rustix/zlib-rs/blake3 carry the `unsafe`); log 1826/1914, expressions 94814/100720 (sha2/ed25519/serde_json). No new baseline exists yet to compare against (B11.4 will be tracked from this run) |
-| Miri | `cargo +nightly-2026-09-28 miri test -p candor-log --lib` | MIRI_RESULT |
-| cargo-fuzz | `cargo +nightly-2026-09-28 fuzz run <t> -- -max_total_time=60 -rss_limit_mb=2048 -timeout=10` for the 4 safefs targets | FUZZ_RESULT |
+| Miri | `cargo +nightly-2026-09-28 miri test -p candor-log --lib` | `test result: ok. 21 passed; 0 failed` (no UB) |
+| cargo-fuzz | `cargo +nightly-2026-09-28 fuzz run <t> -- -max_total_time=60 -rss_limit_mb=2048 -timeout=10` for the 4 safefs targets | No crashes, timeouts or OOM. names: 399,292 runs, cov 769; zip: 46,928 runs, cov 205; tar: 104,949 runs, cov 160 (corpus 2 inputs); tar_gz: 65,902 runs, cov 273. The archive targets have no seed corpus or dictionary, so 60 s barely gets past the header checks (low coverage). See SFS-08 |
 | shellcheck 0.9.0 | `shellcheck -S style` on both lint scripts | clean |
 | repo lints | `lint-safefs.sh`, `lint-logging.sh` on the real tree | both OK (74/83 files). Bypasses: SFS-01, LOG-09 |
 | semgrep / zizmor / systemd-analyze | — | not applicable (no custom rules yet; no workflows/units in scope) |

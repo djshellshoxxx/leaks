@@ -75,19 +75,15 @@ SystemCallFilter=fchown fchownat chown
 TemporaryFileSystem=/var:ro
 BindPaths=/var/lib/postgresql/16/candor-intake
 InaccessiblePaths=-/run/tor-instances -/run/candor/source-web -/run/candor/sealer -/run/candor/istore -/run/candor/staging -/run/credentials/candor-intake-store.service -/run/credentials/candor-sealer.service -/etc/credstore.encrypted -/etc/tor -/boot
-# ---- Logging (ADR-016, LOG-004, LOG-007, NET-008) ----
-# stdout discarded; stderr goes to the
-# separate journald namespace "candor-intake" (journald@candor-intake.conf: Storage=volatile,
-# MaxRetentionSec=24h, no forwarding). Un-prefixed stderr lines are stored at level warning
-# (SyslogLevel); anything a program explicitly marks below warning is dropped (LogLevelMax).
+# ---- Logging (AUD-RM2-STO-02, DB-021, LOG-004/008, ADR-016) ----
+# PostgreSQL output is discarded entirely: even with log_min_messages = panic nothing it
+# writes may reach any journal, because every server log line carries a precise timestamp
+# that can coincide with a source action. Liveness is visible through the unit state only.
 StandardInput=null
 StandardOutput=null
-StandardError=journal
-SyslogLevel=warning
+StandardError=null
 LogNamespace=candor-intake
-LogLevelMax=warning
-LogRateLimitIntervalSec=30s
-LogRateLimitBurst=200
+LogLevelMax=emerg
 SyslogIdentifier=candor-intake-pg
 
 [Install]

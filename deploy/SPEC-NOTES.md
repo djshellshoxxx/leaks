@@ -69,7 +69,7 @@ R7 = `research/R7-secure-implementation.md`.
 
 **D-11 PostgreSQL.**
 - **Unit.** A dedicated `candor-intake-pg.service` starts `postgres` directly, so the full sandbox applies. `pg_ctlcluster` and `postgresql@16-main` are not used.
-- **Log prefix.** `log_line_prefix='%e '` is stricter than 09's `'%m %e '`. journald already stamps lines, and LOG-004 asks for coarse intake timestamps.
+- **Log prefix.** `log_line_prefix='%e '` is stricter than 09's `'%m %e '`. LOG-004 asks for coarse intake timestamps. Since D-26, PostgreSQL output is discarded anyway.
 - **Defaults turned off.** `log_checkpoints` and `log_autovacuum_min_duration` are disabled because PG ≥ 15 enables them by default and both timestamp write activity. `update_process_title=off` is also set.
 - **pg_hba.** pg_hba is exactly 09 §10. Even the `postgres` superuser is rejected on the socket, so bootstrap (role and database creation) and migrations must run in single-user mode with the service stopped.
 - **Open item.** This interacts with R7 SI-E-06 `candorctl migrate`, which needs a decision: either a time-boxed hba entry or single-user mode only.
@@ -95,10 +95,10 @@ R7 = `research/R7-secure-implementation.md`.
 - **Binary formats.** Binary OpenPGP and PKCS#12 are recognised only by armour or by file name.
 - **Exit codes.** Manifest parse errors and invalid paths exit 2 (fail closed).
 
-**D-15 Journald namespace (owner OPSEC instruction).** All five intake units log to `LogNamespace=candor-intake`:
+**D-15 Journald namespace (owner OPSEC instruction).** tor, web, sealer and store log to `LogNamespace=candor-intake`. PostgreSQL emits nothing (D-26).
 - **Storage.** Volatile, `RuntimeMaxUse=16M`, `MaxRetentionSec=24h`, `MaxFileSec=1h`.
 - **Filtering.** `MaxLevelStore=warning`. No forwarding to syslog, kmsg, console or wall.
-- **Per unit.** Units set `StandardOutput=null`, `SyslogLevel=warning` (un-prefixed stderr is stored) and `LogLevelMax=warning` (anything explicitly lower is dropped at the source).
+- **Per unit.** The four logging units set `StandardOutput=null`, `SyslogLevel=warning` (un-prefixed stderr is stored) and `LogLevelMax=warning` (anything explicitly lower is dropped at the source).
 - **Not chosen.** `Storage=none` was considered and rejected. NET-008 and 32 `tor.daemon`/`logging.config` need tor and service warnings visible to the health agent for ≤ 24 h.
 
 **D-16 One PostgreSQL cluster per intake host.**
@@ -136,6 +136,13 @@ All four are follow-ups for the Debian 13 integration run.
 
 **D-24 DNS.** `resolv.conf` points at `127.0.0.1` with nothing listening (17 §4.5). The config check fails on any non-loopback nameserver.
 
+**D-26 PostgreSQL emits no log at all (AUD-RM2-STO-02).**
+- **Finding.** Expected-path errors would become server `ERROR` lines with millisecond timestamps, for example a unique violation when a source retries. Each such line records the exact time of a source action.
+- **Settings.** The intake cluster sets `log_min_messages = panic` and `log_min_error_statement = panic`. It also keeps `logging_collector = off`, `log_destination = stderr`, `log_connections`/`log_disconnections = off`, `log_statement = none`, `log_checkpoints = off` and `track_commit_timestamp = off`.
+- **Unit.** `candor-intake-pg.service` sets `StandardError=null` and `LogLevelMax=emerg`, so not even PANIC lines reach a journal.
+- **Checks.** config-check asserts each of these, and two mutations test it. The PostgreSQL run in `validate.sh` shows zero bytes of server output after rejected connections and a deliberate unique violation.
+- **Residual.** PANIC-level crash messages and start-up configuration errors are discarded too. A crashed or misconfigured intake database is visible only through the unit state (`systemctl`, health agent `SYSTEM:service_failed`). Diagnosis needs `config-check.sh`, `postgres -C` or a dual-approved, time-boxed debugging window (NET-037 pattern) with `StandardError=journal`. The `09 §10` value `log_min_messages = warning` is superseded by this audit finding.
+
 **D-25 `systemd-analyze security` budgets** (R7 SI-B-01, internal scale ×10):
 - Candor services and PostgreSQL: ≤ 0.5. Achieved: 0.4, 0.4, 0.4 and 0.5.
 - tor: ≤ 1.5 (17 §5.3). Achieved: 1.4.
@@ -167,10 +174,10 @@ What I checked, reading the diff as an attacker:
   - **Firewall failure.** A failed nft load keeps every intake unit stopped (`Requires=nftables.service`).
 - **Logging and metadata.**
   - **tor.** `SafeLogging 1`, `warn` only, 1 h granularity, no hidden-service statistics, never a file.
-  - **PostgreSQL.** No connection, statement, duration, checkpoint, autovacuum or lock records. No user, database, host or PID fields. `update_process_title=off`.
+  - **PostgreSQL.** It emits nothing: `log_min_messages = panic` and `StandardError=null` (D-26, AUD-RM2-STO-02). `update_process_title=off`.
   - **journald.** Volatile and capped at 24 h and 16 MiB.
   - **nftables.** No LOG targets.
-  - **Verification.** The PG run confirmed the log has no SQL or connection records.
+  - **Verification.** The PG run confirmed zero bytes of server output, even after errors.
   - **Process titles and banners.** Process titles carry no role or database. Version banners go to `/dev/null` for tor (D-02).
 - **Secrets.**
   - **At rest.** Secrets are TPM-sealed credentials, root-only at rest and per-unit at runtime. No `Environment=` or plain `LoadCredential=` is allowed; config-check enforces this.
@@ -201,5 +208,5 @@ Residual risks (accepted or out of scope for this slice):
 3. **Untested sandbox details.** The runtime sandbox interactions in the open items list are untested in this container, which has no systemd as PID 1. They fail closed (the unit does not start), not open.
 4. **Staging tmpfs on restart.** The staging tmpfs survives a store restart until the application clears it (D-10).
 5. **Scan limits.** check-placement does not content-scan files over 1 MiB, ciphertext-only directories, `/run/credentials` or binary key formats. A deliberate insider can hide a key from it, so the check targets accidental misplacement (B-SD-22).
-6. **Version banner.** PostgreSQL logs its version banner and authentication failures (role and database names, never addresses on a Unix socket) at LOG level into the volatile journal. tor's PoW verifier is interpreted (D-03).
+6. **PostgreSQL crash diagnostics.** They are discarded (D-26). tor's PoW verifier is interpreted (D-03).
 7. **Spec gaps.** D-04, D-11 (migrations), D-18 and D-19 need owner decisions. Until then the strict choice applies.

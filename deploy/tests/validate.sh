@@ -123,6 +123,8 @@ mutate "pg TCP listener"               postgresql/candor-intake.conf "s|^listen_
 mutate "pg include"                    postgresql/candor-intake.conf "+include_if_exists = '/etc/candor/local.conf'"
 mutate "pg duplicate key"              postgresql/candor-intake.conf "+log_min_duration_statement = 0"
 mutate "pg log_checkpoints"            postgresql/candor-intake.conf 's|^log_checkpoints = off|log_checkpoints = on|'
+mutate "pg log_min_messages error"     postgresql/candor-intake.conf 's|^log_min_messages = panic|log_min_messages = error|'
+mutate "pg stderr to journal"          systemd/candor-intake-pg.service 's|^StandardError=null$|StandardError=journal|'
 mutate "pg logging_collector"          postgresql/candor-intake.conf 's|^logging_collector = off|logging_collector = on|'
 mutate "pg world socket"               postgresql/candor-intake.conf 's|^unix_socket_permissions = 0770|unix_socket_permissions = 0777|'
 mutate "pg_hba host line"              postgresql/pg_hba.conf 's|^local   all               all             reject|host all all 0.0.0.0/0 scram-sha-256\nlocal   all               all             reject|'
@@ -293,8 +295,10 @@ if [ -n "${CANDOR_TEST_PG:-}" ] && is_root && users_exist && [ -x "$PGBIN/initdb
     if [ -z "$(q candor-istore postgres postgres 'select 1')" ]; then pass "pg: peer map refuses role switch"; else bad "pg: candor-istore became postgres"; fi
     if [ -z "$(q postgres postgres postgres "select 1")" ]; then pass "pg: superuser has no socket access (09 §10)"; else bad "pg: postgres connected"; fi
     if [ -z "$(q candor-web candor_istore candor_intake_t1 'select 1')" ]; then pass "pg: other OS users cannot reach the socket"; else bad "pg: candor-web connected"; fi
-    # Unix socket only: no client address can exist; assert no connection/statement/duration lines.
-    if grep -qiE 'connection (received|authorized)|statement:|duration:|select 1|pg_settings' "$P/log"; then bad "pg: log contains connection or SQL records"; else pass "pg: log free of connection records and SQL text"; fi
+    # AUD-RM2-STO-02: with log_min_messages = panic the server writes nothing at all, even after
+    # rejected connections and a deliberate error (unique violation on the expected path).
+    q candor-istore candor_istore candor_intake_t1 "create table t(k int primary key); insert into t values (1); insert into t values (1)" >/dev/null
+    if [ -s "$P/log" ]; then bad "pg: server emitted log output: $(head -c 200 "$P/log" | tr -c '[:print:]' '?')"; else pass "pg: no server log output at all (errors and rejected connections included)"; fi
     pkill -INT -u pgtest -f "$PGBIN/postgres" >/dev/null 2>&1; sleep 2
   else bad "initdb failed"; fi
 else skip "PostgreSQL run (set CANDOR_TEST_PG=1; needs root, users, user pgtest, $PGBIN)"; fi

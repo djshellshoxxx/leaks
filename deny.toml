@@ -129,11 +129,56 @@ enable-builtin-globs = true
 include-dependencies = true
 include-workspace = false
 include-archives = true
-# Implementation decision: an explicit `allow-build-scripts` allow-list (28 §5.2
-# "new build.rs ... require explicit approval") is to be populated once the RM-1
-# crate graph settles; until then the inventory is produced by `cargo deny list`
-# and reviewed in PRs that touch Cargo.lock.
-# allow-build-scripts = [ { crate = "..." } ]
+# 28 §5.2 "new build.rs ... require explicit approval" (AUD-RM0-INF-06): only the
+# crates below may run a build script. The list is the inventory of the locked
+# graph at the time of the INF fixes, pinned name@version so a bump (which can
+# change build.rs arbitrarily) fails `cargo deny check bans` until a reviewer
+# re-reads the new build.rs and updates the entry. Adding an entry needs
+# release-supply-chain + security-team approval (CODEOWNERS).
+allow-build-scripts = [
+    { crate = "blake3@1.8.2" },
+    { crate = "cap-fs-ext@3.4.5" },
+    { crate = "cap-primitives@3.4.6" },
+    { crate = "cap-std@3.4.5" },
+    { crate = "crc32fast@1.5.2" },
+    { crate = "crossbeam-utils@0.8.23" },
+    { crate = "curve25519-dalek@5.0.0" },
+    { crate = "generic-array@0.14.9" },
+    { crate = "getrandom@0.3.4" },
+    { crate = "getrandom@0.4.3" },
+    { crate = "icu_normalizer_data@2.3.0" },
+    { crate = "icu_properties_data@2.3.0" },
+    { crate = "io-extras@0.18.4" },
+    { crate = "io-lifetimes@2.0.4" },
+    { crate = "libc@0.2.189" },
+    { crate = "libsqlite3-sys@0.37.0" },
+    { crate = "num-traits@0.2.19" },
+    { crate = "parking_lot_core@0.9.12" },
+    { crate = "proc-macro2@1.0.107" },
+    { crate = "quote@1.0.47" },
+    { crate = "rustix@1.1.2" },
+    { crate = "rustversion@1.0.23" },
+    { crate = "selectors@0.38.0" },
+    { crate = "serde@1.0.228" },
+    { crate = "serde_core@1.0.228" },
+    { crate = "serde_json@1.0.149" },
+    { crate = "target-triple@1.0.1" },
+    { crate = "thiserror@2.0.21" },
+    { crate = "wasm-bindgen@0.2.129" },
+    { crate = "wasm-bindgen-shared@0.2.129" },
+    { crate = "web_atoms@0.2.6" },
+    { crate = "windows_aarch64_gnullvm@0.52.6" },
+    { crate = "windows_aarch64_msvc@0.52.6" },
+    { crate = "windows_i686_gnu@0.52.6" },
+    { crate = "windows_i686_gnullvm@0.52.6" },
+    { crate = "windows_i686_msvc@0.52.6" },
+    { crate = "windows_x86_64_gnu@0.52.6" },
+    { crate = "windows_x86_64_gnullvm@0.52.6" },
+    { crate = "windows_x86_64_msvc@0.52.6" },
+    { crate = "wit-bindgen@0.57.1" },
+    { crate = "zerocopy@0.8.59" },
+    { crate = "zmij@1.0.23" },
+]
 #
 # Reviewed bypasses. Each is pinned to an exact version so a bump forces re-review.
 # Reviewed: the listed files are CI/dev helpers or link-time import libraries and are

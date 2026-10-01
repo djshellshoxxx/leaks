@@ -33,6 +33,15 @@ sha2 = ["safe-to-deploy", "candor-crypto-reviewed"]
 subtle = ["safe-to-deploy", "candor-crypto-reviewed"]
 zeroize = ["safe-to-deploy", "candor-crypto-reviewed"]
 
+[policy.candor-intake-store]
+criteria = "safe-to-deploy"
+
+[policy.candor-intake-store.dependency-criteria]
+getrandom = ["safe-to-deploy", "candor-crypto-reviewed"]
+sha2 = ["safe-to-deploy", "candor-crypto-reviewed"]
+subtle = ["safe-to-deploy", "candor-crypto-reviewed"]
+zeroize = ["safe-to-deploy", "candor-crypto-reviewed"]
+
 [policy.candor-log]
 criteria = "safe-to-deploy"
 
@@ -50,6 +59,15 @@ blake3 = ["safe-to-deploy", "candor-crypto-reviewed"]
 getrandom = ["safe-to-deploy", "candor-crypto-reviewed"]
 zeroize = ["safe-to-deploy", "candor-crypto-reviewed"]
 
+[policy.candor-sealer]
+criteria = "safe-to-deploy"
+
+[policy.candor-sealer.dependency-criteria]
+hkdf = ["safe-to-deploy", "candor-crypto-reviewed"]
+sha2 = ["safe-to-deploy", "candor-crypto-reviewed"]
+subtle = ["safe-to-deploy", "candor-crypto-reviewed"]
+zeroize = ["safe-to-deploy", "candor-crypto-reviewed"]
+
 [policy.candor-source-ui]
 criteria = "safe-to-deploy"
 
@@ -59,23 +77,23 @@ zeroize = ["safe-to-deploy", "candor-crypto-reviewed"]
 
 [[exemptions.aead]]
 version = "0.6.1"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.argon2]]
 version = "0.6.0"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.arrayref]]
 version = "0.3.9"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.arrayvec]]
 version = "0.7.8"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.askama]]
 version = "0.16.1"
@@ -99,13 +117,13 @@ notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.autocfg]]
 version = "1.5.1"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.base64ct]]
 version = "1.8.3"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.bitflags]]
 version = "2.13.2"
@@ -114,18 +132,18 @@ notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.blake2]]
 version = "0.11.0"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.blake3]]
 version = "1.8.2"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.block-buffer]]
 version = "0.12.1"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.cap-fs-ext]]
 version = "3.2.0"
@@ -144,43 +162,43 @@ notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.cc]]
 version = "1.5.1"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.cfg-if]]
 version = "1.0.5"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.chacha20]]
 version = "0.10.2"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.chacha20poly1305]]
 version = "0.11.0"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.cipher]]
 version = "0.5.2"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.cmov]]
 version = "0.5.4"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.constant_time_eq]]
 version = "0.3.1"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.cpufeatures]]
 version = "0.3.1"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.crc32fast]]
 version = "1.5.2"
@@ -189,8 +207,8 @@ notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.crypto-common]]
 version = "0.2.2"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.cssparser-macros]]
 version = "0.7.1"
@@ -199,18 +217,18 @@ notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.ctutils]]
 version = "0.4.2"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.curve25519-dalek]]
 version = "5.0.0"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.curve25519-dalek-derive]]
 version = "0.1.1"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.derive_more]]
 version = "2.1.1"
@@ -224,8 +242,8 @@ notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.digest]]
 version = "0.11.3"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.displaydoc]]
 version = "0.2.7"
@@ -244,13 +262,13 @@ notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.ed25519]]
 version = "3.0.0"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.ed25519-dalek]]
 version = "3.0.0"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.ego-tree]]
 version = "0.11.0"
@@ -264,8 +282,8 @@ notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.fiat-crypto]]
 version = "0.3.0"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.filetime]]
 version = "0.2.29"
@@ -274,8 +292,8 @@ notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.find-msvc-tools]]
 version = "0.1.14"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.fs-set-times]]
 version = "0.20.3"
@@ -289,8 +307,8 @@ notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.getrandom]]
 version = "0.4.3"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.glob]]
 version = "0.3.4"
@@ -304,18 +322,18 @@ notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.hkdf]]
 version = "0.13.0"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.hmac]]
 version = "0.13.0"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.hpke]]
 version = "0.14.1"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.html5ever]]
 version = "0.39.0"
@@ -324,8 +342,8 @@ notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.hybrid-array]]
 version = "0.4.15"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.indexmap]]
 version = "2.14.2"
@@ -334,8 +352,8 @@ notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.inout]]
 version = "0.2.2"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.io-extras]]
 version = "0.18.4"
@@ -359,18 +377,18 @@ notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.keccak]]
 version = "0.2.2"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.kem]]
 version = "0.3.0"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.libc]]
 version = "0.2.189"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.libz-rs-sys]]
 version = "0.5.5"
@@ -409,13 +427,13 @@ notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.ml-kem]]
 version = "0.3.2"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.module-lattice]]
 version = "0.2.3"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.new_debug_unreachable]]
 version = "1.0.6"
@@ -424,8 +442,8 @@ notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.num-traits]]
 version = "0.2.19"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.once_cell]]
 version = "1.21.4"
@@ -444,13 +462,13 @@ notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.password-hash]]
 version = "0.6.1"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.phc]]
 version = "0.6.1"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.phf]]
 version = "0.8.0"
@@ -479,18 +497,18 @@ notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.poly1305]]
 version = "0.9.1"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.ppv-lite86]]
 version = "0.2.21"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.proc-macro2]]
 version = "1.0.107"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.proptest]]
 version = "1.11.0"
@@ -499,8 +517,8 @@ notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.quote]]
 version = "1.0.47"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.r-efi]]
 version = "5.2.0"
@@ -509,8 +527,8 @@ notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.r-efi]]
 version = "6.0.0"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.rand]]
 version = "0.9.5"
@@ -524,8 +542,8 @@ notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.rand_chacha]]
 version = "0.10.0"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.rand_core]]
 version = "0.9.5"
@@ -534,8 +552,8 @@ notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.rand_core]]
 version = "0.10.1"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.redox_syscall]]
 version = "0.5.18"
@@ -554,8 +572,8 @@ notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.rustc_version]]
 version = "0.4.1"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.rustix]]
 version = "1.1.2"
@@ -579,8 +597,8 @@ notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.semver]]
 version = "1.0.28"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.serde]]
 version = "1.0.226"
@@ -609,33 +627,33 @@ notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.sha2]]
 version = "0.11.0"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.sha3]]
 version = "0.11.0"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.sha3]]
 version = "0.12.0"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.shake]]
 version = "0.1.0"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.shlex]]
 version = "2.0.1"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.signature]]
 version = "3.0.0"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.simd-adler32]]
 version = "0.3.10"
@@ -654,8 +672,8 @@ notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.sponge-cursor]]
 version = "0.1.0"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.stable_deref_trait]]
 version = "1.2.1"
@@ -674,13 +692,13 @@ notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.subtle]]
 version = "2.6.1"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.syn]]
 version = "2.0.119"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.syn]]
 version = "3.0.6"
@@ -690,6 +708,7 @@ notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
 [[exemptions.tar]]
 version = "0.4.45"
 criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (dev/build tooling); expires 2027-03-30 (28 §5.2: <= 180 days). Stale: lockfile has 0.4.46, remove with cargo vet prune at integration"
 
 [[exemptions.target-triple]]
 version = "1.0.1"
@@ -743,8 +762,8 @@ notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.turboshake]]
 version = "0.7.1"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.type-map]]
 version = "0.4.0"
@@ -753,18 +772,18 @@ notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.typenum]]
 version = "1.20.1"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.unicode-ident]]
 version = "1.0.26"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.universal-hash]]
 version = "0.6.1"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.web_atoms]]
 version = "0.2.6"
@@ -838,23 +857,23 @@ notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.x-wing]]
 version = "0.1.0"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.x25519-dalek]]
 version = "3.0.0"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.zerocopy]]
 version = "0.8.59"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.zerocopy-derive]]
 version = "0.8.59"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.zerofrom]]
 version = "0.1.8"
@@ -863,13 +882,13 @@ notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.zeroize]]
 version = "1.8.2"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.zeroize_derive]]
 version = "1.5.0"
-criteria = "candor-crypto-reviewed"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
 
 [[exemptions.zerovec]]
 version = "0.11.8"

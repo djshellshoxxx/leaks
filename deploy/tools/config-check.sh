@@ -373,9 +373,9 @@ check_pg() {
     if [ "$got" = "$want" ]; then ok "pg.$key" "'$want'"; else fail "pg.$key" "expected '$want', found '$got'"; fi
   done
 
+  # AUD-RM2-STO-02: only PANIC may be emitted (ERROR/LOG/FATAL lines carry ms timestamps).
   got=$(printf '%s\n' "$norm" | awk -F'\t' '$1=="log_min_messages" {print tolower($2)}')
-  case "$got" in warning|error|log|fatal|panic) ok pg.log_min_messages "$got" ;;
-    *) fail pg.log_min_messages "must be warning or higher, found '$got'" ;; esac
+  if [ "$got" = panic ]; then ok pg.log_min_messages panic; else fail pg.log_min_messages "must be 'panic' (AUD-RM2-STO-02), found '$got'"; fi
 
   # log_line_prefix: no client/session/time identifiers (DB-021; LOG-004). Only %e / %% allowed.
   got=$(printf '%s\n' "$norm" | awk -F'\t' '$1=="log_line_prefix" {print $2}')
@@ -455,7 +455,7 @@ ProtectControlGroups=yes ProtectClock=yes ProtectHostname=yes ProtectProc=invisi
 RestrictRealtime=yes RestrictSUIDSGID=yes LockPersonality=yes MemoryDenyWriteExecute=yes RemoveIPC=yes
 UMask=0077 CapabilityBoundingSet= AmbientCapabilities= KeyringMode=private DevicePolicy=closed
 SystemCallArchitectures=native LimitCORE=0 NoExecPaths=/ ExecPaths=/usr SocketBindDeny=any
-StandardOutput=null StandardError=journal LogNamespace=candor-intake LogLevelMax=warning"
+StandardOutput=null LogNamespace=candor-intake"
 
 check_service() { # unit-file kind(tor|candor|pg) user
   local f="$UNITDIR/$1" p="unit.${1%.service}"
@@ -463,6 +463,14 @@ check_service() { # unit-file kind(tor|candor|pg) user
   # shellcheck disable=SC2086 # word splitting of the key=value list is intended
   unit_expect_many "$p" "$f" $COMMON_KEYS
   unit_expect "$p" "$f" User "$3"
+  if [ "$2" = pg ]; then
+    # AUD-RM2-STO-02: no PostgreSQL output reaches any journal.
+    unit_expect "$p" "$f" StandardError null
+    unit_expect "$p" "$f" LogLevelMax emerg
+  else
+    unit_expect "$p" "$f" StandardError journal
+    unit_expect "$p" "$f" LogLevelMax warning
+  fi
   if ! unit_vals "$f" Requires | grep -qw nftables.service; then fail "$p.requires_nftables" "Requires= must include nftables.service"; else ok "$p.requires_nftables"; fi
 
   # Secrets never via environment; credentials only TPM-sealed (ADR-028; R7 SI-B-01).

@@ -48,11 +48,11 @@ check_file() {
     fi
     DL='(curl|wget)'
     INTERP='(sudo[[:space:]]+)?(env[[:space:]]+[^|]*)?(ba|z|da|k|fi|c|tc)?sh|python[0-9.]*|perl|ruby|node|php|pwsh|powershell|iex'
-    if grep -Eiq "$DL[^|#]*\\|[[:space:]]*($INTERP)([[:space:]]|\$|;|-)" "$f" \
+    if grep -Eiq "${DL}[^|#]*\\|[[:space:]]*($INTERP)([[:space:]]|\$|;|-)" "$f" \
         || grep -Eiq "(ba|z|da|k)?sh[[:space:]]+(-s[[:space:]]+)?<\\([[:space:]]*$DL" "$f" \
         || grep -Eiq "(source|\\.)[[:space:]]+<\\([[:space:]]*$DL" "$f" \
         || grep -Eiq "eval[[:space:]]+[\"']?\\\$[({][[:space:]]*$DL" "$f" \
-        || grep -Eiq "$DL[^#]*[[:space:]](-o|-O|--output|--output-document)[[:space:]=]*[^[:space:]]+[^#]*(&&|;|\\|\\|)[[:space:]]*($INTERP|chmod[[:space:]]+\\+?[0-7]*x|\\./)" "$f"; then
+        || grep -Eiq "${DL}[^#]*[[:space:]](-o|-O|--output|--output-document)[[:space:]=]*[^[:space:]]+[^#]*(&&|;|\\|\\|)[[:space:]]*($INTERP|chmod[[:space:]]+\\+?[0-7]*x|\\./)" "$f"; then
         echo "pin-check: $f: remote code download-and-execute is prohibited (28 §7, INC-39)"
         bad=1
     fi

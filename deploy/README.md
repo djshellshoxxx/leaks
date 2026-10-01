@@ -23,9 +23,9 @@ every ambiguity is recorded in [`SPEC-NOTES.md`](SPEC-NOTES.md).
 | `intake/systemd/run-candor-staging.mount` | `/etc/systemd/system/` | Tier W staging tmpfs `/run/candor/staging`, mode 0700 `candor-istore`, `noswap`. It is RAM-only (ADR-034). |
 | `intake/systemd/candor-intake-pg.service` | `/etc/systemd/system/` | Dedicated PostgreSQL 16 cluster for the intake store. Unix socket only, `PrivateNetwork=yes`. |
 | `intake/systemd/nftables.service.d/candor-intake.conf` | `/etc/systemd/system/nftables.service.d/` | Loads the ruleset only after the service users exist. |
-| `intake/postgresql/{candor-intake.conf,pg_hba.conf,pg_ident.conf}` | `/etc/candor/intake/postgresql/` (root:postgres 0640) | `wal_level=minimal`, no archiving or replication, `track_commit_timestamp=off`. Logging is minimised: no connections, no statements, no checkpoints or autovacuum events, `log_line_prefix='%e '`. Access is peer-only for `candor-istore`. |
+| `intake/postgresql/{candor-intake.conf,pg_hba.conf,pg_ident.conf}` | `/etc/candor/intake/postgresql/` (root:postgres 0640) | `wal_level=minimal`, no archiving or replication, `track_commit_timestamp=off`. PostgreSQL emits no log at all: `log_min_messages = panic` and the unit discards stderr (AUD-RM2-STO-02). Access is peer-only for `candor-istore`. |
 | `intake/apparmor/{candor-web,candor-sealer,candor-intake-store}` | `/etc/apparmor.d/` | Enforce-mode profiles. Units attach them with `AppArmorProfile=` and no `-` prefix, so a unit fails to start if its profile is missing. |
-| `intake/journald/journald@candor-intake.conf` | `/etc/systemd/` | Journal namespace for all five intake units. Volatile storage, at most 24 h retention, 16 MiB, nothing below `warning` stored, no forwarding. |
+| `intake/journald/journald@candor-intake.conf` | `/etc/systemd/` | Journal namespace for tor, web, sealer and store (PostgreSQL emits nothing). Volatile storage, at most 24 h retention, 16 MiB, nothing below `warning` stored, no forwarding. |
 | `intake/journald/candor-intake-host.conf` | `/etc/systemd/journald.conf.d/50-candor-intake.conf` | Host journal: volatile, at most 24 h, no forwarding (17 §5.5). |
 | `intake/sysusers.d/candor-intake.conf` | `/usr/lib/sysusers.d/` | One UID per service, plus every UID that nftables names. |
 | `intake/tmpfiles.d/candor-intake.conf` | `/usr/lib/tmpfiles.d/` | Socket and state directories. Each is 0750 with group set to the single permitted client (07 §4.1). |
@@ -101,7 +101,7 @@ and with the users from `sysusers.d` created.
 | `apparmor_parser -Q -K` (3 profiles) | OK |
 | `tor --verify-config` (as `_tor-candor-intake`) | valid. A `DisableNetwork 1` start also confirmed the socket and cookie group `_candor-torctl` and the key modes. |
 | `check-placement.sh` | 3 positive cases pass (clean host with full and light scans; ssh host key with the `sshd` flag); 19 negative cases fail as expected (exit 30 or 2) |
-| PostgreSQL 16 with `candor-intake.conf` | effective settings match. Peer map, database restriction and socket permissions refuse other users and roles. The log has no connection records and no SQL. |
+| PostgreSQL 16 with `candor-intake.conf` | effective settings match. Peer map, database restriction and socket permissions refuse other users and roles, including `postgres`. The server writes zero bytes of log output, even after errors. |
 
 **Expected `systemd-analyze verify` messages**, filtered by `validate.sh`:
 `Command /usr/lib/candor/{source-web/candor-web,sealer/candor-sealer,intake-store/candor-intake-store} is not executable: No such file or directory`.

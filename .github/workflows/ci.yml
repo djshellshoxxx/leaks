@@ -17,10 +17,12 @@
 # deny/vet -> SG-05 (ST-010/ST-011); docs-lint -> SG-25 (ST-167);
 # reproducibility -> SG-13 smoke (single-host build-twice; the 2-builder comparison is
 # the release pipeline's job); sbom -> SG-14 (CycloneDX; signing happens at release);
-# workflow-lint -> ST-133; dco -> OSG-003.
+# workflow-lint -> ST-133 (+ CODEOWNERS resolution, gate self-tests); dco -> OSG-003;
+# secret-scan -> INF-08; supply-chain-scheduled -> online zizmor + cargo-audit.
 #
 # Tool pins (bump only via reviewed PR; 14-day cooling, 28 §5.1):
-#   cargo-deny =0.20.2, cargo-vet =0.10.2, cargo-cyclonedx =0.5.9, zizmor =1.26.1
+#   cargo-deny =0.20.2, cargo-vet =0.10.2, cargo-cyclonedx =0.5.9, zizmor =1.26.1,
+#   cargo-audit =0.22.1
 
 name: ci
 
@@ -165,6 +167,9 @@ jobs:
             CARGO_HOME="/home/$TEST_USER/.cargo" \
             CARGO_TERM_COLOR=always CARGO_INCREMENTAL=0 RUST_BACKTRACE=1 \
             cargo test --workspace --all-features --locked --no-fail-fast
+      - name: Kill processes left by the unprivileged user
+        if: always()
+        run: sudo pkill -KILL -u "$TEST_USER" || true
 
   cargo-deny:
     name: cargo-deny (advisories, bans, licenses, sources)
@@ -202,6 +207,8 @@ jobs:
         with:
           crate: cargo-vet
           version: 0.10.2
+      - name: Vet policy lint (no crypto-reviewed exemptions, expiries, policies, import approvals)
+        run: python3 scripts/check-vet-policy.py
       - run: cargo vet --locked
 
   docs-lint:
@@ -231,8 +238,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: SHA-pin / trigger / remote-script check
-        run: sh scripts/check-actions-pinned.sh
+      - name: SHA-pin / trigger / remote-script check (+ self-tests)
+        run: |
+          set -euo pipefail
+          sh scripts/tests/test-check-actions-pinned.sh
+          sh scripts/check-actions-pinned.sh
+      - name: CODEOWNERS resolution (crypto paths -> Crypto Reviewers)
+        run: |
+          set -euo pipefail
+          python3 scripts/check-codeowners.py --self-test
+          python3 scripts/check-codeowners.py
+      - name: DCO checker self-tests (malicious-PR fixtures)
+        run: sh scripts/tests/test-check-dco.sh
       - uses: ./.github/actions/setup-rust
         with:
           components: rustfmt
@@ -256,11 +273,16 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
-      - name: Check DCO sign-off on every PR commit
+      - name: Check DCO sign-off on every PR commit (checker and epoch from BASE)
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: sh scripts/check-dco.sh "$BASE_SHA" "$HEAD_SHA"
+        # AUD-RM0-INF-03: the checker is taken from the base revision, never from
+        # the PR tree, and it reads .dco-epoch from the base revision itself.
+        run: |
+          set -euo pipefail
+          git show "$BASE_SHA:scripts/check-dco.sh" > "$RUNNER_TEMP/check-dco.sh"
+          sh "$RUNNER_TEMP/check-dco.sh" "$BASE_SHA" "$HEAD_SHA"
 
   reproducibility:
     name: reproducibility (build twice, compare sha256)
@@ -284,12 +306,15 @@ jobs:
           SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
           export SOURCE_DATE_EPOCH
           sh scripts/repro-check.sh "$RUNNER_TEMP/repro"
-          if [ ! -f "$REPRO_SUMS_OUT" ]; then : > "$REPRO_SUMS_OUT"; fi
+          # AUD-RM0-INF-04: never publish an empty sums file as evidence.
+          if [ ! -s "$REPRO_SUMS_OUT" ]; then
+            echo "repro-check produced no SHA256SUMS" >&2; exit 1
+          fi
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: repro-sha256sums
           path: ${{ runner.temp }}/SHA256SUMS
-          if-no-files-found: ignore
+          if-no-files-found: error
           retention-days: 30
 
   sbom:
@@ -323,3 +348,56 @@ jobs:
           path: ${{ runner.temp }}/sbom
           if-no-files-found: ignore
           retention-days: 90
+
+  secret-scan:
+    # AUD-RM0-INF-08: committed key material (PEM/OpenSSH/OpenPGP private keys,
+    # age identities, GitHub/AWS tokens). Tracked tree on every run; full history
+    # on the schedule. Findings print path:line only, never the matched text.
+    name: secret-scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Scan tracked files
+        run: python3 scripts/check-secrets.py
+      - name: Scan full history (scheduled / manual)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: python3 scripts/check-secrets.py --history
+
+  supply-chain-scheduled:
+    # AUD-RM0-INF-06/07: second RustSec reader (cargo-audit) and zizmor's online
+    # audits (impostor commits, ref confusion, known-vulnerable actions), which
+    # need the GitHub API. Runs only on schedule / manual dispatch, never on PR
+    # code, with a read-only token.
+    name: supply-chain (scheduled cargo-audit, online zizmor)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt
+      - uses: ./.github/actions/cargo-install
+        with:
+          crate: cargo-audit
+          version: 0.22.1
+      - name: cargo audit (second advisory reader)
+        run: cargo audit --deny warnings
+      - uses: ./.github/actions/cargo-install
+        with:
+          crate: zizmor
+          version: 1.26.1
+      - name: zizmor (online audits)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: zizmor --persona=auditor .github
