@@ -606,7 +606,7 @@ fn fuzz_seeds() -> Vec<(&'static str, String, Vec<u8>)> {
 }
 
 #[test]
-#[allow(clippy::disallowed_methods)] // test-only: regenerates/compares committed fuzz seed files in this crate
+#[allow(clippy::disallowed_methods)] // test-only: regenerates/compares committed fuzz seed files in this crate; safefs-lint: allow(test-only fixture regeneration)
 fn fuzz_seeds_are_current() {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/fuzz/seeds/");
     let regen = std::env::var("CANDOR_REGEN_VECTORS").is_ok_and(|v| v == "1");
@@ -627,7 +627,7 @@ fn fuzz_seeds_are_current() {
 }
 
 #[test]
-#[allow(clippy::disallowed_methods)] // test-only: regenerates/compares committed vector files in this crate
+#[allow(clippy::disallowed_methods)] // test-only: regenerates/compares committed vector files in this crate; safefs-lint: allow(test-only fixture regeneration)
 fn vectors_are_current() {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/vectors/");
     let regen = std::env::var("CANDOR_REGEN_VECTORS").is_ok_and(|v| v == "1");

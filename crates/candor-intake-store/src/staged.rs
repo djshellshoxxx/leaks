@@ -28,14 +28,14 @@
 //!
 //! All calls block; run them on a blocking thread.
 
-use std::fs::File;
+use std::fs::File; // safefs-lint: allow(File only wraps an SCM_RIGHTS-received fd for pread; never opened by path)
 use std::io::{IoSlice, IoSliceMut, Write};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::fs::FileExt;
 
 use candor_safefs::{SafeRoot, SlotTime};
-use rustix::fs::FileType;
+use rustix::fs::FileType; // safefs-lint: allow(type check of received fd; no path access)
 use rustix::net::{
     RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, ReturnFlags, SendAncillaryBuffer,
     SendFlags,
@@ -154,7 +154,7 @@ pub fn receive_staged_bundle(
     if header.len > max_len.min(MAX_PART_PADDED_SIZE) {
         return Err(StoreError::InvalidInput("staged bundle too large"));
     }
-    let st = rustix::fs::fstat(&fd).map_err(io_err)?;
+    let st = rustix::fs::fstat(&fd).map_err(io_err)?; // safefs-lint: allow(fstat on received fd; no path access)
     if FileType::from_raw_mode(st.st_mode) != FileType::RegularFile {
         return Err(StoreError::InvalidInput(
             "staged descriptor not a regular file",
