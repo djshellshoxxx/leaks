@@ -631,7 +631,7 @@ impl IntakeStore for MemoryStore {
 
     async fn expire_replies(&self, today: Day, retention_days: u32) -> Result<u64> {
         let keep = retention_days.min(REPLY_WINDOW_DAYS);
-        self.purge_replies_before(today.saturating_minus(keep))
+        self.purge_replies_before(today.saturating_minus(keep).plus(1)?)
             .await
     }
 

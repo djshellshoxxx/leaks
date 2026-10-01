@@ -200,6 +200,7 @@ Family defaults:
 | SW-27 | GET `/rotate` | session(AUTHENTICATED) | — | S11r explanation and current-passphrase form (leads to SW-22) | default | 404 page if not authenticated | none | none | ADR-046(7) |
 | SW-28 | POST `/rotate/confirm` | session(PENDING_CONFIRM, rotation) + CSRF | `csrf`, `w_a`, `w_b`, `w_c` | On a match: C-07 completes `ROTATE_PASSPHRASE` (07 §5.2); the old passphrase stops working. On a mismatch: new positions (≤ 5) | 3/day/circuit | wrong-passphrase page | SS | none | Same confirmation rule as SW-26 |
 | SW-29 | GET/POST `/files/check` | session + CSRF (POST) | `csrf`, acknowledgement | S07 Metadata Warning (class from file extension only; server never parses files, ADR-012) | default | — | none | none | 11 §5.5 |
+| SW-30 | GET `/{lang}/safety/tips` | pub | — | S02b Safety tips page (all tips, both normal and high-risk tracks; static per locale; size class P1; 11a-SOURCE-SAFETY-TIPS.md) | default | — | none | none | TIP-001..013, ADR-051(2) |
 
 There are no other paths; this table matches 11 §5.5 route for route (r3). Any unlisted path returns the SW 404 page (same bytes as SW-02 unknown). GET forms of `/q`, `/identity`, `/files`, `/conversation` render the same screens as their POST rows without side effects.
 

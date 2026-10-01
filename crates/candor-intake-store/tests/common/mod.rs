@@ -489,7 +489,7 @@ pub async fn counters<S: IntakeStore, F: Fn(TenantId) -> Fut, Fut: Future<Output
     s.counter_add(m, ch, CounterName::SubmissionsReceived, 3).await.unwrap();
     s.counter_add(m, ch, CounterName::AccountsCreated, 1).await.unwrap();
     assert!(matches!(s.counter_add(m, ch, CounterName::AccountsCreated, u32::MAX).await, Err(StoreError::InvalidInput(_))));
-    let prev = Day(20696); // 2026-09-01
+    let prev = Day(20697); // 2026-09-01
     s.counter_add(prev, ch, CounterName::AccountDeletions, 4).await.unwrap();
     let cells = s.counters_for_month(m).await.unwrap();
     assert_eq!(cells.len(), 2);
