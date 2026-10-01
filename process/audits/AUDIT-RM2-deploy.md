@@ -886,3 +886,116 @@ Gate: **PASS 2026-10-01 7cae42f** for `deploy/` as committed.
 Fixed this round: DEP-25, DEP-26, DEP-27; the ADR-055(1) re-pin is verified. DEP-24 and DEP-23 stay fixed.
 
 Gate: **PASS 2026-10-01 c928760** for `deploy/` and `crates/candor-safe-read`. No open Critical, High or Medium findings; DEP-29 and DEP-30 are tracked. Live-only verification remains integration items 7–9.
+
+---
+
+## Re-test (round 6)
+
+| Field | Value |
+|---|---|
+| Date | 2026-10-01 |
+| Revision | `deploy/` as of HEAD `e9e6a1a`: 2a8974b, plus the ADR-056 change committed with 266f29c. The working tree equals HEAD for `deploy/`. Tested on a byte-identical scratch snapshot taken while the builder was still editing; I compared it with the final tree afterwards |
+| Scratch | `/var/tmp/aud6.*` and `/run/aud6wb.*`, both removed |
+
+### Tools
+
+| Check | Result |
+|---|---|
+| `CANDOR_TEST_PG=1 validate.sh` on a full `git archive` + `deploy/` snapshot | 408 PASS, 0 FAIL, exit 0 |
+| config-check on base / ce-single / ce-hardened | 884 OK each |
+| Reproducible build of `candor-safe-read` | sha256 `58b2bb3a…eccbbf6` **equals** the manifest pin |
+| `cargo test -p candor-safe-read` | 8 passed |
+| clippy `-D warnings` | clean |
+
+### Status of round-5 findings and the new rules
+
+| Item | Status | Evidence |
+|---|---|---|
+| DEP-29 (`memfd` exec) | **Fixed** | `vm.memfd_noexec = 2` is in the sysctl baseline. Static value 0, and a host-root `99-z.conf` with 1, are both rejected (`kernel.sysctl.vm.memfd_noexec`). Live `/proc/sys` remains an integration item |
+| DEP-30 (`--work-base`, reader output) | **Fixed** | See the two tables below |
+| Sealer memory rule (budget, staging, session upload, slots) | **Verified** | See the memory-rule table below |
+| ADR-056 (`MAX_SESSIONS=512`, `UPLOAD_SLOTS=512`) | **Verified** | See the ADR-056 table below. The manifest re-pin verifies |
+
+**DEP-30: `--work-base` ancestors.**
+
+| Base | Result |
+|---|---|
+| parent owned by `nobody` | exit 2 |
+| group-writable parent | exit 2 |
+| sticky world-writable parent | exit 2 |
+| base is a symlink | exit 2 |
+| symlinked ancestor | exit 2 |
+| `..` component | exit 2 |
+| relative path | exit 2 |
+| root-owned base, root-owned ancestors | accepted |
+
+**DEP-30: reader output.** The reader now creates OUT with `openat2` beneath the work-directory fd 3, using `O_EXCL|O_NOFOLLOW|O_NONBLOCK` and `RESOLVE_BENEATH|NO_SYMLINKS`.
+
+| OUT | Exit code |
+|---|---|
+| fresh name | 0 |
+| already exists | 15 |
+| symlink to `/etc/passwd` | 15, target untouched |
+| FIFO | 15, no hang |
+| absolute path or `..` | 2 |
+| symlinked directory inside OUT | 15, nothing created under `/etc` |
+| fd 3 missing, a file, or not private (0755) | 15 |
+
+`--md5` writes to its output file; stdout is empty. **The output-file design is approved.**
+
+**Sealer memory rule (effective unit, per profile).** All rejected with exit 30:
+- budget greater than `MemoryMax` − 1024, including when raised by a drop-in or a profile `MemoryMax`;
+- `MemoryMax=infinity`;
+- staging tmpfs smaller than the budget (in the unit, via the hardened profile, or `size=50%`);
+- session upload greater than budget / 2;
+- slots 15, 4097, missing, `0512`, or quoted;
+- `RUST_BACKTRACE` added on the same line, or a separate `RUST_LOG` line;
+- `Environment=` reset or `UnsetEnvironment` in a drop-in.
+
+A duplicate `Environment=` line takes the last value, matching systemd.
+
+**ADR-056.** Rejected with exit 30:
+- `MAX_SESSIONS` 15, 65537 or missing;
+- slots below sessions;
+- slice under 1 MiB (4096 slots against a 3840 MiB budget).
+
+The 16/16 minimum is accepted.
+
+### Fail-open sweep (item 4)
+
+Method: the script has no `pipefail` (`set -u` only). I injected failures by shadowing each tool with an `exit 2` shim, in static mode and in host-root mode.
+
+- **Fails closed (exit 30, or 2 for usage):** awk, grep, sed, cut, sort, tr, jq, wc, head, tail, cmp, sha256sum, stat, systemd-analyze, nft, tor, unshare, setpriv, timeout, and apparmor_parser in host mode.
+- **Fails open:** **comm** and **uniq**. With `comm` broken, a PostgreSQL key that is not on the allow-list passes the whole run (exit 0, verified; `pg.allowed_keys`, line 591). The same pattern exists elsewhere:
+  - `comm` in the sealer syscall-set and `scf-never` checks (lines 990–994) and the security-item check (884). The exact pinned unit lines and the threshold still catch real changes there.
+  - `uniq -d` in the torrc and PG duplicate checks (372, 588). tor's effective dump and the `pg.no_duplicates`/allow-list path still catch duplicates.
+- **mawk** is the system awk here. The fixer's mawk regex fix holds: no awk diagnostics in any run.
+
+#### AUD-RM2-DEP-31 — "no output" from a failed `comm`/`uniq` is read as "no difference"
+- Severity: Low
+- Location: `deploy/tools/config-check.sh:372, 588, 591, 884, 990-994`
+- Category: B10.7 (CWE-754, CWE-636)
+- Description: these command substitutions take the empty output of a failed pipeline stage as a pass. There is no `pipefail` and no check of the status. Verified: with `comm` unable to run (exit 2), `cluster_name = 'x'` in `candor-intake.conf` passes, exit 0.
+- Exploit scenario: a broken or replaced coreutils, or a resource limit that makes `comm` fail, silently disables the PostgreSQL allow-list. Integrity of `/usr/bin` rests on the package, so the precondition is high.
+- Fix recommendation: `set -o pipefail`, and test the status of every comparison substitution, or compute the set difference in one awk program that prints an explicit `DONE` sentinel and FAIL when it is absent. Add a validate case that runs with `comm` and `uniq` shims (exit 2) and expects exit 30. Apply the same rule to any future `| grep -c` / `| wc -l` counter.
+- Status: Open
+
+#### AUD-RM2-DEP-32 — The work-directory descriptor `{WORKFD}` is inherited by every child process
+- Severity: Info
+- Location: `config-check.sh:161` (`exec {WORKFD}<"$WORK"`)
+- Description: bash `{var}` descriptors are not close-on-exec, so tor (run as `_tor-candor-intake`), `postgres -C`, `psql` (`candor-imaint`), nft and apparmor_parser inherit a read fd to the root 0700 work directory. This is not exploitable today: lookups through a directory fd still need search permission on that root 0700 directory. Pass it only to `candor-safe-read` (`3<&"$WORKFD"`) and close it for every other command (`{WORKFD}<&-`), as least privilege.
+- Status: Open
+
+### Round-6 gate
+
+| Severity | Open | IDs |
+|---|---|---|
+| Critical | 0 | — |
+| High | 0 | — |
+| Medium | 0 | — |
+| Low | 1 | DEP-31 |
+| Info | 3 | DEP-13, DEP-28, DEP-32 |
+
+DEP-29 and DEP-30 are fixed. The sealer memory rule and ADR-056 are verified.
+
+Gate: **PASS 2026-10-01 e9e6a1a** for `deploy/` and `crates/candor-safe-read`. Live-only checks remain integration items 7–9 (memfd_noexec on `/proc/sys`, AppArmor `raw_data`, `systemctl show`).

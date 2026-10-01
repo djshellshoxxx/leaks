@@ -710,3 +710,44 @@ Gate: **PASS** 2026-10-01 (working tree on ff8b5c4; it must be committed unchang
 - **Info:**
   - `MemoryStore::blob_referenced` will be made fail-closed when the store is uninitialised (done in the same change).
   - The 30 s role default during `BEGIN`/setup is accepted, because the sealer's 60 s bound applies and it fails safe.
+
+---
+
+## Re-test (round 7) — delta: VACUUM FULL test, `F_SEAL_EXEC`, MemoryStore fail-closed
+
+HEAD `e9e6a1a` (no uncommitted changes in the crate). Compared against `ff8b5c4`.
+
+**Runs:** `pg-test.sh` full suite 32 + 18 + 37 + 6 + 20 pass. `pg_vacuum_full_erases_old_images` was run **30× in one cluster: 30 pass / 0 fail**.
+
+**1) `pg_vacuum_full_erases_old_images`: accepted, no weakening.**
+
+| Aspect | Old (ff8b5c4) | New (e9e6a1a) |
+|---|---|---|
+| Relations | heap + TOAST + all indexes (main fork) | same set (`intake_relations` unchanged) |
+| FSM / VM / WAL | not scanned | not scanned (unchanged; FSM/VM hold no tuple data; WAL is the documented 09 §13 residual) |
+| Positive control before FULL | 8-byte pattern hits > 0 | the same pattern control **plus** the structural scan must report residue |
+| relfilenode changed, content and single slot xmin unchanged | yes | yes |
+| After FULL | unanchored 8-byte search for `[old xmin][slot xid]`, `[chunk_id][0]` (TOAST), `[va_valueid][toastrelid]` anywhere | per page: every byte outside header, line-pointer array, `LP_NORMAL` items and special space must be **zero** (strictly stronger for free-space residue, any pattern); live heap/TOAST tuples must not carry an old xmin; TOAST chunks and TOAST-index keys must not carry an old chunk id; heap items must not hold an old TOAST pointer |
+
+- Only one assertion was dropped: the unanchored header search *inside live items*. PostgreSQL never copies a pre-rewrite tuple image into a live tuple's data, so this loses no detection.
+- Index items other than TOAST-index keys are not inspected, but stale index bytes can only sit in free space (now required to be zero) or in `LP_DEAD` items. `LP_DEAD` items are not marked covered, so they fail the zero check: the scan is conservative and cannot falsely pass.
+- The `_bt_slideleft` exception accepts exactly one copy of the last line pointer (an offset/length, no data), which matches nbtree's sort-build behaviour in PG 16.
+
+**Root cause:** plausible and consistent with the ~1/30 rate.
+- Test xids and OIDs are small, cluster-wide counters shared by many test DBs. With ~15 old xids, `[old xmin LE][slot xid]` needs only the two high bytes (zeros, often alignment padding) plus two low bytes of preceding data (a signature tail) to match before a new header with `xmin = slot`: about #old / 65,536 per live tuple × hundreds of tuples ≈ 1/30.
+- `[chunk_id][0]` similarly matches a new TOAST header whose `xmin` equals an old chunk OID.
+- Independent corroboration: my round-4 raw-page PoC found 0 hits after `VACUUM FULL` on a fresh database.
+
+No real residue is hidden.
+
+**2) `F_SEAL_EXEC`: Fixed.** `REQUIRED_SEALS` now includes `EXEC`. The negative variant "no SEAL_EXEC" is in `staged_bundle_hostile_variants_refused`, and fixtures use `MFD_NOEXEC_SEAL`, so the missing-seal variants are not masked by implied seals. The sealer's `BundleWriter` uses `MFD_NOEXEC_SEAL` and adds `EXEC` (interop OK). Info: `MFD_NOEXEC_SEAL` needs Linux ≥ 6.3; the sealer fails closed with `EINVAL` on older kernels, so the H-INTAKE kernel floor must be recorded (deploy, alongside DEP-29 `vm.memfd_noexec = 2`).
+
+**3) MemoryStore: Fixed.** `blob_referenced` calls `st.meta()?` → `NotInitialized`; `staged_sweep_uninitialised_memory_store_fails_closed` passes and nothing is deleted.
+
+Open after round 7: Critical/High/Medium 0; Low: STO-29 (tracked). Gate: **PASS** 2026-10-01 e9e6a1a. The residual acceptances from round 4 are still pending with the lead.
+
+## Lead note after round 7 (2026-10-01)
+- **Gate: PASS at e9e6a1a.**
+- The round-4 residual acceptances were recorded under "Lead dispositions after round 4" above, as five accepted residuals plus the STO-26 closure via ADR-054.
+- **Kernel floor:** Linux ≥ 6.3 is required for `F_SEAL_EXEC`; it is assigned to deploy (manifest plus a host check).
+- **STO-29 (Low):** tracked for wave 2.
