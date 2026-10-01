@@ -32,8 +32,9 @@ updates:
     cooldown:
       default-days: 14
     open-pull-requests-limit: 10
-    # Dependencies are pinned "=x.y.z"; keep them exact.
-    versioning-strategy: increase
+    # Direct dependencies are pinned "=x.y.z" and bumped by humans in Cargo.toml after
+    # review (28 §5.1 item 5); Dependabot only proposes Cargo.lock updates.
+    versioning-strategy: lockfile-only
     commit-message:
       prefix: "deps"
     labels: ["dependencies", "supply-chain"]
