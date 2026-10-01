@@ -27,6 +27,11 @@ address given. CI (`scripts/check-dco.sh`) rejects PRs containing unsigned commi
 To fix a branch: `git rebase --signoff <base>`. Commits that predate the DCO
 policy (reachable from the commit recorded in `.dco-epoch` at the repository
 root) are exempt; every later commit must be signed off.
+Merge commits are checked too: sign them off (`git merge --signoff`; note that
+`-s` means --strategy for merge) or, preferably, rebase
+instead of merging the base branch into your PR. CI runs the checker and reads
+`.dco-epoch` from the PR's **base** revision, so changes to either take effect
+only after they are merged (both are owned by the Security Lead in CODEOWNERS).
 
 ## 2. Licensing of your contribution
 

@@ -30,6 +30,15 @@ An imported audit never grants `candor-crypto-reviewed`.
   `candor-crypto-reviewed`. Add a `[policy.<first-party crate>]` entry with
   `dependency-criteria = { <crate> = ["safe-to-deploy", "candor-crypto-reviewed"] }`
   for each first-party crate that depends on them directly (candor-core first).
+- `candor-crypto-reviewed` is NEVER granted by an exemption (AUD-RM0-INF-05):
+  exemptions are `safe-to-deploy` only, and the crypto set (and its transitive
+  dependencies, which cargo-vet requires to meet the same criterion) needs real
+  audits recorded by a Crypto Reviewer with `cargo vet certify <crate> <ver>
+  candor-crypto-reviewed`. Until those audits exist, `cargo vet` fails and the
+  missing reviews are a release blocker — do not paper over them with
+  exemptions. `scripts/check-vet-policy.py` (CI job cargo-vet) enforces this,
+  the expiry notes, a policy for every crate under `crates/`, and completed
+  import approvals.
 - Exemptions expire after ≤ 180 days. cargo-vet has no expiry field, so every
   exemption's `notes` must contain `expires YYYY-MM-DD`; reviewers reject
   exemptions without it.

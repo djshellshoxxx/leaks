@@ -166,7 +166,7 @@ What I checked, reading the diff as an attacker:
   - **tor.** tor has every `*Port` set to 0 and no TCP listener. Its only service target is a Unix socket.
   - **Web and PostgreSQL.** The web service and PostgreSQL have no network namespace access at all.
   - **Relay port.** The only inbound IP port is relay0:7443. It is restricted three times: by `BindToDevice`, by the socket unit's `IPAddressDeny=any` plus the single allowed address, and by nftables `@core_relay`.
-  - **Config check.** config-check rejects 78 mutations, including a SocksPort, ControlPort or MetricsPort, a TCP onion target, an extra HiddenServicePort, inbound HTTP and a PostgreSQL TCP listener.
+  - **Config check.** config-check rejects 80 mutations, including a SocksPort, ControlPort or MetricsPort, a TCP onion target, an extra HiddenServicePort, inbound HTTP and a PostgreSQL TCP listener.
 - **Egress and no clearnet fallback.**
   - **ext0.** Only the two tor UIDs may leave ext0, TCP only, and only to public addresses.
   - **Candor services.** They have `PrivateNetwork=yes` and AF_UNIX only, plus nftables.
