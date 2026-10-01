@@ -782,10 +782,18 @@ async fn staged_sweep_bounded_per_slot() {
     use candor_intake_store::staged::STAGED_SWEEP_MAX_REMOVALS;
     let e = env();
     let m = mem_store().await;
-    for _ in 0..STAGED_SWEEP_MAX_REMOVALS + 6 {
+    // Two crashed receivers (each bounded to its in-flight limit).
+    for _ in 0..STAGED_SWEEP_MAX_REMOVALS {
         std::mem::forget(received(&e));
     }
-    let rx2 = restart(&e);
+    let e2 = Env {
+        rx: restart(&e),
+        tmp: e.tmp,
+    };
+    for _ in 0..6 {
+        std::mem::forget(received(&e2));
+    }
+    let rx2 = restart(&e2);
     assert_eq!(
         rx2.startup(&m, slot()).await.unwrap(),
         STAGED_SWEEP_MAX_REMOVALS
