@@ -17,8 +17,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use candor_sealer::proto::{
-    ErrorCode, PROTO_VERSION, Request, Response, decode_response, encode_request, frame,
-    frame_len,
+    ErrorCode, PROTO_VERSION, Request, Response, decode_response, encode_request, frame, frame_len,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
@@ -84,10 +83,11 @@ impl SealerClient {
     ) -> Result<Response, SealerError> {
         let msg = encode_request(rid, req).map_err(|_| SealerError::Unavailable)?;
         let f = frame(&msg).map_err(|_| SealerError::Unavailable)?;
-        s.write_all(&f).await.map_err(|_| SealerError::Unavailable)?;
+        s.write_all(&f)
+            .await
+            .map_err(|_| SealerError::Unavailable)?;
         let body = Self::read_frame(s).await?;
-        let (got, resp) =
-            decode_response(req.op(), &body).map_err(|_| SealerError::Unavailable)?;
+        let (got, resp) = decode_response(req.op(), &body).map_err(|_| SealerError::Unavailable)?;
         if got != rid {
             return Err(SealerError::Unavailable);
         }

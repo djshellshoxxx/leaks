@@ -22,6 +22,9 @@ criteria = "safe-to-deploy"
 [policy.candor-intake-store]
 criteria = "safe-to-deploy"
 
+[policy.candor-intake-web]
+criteria = "safe-to-deploy"
+
 [policy.candor-log]
 criteria = "safe-to-deploy"
 

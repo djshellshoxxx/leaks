@@ -78,7 +78,11 @@ pub const REGISTRY: [RouteDecl; 22] = [
     d(Route::Safety, true, None),
     d(Route::SafetyTips, true, None),
     d(Route::Status, true, None),
-    d(Route::New, true, p(PostAuth::PreOrSession, Some(Class::NewSession))),
+    d(
+        Route::New,
+        true,
+        p(PostAuth::PreOrSession, Some(Class::NewSession)),
+    ),
     d(Route::Concerns, true, p(S, None)),
     d(Route::Questionnaire, true, p(S, None)),
     d(Route::Identity, true, p(S, None)),
@@ -96,7 +100,11 @@ pub const REGISTRY: [RouteDecl; 22] = [
     d(Route::Check, false, p(S, None)),
     d(Route::NewPhrase, false, p(S, Some(Class::NewPhrase))),
     d(Route::Submit, false, p(S, Some(Class::Submit))),
-    d(Route::Login, true, p(PostAuth::PreOrSession, Some(Class::Login))),
+    d(
+        Route::Login,
+        true,
+        p(PostAuth::PreOrSession, Some(Class::Login)),
+    ),
     d(Route::Inbox, true, p(S, None)),
     d(
         Route::Conversation,
@@ -358,14 +366,28 @@ mod tests {
     #[test]
     fn unknown_paths_are_not_routes() {
         for p in [
-            "", "/en", "/en//", "/de/", "/en/q/", "/en/Q", "/en/static/x.css", "/en/../en/",
-            "/app/v1/replies", "/en/saved", "/en/keys", "/en/verify", "/.well-known/x",
+            "",
+            "/en",
+            "/en//",
+            "/de/",
+            "/en/q/",
+            "/en/Q",
+            "/en/static/x.css",
+            "/en/../en/",
+            "/app/v1/replies",
+            "/en/saved",
+            "/en/keys",
+            "/en/verify",
+            "/.well-known/x",
         ] {
             assert!(lookup(p).is_none(), "{p}");
         }
         assert_eq!(lookup("/").unwrap().1.route, Route::Landing);
         assert_eq!(lookup("/en/").unwrap().1.route, Route::Landing);
-        assert_eq!(lookup("/en/safety/tips").unwrap().1.route, Route::SafetyTips);
+        assert_eq!(
+            lookup("/en/safety/tips").unwrap().1.route,
+            Route::SafetyTips
+        );
     }
 
     /// Deny by default: every route accepts only its own fields.

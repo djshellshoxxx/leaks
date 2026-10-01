@@ -78,7 +78,7 @@ impl Class {
 
     /// `(capacity, refill period of the whole capacity)`.
     fn limit(self) -> (u64, Duration) {
-        let min = |m| Duration::from_secs(60 * m);
+        let min = |m: u64| Duration::from_secs(m.saturating_mul(60));
         match self {
             // 60 per minute with a burst of 20: refill 20 tokens in 20 s.
             Self::Request => (20, Duration::from_secs(20)),
@@ -113,13 +113,11 @@ impl Bucket {
 
     fn take(&mut self, cap: u64, period: Duration, now: Instant) -> bool {
         let max = cap.saturating_mul(1000);
-        let el = u64::try_from(now.saturating_duration_since(self.at).as_millis()).unwrap_or(u64::MAX);
+        let el =
+            u64::try_from(now.saturating_duration_since(self.at).as_millis()).unwrap_or(u64::MAX);
         let per = u64::try_from(period.as_millis()).unwrap_or(u64::MAX).max(1);
         // refill = elapsed_ms × cap × 1000 / period_ms (saturating).
-        let refill = el
-            .saturating_mul(max)
-            .checked_div(per)
-            .unwrap_or(max);
+        let refill = el.saturating_mul(max).checked_div(per).unwrap_or(max);
         self.milli = self.milli.saturating_add(refill).min(max);
         self.at = now;
         if self.milli >= 1000 {
@@ -335,7 +333,11 @@ mod tests {
             assert!(l.allow(l.token(i), Class::Request, t0));
         }
         assert_eq!(l.tracked(), 10);
-        assert!(l.allow(l.token(100), Class::Request, t0 + CIRCUIT_IDLE + Duration::from_secs(61)));
+        assert!(l.allow(
+            l.token(100),
+            Class::Request,
+            t0 + CIRCUIT_IDLE + Duration::from_secs(61)
+        ));
         assert_eq!(l.tracked(), 1);
     }
 

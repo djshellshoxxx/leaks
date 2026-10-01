@@ -606,8 +606,13 @@ impl StagedReceiver {
         set_socket_timeout(sock, Timeout::Send, Some(self.timeout)).map_err(io_err)?;
         let msg = encode_staged_ack(code, sha256);
         let mut control = SendAncillaryBuffer::default();
-        let n = rustix::net::sendmsg(sock, &[IoSlice::new(&msg)], &mut control, SendFlags::NOSIGNAL)
-            .map_err(io_err)?;
+        let n = rustix::net::sendmsg(
+            sock,
+            &[IoSlice::new(&msg)],
+            &mut control,
+            SendFlags::NOSIGNAL,
+        )
+        .map_err(io_err)?;
         if n != STAGED_ACK_LEN {
             return Err(StoreError::Backend);
         }

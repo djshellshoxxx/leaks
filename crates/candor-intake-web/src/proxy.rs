@@ -110,7 +110,12 @@ mod tests {
             b"PROXY UNKNOWN\r\n",
             b"GET / HTTP/1.1\r\n",
         ] {
-            assert_eq!(parse_proxy_line(bad), None, "{}", String::from_utf8_lossy(bad));
+            assert_eq!(
+                parse_proxy_line(bad),
+                None,
+                "{}",
+                String::from_utf8_lossy(bad)
+            );
         }
         assert_eq!(find_line_end(b"abc\r\nrest"), Some(5));
         assert_eq!(find_line_end(&[b'a'; 200]), None);

@@ -46,8 +46,9 @@ pub struct Confirm {
     pub positions: [u8; 3],
     /// No attempts left (only "new passphrase" and "discard" remain).
     pub exhausted: bool,
-    /// The last attempt failed (render the mismatch error).
-    pub failed: bool,
+    /// Failed attempts for this passphrase (11 S10c: after 3, only "Get a
+    /// new passphrase" and "Discard" remain; the sealer erases at 5).
+    pub failures: u8,
 }
 
 /// One web session.
@@ -263,11 +264,17 @@ mod tests {
         // 114 min: still alive; 120 min: gone even with recent activity.
         t = t0 + 119 * m;
         assert_eq!(s.with(&[1; 32], t, true, |_| ()), Ok(()));
-        assert_eq!(s.with(&[1; 32], t0 + 120 * m, true, |_| ()), Err(Lookup::Gone));
+        assert_eq!(
+            s.with(&[1; 32], t0 + 120 * m, true, |_| ()),
+            Err(Lookup::Gone)
+        );
         // Idle: 20 minutes without activity ends it.
         s.insert([2; 32], WebSession::new(Phase::Drafting, t0).unwrap());
         assert_eq!(s.with(&[2; 32], t0 + 19 * m, false, |_| ()), Ok(()));
-        assert_eq!(s.with(&[2; 32], t0 + 20 * m, true, |_| ()), Err(Lookup::Gone));
+        assert_eq!(
+            s.with(&[2; 32], t0 + 20 * m, true, |_| ()),
+            Err(Lookup::Gone)
+        );
         // A peek without touch does not extend.
         s.insert([3; 32], WebSession::new(Phase::Drafting, t0).unwrap());
         assert_eq!(s.with(&[3; 32], t0 + 10 * m, false, |_| ()), Ok(()));
@@ -282,12 +289,21 @@ mod tests {
         for i in 0..MAX_SESSIONS {
             let mut k = [0u8; 32];
             k[..8].copy_from_slice(&(i as u64).to_be_bytes());
-            s.insert(k, WebSession::new(Phase::Drafting, t0 + Duration::from_millis(i as u64)).unwrap());
+            s.insert(
+                k,
+                WebSession::new(Phase::Drafting, t0 + Duration::from_millis(i as u64)).unwrap(),
+            );
         }
-        s.insert([9; 32], WebSession::new(Phase::Drafting, t0 + Duration::from_secs(100)).unwrap());
+        s.insert(
+            [9; 32],
+            WebSession::new(Phase::Drafting, t0 + Duration::from_secs(100)).unwrap(),
+        );
         assert_eq!(s.len(), MAX_SESSIONS);
         // Entry 0 (oldest) was evicted.
-        assert!(s.with(&[0; 32], t0 + Duration::from_secs(101), false, |_| ()).is_err());
+        assert!(
+            s.with(&[0; 32], t0 + Duration::from_secs(101), false, |_| ())
+                .is_err()
+        );
     }
 
     #[test]

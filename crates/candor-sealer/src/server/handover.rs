@@ -124,6 +124,19 @@ impl StagedBundle {
         self.fd.as_fd()
     }
 
+    /// Seal `data` into a new immutable anonymous file (the same writer the
+    /// sealer uses for real bundles). For integration tests and in-process
+    /// tooling; refuses empty data and data above [`MAX_BUNDLE_LEN`].
+    pub fn from_bytes(data: &[u8]) -> std::io::Result<Self> {
+        let too_big = u64::try_from(data.len()).map_or(true, |n| n > MAX_BUNDLE_LEN);
+        if data.is_empty() || too_big {
+            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
+        }
+        let mut w = BundleWriter::new()?;
+        std::io::Write::write_all(&mut w, data)?;
+        w.finish()
+    }
+
     /// Read the whole file (`pread` from offset 0), for in-process sinks and
     /// tests. Bounded by the recorded length.
     pub fn read_to_vec(&self) -> Result<Vec<u8>, SinkError> {

@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# cargo-fuzz layout (IMPL-RM2 §2.6/§5; ST-044 fuzz_http_request, ST-054
+# fuzz_form_urlencoded, ST-043 fuzz_multipart_intake). Run from
+# crates/candor-intake-web, for example:
+#   cargo +nightly-2026-09-28 fuzz run fuzz_http_request <corpus> fuzz/seeds/fuzz_http_request \
+#     -- -max_total_time=60 -rss_limit_mb=2048 -timeout=10
+# Own workspace so the main workspace never builds libFuzzer.
+[package]
+name = "candor-intake-web-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "AGPL-3.0-or-later"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.10"
+candor-intake-web = { path = ".." }
+candor-source-ui = { path = "../../candor-source-ui" }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "fuzz_http_request"
+path = "fuzz_targets/fuzz_http_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_form_urlencoded"
+path = "fuzz_targets/fuzz_form_urlencoded.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_multipart_intake"
+path = "fuzz_targets/fuzz_multipart_intake.rs"
+test = false
+doc = false
+bench = false

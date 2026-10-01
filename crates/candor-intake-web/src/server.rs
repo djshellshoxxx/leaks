@@ -102,7 +102,12 @@ impl BodyReader {
         }
         if self.pos < self.leftover.len() {
             let end = self.pos.saturating_add(max).min(self.leftover.len());
-            let out = Zeroizing::new(self.leftover.get(self.pos..end).unwrap_or_default().to_vec());
+            let out = Zeroizing::new(
+                self.leftover
+                    .get(self.pos..end)
+                    .unwrap_or_default()
+                    .to_vec(),
+            );
             self.pos = end;
             return Ok(Some(out));
         }
@@ -112,7 +117,9 @@ impl BodyReader {
         let Some(r) = self.reader.as_mut() else {
             return Err(BodyError::Stalled);
         };
-        let want = usize::try_from(self.remaining).unwrap_or(usize::MAX).min(max);
+        let want = usize::try_from(self.remaining)
+            .unwrap_or(usize::MAX)
+            .min(max);
         let mut buf = Zeroizing::new(vec![0u8; want]);
         let idle_end = Instant::now()
             .checked_add(BODY_IDLE_TIMEOUT)
@@ -262,7 +269,11 @@ async fn linger(mut w: OwnedWriteHalf, r: Option<OwnedReadHalf>) {
     }
 }
 
-async fn connection<S: StoreReads + 'static>(web: Arc<Web<S>>, mut stream: UnixStream, overflow: bool) {
+async fn connection<S: StoreReads + 'static>(
+    web: Arc<Web<S>>,
+    mut stream: UnixStream,
+    overflow: bool,
+) {
     let received = Instant::now();
     let Some((circuit_id, buf, head_end)) = read_head(&mut stream).await else {
         return;
@@ -325,9 +336,7 @@ async fn connection<S: StoreReads + 'static>(web: Arc<Web<S>>, mut stream: UnixS
         reader: Some(rd),
         remaining: cl.saturating_sub(left),
         total: cl,
-        deadline: received
-            .checked_add(FORM_TOTAL_TIMEOUT)
-            .unwrap_or(received),
+        deadline: received.checked_add(FORM_TOTAL_TIMEOUT).unwrap_or(received),
     };
     let post_or_cookie = head.method == Method::Post || head.session_cookie_present;
     let task = tokio::spawn(Arc::clone(&web).handle(head, circuit, received, body));

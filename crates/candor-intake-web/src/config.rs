@@ -103,10 +103,11 @@ pub struct ChannelConfig {
     pub id: [u8; 16],
     /// S04 option. Its `id` must be the lowercase hex of [`ChannelConfig::id`].
     pub option: ChannelOption,
-    /// Role labels for the S04b checklist (index = `coi_label` value).
-    pub roles: Vec<String>,
-    /// Report categories offered at S05 step 3.
-    pub categories: Vec<ChoiceOption>,
+    /// Role labels for the S04b checklist: `(role-label id, label)`; the
+    /// form value is the index, the sealer receives the id.
+    pub roles: Vec<(u16, String)>,
+    /// Report categories offered at S05 step 3: `(category id, option)`.
+    pub categories: Vec<(u16, ChoiceOption)>,
 }
 
 impl core::fmt::Debug for ChannelConfig {
@@ -208,7 +209,9 @@ impl std::error::Error for ConfigError {}
 
 fn onion_ok(h: &str) -> bool {
     h.strip_suffix(".onion").is_some_and(|b| {
-        b.len() == 56 && b.bytes().all(|c| c.is_ascii_lowercase() || (b'2'..=b'7').contains(&c))
+        b.len() == 56
+            && b.bytes()
+                .all(|c| c.is_ascii_lowercase() || (b'2'..=b'7').contains(&c))
     })
 }
 

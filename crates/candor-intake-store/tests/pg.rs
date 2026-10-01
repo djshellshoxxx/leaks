@@ -2011,10 +2011,21 @@ async fn pg_staged_ack_after_commit() {
         len: data.len() as u64,
         sha256: sha2::Sha256::digest(&data).into(),
     };
-    let ack = |want: u8| {
-        let mut x = [0u8; 2];
+    // STO-29: every acknowledgement is `code ‖ sha256` (33 bytes); each
+    // successful receive first queues `0x02 ‖ h` ("copied").
+    let ack = |want: u8| loop {
+        let mut x = [0u8; 40];
         let n = rustix::net::recv(&sealer, &mut x, rustix::net::RecvFlags::DONTWAIT).unwrap();
-        assert_eq!((n.0, x[0]), (1, want));
+        assert_eq!(n.0, 33);
+        if x[0] == 0x02 {
+            assert_eq!(&x[1..33], &h.sha256, "copied ack echoes the bundle hash");
+            continue;
+        }
+        assert_eq!(x[0], want);
+        if want == 0x01 {
+            assert_eq!(&x[1..33], &h.sha256, "commit ack echoes the bundle hash");
+        }
+        break;
     };
     let mut env0 = common::envelope(0);
     {
@@ -2288,9 +2299,17 @@ async fn pg_staged_stalled_commit_refused() {
         "refused within the per-attempt cap"
     );
     rx.refuse(store_sock.as_fd()).unwrap();
-    let mut x = [0u8; 2];
-    let n = rustix::net::recv(&sealer, &mut x, rustix::net::RecvFlags::DONTWAIT).unwrap();
-    assert_eq!((n.0, x[0]), (1, 0x00));
+    // STO-29: `0x02 ‖ h` after the copy, then the refusal `0x00 ‖ 0³²`.
+    let mut codes = Vec::new();
+    loop {
+        let mut x = [0u8; 40];
+        let Ok(n) = rustix::net::recv(&sealer, &mut x, rustix::net::RecvFlags::DONTWAIT) else {
+            break;
+        };
+        assert_eq!(n.0, 33);
+        codes.push(x[0]);
+    }
+    assert_eq!(codes, vec![0x02, 0x00]);
     sqlx::raw_sql("ROLLBACK")
         .execute(&mut holder)
         .await

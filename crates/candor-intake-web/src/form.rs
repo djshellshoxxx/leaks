@@ -238,8 +238,20 @@ fn validate(raw: &[u8], rule: &Rule) -> Result<Zeroizing<String>, FormError> {
             let s = core::str::from_utf8(raw).map_err(|_| FormError::Invalid(rule.name))?;
             Ok(Zeroizing::new(s.to_owned()))
         }
-        Kind::Short => text(raw, rule, false, MAX_SHORT_CHARS, MAX_SHORT_CHARS.saturating_mul(4)),
-        Kind::Name => text(raw, rule, false, MAX_NAME_CHARS, MAX_NAME_CHARS.saturating_mul(4)),
+        Kind::Short => text(
+            raw,
+            rule,
+            false,
+            MAX_SHORT_CHARS,
+            MAX_SHORT_CHARS.saturating_mul(4),
+        ),
+        Kind::Name => text(
+            raw,
+            rule,
+            false,
+            MAX_NAME_CHARS,
+            MAX_NAME_CHARS.saturating_mul(4),
+        ),
         Kind::Long => text(raw, rule, true, MAX_LONG_CHARS, MAX_LONG_BYTES),
         Kind::Secret { max } => {
             if raw.len() > max {
@@ -257,7 +269,13 @@ fn validate(raw: &[u8], rule: &Rule) -> Result<Zeroizing<String>, FormError> {
             if raw.len() > MAX_WORD_BYTES {
                 return Err(FormError::TooLong(rule.name));
             }
-            text(raw, rule, false, MAX_WORD_BYTES, MAX_WORD_BYTES.saturating_mul(3))
+            text(
+                raw,
+                rule,
+                false,
+                MAX_WORD_BYTES,
+                MAX_WORD_BYTES.saturating_mul(3),
+            )
         }
     }
 }
@@ -327,7 +345,11 @@ pub fn is_urlencoded(content_type: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
     use super::*;
 
     fn rules(n: &str) -> Option<Rule> {
@@ -344,7 +366,11 @@ mod tests {
 
     #[test]
     fn parses_and_normalises() {
-        let f = parse_form(b"csrf=ab_-9&what=a%0D%0Ab+c&coi_label=1&coi_label=2", &rules).unwrap();
+        let f = parse_form(
+            b"csrf=ab_-9&what=a%0D%0Ab+c&coi_label=1&coi_label=2",
+            &rules,
+        )
+        .unwrap();
         assert_eq!(f.get("csrf"), Some("ab_-9"));
         assert_eq!(f.get("what"), Some("a\nb c"));
         assert_eq!(f.all("coi_label").collect::<Vec<_>>(), vec!["1", "2"]);
@@ -355,45 +381,111 @@ mod tests {
 
     #[test]
     fn rejects_unknown_duplicate_and_malformed() {
-        assert_eq!(parse_form(b"x=1", &rules).unwrap_err(), FormError::UnknownField);
-        assert_eq!(parse_form(b"csrf=a&csrf=b", &rules).unwrap_err(), FormError::Duplicate);
-        assert_eq!(parse_form(b"csrf=%4", &rules).unwrap_err(), FormError::Malformed);
-        assert_eq!(parse_form(b"csrf=%zz", &rules).unwrap_err(), FormError::Malformed);
-        assert_eq!(parse_form(b"csrf", &rules).unwrap_err(), FormError::Malformed);
-        assert_eq!(parse_form(b"csrf=a&", &rules).unwrap_err(), FormError::Malformed);
-        assert_eq!(parse_form(b"CSRF=a", &rules).unwrap_err(), FormError::Malformed);
-        assert_eq!(parse_form(b"what=%FF", &rules).unwrap_err(), FormError::Invalid("what"));
-        assert_eq!(parse_form(b"what=a%00", &rules).unwrap_err(), FormError::Invalid("what"));
-        assert_eq!(parse_form(b"what=a%C2%85", &rules).unwrap_err(), FormError::Invalid("what"));
-        assert_eq!(parse_form(b"where=a%0Ab", &rules).unwrap_err(), FormError::Invalid("where"));
-        assert_eq!(parse_form(b"what=a%0Db", &rules).unwrap_err(), FormError::Invalid("what"));
+        assert_eq!(
+            parse_form(b"x=1", &rules).unwrap_err(),
+            FormError::UnknownField
+        );
+        assert_eq!(
+            parse_form(b"csrf=a&csrf=b", &rules).unwrap_err(),
+            FormError::Duplicate
+        );
+        assert_eq!(
+            parse_form(b"csrf=%4", &rules).unwrap_err(),
+            FormError::Malformed
+        );
+        assert_eq!(
+            parse_form(b"csrf=%zz", &rules).unwrap_err(),
+            FormError::Malformed
+        );
+        assert_eq!(
+            parse_form(b"csrf", &rules).unwrap_err(),
+            FormError::Malformed
+        );
+        assert_eq!(
+            parse_form(b"csrf=a&", &rules).unwrap_err(),
+            FormError::Malformed
+        );
+        assert_eq!(
+            parse_form(b"CSRF=a", &rules).unwrap_err(),
+            FormError::Malformed
+        );
+        assert_eq!(
+            parse_form(b"what=%FF", &rules).unwrap_err(),
+            FormError::Invalid("what")
+        );
+        assert_eq!(
+            parse_form(b"what=a%00", &rules).unwrap_err(),
+            FormError::Invalid("what")
+        );
+        assert_eq!(
+            parse_form(b"what=a%C2%85", &rules).unwrap_err(),
+            FormError::Invalid("what")
+        );
+        assert_eq!(
+            parse_form(b"where=a%0Ab", &rules).unwrap_err(),
+            FormError::Invalid("where")
+        );
+        assert_eq!(
+            parse_form(b"what=a%0Db", &rules).unwrap_err(),
+            FormError::Invalid("what")
+        );
         // Unknown field wins over a field error.
-        assert_eq!(parse_form(b"what=%00&x=1", &rules).unwrap_err(), FormError::UnknownField);
+        assert_eq!(
+            parse_form(b"what=%00&x=1", &rules).unwrap_err(),
+            FormError::UnknownField
+        );
         let many = vec!["coi_label=1"; MAX_FORM_FIELDS + 1].join("&");
-        assert_eq!(parse_form(many.as_bytes(), &rules).unwrap_err(), FormError::Malformed);
+        assert_eq!(
+            parse_form(many.as_bytes(), &rules).unwrap_err(),
+            FormError::Malformed
+        );
     }
 
     #[test]
     fn limits_are_exact() {
         // 500 characters pass, 501 fail (boundary values, SI-A-02).
         let ok = format!("where={}", "%C3%A9".repeat(MAX_SHORT_CHARS));
-        assert_eq!(parse_form(ok.as_bytes(), &rules).unwrap().get("where").unwrap().chars().count(), 500);
+        assert_eq!(
+            parse_form(ok.as_bytes(), &rules)
+                .unwrap()
+                .get("where")
+                .unwrap()
+                .chars()
+                .count(),
+            500
+        );
         let bad = format!("where={}", "a".repeat(MAX_SHORT_CHARS + 1));
-        assert_eq!(parse_form(bad.as_bytes(), &rules).unwrap_err(), FormError::TooLong("where"));
+        assert_eq!(
+            parse_form(bad.as_bytes(), &rules).unwrap_err(),
+            FormError::TooLong("where")
+        );
         let long = format!("what={}", "a".repeat(MAX_LONG_CHARS));
         assert!(parse_form(long.as_bytes(), &rules).is_ok());
         let long = format!("what={}", "a".repeat(MAX_LONG_CHARS + 1));
-        assert_eq!(parse_form(long.as_bytes(), &rules).unwrap_err(), FormError::TooLong("what"));
+        assert_eq!(
+            parse_form(long.as_bytes(), &rules).unwrap_err(),
+            FormError::TooLong("what")
+        );
         let pw = format!("passphrase={}", "a".repeat(257));
-        assert_eq!(parse_form(pw.as_bytes(), &rules).unwrap_err(), FormError::TooLong("passphrase"));
-        assert_eq!(parse_form(&vec![b'a'; MAX_FORM_BODY + 1], &rules).unwrap_err(), FormError::Malformed);
+        assert_eq!(
+            parse_form(pw.as_bytes(), &rules).unwrap_err(),
+            FormError::TooLong("passphrase")
+        );
+        assert_eq!(
+            parse_form(&vec![b'a'; MAX_FORM_BODY + 1], &rules).unwrap_err(),
+            FormError::Malformed
+        );
     }
 
     #[test]
     fn content_type_exact() {
         assert!(is_urlencoded("application/x-www-form-urlencoded"));
-        assert!(is_urlencoded("application/x-www-form-urlencoded; charset=UTF-8"));
-        assert!(!is_urlencoded("application/x-www-form-urlencoded; charset=latin1"));
+        assert!(is_urlencoded(
+            "application/x-www-form-urlencoded; charset=UTF-8"
+        ));
+        assert!(!is_urlencoded(
+            "application/x-www-form-urlencoded; charset=latin1"
+        ));
         assert!(!is_urlencoded("multipart/form-data; boundary=x"));
         assert!(!is_urlencoded("text/plain"));
     }

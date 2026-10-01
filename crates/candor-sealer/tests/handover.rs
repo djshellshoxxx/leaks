@@ -21,11 +21,11 @@ use std::io::{IoSlice, IoSliceMut};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, OwnedFd};
 
+use candor_core::header::ObjectType;
 use candor_sealer::server::handover::{
     ACK_COMMITTED, ACK_COPIED, ACK_LEN, ACK_REFUSED, MAX_BUNDLE_LEN, MSG_LEN, StoreConnection,
     VERSION, copy_deadline, encode_ack,
 };
-use candor_core::header::ObjectType;
 use candor_sealer::server::sink::{Blob, EnvelopeGroup, EnvelopeObject, SinkError, StagedBundle};
 use candor_sealer::server::{ChaffConfig, Limits};
 use common::*;
@@ -186,7 +186,10 @@ async fn hand_over_fails_closed_without_a_commit_ack() {
     let copied = encode_ack(ACK_COPIED, &h).to_vec();
     let committed = encode_ack(ACK_COMMITTED, &h).to_vec();
     // The well-formed exchange succeeds.
-    assert_eq!(scripted(&b, vec![copied.clone(), committed.clone()]), Ok(()));
+    assert_eq!(
+        scripted(&b, vec![copied.clone(), committed.clone()]),
+        Ok(())
+    );
     // Refused, before or after the copy.
     let refused = encode_ack(ACK_REFUSED, &h).to_vec();
     assert_eq!(scripted(&b, vec![refused.clone()]), Err(SinkError));
@@ -194,21 +197,33 @@ async fn hand_over_fails_closed_without_a_commit_ack() {
     // STO-29: the commit ack without the copied ack first.
     assert_eq!(scripted(&b, vec![committed.clone()]), Err(SinkError));
     // STO-29: the copied ack twice (no commit).
-    assert_eq!(scripted(&b, vec![copied.clone(), copied.clone()]), Err(SinkError));
+    assert_eq!(
+        scripted(&b, vec![copied.clone(), copied.clone()]),
+        Err(SinkError)
+    );
     // STO-29 hash echo: an ack for another bundle is refused in either phase.
     let mut other = h;
     other[0] ^= 1;
     assert_eq!(
-        scripted(&b, vec![encode_ack(ACK_COPIED, &other).to_vec(), committed.clone()]),
+        scripted(
+            &b,
+            vec![encode_ack(ACK_COPIED, &other).to_vec(), committed.clone()]
+        ),
         Err(SinkError)
     );
     assert_eq!(
-        scripted(&b, vec![copied.clone(), encode_ack(ACK_COMMITTED, &other).to_vec()]),
+        scripted(
+            &b,
+            vec![copied.clone(), encode_ack(ACK_COMMITTED, &other).to_vec()]
+        ),
         Err(SinkError)
     );
     // Old one-byte acks (protocol 1), an unknown code, short and long acks.
     assert_eq!(scripted(&b, vec![vec![ACK_COMMITTED]]), Err(SinkError));
-    assert_eq!(scripted(&b, vec![encode_ack(0x03, &h).to_vec()]), Err(SinkError));
+    assert_eq!(
+        scripted(&b, vec![encode_ack(0x03, &h).to_vec()]),
+        Err(SinkError)
+    );
     assert_eq!(
         scripted(&b, vec![copied[..ACK_LEN - 1].to_vec()]),
         Err(SinkError)
@@ -227,7 +242,11 @@ async fn hand_over_fails_closed_without_a_commit_ack() {
     let mut conn = StoreConnection::new(s);
     assert_eq!(conn.hand_over(&b), Err(SinkError));
     assert!(!conn.is_open());
-    assert_eq!(conn.hand_over(&b), Err(SinkError), "closed connection refuses");
+    assert_eq!(
+        conn.hand_over(&b),
+        Err(SinkError),
+        "closed connection refuses"
+    );
     t.join().unwrap();
     // The store goes away without answering.
     let (s, st) = pair();
@@ -261,7 +280,10 @@ async fn hand_over_fails_closed_without_a_commit_ack() {
         reply(&st, &c3, None);
         std::thread::sleep(std::time::Duration::from_millis(2_000));
         let late = rustix::net::send(&st, &committed, SendFlags::NOSIGNAL);
-        assert!(late.is_err(), "late commit ack must not reach an open socket");
+        assert!(
+            late.is_err(),
+            "late commit ack must not reach an open socket"
+        );
     });
     let mut conn = StoreConnection::with_ack_timeout(s, std::time::Duration::from_millis(200));
     let start = std::time::Instant::now();

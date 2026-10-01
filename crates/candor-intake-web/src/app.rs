@@ -38,7 +38,12 @@ pub struct Reply {
 
 impl core::fmt::Debug for Reply {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "Reply([{} + {} bytes redacted])", self.head.len(), self.body.as_slice().len())
+        write!(
+            f,
+            "Reply([{} + {} bytes redacted])",
+            self.head.len(),
+            self.body.as_slice().len()
+        )
     }
 }
 
@@ -48,6 +53,12 @@ pub enum ReplyBody {
     Owned(Zeroizing<Vec<u8>>),
     /// A page shared between requests (contains nothing secret).
     Shared(Arc<[u8]>),
+}
+
+impl core::fmt::Debug for ReplyBody {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "ReplyBody([{} bytes redacted])", self.as_slice().len())
+    }
 }
 
 impl ReplyBody {
@@ -132,6 +143,9 @@ pub struct Web<S: StoreReads> {
     fallback_p2: Arc<[u8]>,
     sealer_up: AtomicBool,
     store_up: AtomicBool,
+    /// Public key of a random throw-away key: the verification target for
+    /// unknown locators, so both login paths do the same work (07 §5.3).
+    pub(crate) dummy_pk: [u8; 32],
 }
 
 impl<S: StoreReads> core::fmt::Debug for Web<S> {
@@ -173,6 +187,9 @@ impl<S: StoreReads + 'static> Web<S> {
             fallback_p2: Arc::from(Vec::new()),
             sealer_up: AtomicBool::new(true),
             store_up: AtomicBool::new(true),
+            dummy_pk: candor_core::sig::SigningKey::generate()
+                .map_err(|_| ConfigError("rng"))?
+                .verifying_key_bytes(),
         };
         web.fallback_p1 = web
             .fallback_page(ui::Method::Get, false)
@@ -181,7 +198,12 @@ impl<S: StoreReads + 'static> Web<S> {
             .fallback_page(ui::Method::Post, true)
             .ok_or(ConfigError("fallback page"))?;
         // Every fixed page must render (start-time check, fail closed).
-        for screen in [Screen::Landing, Screen::Safety, Screen::SafetyTips, Screen::Status] {
+        for screen in [
+            Screen::Landing,
+            Screen::Safety,
+            Screen::SafetyTips,
+            Screen::Status,
+        ] {
             let mut vm = web.base_vm(ui::Method::Get, false, Locale::En, None);
             web.fill_static(screen, &mut vm);
             vm.ctx.form_token = Some(FALLBACK_TOKEN.to_owned());
@@ -205,8 +227,10 @@ impl<S: StoreReads + 'static> Web<S> {
     }
 
     pub(crate) fn note_sealer(&self, r: &Result<candor_sealer::proto::Response, SealerError>) {
-        self.sealer_up
-            .store(!matches!(r, Err(SealerError::Unavailable)), Ordering::Relaxed);
+        self.sealer_up.store(
+            !matches!(r, Err(SealerError::Unavailable)),
+            Ordering::Relaxed,
+        );
     }
 
     pub(crate) fn note_store(&self, ok: bool) {
@@ -326,9 +350,9 @@ impl<S: StoreReads + 'static> Web<S> {
     pub(crate) fn out_any(&self, rq: &Rq<'_>) -> Out {
         if let Some(k) = rq.keys.as_ref()
             && rq.live
-            && let Ok(o) = self
-                .sessions
-                .with(&k.table, Instant::now(), false, |s| Self::out_session(s, Instant::now()))
+            && let Ok(o) = self.sessions.with(&k.table, Instant::now(), false, |s| {
+                Self::out_session(s, Instant::now())
+            })
         {
             return o;
         }
@@ -359,8 +383,7 @@ impl<S: StoreReads + 'static> Web<S> {
             return fallback();
         };
         drop(vm);
-        if ui::finalize_headers(&mut page, out.set_cookie.as_deref().map(String::as_str)).is_err()
-        {
+        if ui::finalize_headers(&mut page, out.set_cookie.as_deref().map(String::as_str)).is_err() {
             return fallback();
         }
         Self::wire(page).unwrap_or_else(fallback)
@@ -388,7 +411,13 @@ impl<S: StoreReads + 'static> Web<S> {
         match f {
             Fail::Busy => {
                 let retry = (rq.method == ui::Method::Post)
-                    .then(|| rq.head.path.as_deref().and_then(routes::lookup).map(|(_, d)| d.route))
+                    .then(|| {
+                        rq.head
+                            .path
+                            .as_deref()
+                            .and_then(routes::lookup)
+                            .map(|(_, d)| d.route)
+                    })
                     .flatten();
                 self.page(rq, out, Screen::Busy, |vm| vm.busy.retry = retry)
             }
@@ -444,11 +473,9 @@ impl<S: StoreReads + 'static> Web<S> {
             .and_then(|c| unhex32(c))
             .map(|cs| session_keys(&cs));
         let now = Instant::now();
-        let live = keys.as_ref().is_some_and(|k| {
-            self.sessions
-                .with(&k.table, now, true, |_| ())
-                .is_ok()
-        });
+        let live = keys
+            .as_ref()
+            .is_some_and(|k| self.sessions.with(&k.table, now, true, |_| ()).is_ok());
         let path = head.path.as_deref();
         let locale = path
             .and_then(|p| p.strip_prefix('/'))
@@ -483,31 +510,57 @@ impl<S: StoreReads + 'static> Web<S> {
             }
             _ => {}
         }
-        let Some((route_path, decl)) = path.and_then(routes::lookup) else {
+        let Some((_, decl)) = path.and_then(routes::lookup) else {
             return self.fail(&rq, Fail::NotFound);
         };
-        let _ = route_path;
+        // 07 §11 / 11 §5.4 rule 7: every POST response of the login and
+        // rotation routes (SW-10, SW-22, SW-28) is released no earlier than
+        // the floor, whatever the outcome: success, wrong passphrase, unknown
+        // account, malformed form, CSRF failure, rate limit or busy.
+        if method == ui::Method::Post
+            && matches!(
+                decl.route,
+                Route::Login | Route::Inbox | Route::RotateConfirm
+            )
+        {
+            let reply = self.dispatch_route(&rq, decl, now, body).await;
+            self.login_floor(received).await;
+            return reply;
+        }
+        self.dispatch_route(&rq, decl, now, body).await
+    }
+
+    async fn dispatch_route(
+        &self,
+        rq: &Rq<'_>,
+        decl: &'static RouteDecl,
+        now: Instant,
+        body: &mut BodyReader,
+    ) -> Reply {
+        let head = rq.head;
+        let method = rq.method;
+        let circuit = rq.circuit;
         match method {
             ui::Method::Get | ui::Method::Head => {
                 if !decl.get {
-                    return self.page(&rq, self.out_any(&rq), Screen::MethodNotAllowed, |_| ());
+                    return self.page(rq, self.out_any(rq), Screen::MethodNotAllowed, |_| ());
                 }
-                self.get(&rq, decl).await
+                self.get(rq, decl).await
             }
             ui::Method::Post => {
                 let Some(post) = decl.post else {
-                    return self.page(&rq, self.out_any(&rq), Screen::MethodNotAllowed, |_| ());
+                    return self.page(rq, self.out_any(rq), Screen::MethodNotAllowed, |_| ());
                 };
                 // 08 §3.7 + tightening: before anything else (no body read).
                 if !origin_ok(&head.origin, head.fetch_site, &self.origin) {
-                    return self.fail(&rq, Fail::Error);
+                    return self.fail(rq, Fail::Error);
                 }
                 if let Some(c) = post.rate
                     && !self.limiter.allow(circuit, c, now)
                 {
-                    return self.fail(&rq, Fail::Busy);
+                    return self.fail(rq, Fail::Busy);
                 }
-                self.post(&rq, decl, post.auth, body).await
+                self.post(rq, decl, post.auth, body).await
             }
         }
     }
@@ -590,7 +643,9 @@ impl<S: StoreReads + 'static> Web<S> {
         {
             let ok = self
                 .sessions
-                .with(&k.table, Instant::now(), false, |s| token_eq(posted, &s.csrf))
+                .with(&k.table, Instant::now(), false, |s| {
+                    token_eq(posted, &s.csrf)
+                })
                 .map_err(|_| Fail::Gone)?;
             return if ok { Ok(()) } else { Err(Fail::Error) };
         }
@@ -703,7 +758,11 @@ fn csrf_from_raw(raw: &[u8]) -> Option<Zeroizing<String>> {
     raw.split(|b| *b == b'&').find_map(|p| {
         let v = p.strip_prefix(b"csrf=")?;
         crate::http::valid_cookie_value(v)
-            .then(|| core::str::from_utf8(v).ok().map(|s| Zeroizing::new(s.to_owned())))
+            .then(|| {
+                core::str::from_utf8(v)
+                    .ok()
+                    .map(|s| Zeroizing::new(s.to_owned()))
+            })
             .flatten()
     })
 }
@@ -712,7 +771,9 @@ fn manifest_reply(m: &Arc<[u8]>) -> Reply {
     // SW-23: byte-exact, identical for everyone, exempt from P1/P2 padding;
     // fixed header set without cookie or date.
     let mut head = Zeroizing::new(Vec::with_capacity(256));
-    head.extend_from_slice(b"HTTP/1.1 200 OK\r\nContent-Type: application/cbor\r\nContent-Length: ");
+    head.extend_from_slice(
+        b"HTTP/1.1 200 OK\r\nContent-Type: application/cbor\r\nContent-Length: ",
+    );
     head.extend_from_slice(m.len().to_string().as_bytes());
     head.extend_from_slice(
         b"\r\nCache-Control: no-store, max-age=0\r\nX-Content-Type-Options: nosniff\r\nCross-Origin-Resource-Policy: same-origin\r\nReferrer-Policy: no-referrer\r\n\r\n",
@@ -772,6 +833,29 @@ pub(crate) fn head_error_reply<S: StoreReads + 'static>(
         }
         crate::http::HeadErrorKind::Malformed => web.fail(&rq, Fail::Error),
     }
+}
+
+/// The busy page for a connection over the serving cap: the request's size
+/// class, no session lookup (ADR-038(5): the same page as every other busy).
+pub(crate) fn busy_reply<S: StoreReads + 'static>(
+    web: &Web<S>,
+    head: &RequestHead,
+    circuit: CircuitToken,
+) -> Reply {
+    let rq = Rq {
+        head,
+        method: match head.method {
+            Method::Get => ui::Method::Get,
+            Method::Head => ui::Method::Head,
+            Method::Post => ui::Method::Post,
+        },
+        locale: Locale::En,
+        circuit,
+        received: Instant::now(),
+        keys: None,
+        live: false,
+    };
+    web.fail(&rq, Fail::Busy)
 }
 
 /// The route of a path, for tests and the registry lint.

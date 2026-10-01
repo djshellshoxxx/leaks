@@ -147,9 +147,7 @@ pub fn boundary_from_content_type(ct: &str) -> Option<String> {
         .strip_prefix('"')
         .and_then(|x| x.strip_suffix('"'))
         .unwrap_or(v);
-    let ok = (1..=MAX_BOUNDARY).contains(&v.len())
-        && v.bytes().all(bchar)
-        && !v.ends_with(' ');
+    let ok = (1..=MAX_BOUNDARY).contains(&v.len()) && v.bytes().all(bchar) && !v.ends_with(' ');
     ok.then(|| v.to_owned())
 }
 
@@ -242,7 +240,11 @@ impl Multipart {
                     let first = self.delim.get(2..).unwrap_or_default().to_vec();
                     let need = first.len().saturating_add(2);
                     if self.buf.len() < need {
-                        if !first.starts_with(self.buf.get(..self.buf.len().min(first.len())).unwrap_or_default()) {
+                        if !first.starts_with(
+                            self.buf
+                                .get(..self.buf.len().min(first.len()))
+                                .unwrap_or_default(),
+                        ) {
                             return self.fail(MultipartError::Malformed);
                         }
                         return Ok(None);
@@ -283,7 +285,11 @@ impl Multipart {
                 }
                 State::Body { file } => {
                     let dl = self.delim.len();
-                    if let Some(at) = self.buf.windows(dl).position(|w| w == self.delim.as_slice()) {
+                    if let Some(at) = self
+                        .buf
+                        .windows(dl)
+                        .position(|w| w == self.delim.as_slice())
+                    {
                         if at > 0 {
                             let n = at.min(UPLOAD_CHUNK);
                             return self.emit(n, file).map(Some);
@@ -409,7 +415,9 @@ fn parse_part_header(block: &[u8]) -> Result<PartHeader, MultipartError> {
             if content_type.is_some()
                 || value.is_empty()
                 || value.len() > MAX_MEDIA_TYPE_BYTES
-                || !value.bytes().all(|b| (0x21..=0x7e).contains(&b) || b == b' ')
+                || !value
+                    .bytes()
+                    .all(|b| (0x21..=0x7e).contains(&b) || b == b' ')
                 || value
                     .get(..10)
                     .is_some_and(|p| p.eq_ignore_ascii_case("multipart/"))
@@ -437,9 +445,7 @@ fn parse_part_header(block: &[u8]) -> Result<PartHeader, MultipartError> {
 /// ≤ [`MAX_FILENAME_BYTES`] bytes after normalisation. Empty means "no file
 /// chosen" and is reported by the route, not here.
 fn filename(raw: &str) -> Result<Zeroizing<String>, MultipartError> {
-    if raw.len() > MAX_FILENAME_BYTES.saturating_mul(3)
-        || raw.chars().any(|c| c.is_control())
-    {
+    if raw.len() > MAX_FILENAME_BYTES.saturating_mul(3) || raw.chars().any(|c| c.is_control()) {
         return Err(MultipartError::Malformed);
     }
     let mut out = Zeroizing::new(String::with_capacity(raw.len().saturating_mul(3)));
@@ -454,7 +460,12 @@ fn filename(raw: &str) -> Result<Zeroizing<String>, MultipartError> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
     use super::*;
 
     const B: &str = "----geckoformboundary1234";
@@ -469,7 +480,11 @@ mod tests {
             while let Some(ev) = p.next_event()? {
                 match ev {
                     Event::Part(h) => {
-                        out.push(format!("part {} {:?}", h.name, h.filename.as_deref().map(String::as_str)));
+                        out.push(format!(
+                            "part {} {:?}",
+                            h.name,
+                            h.filename.as_deref().map(String::as_str)
+                        ));
                         file.clear();
                     }
                     Event::Data(d) => file.extend_from_slice(&d),
@@ -509,7 +524,11 @@ mod tests {
     fn browser_shape_any_feed_size() {
         let b = body(&[
             ("csrf", None, "tok"),
-            ("file", Some("r\u{e9}port.pdf"), "%PDF-1.7 \r\n--not-the-boundary\r\n data"),
+            (
+                "file",
+                Some("r\u{e9}port.pdf"),
+                "%PDF-1.7 \r\n--not-the-boundary\r\n data",
+            ),
             ("action", None, "upload"),
         ]);
         for step in [1, 2, 3, 7, 64, 4096, 1 << 20] {
@@ -536,11 +555,20 @@ mod tests {
             boundary_from_content_type(&format!("multipart/form-data; boundary={B}")).as_deref(),
             Some(B)
         );
-        assert_eq!(boundary_from_content_type("multipart/form-data; boundary=\"ab\"").as_deref(), Some("ab"));
+        assert_eq!(
+            boundary_from_content_type("multipart/form-data; boundary=\"ab\"").as_deref(),
+            Some("ab")
+        );
         assert!(boundary_from_content_type("multipart/form-data").is_none());
         assert!(boundary_from_content_type("multipart/mixed; boundary=a").is_none());
         assert!(boundary_from_content_type("multipart/form-data; boundary=a; x=y").is_none());
-        assert!(boundary_from_content_type(&format!("multipart/form-data; boundary={}", "a".repeat(71))).is_none());
+        assert!(
+            boundary_from_content_type(&format!(
+                "multipart/form-data; boundary={}",
+                "a".repeat(71)
+            ))
+            .is_none()
+        );
         assert!(boundary_from_content_type("multipart/form-data; boundary=").is_none());
         assert!(boundary_from_content_type("multipart/form-data; boundary=a\u{0}b").is_none());
     }
@@ -562,15 +590,33 @@ mod tests {
         cases.push(format!("--{B}\r\nContent-Disposition: form-data; name=\"csrf\"\r\nContent-Transfer-Encoding: base64\r\n\r\nz\r\n--{B}--\r\n").into_bytes());
         // filename*, extra params, bad names, duplicate disposition.
         cases.push(format!("--{B}\r\nContent-Disposition: form-data; name=\"file\"; filename*=UTF-8''a\r\n\r\nz\r\n--{B}--\r\n").into_bytes());
-        cases.push(format!("--{B}\r\nContent-Disposition: form-data; name=\"Csrf\"\r\n\r\nz\r\n--{B}--\r\n").into_bytes());
-        cases.push(format!("--{B}\r\nContent-Disposition: attachment; name=\"csrf\"\r\n\r\nz\r\n--{B}--\r\n").into_bytes());
+        cases.push(
+            format!(
+                "--{B}\r\nContent-Disposition: form-data; name=\"Csrf\"\r\n\r\nz\r\n--{B}--\r\n"
+            )
+            .into_bytes(),
+        );
+        cases.push(
+            format!(
+                "--{B}\r\nContent-Disposition: attachment; name=\"csrf\"\r\n\r\nz\r\n--{B}--\r\n"
+            )
+            .into_bytes(),
+        );
         cases.push(format!("--{B}\r\nContent-Disposition: form-data; name=\"csrf\"\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\nz\r\n--{B}--\r\n").into_bytes());
         // Content-Type on a non-file part; control character in a filename.
         cases.push(format!("--{B}\r\nContent-Disposition: form-data; name=\"csrf\"\r\nContent-Type: text/plain\r\n\r\nz\r\n--{B}--\r\n").into_bytes());
         cases.push(format!("--{B}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a\u{1}b\"\r\n\r\nz\r\n--{B}--\r\n").into_bytes());
         // Header folding; garbage after the delimiter.
-        cases.push(format!("--{B}\r\nContent-Disposition: form-data;\r\n name=\"csrf\"\r\n\r\nz\r\n--{B}--\r\n").into_bytes());
-        cases.push(format!("--{B}\r\nContent-Disposition: form-data; name=\"csrf\"\r\n\r\nz\r\n--{B}xx").into_bytes());
+        cases.push(
+            format!(
+                "--{B}\r\nContent-Disposition: form-data;\r\n name=\"csrf\"\r\n\r\nz\r\n--{B}--\r\n"
+            )
+            .into_bytes(),
+        );
+        cases.push(
+            format!("--{B}\r\nContent-Disposition: form-data; name=\"csrf\"\r\n\r\nz\r\n--{B}xx")
+                .into_bytes(),
+        );
         for (i, c) in cases.iter().enumerate() {
             for step in [1, 5, 1 << 20] {
                 assert!(run(c, step).is_err(), "case {i} step {step}");
@@ -582,21 +628,32 @@ mod tests {
     fn limits() {
         // Five parts.
         let five: Vec<(&str, Option<&str>, &str)> = vec![("a", None, "1"); 5];
-        assert_eq!(run(&body(&five), 1 << 20).unwrap_err(), MultipartError::TooManyParts);
+        assert_eq!(
+            run(&body(&five), 1 << 20).unwrap_err(),
+            MultipartError::TooManyParts
+        );
         // Non-file value over the limit.
         let big = "x".repeat(MAX_PART_VALUE + 1);
-        assert_eq!(run(&body(&[("csrf", None, &big)]), 1 << 20).unwrap_err(), MultipartError::TooLarge);
+        assert_eq!(
+            run(&body(&[("csrf", None, &big)]), 1 << 20).unwrap_err(),
+            MultipartError::TooLarge
+        );
         // Filename over 255 bytes.
         let long = "n".repeat(MAX_FILENAME_BYTES + 1);
         assert!(run(&body(&[("file", Some(&long), "x")]), 1 << 20).is_err());
         // Header block over 1 KiB.
-        let mut h = format!("--{B}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a\"\r\nContent-Type: ");
+        let mut h = format!(
+            "--{B}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a\"\r\nContent-Type: "
+        );
         h.push_str(&"a".repeat(MAX_PART_HEADER));
         h.push_str("\r\n\r\nx\r\n");
         assert!(run(h.as_bytes(), 1 << 20).is_err());
         // Feeding more than the room is refused.
         let mut p = Multipart::new(B);
-        assert_eq!(p.feed(&vec![0u8; BUF_CAP + 1]).unwrap_err(), MultipartError::TooLarge);
+        assert_eq!(
+            p.feed(&vec![0u8; BUF_CAP + 1]).unwrap_err(),
+            MultipartError::TooLarge
+        );
     }
 
     #[test]

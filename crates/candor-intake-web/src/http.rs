@@ -169,7 +169,9 @@ fn ascii_string(v: &[u8]) -> Option<String> {
 /// Our cookie values: exactly 64 lowercase hex characters.
 #[must_use]
 pub fn valid_cookie_value(v: &[u8]) -> bool {
-    v.len() == COOKIE_VALUE_LEN && v.iter().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+    v.len() == COOKIE_VALUE_LEN
+        && v.iter()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
 }
 
 fn path_ok(p: &[u8]) -> bool {
@@ -234,11 +236,15 @@ pub fn parse_head(buf: &[u8], host: &str) -> Result<RequestHead, HeadError> {
     if buf.len() > MAX_HEAD_BYTES {
         return Err(err);
     }
-    // Every line ends with CRLF; no bare CR or LF anywhere.
-    let body = buf.strip_suffix(b"\r\n\r\n").ok_or(err)?;
+    // Every line ends with CRLF; no bare CR or LF anywhere. After removing
+    // the blank line's CRLF, splitting on LF leaves one empty tail element.
+    if !buf.ends_with(b"\r\n\r\n") {
+        return Err(err);
+    }
+    let body = buf.strip_suffix(b"\r\n").ok_or(err)?;
     let mut lines = body.split(|b| *b == b'\n');
     let line = lines.next().ok_or(err)?;
-    let line = line.strip_suffix(b"\r").unwrap_or(line);
+    let line = line.strip_suffix(b"\r").ok_or(err)?;
     if line.len() > MAX_REQUEST_LINE || line.contains(&b'\r') {
         return Err(err);
     }
@@ -293,7 +299,16 @@ pub fn parse_head(buf: &[u8], host: &str) -> Result<RequestHead, HeadError> {
     let mut fetch_seen = false;
     let mut cookies: Option<Cookies> = None;
     let mut bad = false;
+    let mut ended = false;
     for raw in lines {
+        if ended {
+            return Err(err);
+        }
+        if raw.is_empty() {
+            // The tail after the last CRLF (must be the last element).
+            ended = true;
+            continue;
+        }
         // Each remaining line must end in CR (we split on LF).
         let Some(l) = raw.strip_suffix(b"\r") else {
             return Err(err);
@@ -398,7 +413,7 @@ pub fn parse_head(buf: &[u8], host: &str) -> Result<RequestHead, HeadError> {
             _ => {}
         }
     }
-    if bad || !host_seen {
+    if bad || !host_seen || !ended {
         return Err(err);
     }
     let cookies = cookies.unwrap_or(Cookies {
@@ -449,7 +464,11 @@ pub fn serialize_head(page: &candor_source_ui::Page) -> Option<Zeroizing<Vec<u8>
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
     use super::*;
 
     const HOST: &str = "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion";
@@ -492,7 +511,10 @@ mod tests {
         )
         .unwrap();
         assert!(h.session_cookie_present);
-        assert_eq!(h.session_cookie.as_deref().map(String::as_str), Some(cs.as_str()));
+        assert_eq!(
+            h.session_cookie.as_deref().map(String::as_str),
+            Some(cs.as_str())
+        );
         assert!(h.pre_cookie.is_none(), "malformed value dropped");
         // Duplicate session cookie: refused, class still known (POST + cookie).
         let e = parse_head(
@@ -512,8 +534,18 @@ mod tests {
         let host = format!("Host: {HOST}");
         let cases: Vec<Vec<u8>> = vec![
             req(&["POST /en/q HTTP/1.1", &host, "Transfer-Encoding: chunked"]),
-            req(&["POST /en/q HTTP/1.1", &host, "Content-Length: 5", "Transfer-Encoding: chunked"]),
-            req(&["POST /en/q HTTP/1.1", &host, "Content-Length: 5", "Content-Length: 5"]),
+            req(&[
+                "POST /en/q HTTP/1.1",
+                &host,
+                "Content-Length: 5",
+                "Transfer-Encoding: chunked",
+            ]),
+            req(&[
+                "POST /en/q HTTP/1.1",
+                &host,
+                "Content-Length: 5",
+                "Content-Length: 5",
+            ]),
             req(&["POST /en/q HTTP/1.1", &host, "Content-Length: +5"]),
             req(&["POST /en/q HTTP/1.1", &host, "Content-Length: 5, 5"]),
             req(&["POST /en/q HTTP/1.1", &host, "Content-Encoding: gzip"]),
@@ -533,14 +565,19 @@ mod tests {
         ];
         for c in &cases {
             let e = parse_head(c, HOST).unwrap_err();
-            assert_eq!(e.kind, HeadErrorKind::Malformed, "{:?}", String::from_utf8_lossy(c));
+            assert_eq!(
+                e.kind,
+                HeadErrorKind::Malformed,
+                "{:?}",
+                String::from_utf8_lossy(c)
+            );
         }
     }
 
     #[test]
     fn other_methods_get_405() {
-        let e = parse_head(&req(&["PUT /en/ HTTP/1.1", &format!("Host: {HOST}")]), HOST)
-            .unwrap_err();
+        let e =
+            parse_head(&req(&["PUT /en/ HTTP/1.1", &format!("Host: {HOST}")]), HOST).unwrap_err();
         assert_eq!(e.kind, HeadErrorKind::MethodNotAllowed);
     }
 
