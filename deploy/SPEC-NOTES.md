@@ -362,3 +362,19 @@ Checks run for round 5 (2026-10-01, this container): `shellcheck -S style -x` cl
 | DEP-30 | `--work-base`: every ancestor up to `/` must be a root-owned directory, not a symlink, with no group/world write and no sticky bit (so `/tmp` and `/var/tmp` are refused); no `.`/`..` components; otherwise exit 2. config-check opens `$WORK` once (`exec {WORKFD}<`) and passes it to the reader as fd 3. OUT is a relative name created with `openat2(O_WRONLY\|O_CREAT\|O_EXCL\|O_NOFOLLOW\|O_NONBLOCK\|O_NOCTTY, RESOLVE_BENEATH\|NO_SYMLINKS\|NO_MAGICLINKS)`, mode 0600. The fd-3 directory must be private (no group/other bits); it is re-opened through `/proc/self/fd/3` because safe Rust cannot adopt a raw fd. config-check removes OUT before each call. validate.sh keeps its work base under `/run`. Reader re-pinned; two builds in different target directories gave sha256 `58b2bb3a…eccbbf6`. `deploy/.build/` (the build cache) is git-ignored. | crate: existing file, symlink, symlinked directory, FIFO (no block), absolute/`..`/empty names, non-private directory (8 tests). validate: the same cases through the binary, plus no fd 3; `--work-base` refused under sticky `/var/tmp`, a `nobody`-owned ancestor, a group-writable ancestor, a symlinked ancestor and `..`; a root 0755 chain accepted |
 
 Checks run for round 6: `shellcheck -S style -x` clean; `cargo clippy -p candor-safe-read --all-targets -- -D warnings` clean; `cargo test -p candor-safe-read` 8 passed; `CANDOR_TEST_PG=1 validate.sh` 381 PASS, 0 FAIL, exit 0 (877 static checks OK).
+
+### Sealer memory rule (lead decision after round 5)
+
+The sealer unit sets `CANDOR_SEALER_MEMORY_BUDGET_MIB=3840`, `CANDOR_SEALER_SESSION_UPLOAD_MIB=768` and `CANDOR_SEALER_UPLOAD_SLOTS=64`. The `Environment=` allow-list admits only these three variables. config-check (`check_sealer_memory`) works on the effective merged unit, so each profile is checked against its own `MemoryMax` and mount size. It requires:
+- budget ≤ `MemoryMax` − 1024 MiB;
+- staging tmpfs `size=` ≥ budget;
+- per-draft quota present and ≤ budget / 2;
+- slots present, an integer in 16..4096.
+
+Any violation exits 30. The per-draft quota must be set explicitly so the half-budget rule cannot pass when the variable is missing.
+
+**Two fail-open bugs found and fixed in config-check:**
+- mawk panics (exit 100) on some `{m,n}` regexes inside repeated groups. Such a panic used to drop a unit's whole allow-list evaluation without any FAIL. A failed evaluation now reports FAIL.
+- The new rule's results were first piped into `report_lines`, a subshell, so FAILs were printed but not counted. It now uses a here-string.
+
+validate.sh adds 21 cases: 18 must exit 30 and name their rule, and 3 must be accepted. They cover the base tree, ce-single and ce-hardened. `CANDOR_TEST_PG=1 validate.sh`: 402 PASS, 0 FAIL; 882 static checks OK.
