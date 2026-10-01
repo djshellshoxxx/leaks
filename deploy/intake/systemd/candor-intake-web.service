@@ -1,0 +1,87 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# C-06 source web service (07 §5.1). Unit name per the RM-2 deployment brief; OS user
+# candor-web (07 §4.1). Socket-activated (candor-intake-web.socket): the process receives the
+# listening AF_UNIX fd named "http" (sd_listen_fds) and never creates an IP socket.
+# Network: none (PrivateNetwork=yes, NET-032, 16 §14.2). Holds no long-term key.
+[Unit]
+Description=Candor source web (C-06, Z-INTAKE)
+Requires=candor-intake-web.socket nftables.service
+Wants=candor-sealer.socket candor-intake-store.socket
+After=candor-intake-web.socket candor-sealer.socket candor-intake-store.socket nftables.service
+StartLimitIntervalSec=60s
+StartLimitBurst=5
+
+[Service]
+Type=exec
+ExecStart=/usr/lib/candor/source-web/candor-web
+User=candor-web
+Group=candor-web
+# Group candor-web gives access to seal.sock; candor-istore-clients to istore.sock.
+SupplementaryGroups=candor-istore-clients
+Restart=on-failure
+RestartSec=2s
+AppArmorProfile=candor-web
+# 07 §4.2 per-unit delta.
+MemoryMax=1G
+MemorySwapMax=0
+LimitMEMLOCK=1G
+TasksMax=256
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+# ---- 07 §4.2 / 17 §5.3 / R7 SI-B-01 hardening baseline (do not weaken; config-check.sh) ----
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateIPC=yes
+PrivateMounts=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+UMask=0077
+CapabilityBoundingSet=
+AmbientCapabilities=
+KeyringMode=private
+DevicePolicy=closed
+SystemCallArchitectures=native
+SystemCallErrorNumber=EPERM
+LimitCORE=0
+# Executables only from /usr (the program and ld.so/libs); /run, /var, /tmp, /dev/shm, /etc
+# are never executable for this unit (R7 SI-B-01).
+NoExecPaths=/
+ExecPaths=/usr
+# No IP at all (07 §4.2 IPAddressDeny=any); no bind() on AF_INET/AF_INET6.
+IPAddressDeny=any
+SocketBindDeny=any
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @debug @cpu-emulation @obsolete @raw-io @reboot @swap @module @clock @setuid @chown @keyring process_vm_readv process_vm_writev
+# Nothing else on Z-INTAKE is visible (defence in depth on top of DAC/AppArmor).
+TemporaryFileSystem=/var:ro
+InaccessiblePaths=-/run/tor-instances -/run/candor/staging -/run/candor/intake-pg -/run/credentials/candor-intake-store.service -/run/credentials/candor-sealer.service -/etc/credstore.encrypted -/etc/tor -/etc/candor/intake/postgresql -/boot
+# ---- Logging (ADR-016, LOG-004, LOG-007, NET-008) ----
+# stdout discarded; stderr carries only candor-log formatted codes (07 §4.2). It goes to the
+# separate journald namespace "candor-intake" (journald@candor-intake.conf: Storage=volatile,
+# MaxRetentionSec=24h, no forwarding); messages below warning are dropped at the source.
+StandardInput=null
+StandardOutput=null
+StandardError=journal
+LogNamespace=candor-intake
+LogLevelMax=warning
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=200
+SyslogIdentifier=candor-web
+
+[Install]
+WantedBy=multi-user.target

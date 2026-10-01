@@ -1,0 +1,96 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# C-08 intake store (07 §5.3). OS user candor-istore. Socket-activated with two fds:
+#   "istore" - AF_UNIX SEQPACKET IPC from candor-web / candor-sealer (candor-intake-store.socket)
+#   "relay"  - TCP 7443 on relay0, bound by PID 1 (candor-intake-store-relay.socket, I1)
+# so the process itself needs no AF_INET and runs in an empty network namespace: it can
+# accept the core's pull on the inherited socket but can never initiate a connection
+# (ADR-009). Ciphertext only; never receives plaintext (07 §5.3).
+# Secrets (TPM-sealed credentials, ADR-028): K37 Intake Routing Key, K31 intake batch
+# signing key, relay mTLS server key.
+[Unit]
+Description=Candor intake store (C-08, Z-INTAKE)
+Requires=candor-intake-store.socket candor-intake-store-relay.socket candor-intake-pg.service run-candor-staging.mount nftables.service
+After=candor-intake-store.socket candor-intake-store-relay.socket candor-intake-pg.service run-candor-staging.mount nftables.service
+RequiresMountsFor=/var/lib/candor/intake
+StartLimitIntervalSec=60s
+StartLimitBurst=5
+
+[Service]
+Type=exec
+ExecStart=/usr/lib/candor/intake-store/candor-intake-store
+User=candor-istore
+Group=candor-istore
+Restart=on-failure
+RestartSec=2s
+AppArmorProfile=candor-intake-store
+LoadCredentialEncrypted=routing_key:/etc/credstore.encrypted/candor-intake.routing_key.cred
+LoadCredentialEncrypted=batch_signing_key:/etc/credstore.encrypted/candor-intake.batch_signing_key.cred
+LoadCredentialEncrypted=relay_tls_key:/etc/credstore.encrypted/candor-intake.relay_tls_key.cred
+# The Tier W staging tmpfs (ADR-034; 07 §5.3) is charged to this cgroup when written, so
+# MemoryMax = staging size + 1 GiB. Profile drop-ins adjust both together
+# (profiles/ce-*/). Never swap (BE-004).
+MemoryMax=5G
+MemorySwapMax=0
+TasksMax=256
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+# ---- 07 §4.2 / 17 §5.3 / R7 SI-B-01 hardening baseline (do not weaken; config-check.sh) ----
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateIPC=yes
+PrivateMounts=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+UMask=0077
+CapabilityBoundingSet=
+AmbientCapabilities=
+KeyringMode=private
+DevicePolicy=closed
+SystemCallArchitectures=native
+SystemCallErrorNumber=EPERM
+LimitCORE=0
+# Executables only from /usr (the program and ld.so/libs); /run, /var, /tmp, /dev/shm, /etc
+# are never executable for this unit (R7 SI-B-01).
+NoExecPaths=/
+ExecPaths=/usr
+# No IP at all (07 §4.2 IPAddressDeny=any); no bind() on AF_INET/AF_INET6.
+IPAddressDeny=any
+SocketBindDeny=any
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @debug @cpu-emulation @obsolete @raw-io @reboot @swap @module @clock @setuid @chown @keyring process_vm_readv process_vm_writev
+# Only its own state is visible under /var; everything else on Z-INTAKE is hidden.
+TemporaryFileSystem=/var:ro
+BindPaths=/var/lib/candor/intake
+BindReadOnlyPaths=/var/lib/candor/relay
+ReadWritePaths=/run/candor/staging /run/candor/directory
+InaccessiblePaths=-/run/tor-instances -/run/candor/source-web -/run/credentials/candor-sealer.service -/etc/credstore.encrypted -/etc/tor -/etc/candor/intake/postgresql -/boot
+# ---- Logging (ADR-016, LOG-004, LOG-007, NET-008) ----
+# stdout discarded; stderr carries only candor-log formatted codes (07 §4.2). It goes to the
+# separate journald namespace "candor-intake" (journald@candor-intake.conf: Storage=volatile,
+# MaxRetentionSec=24h, no forwarding); messages below warning are dropped at the source.
+StandardInput=null
+StandardOutput=null
+StandardError=journal
+LogNamespace=candor-intake
+LogLevelMax=warning
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=200
+SyslogIdentifier=candor-intake-store
+
+[Install]
+WantedBy=multi-user.target

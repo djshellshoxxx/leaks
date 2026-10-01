@@ -1,0 +1,94 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# C-07 sealer (07 §4.1-§4.4, §5.2). Holds K35 (sealer signing key) and the per-deployment
+# Argon2id salt, both delivered as TPM-sealed systemd credentials (ADR-028; R7 SI-B-01:
+# never via Environment=). Tier W drafts and keys live only in mlocked RAM (ADR-034).
+# No network (PrivateNetwork=yes), no writable path at all (07 §4.2: ReadWritePaths none),
+# no capabilities (mlock is allowed by LimitMEMLOCK, so CAP_IPC_LOCK is not needed).
+# The in-process seccompiler allow-list (07 §4.3) is installed after init; the systemd filter
+# below is the coarse outer layer and additionally permits the seccomp(2) call for that.
+[Unit]
+Description=Candor sealer (C-07, Z-INTAKE)
+Requires=candor-sealer.socket nftables.service
+Wants=candor-intake-store.socket
+After=candor-sealer.socket candor-intake-store.socket nftables.service
+StartLimitIntervalSec=60s
+StartLimitBurst=5
+
+[Service]
+Type=exec
+ExecStart=/usr/lib/candor/sealer/candor-sealer
+User=candor-sealer
+Group=candor-sealer
+# Chaff COMMIT_ENVELOPE to the intake store (07 §5.3, ADR-047(3)).
+SupplementaryGroups=candor-istore-clients
+Restart=on-failure
+RestartSec=2s
+AppArmorProfile=candor-sealer
+LoadCredentialEncrypted=sealer_signing_key:/etc/credstore.encrypted/candor-intake.sealer_signing_key.cred
+LoadCredentialEncrypted=argon2_salt:/etc/credstore.encrypted/candor-intake.argon2_salt.cred
+# 07 §4.2 per-unit delta.
+MemoryMax=2560M
+MemorySwapMax=0
+LimitMEMLOCK=2G
+TasksMax=64
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+# ---- 07 §4.2 / 17 §5.3 / R7 SI-B-01 hardening baseline (do not weaken; config-check.sh) ----
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateIPC=yes
+PrivateMounts=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+UMask=0077
+CapabilityBoundingSet=
+AmbientCapabilities=
+KeyringMode=private
+DevicePolicy=closed
+SystemCallArchitectures=native
+SystemCallErrorNumber=EPERM
+LimitCORE=0
+# Executables only from /usr (the program and ld.so/libs); /run, /var, /tmp, /dev/shm, /etc
+# are never executable for this unit (R7 SI-B-01).
+NoExecPaths=/
+ExecPaths=/usr
+# No IP at all (07 §4.2 IPAddressDeny=any); no bind() on AF_INET/AF_INET6.
+IPAddressDeny=any
+SocketBindDeny=any
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @debug @cpu-emulation @obsolete @raw-io @reboot @swap @module @clock @setuid @chown @keyring process_vm_readv process_vm_writev
+SystemCallFilter=seccomp
+# Nothing else on Z-INTAKE is visible (defence in depth on top of DAC/AppArmor).
+TemporaryFileSystem=/var:ro
+InaccessiblePaths=-/run/tor-instances -/run/candor/staging -/run/candor/intake-pg -/run/credentials/candor-intake-store.service -/run/credentials/candor-sealer.service -/etc/credstore.encrypted -/etc/tor -/etc/candor/intake/postgresql -/boot
+InaccessiblePaths=-/run/candor/source-web
+# ---- Logging (ADR-016, LOG-004, LOG-007, NET-008) ----
+# stdout discarded; stderr carries only candor-log formatted codes (07 §4.2). It goes to the
+# separate journald namespace "candor-intake" (journald@candor-intake.conf: Storage=volatile,
+# MaxRetentionSec=24h, no forwarding); messages below warning are dropped at the source.
+StandardInput=null
+StandardOutput=null
+StandardError=journal
+LogNamespace=candor-intake
+LogLevelMax=warning
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=200
+SyslogIdentifier=candor-sealer
+
+[Install]
+WantedBy=multi-user.target

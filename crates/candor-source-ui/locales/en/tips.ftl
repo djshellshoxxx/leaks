@@ -84,7 +84,7 @@ tip-files-h = A document may be a **unique copy** made for only a few people. Sm
 # @class critical
 tip-metadata-title = Hidden data in files
 # @class critical
-tip-metadata-n = Photos and documents can hide author names, places and the camera or computer used. File names are replaced by default.
+tip-metadata-n = Photos and files can hide names, places and the device used. File names are replaced by default.
 # @class critical
 tip-metadata-h = Cleaning does not remove everything. A camera leaves its own pattern in every photo, and the background, a reflection or a user name on a screen can point to you. Office files can keep tracked changes and old versions. Keep originals out of cloud folders and synced phones.
 
@@ -183,7 +183,7 @@ tip-after-h = Don't search for news of your report from work devices or accounts
 # @class critical
 tip-seizure-title = If your device is checked
 # @class critical
-tip-seizure-n = Don't keep notes, drafts, downloads or bookmarks about your report on devices other people can check.
+tip-seizure-n = Don't keep notes, drafts or saved files about your report on a phone or computer that others can check.
 # @class critical
 tip-seizure-h = A checked device can show Tor Browser, downloads and recent files. **Tails** keeps nothing after shutdown unless you set it to. Don't destroy anything you may be legally required to keep. Get legal advice if you are under investigation.
 

@@ -18,7 +18,6 @@ After=nftables.service
 [Socket]
 ListenStream=0.0.0.0:7443
 BindToDevice=relay0
-BindIPv6Only=ipv6-only
 FreeBind=no
 Transparent=no
 ReusePort=no

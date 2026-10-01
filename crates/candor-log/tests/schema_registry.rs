@@ -67,16 +67,28 @@ fn registry_forbids_coi_codes_and_free_text_types() {
                 );
             }
             let t: String = f.rust_type.chars().filter(|c| !c.is_whitespace()).collect();
-            for banned in ["String", "str", "IpAddr", "SocketAddr", "PathBuf", "Path", "Vec<u8>"] {
-                assert!(
-                    !t.split(|c: char| !c.is_alphanumeric() && c != '_')
-                        .any(|seg| seg == banned)
-                        && !t.contains("Vec<u8>"),
-                    "{}.{} has banned type {t}",
-                    e.name,
-                    f.name
-                );
-            }
+            const BANNED: [&str; 11] = [
+                "String",
+                "str",
+                "OsString",
+                "IpAddr",
+                "Ipv4Addr",
+                "Ipv6Addr",
+                "SocketAddr",
+                "PathBuf",
+                "Path",
+                "SystemTime",
+                "Instant",
+            ];
+            let free_text = t
+                .split(|c: char| !c.is_alphanumeric() && c != '_')
+                .any(|seg| BANNED.contains(&seg));
+            assert!(
+                !free_text && !t.contains("Vec<u8>"),
+                "{}.{} has banned type {t}",
+                e.name,
+                f.name
+            );
         }
     }
 }
