@@ -17,9 +17,9 @@ Specs: `specs/09-DATABASE.md` §5.1/§8/§10/§11, `specs/07-BACKEND.md` §5.3/�
 - Expected outcomes (duplicates, existing accounts) never raise a server-side error, so PostgreSQL logs nothing about source actions.
 - Real and chaff envelopes are stored identically.
 - No kind, tier or arrival date leaves through RL-02.
-- Source deletions append a K31-signed, hash-chained deletion-list entry in the same transaction. The list is append-only for the application role; only the maintenance role prunes, never the head. A restored store, and the PostgreSQL store at every process start, refuses service until a verified, contiguous, untruncated Z-CORE list is applied.
+- Source deletions append a K31-signed, hash-chained deletion-list entry in the same transaction. The list is append-only for the application role; only the maintenance role prunes, never the head. Inserts must extend the chain (DB trigger). Acknowledgements (RL-11) and pushed lists (RL-12) are accepted only against a Z-CORE-signed head; the maintenance process re-verifies that signature before it prunes anything. A restored store, and the PostgreSQL store at every process start, refuses service until a verified, contiguous, untruncated Z-CORE list that chains to the last verified head (carried in backups) is applied.
 - The Key Directory snapshot high-water mark never decreases. The store checks this, and a DB trigger enforces it as well.
-- The fetch-all reply set is served as fixed 64 × 70,000-byte pages. The page count is a power of two fixed by the configuration, every requester gets byte-identical pages, and each import slot adds exactly K persistent entries (real replies topped up with dummies), so diffs between rebuilds reveal nothing about reply volume.
+- The fetch-all reply set is served as fixed 64 × 70,000-byte pages. The page count is a power of two fixed by the configuration, every requester gets byte-identical pages, and each import slot adds exactly K persistent entries (real replies topped up with dummies), so diffs between rebuilds reveal nothing about reply volume. Dummy sizes are drawn from a configured public bucket distribution, never copied from real replies, and every stored reply (real or dummy) has the canonical length of its bucket.
 - Errors and `Debug` output are content-free.
 
 ## API sketch
@@ -28,11 +28,12 @@ Specs: `specs/09-DATABASE.md` §5.1/§8/§10/§11, `specs/07-BACKEND.md` §5.3/�
 use candor_intake_store::*;
 
 // Production: migrate with `candorctl migrate` (OS user candor-migrate), then:
-let cfg = DeadDropConfig { slots_per_day: 4, per_slot: 16, max_pending: 5_000 };
+let cfg = DeadDropConfig { slots_per_day: 4, per_slot: 16, max_pending: 5_000,
+                          dummy_bucket_weights: DEFAULT_DUMMY_BUCKET_WEIGHTS };
 let store = PgIntakeStore::open(opts.username("candor_istore").database(db), tenant, 8,
                                 cfg, Box::new(real_format_dummies)).await?;  // starts restore-pending
 store.init(tenant, kdf_salt).await?;
-store.apply_pushed_deletion_list(&core_copy, core_head, &k31_pk, &CoreReplyHasher).await?;
+store.apply_pushed_deletion_list(&core_copy, &signed_core_head, &core_pk, &k31_pk, &CoreReplyHasher).await?;
 let acct = store.create_account(new_account, today).await?;     // separate from envelopes
 let r = store.commit_envelope(CommitEnvelope { objects: [main, bundle, identity], /* … */ }).await?;
 // At each fixed import slot:
@@ -40,9 +41,11 @@ let batch = store.claim_batch(today, ClaimLimits { max_objects: 500, max_bytes: 
 let ack = store.ack_batch(batch.batch_no, &digests).await?;     // then delete ack.blobs_to_delete
 store.apply_replies(today, replies).await?;
 store.rebuild_published_set(slot).await?;                       // K new entries
+store.acknowledge_deletion_head(&signed_core_head, &core_pk).await?;     // RL-11
 store.uniform_rewrite(slot, &counter_deltas, &active_accounts).await?;   // last
+vacuum_after_rewrite(&owner_opts).await?;   // as candor-migrate (table owner), right after
 // Daily job, separate process as candor_intake_maint:
-PgIntakeMaintenance::open(maint_opts, tenant).await?.prune_deletion_list(today).await?;
+PgIntakeMaintenance::open(maint_opts, tenant, core_pk).await?.prune_deletion_list(today).await?;
 
 // Tests of other crates:
 let mem = MemoryStore::new()?;
@@ -51,7 +54,7 @@ let mem = MemoryStore::new()?;
 ## Tests
 
 ```sh
-cargo test -p candor-intake-store                                          # PG tests skip with a message
+cargo test -p candor-intake-store                                          # PG tests return early (CANDOR_TEST_PG unset)
 crates/candor-intake-store/scripts/pg-test.sh                              # throwaway PG 16 cluster + full suite
 crates/candor-intake-store/scripts/pg-test.sh cargo test -p candor-intake-store --test pg
 ```

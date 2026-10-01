@@ -181,8 +181,32 @@ R5 B-CR-52.
 ## Open items
 
 - RESOLVED: cargo-fuzz targets `fuzz_safefs_names` (ST-048) and
-  `fuzz_archive_{zip,tar,tar_gz}` (ST-049) live in `fuzz/` (nightly cargo-fuzz runs pending in CI).
+  `fuzz_archive_{zip,tar,tar_gz}` (ST-049) live in `fuzz/`, with committed
+  seeds in `fuzz/seeds/<target>/` (nightly cargo-fuzz runs pending in CI).
 - Host-side enforcement for FILE-020 (cgroups, VM memory, timers) is in C-17,
   not here. The wall-clock limit is also C-17's job.
 - RESOLVED: CI job `test-nonroot` runs the workspace tests as an unprivileged user,
   so the foreign-owner refusal path is exercised.
+
+## Fixes for AUD-RM1-SFS (audit `process/audits/AUDIT-RM1-safefs-log.md`)
+
+| Finding | Fix | Regression test |
+|---|---|---|
+| SFS-01 (M) lint bypassable / not in CI | Workspace `clippy.toml` now bans `std::fs::*` path APIs, `File::open/create/options`, `OpenOptions::open`, `DirBuilder::create`, `Path::join`/`PathBuf::push`, `rustix::fs`/`libc`/`nix` open/rename/link/unlink families (`disallowed-methods`) and `tar::Archive`/`zip::ZipArchive` (`disallowed-types`); type-resolved, so `extern crate std as s; s::fs::write` is caught. This crate opts out per module (`store`, `archive/*`) with a reasoned `#![allow]`. `lint-safefs.sh` now: no `^\*` comment skip, no `[^:]` exclusion, extra rustix/libc/nix/`extern crate std as` patterns, rejects `allow(clippy::disallowed_*)` outside this crate and any crate-local `clippy.toml` (it would replace the workspace bans), parses table-form/renamed deps and resolves deps with `cargo metadata` + `jq` when a workspace manifest exists, and fails closed (exit 2) on any grep/cargo/jq error (command substitution, not process substitution). CI job `repo-lints` runs it on the real tree. | `tests/lint.rs::audit_bypasses_are_caught`, `renamed_dependency_resolved_through_cargo_metadata` |
+| SFS-02 (M) invisible/format chars, confusable dots | `DisplayName` removes every `Default_Ignorable_Code_Point` (zero-width chars, U+FEFF, soft hyphen, CGJ, variation selectors, Mongolian FVS, tag/ignorable block U+E0000–E0FFF, Hangul fillers U+115F/1160/3164/FFA0, …), all other `Cf`, private use, noncharacters and the braille blank U+2800; whitespace runs collapse to one ASCII space and are trimmed; the all-dots check runs on NFKC (fullwidth `．．` → U+2024 U+2024); over-long names are truncated in the middle keeping the final extension visible (`head…ext`). The DI table is hand-written from Unicode 16 DerivedCoreProperties (no new dependency); unassigned (`Cn`) code points are not tracked (would need a Unicode data dependency) — residual. | `display::tests::invisible_and_filler_characters_removed`, `truncation_keeps_extension_visible`, proptests `fillers_never_survive`, `invariants`; fuzz oracle extended |
+| SFS-03 (L) aborted write leaves root mtime | `PendingObject` records the root's atime/mtime before creating its temp file and restores them (futimens + fsync) when dropped without commit. ctime still changes (documented residual, unchanged). | `tests/store.rs::dropped_pending_object_restores_root_times` |
+| SFS-04 (L) Debug leaks path/sizes | Manual `Debug` for `ObjectReader` (nothing), `PendingObject` (poisoned flag only), `ExtractedMember` (no size), `ExtractionReport` (no `total_bytes`). | `debug_output_has_no_path_or_size`, `report_debug_has_no_sizes` |
+| SFS-05 (L) best-effort rollback | `finish` returns `ArchiveError::RollbackIncomplete(Vec<ObjectId>)` when any stored member cannot be removed (NotFound counts as removed); callers must remove them or destroy the scratch root. | `archive::tests::incomplete_rollback_is_reported` |
+| SFS-06 (L) per-entry extension cap | The extension-header counter is archive-wide; a second local pax header for one entry is `Malformed`. | `tar_extension_header_cap_is_archive_wide` |
+| SFS-07 (L) writes after failure | Any failed write poisons the `PendingObject`; later writes and `commit` fail. | `store::tests::failed_write_poisons_pending_object` |
+| SFS-08 (I) | `ContentKey` no longer `Clone`. Fuzz seed corpora committed (`fuzz/seeds/`, from small ustar/GNU/pax tars, tar.gz, stored/deflate zips, hostile names): 30 s smoke runs reach cov 1114–1795 on the archive targets (was 160–273). **Deferred (justified):** `O_TMPFILE` + `linkat(AT_EMPTY_PATH)` needs `CAP_DAC_READ_SEARCH` or `/proc` access, which conflicts with the confinement profile — the named temp file plus SFS-03 time restore and `purge_incomplete` stay; the inotify "no inode outside root" test needs a new dependency and is left to the C-17 integration suite; the nightly fuzz CI job is left to the lead (ci.yml was limited to one additive job). | — |
+| SFS-09 (I) local/central cross-check | Local header method, encryption flag and (without data descriptor) CRC and sizes must equal the central directory; every member range must end before the central directory. | `zip_local_central_field_mismatch_rejected` |
+
+### Security self-review (this pass)
+
+Re-read as an attacker: no new path composition (the time restore uses the
+root handle and "."), no new allocation driven by input, no new panics
+(`as _` only widens `st_*time_nsec` into `Timespec`), errors still carry no
+names/paths (RollbackIncomplete prints a count; its ids are random storage
+ids). Residuals: ctime of the root still records abort time; display-name
+`Cn` code points survive; the grep layer remains a heuristic behind clippy.

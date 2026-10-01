@@ -110,8 +110,14 @@ crates/candor-safefs/scripts/lint-safefs.sh --include-tests # also tests/, bench
 ```
 
 To exempt a line, add `// safefs-lint: allow(<reason>)`. The reason must not be
-empty. The lint is a grep heuristic. Semgrep taint rules and clippy
-`disallowed-methods` still need to be configured at workspace level (07 §10).
+empty. The primary gate is the workspace `clippy.toml` (`disallowed-methods`
+for `std::fs::*`, `Path::join`, `rustix::fs`/`libc`/`nix` file calls,
+`disallowed-types` for `tar::Archive`/`zip::ZipArchive`), enforced by the CI
+clippy job; only this crate opts out, per module with a reasoned `allow`. The
+script covers what clippy cannot: banned dependencies (also renamed or
+table-form, via `cargo metadata`), `allow(clippy::disallowed_*)` elsewhere,
+crate-local `clippy.toml` files, plus a grep layer. It fails closed (exit 2) if
+grep, cargo or jq fail, and runs on the real workspace in CI (`repo-lints`).
 
 ## Testing
 
@@ -119,7 +125,7 @@ empty. The lint is a grep heuristic. Semgrep taint rules and clippy
 cargo test -p candor-safefs
 ```
 
-The suite has 57 tests: unit tests, property tests (name sanitizer, id
+The suite has 69 tests: unit tests, property tests (name sanitizer, id
 round-trip, store round-trip, arbitrary archive names, random bytes into every
 extractor), store confinement tests and a malicious-archive suite. The
 malicious archives are built by hand in `tests/common`: zip slip, symlinks,

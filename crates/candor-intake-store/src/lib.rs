@@ -20,7 +20,9 @@ pub mod store;
 pub mod types;
 mod validate;
 
-pub use deaddrop::{DeadDropConfig, DummyReplies, RandomDummyReplies};
+pub use deaddrop::{
+    DEFAULT_DUMMY_BUCKET_WEIGHTS, DeadDropConfig, DummyReplies, RandomDummyReplies,
+};
 pub use deletion::{
     CoreReplyHasher, DeletionEntry, DeletionKind, DeletionSigner, Ed25519DeletionSigner,
     ReplyObjectHasher, SignedDeletionHead,
