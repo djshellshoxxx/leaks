@@ -140,10 +140,7 @@ async fn stalled_sessions_do_not_block_a_third() {
         assert!(matches!(begin(&f, sess(i), MIB).await, Response::Part { .. }));
     }
     assert_eq!(begin(&f, sess(3), MIB).await, Response::error(ErrorCode::Busy));
-    // Session 1 keeps sending; session 2 stalls.
-    let Response::Draft(_) = ok(&f.sealer, Request::DraftGet { sess: sess(1) }).await else {
-        panic!()
-    };
+    // Neither admitted source sends a byte.
     tokio::time::advance(std::time::Duration::from_secs(119)).await;
     f.sealer.reap_expired();
     assert_eq!(begin(&f, sess(3), MIB).await, Response::error(ErrorCode::Busy));
@@ -153,7 +150,11 @@ async fn stalled_sessions_do_not_block_a_third() {
     // released: the third source is admitted.
     assert_eq!(f.sealer.memory_reserved(), 0);
     assert!(matches!(begin(&f, sess(3), MIB).await, Response::Part { .. }));
-    assert!(read_all_files(&f.staging_path).is_empty(), "stalled parts left data");
+    assert_eq!(
+        read_all_files(&f.staging_path).len(),
+        1,
+        "only the new upload's file; the stalled parts left nothing"
+    );
 }
 
 /// Sealing within the budget succeeds (never refused for memory), frees the
