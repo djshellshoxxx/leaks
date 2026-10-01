@@ -449,3 +449,10 @@ These ADRs are binding and supersede conflicting text in earlier ADRs and docume
 9. **Intake DR deletion durability** (RVW-A-28): source-initiated deletions are recorded in a signed intake deletion list replicated to Z-CORE via the relay; any intake restore applies it before serving.
 10. **MANAGED audit export key** (DISP-G6): audit exports in the MANAGED profile are encrypted to a customer-held key; the vendor cannot read audit contents.
 11. **Canonical constants registry** is owned by `39-REQUIREMENTS-TRACEABILITY.md` §Constants and checked by the spec-constant lint (ST-167, SG-25).
+
+### ADR-048 Owner sign-offs (2026-10-01)
+The project owner approved the following judgement calls raised during revision:
+1. **GOV profile Tier W default**: for CJIS/FIPS-mandated government deployments, the no-JavaScript web path (Tier W) is preselected OFF; enabling it is ADVANCED and requires a recorded agency determination (22 GOV-028).
+2. **GOV Recovery Quorum**: enabled by default in the GOV profile, custodians from independent roles, disclosed to sources (ADR-044(3)).
+3. **Library licensing**: `candor-core` and `candor-safefs` are Apache-2.0 OR MIT; all other Trust Path code AGPL-3.0-or-later (ADR-031).
+4. **Implementation scope**: implementation begins with the Community Edition only (open-source Trust Path, milestones RM-0 and RM-1 of 38). No Enterprise module work until CE 1.0 GA (RM-004).
