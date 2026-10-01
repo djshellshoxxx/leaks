@@ -1478,6 +1478,14 @@ events:
     fields:
       - name: "prune"
         type: "RetentionPrune"
+  - type: "sys.stage_lost"
+    class: SYSTEM
+    stream: sys-slot
+    ts: date_only
+    fields:
+      - name: "stream"
+        type: "StreamId"
+        codes: ["sec", "case", "sys", "case-slot", "sys-slot"]
   - type: "sys.slot_retention_tombstone"
     class: SYSTEM
     stream: sys-slot

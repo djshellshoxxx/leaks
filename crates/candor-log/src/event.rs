@@ -142,12 +142,12 @@ macro_rules! catalog {
             /// Whether every artefact-derived field (sequence numbers,
             /// ranges, checkpoint roots) was derived under checkpoint key
             /// `key` (AUD-RM1-LOG-17).
-            pub(crate) fn origins_ok(&self, key: &[u8; 32]) -> bool {
+            pub(crate) fn origins_ok(&self, key: &[u8; 32], max_seq: u64) -> bool {
                 match self {
                     $( Self::$v { $( $f ),* } => {
                         #[allow(unused_mut)]
                         let mut ok = true;
-                        $( ok &= AuditField::origin_ok($f, key); )*
+                        $( ok &= AuditField::origin_ok($f, key, max_seq); )*
                         ok
                     } ),*
                 }
@@ -332,6 +332,10 @@ catalog! {
     /// before its whole intervals are deleted (AUD-RM1-LOG-01: the verifier
     /// needs the tombstone in the pruned stream). Implementation-defined.
     SysRetentionTombstone = "sys.retention_tombstone" [System, System] { prune: RetentionPrune }
+    /// Written once per slot stream after a (re)start (AUD-RM1-LOG-25):
+    /// date-only events staged in memory before the restart may have been
+    /// lost (a clean shutdown cannot flush them early without timing them).
+    SysStageLost = "sys.stage_lost" [System, DateOnly] { stream: StreamId }
     /// Retention tombstone of the date-only `sys-slot` stream.
     SysSlotRetentionTombstone = "sys.slot_retention_tombstone" [System, DateOnly] { prune: RetentionPrune }
 }
@@ -464,7 +468,7 @@ mod tests {
         let key = [9u8; 32];
         let n = AuditEvent::samples()
             .iter()
-            .filter(|e| !e.origins_ok(&key))
+            .filter(|e| !e.origins_ok(&key, u64::MAX))
             .count();
         // checkpoint_signed (range, root), witness_cosigned/failed (seq),
         // verification_failed (seq), exported (range), viewed (range).

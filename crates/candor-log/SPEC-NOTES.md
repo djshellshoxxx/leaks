@@ -309,6 +309,13 @@ MAC under its own public test key to get reproducible fixtures/seeds).
 | LOG-14 (L) COI adjacency | `case.coi_tags_updated` is date-only, so it lands in the shuffled `case-slot` stream; COI-caused membership changes are emitted with a system actor (date-only ⇒ `case-slot` as well). Neither is ever adjacent to the other in order. **Residual:** co-occurrence of both for the same case within one import slot window (the granularity imports already have); staff-made removals stay exact-time in CASE. Lead-auditor acceptance still required for that residual. | `timestamp_policy`, registry (`case.coi_tags_updated: case-slot, date_only`) |
 | LOG-23 (I) | (a) `CaseRecordSource` + `RedactionPlan::build` (see LOG-16). (b) `diag::__private::emit` const- and run-time checks `MODULE` as a module path (`ident(::ident)*`, ≤ 200 bytes) and enforces the release ceiling itself from the site's `DEBUG_ASSERTIONS` constant (set by the macro from the calling crate's `cfg!(debug_assertions)`). A hand-written `Site` can still claim `DEBUG_ASSERTIONS = true` (Info, static data only). | `diag::tests::module_check`, `tests/ui/diag_forged_internals.rs` |
 
+### Round 3 (re-test of round 2)
+
+| Finding | Fix | Regression test |
+|---|---|---|
+| LOG-24 (M) `Seq::of_failure` carries 64 chosen bits | Artefact-derived fields must also lie in the writer's own sequence space: `emit` refuses a `Seq` > the largest `next_seq` of the writer's streams and a `SeqRange` not ending below it (`ForeignArtefact`), in addition to the key binding. A crafted failure (stub with `seq = 0xcb007107000001bb`) can no longer be logged; real failures and ranges still can. Residual: a value below the writer's own counters can encode ~log2(next_seq) bits (same class as LOG-03's bounded fields). | `crafted_failure_seq_cannot_be_logged` |
+| LOG-25 (L) staged events lost on crash | `AuditLog::note_restart()` (C-24 calls it once at start-up) stages one date-only `sys.stage_lost { stream }` per slot stream, written to `sys-slot` at the next slot boundary, so a gap after a restart is always flagged and never reads as "nothing happened"; overflow of the stage now returns `StageFull`. A durable sealed stage was not chosen: it needs typed event decoding and a fixed-size preallocated file to avoid timing, which is not simple; the loss is bounded to one slot. | `restart_marks_possible_stage_loss` |
+
 **Downstream (outside this crate, for the lead):** `candor-sealer` tests and
 fuzz harness call the removed `TenantRef::derive(&AuditIdKey::new([3; 32]),
 b"tenant")` (`tests/common/mod.rs`, `tests/hardening.rs`,

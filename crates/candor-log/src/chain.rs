@@ -827,6 +827,8 @@ pub enum LogError {
     Encoding,
     /// Sequence space exhausted.
     SeqOverflow,
+    /// Too many date-only events staged for the open slot (fail closed).
+    StageFull,
     /// The primary sink failed; nothing was committed.
     Sink(SinkError),
     /// No primary sink is attached (fail closed).
@@ -854,6 +856,7 @@ impl fmt::Display for LogError {
             Self::Envelope(_) => "audit: envelope rule violated",
             Self::Encoding => "audit: encoding failed",
             Self::SeqOverflow => "audit: sequence overflow",
+            Self::StageFull => "audit: slot stage full",
             Self::Sink(_) => "audit: primary sink failure",
             Self::NoPrimarySink => "audit: no primary sink",
             Self::Signer => "audit: checkpoint signing failed",
@@ -1123,6 +1126,23 @@ impl<S: CheckpointSigner, C: AuditClock> AuditLog<S, C> {
         }
     }
 
+    /// Record, after a (re)start, that date-only events staged in memory by
+    /// the previous process may have been lost (AUD-RM1-LOG-25): one
+    /// date-only `sys.stage_lost` per slot stream, written to `sys-slot` at
+    /// the next slot boundary (so it carries no finer time than the slot).
+    /// C-24 calls this once at start-up, after attaching the primary sink
+    /// and resuming the streams; a reader then never mistakes a crash gap in
+    /// `case-slot`/`sys-slot` for "nothing happened".
+    pub fn note_restart(&mut self) -> Result<(), LogError> {
+        for stream in [StreamId::CaseSlot, StreamId::SysSlot] {
+            self.emit_checked(
+                EventContext::system(crate::codes::Service::Audit),
+                AuditEvent::SysStageLost { stream },
+            )?;
+        }
+        Ok(())
+    }
+
     /// Set the primary (durable, commit-point) sink.
     pub fn set_primary_sink(&mut self, sink: Box<dyn AuditSink + Send>) {
         self.primary = Some(sink);
@@ -1267,7 +1287,8 @@ impl<S: CheckpointSigner, C: AuditClock> AuditLog<S, C> {
         if self.host_role == HostRole::Intake && !event.allowed_on_intake() {
             return Err(LogError::Envelope(EnvelopeError::NotAllowedOnHost));
         }
-        if !event.origins_ok(self.signer.verifying_key().as_bytes()) {
+        let max_seq = self.streams.iter().map(|s| s.next_seq).max().unwrap_or(0);
+        if !event.origins_ok(self.signer.verifying_key().as_bytes(), max_seq) {
             return Err(LogError::ForeignArtefact);
         }
         if self.primary.is_none() {
@@ -1295,7 +1316,7 @@ impl<S: CheckpointSigner, C: AuditClock> AuditLog<S, C> {
                 .get_mut(idx(stream))
                 .ok_or(LogError::Encoding)?;
             if st.staged.len() >= MAX_STAGED_PER_SLOT {
-                return Err(LogError::SeqOverflow);
+                return Err(LogError::StageFull);
             }
             st.staged.push(staged);
             let secondary_lag = self.feed_secondaries(None);

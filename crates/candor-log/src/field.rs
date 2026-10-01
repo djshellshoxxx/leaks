@@ -35,10 +35,14 @@ pub trait AuditField: sealed::Sealed {
     /// Whether a value derived from an audit artefact (checkpoint,
     /// verification report or failure) was derived under the checkpoint key
     /// `key` of the log that is emitting it (AUD-RM1-LOG-17: a value from a
-    /// self-signed or foreign checkpoint is refused). `true` for every
+    /// self-signed or foreign checkpoint is refused) and, for sequence
+    /// numbers, lies within the writer's own sequence space: a `Seq` ≤
+    /// `max_seq` and a `SeqRange` ending below it, where `max_seq` is the
+    /// largest `next_seq` of the writer's streams (AUD-RM1-LOG-24: a crafted
+    /// verification failure cannot carry 64 chosen bits). `true` for every
     /// other field type.
     #[doc(hidden)]
-    fn origin_ok(&self, _key: &[u8; 32]) -> bool {
+    fn origin_ok(&self, _key: &[u8; 32], _max_seq: u64) -> bool {
         true
     }
 }
@@ -154,8 +158,8 @@ impl<T: AuditField> AuditField for Option<T> {
     fn schema_codes() -> &'static [&'static str] {
         T::schema_codes()
     }
-    fn origin_ok(&self, key: &[u8; 32]) -> bool {
-        self.as_ref().is_none_or(|v| v.origin_ok(key))
+    fn origin_ok(&self, key: &[u8; 32], max_seq: u64) -> bool {
+        self.as_ref().is_none_or(|v| v.origin_ok(key, max_seq))
     }
 }
 
@@ -312,8 +316,8 @@ impl AuditField for Seq {
     fn to_value(&self) -> Value {
         Value::Uint(self.v)
     }
-    fn origin_ok(&self, key: &[u8; 32]) -> bool {
-        &self.origin == key
+    fn origin_ok(&self, key: &[u8; 32], max_seq: u64) -> bool {
+        &self.origin == key && self.v <= max_seq
     }
 }
 
@@ -354,8 +358,8 @@ impl AuditField for SeqRange {
     fn to_value(&self) -> Value {
         Value::Array(vec![Value::Uint(self.first), Value::Uint(self.last)])
     }
-    fn origin_ok(&self, key: &[u8; 32]) -> bool {
-        &self.origin == key
+    fn origin_ok(&self, key: &[u8; 32], max_seq: u64) -> bool {
+        &self.origin == key && self.first <= self.last && self.last < max_seq
     }
 }
 
@@ -381,7 +385,7 @@ impl AuditField for CheckpointRoot {
     fn to_value(&self) -> Value {
         Value::Bytes(self.root.to_vec())
     }
-    fn origin_ok(&self, key: &[u8; 32]) -> bool {
+    fn origin_ok(&self, key: &[u8; 32], _max_seq: u64) -> bool {
         &self.origin == key
     }
 }

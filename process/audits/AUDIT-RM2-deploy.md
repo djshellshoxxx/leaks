@@ -654,3 +654,106 @@ Gate: **NOT YET PASS** 2026-10-01 201f20b+wt. There are no open Critical or High
 - ADR-053(2): no source-path output in any journal; OOM/segfault lines are an accepted residual.
 
 That outstanding precondition of the round-3 gate is closed. The gate now depends only on DEP-23 (Medium). DEP-24 (Low) is tracked and does not block. Fixes for both are in progress, and round 4 will re-test them.
+
+---
+
+## Re-test (round 4)
+
+| Field | Value |
+|---|---|
+| Date | 2026-10-01 |
+| Revision | HEAD `7cae42f` (fixes in 8163ede, d2b9c68, 7cae42f). The working-tree change to `deploy/intake/systemd/candor-sealer.service` (re-allows `memfd_create`, ADR-055/SEA-16) is someone else's work in progress. It is **not covered** here, and config-check correctly rejects it: `syscall_set` and `syscall_never` FAIL |
+| Scope | DEP-23, DEP-24, maintenance-role decision (`--pg-db`), STO-26 against ADR-054, python3 dependency, PG profile `/etc/passwd` read |
+
+### Tools
+
+| Check | Result |
+|---|---|
+| shellcheck | clean |
+| `py_compile safe-read.py` | ok (the `__pycache__` it created was removed) |
+| `sha256sum -c config-check.manifest` | OK; the script pin equals the manifest digest |
+| `CANDOR_TEST_PG=1 validate.sh` on a `git archive HEAD` copy in scratch | 350 PASS, 1 FAIL |
+
+The one FAIL is "work directories left behind". It is caused by other agents running `validate.sh` at the same time on the shared `/run/candor-config-check`; I saw the concurrent processes. It is not a defect of the fix (DEP-27). On the live working tree the sealer WIP adds the expected 2 FAILs.
+
+### DEP-23 (AppArmor include closure): **Fixed**
+
+- **Profiles.** All 6 profiles have no `include`; `abi <abi/3.0>` is their only distribution reference.
+- **Host-root variants, rejected (exit 30):**
+
+  | Variant | Rejected by |
+  |---|---|
+  | `abstractions/base.d` snippet, `tunables/global.d` snippet, non-empty `local/candor-web` | `apparmor.snippet_dirs_empty` |
+  | rewritten `abstractions/openssl` | `apparmor.dist_conffiles` |
+  | edited `abi/3.0` | `apparmor.abi` + `.compiled` |
+  | include added to a profile | content + include + compiled |
+  | foreign profile naming the sealer binary | `no_foreign_profiles` |
+
+- **parser.conf `policy-features`/`kernel-features`/`features-file` pointing at a minimal feature file.** The compiled output does not change (the profile's `abi` pins the features), so these cannot downgrade policy. A missing feature file fails closed.
+- **Accepted but harmless:**
+  - A forged `dpkg/status` digest for a tampered abstraction. Abstractions are no longer included, so policy is unaffected.
+  - A foreign profile attached by glob `/usr/lib/cand*/**`. Units attach the named profile with `AppArmorProfile=`, so the glob profile is unused. Info.
+- **Not verified here:** the live `raw_data` comparison, because this container has no AppArmor in the kernel. It stays integration item 9.
+
+### DEP-24 (input reader race): **Fixed**
+
+- **Code review.** `safe-read.py` walks every component with `openat`/`O_PATH|O_NOFOLLOW`, checks the file first with `fstatat(AT_SYMLINK_NOFOLLOW)`, then opens with `O_NONBLOCK|O_NOFOLLOW`. On the open descriptor it checks inode equality, `nlink==1`, owner, mode and size cap, and it never prints content. It is manifest-pinned and runs `-I -S -B` under `timeout`. Unit files are read through it too, and the remaining `systemd-analyze --root` / `postgres -C` reads are root-confined or unprivileged.
+- **Direct cases:** FIFO → 12, parent symlink → 10, hard link → 13.
+- **Race loops:** parent-directory ↔ symlink swap, 400 reads → 105 OK, **0 leaks**. FIFO ↔ file swap, 300 reads → **0 hangs**.
+
+### Maintenance role (`--pg-db`): **Verified**
+
+- The query checks: memberships = `pg_checkpoint` only (no ADMIN/SET), no members, no privileged attributes, NOINHERIT, `datdba = candor_intake_maint`, and no owned objects.
+- A running server without `--pg-db` → FAIL. The validate PG run includes these cases and passes.
+
+### Fixer-reported changes (scrutinised)
+
+- **PG profile reads `/etc/passwd` and `/etc/nsswitch.conf`: accepted (Info).**
+  - Needed for `getpwuid` in peer authentication. `/etc/passwd` holds no secrets, and `/etc/shadow` stays denied.
+  - The NSS varlink socket is not writable under the profile, so lookups fall back to files.
+- **python3 as an H-INTAKE dependency: DEP-26 (Low).** It is not a security defect in the reader, but it is a deviation from 17 §5.1 and the Toolchain row ("no interpreters beyond what packages require"). See DEP-26.
+
+### STO-26 against ADR-054 — DEP-25 (Low)
+
+ADR-054(1) requires one dedicated cluster per tenant intake. The deployment and the checker still allow several intake databases per cluster:
+- `pg_hba.conf` admits `candor_intake_maint` (and the store and migrator roles) to `/^candor_intake_` databases.
+- `pg_maint_role` inspects only the `--pg-db` database. It does not assert that the cluster has exactly one `candor_intake_*` database.
+
+ADR-054's cross-tenant protection (STO-26: a tenant's maintenance login dropping or locking another tenant's idle database) is therefore policy only. The database-owner DoS levers are not monitored either: `datconnlimit`, and `pg_db_role_setting` entries from `ALTER DATABASE … SET`.
+
+Fix:
+- Pin the database name in `pg_hba` (installer-filled, exact match instead of the regex), with an exact-template rule in config-check.
+- In `--pg-db`, assert `count(*) = 1` for `datname LIKE 'candor\_intake\_%'` and `datconnlimit = -1`.
+- Assert no `pg_db_role_setting` rows for the database.
+
+### New findings
+
+| ID | Sev | Title | Status |
+|---|---|---|---|
+| DEP-25 | Low | ADR-054 single-intake-DB-per-cluster not enforced (hba regex; no catalog count); owner DoS levers (`datconnlimit`, `pg_db_role_setting`) unchecked | Open |
+| DEP-26 | Low | `python3` added to H-INTAKE for `safe-read.py`, against 17 §5.1 Toolchain ("no interpreters beyond what packages require"). It is a general interpreter on the most exposed host, useful after exploitation; confined services cannot exec it (AppArmor has no `x`). Fix: record lead acceptance in an ADR and add it to the Platform Manifest, or move the reader into a compiled helper (the planned Rust `candorctl check`) and drop python3 | Open (lead decision) |
+| DEP-27 | Info | `validate.sh`'s "work base empty" assertion and the shared `/run/candor-config-check` make concurrent validator runs fail spuriously. Check only the run's own directory, or use a per-run base | Open |
+| DEP-28 | Info | dpkg conffile verification relies on MD5 digests from a root-writable `status` file. Acceptable now that abstractions are not included; do not rely on it for anything that is included | Open |
+
+### Round-4 summary and gate
+
+| Severity | Open | IDs |
+|---|---|---|
+| Critical | 0 | — |
+| High | 0 | — |
+| Medium | 0 | DEP-23 fixed |
+| Low | 3 | DEP-24 fixed; DEP-25, DEP-26 new; DEP-13 is Info (tracking) |
+| Info | 4 | DEP-13, DEP-22 (fixed), DEP-27, DEP-28 |
+
+Gate: **PASS 2026-10-01 7cae42f** for `deploy/` as committed.
+- No open Critical, High or Medium findings. Lows and Infos are tracked.
+- The PASS does **not** cover the uncommitted `candor-sealer.service` change (ADR-055 `memfd_create`). That change voids the PASS for the file. It needs a baseline re-pin (`scf|`, `scf-never|`, `unit|` lines and the manifest digests) and a delta re-test before integration.
+- Live-only items (AppArmor `raw_data`/enforce, `systemctl show`, `/proc/sys`) remain integration items 7–9.
+
+## Lead dispositions after round 4 (2026-10-01)
+- **Gate: PASS at 7cae42f**, subject to a delta re-test of the `memfd_create` change (ADR-055(1)) together with the items below.
+- **DEP-25 (Low):** fix. Enforce ADR-054 by pinning an exact database name in `pg_hba`, a config-check that counts exactly one intake database per cluster, and checks on the maint role's connection limit and its `ALTER DATABASE … SET` overrides.
+- **DEP-26 (Low):** fix per ADR-055(3) by replacing `safe-read.py` with a compiled tool; python3 does not go on H-INTAKE.
+- **DEP-27 (Info):** accepted. The failure was caused by concurrent runs; validate.sh gets a per-run scratch directory.
+- **DEP-28 (Info):** accepted. The dpkg MD5 check is a consistency check, not a trust anchor; trust in the binaries comes from the signed release manifest (28/31).
+- **PG profile read of `/etc/passwd` (Info):** accepted.

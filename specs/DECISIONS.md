@@ -499,3 +499,8 @@ The project owner approved the following judgement calls raised during revision:
 
 ### ADR-054 Intake database isolation (2026-10-01; AUD-RM2-STO-26)
 1. Every intake store runs in its own dedicated PostgreSQL cluster: one cluster per tenant intake, never shared across tenants and never shared with Z-CORE. The maintenance role (`candor_intake_maint`) owns that cluster's intake database only; it is not a member of the schema-owner role.
+
+### ADR-055 Sealer bundle handover and KD encoding (2026-10-01; AUD-RM2-SEA-16/19, C-3, DEP-26)
+1. The sealer hands sealed bundles to the intake store as anonymous memfds, sealed `F_SEAL_WRITE|F_SEAL_GROW|F_SEAL_SHRINK|F_SEAL_SEAL`, over `SCM_RIGHTS` on `istore.sock`; there are no bundle files in staging. The store must verify that all four seals are set, the descriptor is a regular file, its size matches the header, and the peer UID is the sealer's (STO-27). The sealer unit allows `memfd_create`.
+2. The CBOR body key numbering, `signer_key_id` form and composite subject derivations for KD entries chosen in `crates/candor-sealer/SPEC-NOTES.md` (C-3) are canonical until 04 §14.2 is amended to match; changing them is a format break.
+3. No interpreter is added to H-INTAKE for configuration checking: the safe reader (DEP-24) becomes a compiled, reproducibly built tool; python3 is not part of the H-INTAKE platform manifest (AUD-RM2-DEP-26).

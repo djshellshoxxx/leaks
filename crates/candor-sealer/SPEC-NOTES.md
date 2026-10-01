@@ -264,3 +264,10 @@ Coordination items:
 - **C-5 (store / integration):** `EnvelopeSink::commit_envelope_group` over the store client calls `handover::hand_over` for `Blob::Staged` and returns `Ok` only after the store's acknowledgement; account rows arrive in batches (`upsert_account`) independent of envelope commits.
 
 Check results (round 2, 2026-10-01, live tree): see the final section.
+
+### Check results (round 2, 2026-10-01, live tree incl. migrated candor-core)
+- `cargo fmt -p candor-sealer`: applied.
+- `cargo clippy -p candor-sealer --all-targets --all-features -- -D warnings` and `--no-default-features --lib`: clean.
+- `cargo test -p candor-sealer`: 72 pass (28 unit + 44 integration in 12 binaries) plus the `harness = false` hardening binary (2 scenarios, exit 0).
+- `lint-safefs.sh --include-tests`: no sealer findings; `lint-logging.sh`: ok.
+- `fuzz_sealer_ipc` (nightly-2026-09-28, seeds + fresh corpus, `-max_total_time=150 -rss_limit_mb=2048`): 4,045 runs, no crash, leak or OOM; **cov 10,569**, ft 25,705, corpus 518 (round 1: cov 154). Throughput is ~30 exec/s because mode-3 inputs run a real 64 MiB Argon2id and modes 2/3 seal real envelopes.

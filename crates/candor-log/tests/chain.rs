@@ -1779,3 +1779,94 @@ fn checkpoint_values_cannot_be_laundered() {
     .unwrap();
     let _ = (clock.read(), seq);
 }
+
+// AUD-RM1-LOG-24 regression (round-3 PoC `r3seq.rs`): a crafted record
+// verified under the writer's *public* key fails with a caller-chosen seq
+// (IPv4 203.0.113.7:443 packed in 64 bits); the resulting `Seq` is outside
+// the writer's sequence space and `emit` refuses it.
+#[test]
+fn crafted_failure_seq_cannot_be_logged() {
+    let (mut log, _sink, _c) = log_with(HostRole::Core, CheckpointPolicy::DEFAULT);
+    log.emit(EventContext::staff(user(1)), login()).unwrap();
+    let key = log.verifying_key();
+    let x: u64 = 0xcb00_7107_0000_01bb;
+    let stub = ChainRecord::Redacted {
+        seq: x,
+        case: case(1),
+        inner: [0; 32],
+        tombstone_seq: x + 1,
+    };
+    let e = verify_stream(&params(&key, StreamId::Sec), &[stub], &[]).unwrap_err();
+    let seq = candor_log::field::Seq::of_failure(&e);
+    assert_eq!(seq.get(), x, "the verifier reports the crafted value");
+    assert_eq!(
+        log.emit(
+            EventContext::staff(user(1)),
+            AuditEvent::AuditVerificationFailed {
+                stream: StreamId::Sec,
+                seq,
+                failure_code: e.code,
+            }
+        )
+        .unwrap_err(),
+        LogError::ForeignArtefact
+    );
+    // A failure inside the writer's own sequence space is still loggable.
+    let ok = verify_stream(&params(&key, StreamId::Case), &[], &[]).map(|_| ());
+    assert!(ok.is_ok());
+    let bad = ChainRecord::Full {
+        bytes: vec![0xff],
+        salt: [0; 32],
+        claimed_hash: None,
+    };
+    let e = verify_stream(&params(&key, StreamId::Sec), &[bad], &[]).unwrap_err();
+    log.emit(
+        EventContext::staff(user(1)),
+        AuditEvent::AuditVerificationFailed {
+            stream: StreamId::Sec,
+            seq: candor_log::field::Seq::of_failure(&e),
+            failure_code: e.code,
+        },
+    )
+    .unwrap();
+}
+
+// AUD-RM1-LOG-25: after a restart the log records, in `sys-slot` at the
+// next slot boundary, that staged date-only events may have been lost.
+#[test]
+fn restart_marks_possible_stage_loss() {
+    let r = rig(HostRole::Core, CheckpointPolicy::DEFAULT);
+    let (mut log, sink, clock) = (r.log, r.sink, r.clock);
+    log.emit(EventContext::system(Service::Relay), imported(1))
+        .unwrap();
+    // Crash: the staged import is gone with the process.
+    drop(log);
+    let r2 = rig_at(HostRole::Core, CheckpointPolicy::DEFAULT, clock.now());
+    let (mut log2, sink2, clock2) = (r2.log, r2.sink, r2.clock);
+    log2.note_restart().unwrap();
+    assert!(sink2.0.lock().unwrap().chain(StreamId::SysSlot).is_empty());
+    next_slot(&mut log2, &clock2);
+    let st = sink2.0.lock().unwrap();
+    let lost: Vec<StreamId> = st
+        .records(StreamId::SysSlot)
+        .iter()
+        .filter_map(|r| match r.event() {
+            AuditEvent::SysStageLost { stream } => Some(*stream),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lost.len(), 2);
+    assert!(lost.contains(&StreamId::CaseSlot) && lost.contains(&StreamId::SysSlot));
+    assert!(
+        st.records(StreamId::SysSlot)
+            .iter()
+            .all(|r| ts_of(r).is_multiple_of(DAY))
+    );
+    verify_stream(
+        &params(&log2.verifying_key(), StreamId::SysSlot),
+        &st.chain(StreamId::SysSlot),
+        &st.checkpoints(StreamId::SysSlot),
+    )
+    .unwrap();
+    assert!(sink.0.lock().unwrap().chain(StreamId::CaseSlot).is_empty());
+}
