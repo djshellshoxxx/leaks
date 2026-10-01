@@ -14,7 +14,7 @@ use std::sync::Arc;
 use crate::deletion::{DeletionEntry, DeletionSigner, ReplyObjectHasher, SignedDeletionHead};
 use crate::error::Result;
 use crate::types::{
-    AccountId, AckResult, ApplyRepliesResult, BackupSnapshot, ClaimLimits, ClaimedBatch,
+    AccountId, AckResult, ApplyRepliesResult, BackupSnapshot, BlobId, ClaimLimits, ClaimedBatch,
     CommitEnvelope, CounterCell, CounterDelta, Day, EnvelopeRef, ImportSlot, IncomingReply,
     InstallOutcome, KdHighWater, LookupTag, MailboxId, NewAccount, ObjectData, PartSelector,
     ReplyIndex, ReplyRef, SourceAccount, StoredReply, TenantId, VerifiedSnapshot,
@@ -316,4 +316,12 @@ pub trait IntakeMaintenance: Send + Sync {
     /// then delete relayed entries older than 35 days, always keeping the newest
     /// entry as the chain head (the database refuses anything else).
     fn prune_deletion_list(&self, today: Day) -> impl Future<Output = Result<u64>> + Send;
+
+    /// Whether a committed envelope references `blob` (`envelope_part.blob_id`;
+    /// AUD-RM2-STO-27 staged-blob sweep). Read-only, one indexed lookup. The
+    /// PostgreSQL store runs it as the application role, which already reads
+    /// `envelope_part` (no new grant); [`crate::PgIntakeMaintenance`] has no
+    /// access to that table and fails closed. Callers must treat `Err` as
+    /// "referenced" (never delete on error).
+    fn blob_referenced(&self, blob: BlobId) -> impl Future<Output = Result<bool>> + Send;
 }

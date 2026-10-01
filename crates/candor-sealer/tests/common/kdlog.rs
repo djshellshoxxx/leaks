@@ -111,7 +111,11 @@ pub fn k01_mldsa_pk() -> Vec<u8> {
 /// An ML-DSA-65 signature entry `{1: SHA-256(pk), 2: 2, 3: sig}` by `sk`.
 pub fn mldsa_sig(sk: &ml_dsa::SigningKey<ml_dsa::MlDsa65>, msg: &[u8]) -> Value {
     let pk = sk.expanded_key().verifying_key().encode();
-    let sig = sk.expanded_key().sign_deterministic(msg, &[]).unwrap().encode();
+    let sig = sk
+        .expanded_key()
+        .sign_deterministic(msg, &[])
+        .unwrap()
+        .encode();
     m(vec![
         (1, b(&candor_core::hash::sha256(&[pk.as_slice()]))),
         (2, u(kd::alg::ML_DSA_65)),

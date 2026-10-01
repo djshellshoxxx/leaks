@@ -29,16 +29,19 @@
 //! the copy reads RAM only and cannot stall), `fstat` size ≠ `len`, a file that
 //! shrinks or grows during the copy, and a hash mismatch.
 //!
-//! Orphans: a blob copied into the blob root whose envelope did not commit is
-//! recorded in an in-memory registry (never on disk) and removed by
-//! [`StagedReceiver::sweep_orphans`], which the daemon calls at every slot
-//! boundary with that slot (and [`StagedReceiver::startup`] at start).
+//! Orphans: [`StagedReceiver::sweep`] (at start-up via
+//! [`StagedReceiver::startup`] and at every slot boundary, with that slot)
+//! removes a blob only if it is not in flight in this receiver and no
+//! committed envelope references it ([`crate::IntakeMaintenance::blob_referenced`]),
+//! in shuffled order and a bounded number per slot. This covers failed
+//! commits, unknown outcomes and crashes between copy and commit. In-flight
+//! state is kept in memory only (never on disk).
 //! No path, size, name or identifier is logged or put into an error.
 //!
 //! Receive, acknowledge, refuse and sweep block (run them on a blocking
 //! thread); [`StagedReceiver::commit_staged`] is async.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::io::{IoSlice, IoSliceMut, Write};
 use std::mem::MaybeUninit;
@@ -58,9 +61,9 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
-use crate::IntakeStore;
 use crate::error::{Result, StoreError};
 use crate::types::{BlobId, CommitEnvelope, EnvelopeRef, GROUP_OBJECTS, MAX_PART_PADDED_SIZE};
+use crate::{IntakeMaintenance, IntakeStore};
 
 const _: () = assert!(STAGED_BUNDLE_INDEX < GROUP_OBJECTS);
 
@@ -88,6 +91,10 @@ const REQUIRED_SEALS: SealFlags = SealFlags::WRITE
     .union(SealFlags::GROW)
     .union(SealFlags::SHRINK)
     .union(SealFlags::SEAL);
+/// Reference lookups per sweep.
+pub const STAGED_SWEEP_MAX_CHECKS: usize = 1024;
+/// Removals per sweep.
+pub const STAGED_SWEEP_MAX_REMOVALS: usize = 64;
 /// Copy buffer size.
 const CHUNK: usize = 64 * 1024;
 const CHUNK_U64: u64 = 64 * 1024;
@@ -162,12 +169,26 @@ enum State {
     Committing,
     /// Definitely not referenced: removed by the next sweep.
     Orphan,
+    /// Commit outcome unknown. `false`: protected until the next sweep (a
+    /// late `COMMIT` has a full slot to land; statement timeouts are far
+    /// shorter); `true`: then decided by the database reference check.
+    Uncertain(bool),
+}
+
+impl State {
+    /// Protected from the sweep regardless of the database.
+    fn in_flight(self) -> bool {
+        matches!(
+            self,
+            Self::Receiving | Self::Live | Self::Committing | Self::Uncertain(false)
+        )
+    }
 }
 
 #[derive(Default)]
 struct Registry {
     map: Mutex<HashMap<BlobId, State>>,
-    /// Blobs whose envelope commit outcome is unknown (kept, never swept).
+    /// Blobs whose envelope commit outcome was unknown (health counter).
     uncertain: AtomicU64,
 }
 
@@ -187,7 +208,7 @@ impl Registry {
     }
 
     fn uncertain(&self, id: BlobId) {
-        self.forget(id);
+        self.set(id, State::Uncertain(false));
         self.uncertain.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -210,7 +231,8 @@ impl Drop for ReceiveGuard<'_> {
 }
 
 /// Marks a blob `Uncertain` if the commit future is dropped mid-await (the
-/// database may or may not have committed: keep the blob).
+/// database may or may not have committed: only the reference check may
+/// remove the blob).
 struct CommitGuard<'a> {
     reg: &'a Registry,
     id: BlobId,
@@ -389,9 +411,15 @@ impl StagedReceiver {
         self.reg.uncertain.load(Ordering::Relaxed)
     }
 
-    /// Start-up: remove temp files of copies interrupted by a crash.
-    pub fn startup(&self, slot: SlotTime) -> Result<usize> {
-        self.blobs.purge_incomplete(slot).map_err(io_err)
+    /// Start-up: remove temp files of copies interrupted by a crash, then
+    /// [`Self::sweep`] (crash leftovers: copied, never committed).
+    pub async fn startup<M: IntakeMaintenance + ?Sized>(
+        &self,
+        refs: &M,
+        slot: SlotTime,
+    ) -> Result<usize> {
+        self.blobs.purge_incomplete(slot).map_err(io_err)?;
+        self.sweep(refs, slot).await
     }
 
     /// Receive one hand-over from `sock` and copy the passed file into the
@@ -480,8 +508,9 @@ impl StagedReceiver {
     /// the blob is an orphan (swept). A backend error has an unknown outcome:
     /// the commit is retried once (a group that did commit is then reported
     /// as a duplicate); if that does not succeed, or the future is dropped
-    /// mid-commit, the blob is kept (never swept: it may be referenced) and
-    /// counted in [`Self::uncertain_count`]. On `Err` call [`Self::refuse`].
+    /// mid-commit, no token is issued, the blob is counted in
+    /// [`Self::uncertain_count`] and protected for one sweep, after which the
+    /// database reference check decides. On `Err` call [`Self::refuse`].
     pub async fn commit_staged<C: StagedCommit + ?Sized>(
         &self,
         store: &C,
@@ -556,35 +585,94 @@ impl StagedReceiver {
         Ok(())
     }
 
-    /// Remove every orphan blob (copied, envelope definitely not committed).
-    /// Call at each slot boundary with that slot: removals change directory
-    /// times only to `slot`, at a fixed schedule independent of when the
-    /// failures happened, and nothing is written about them anywhere.
-    /// Returns how many were removed; failures stay registered and are
-    /// retried at the next boundary.
-    pub fn sweep_orphans(&self, slot: SlotTime) -> Result<usize> {
-        let orphans: Vec<BlobId> = self
-            .reg
-            .lock()
+    /// Sweep the staged blob directory: at start-up ([`Self::startup`]) and
+    /// at every slot boundary, with that slot. A blob is removed only if it is
+    /// not in flight in this receiver (being received, held as a
+    /// [`StagedBlob`], being committed, or of unknown outcome for less than
+    /// one sweep) **and** `refs.blob_referenced` says no committed envelope
+    /// names it; any error counts as "referenced" (fail closed: the sweep stops
+    /// without removing anything unchecked). Known orphans are checked first,
+    /// then the other unregistered blobs (crash leftovers) in random order;
+    /// at most [`STAGED_SWEEP_MAX_CHECKS`] lookups and
+    /// [`STAGED_SWEEP_MAX_REMOVALS`] removals per call (the rest waits for
+    /// the next slot). Removals run in shuffled order through safefs, which
+    /// normalises directory times to `slot`; nothing is logged or recorded.
+    ///
+    /// The directory must be used by this receiver only (deploy rule): any
+    /// other unreferenced object in it would be removed. Filesystem calls
+    /// block briefly (one listing, bounded removals).
+    pub async fn sweep<M: IntakeMaintenance + ?Sized>(
+        &self,
+        refs: &M,
+        slot: SlotTime,
+    ) -> Result<usize> {
+        // List first, then snapshot the registry: a listed blob was
+        // registered before its file existed, so if it is in flight it is in
+        // the snapshot; one that has left the registry is committed (the
+        // database says so) or was orphaned.
+        let listed: Vec<BlobId> = self
+            .blobs
+            .list()
+            .map_err(io_err)?
             .iter()
-            .filter(|(_, s)| **s == State::Orphan)
-            .map(|(id, _)| *id)
+            .map(|o| BlobId(*o.as_bytes()))
             .collect();
+        let listed_set: HashSet<BlobId> = listed.iter().copied().collect();
+        let mut known = Vec::new();
+        let mut others = Vec::new();
+        {
+            let mut m = self.reg.lock();
+            // Orphans and aged uncertain entries whose file is gone are
+            // dropped; the rest of them are candidates. Fresh uncertain
+            // entries age now and become candidates at the next sweep.
+            m.retain(|id, st| match *st {
+                State::Orphan | State::Uncertain(true) => listed_set.contains(id),
+                _ => true,
+            });
+            for id in &listed {
+                match m.get_mut(id) {
+                    None => others.push(*id),
+                    Some(st @ State::Uncertain(false)) => *st = State::Uncertain(true),
+                    Some(st) if !st.in_flight() => known.push(*id),
+                    Some(_) => {}
+                }
+            }
+            // Uncertain entries whose file is not listed age too.
+            for st in m.values_mut() {
+                if *st == State::Uncertain(false) {
+                    *st = State::Uncertain(true);
+                }
+            }
+        }
+        shuffle(&mut known)?;
+        shuffle(&mut others)?;
+        let mut doomed = Vec::new();
+        for id in known
+            .into_iter()
+            .chain(others)
+            .take(STAGED_SWEEP_MAX_CHECKS)
+        {
+            if doomed.len() >= STAGED_SWEEP_MAX_REMOVALS {
+                break;
+            }
+            if !refs.blob_referenced(id).await? {
+                doomed.push(id);
+            }
+        }
+        shuffle(&mut doomed)?;
         let mut removed = 0usize;
         let mut failed = false;
-        for id in orphans {
+        for id in doomed {
+            // Re-check under the lock: never remove a blob that became in
+            // flight (it cannot, ids are fresh, but fail safe).
+            if self.reg.lock().get(&id).is_some_and(|st| st.in_flight()) {
+                continue;
+            }
             let oid = ObjectId::from_bytes(id.0);
-            let r = match self.blobs.exists(&oid) {
-                Ok(true) => self.blobs.remove(&oid, slot).map(|()| true),
-                Ok(false) => Ok(false),
-                Err(e) => Err(e),
-            };
-            match r {
-                Ok(was) => {
+            match self.blobs.remove(&oid, slot) {
+                Ok(()) => {
                     self.reg.forget(id);
-                    if was {
-                        removed = removed.saturating_add(1);
-                    }
+                    removed = removed.saturating_add(1);
                 }
                 Err(_) => failed = true,
             }
@@ -594,6 +682,28 @@ impl StagedReceiver {
         }
         Ok(removed)
     }
+}
+
+/// Unbiased Fisher–Yates shuffle from the OS CSPRNG (fail closed).
+fn shuffle<T>(v: &mut [T]) -> Result<()> {
+    let mut i = v.len();
+    while i > 1 {
+        let bound = u64::try_from(i).map_err(|_| StoreError::Capacity)?;
+        // Rejection sampling: accept only below the largest multiple of `bound`.
+        let rem = u64::MAX.checked_rem(bound).ok_or(StoreError::Capacity)?;
+        let zone = u64::MAX.saturating_sub(rem);
+        let r = loop {
+            let mut b = [0u8; 8];
+            crate::rng::fill(&mut b)?;
+            let x = u64::from_le_bytes(b);
+            if x < zone {
+                break x.checked_rem(bound).ok_or(StoreError::Capacity)?;
+            }
+        };
+        i = i.saturating_sub(1);
+        v.swap(i, usize::try_from(r).map_err(|_| StoreError::Capacity)?);
+    }
+    Ok(())
 }
 
 /// The bundle object (and only it) names `id`, with size `len`.

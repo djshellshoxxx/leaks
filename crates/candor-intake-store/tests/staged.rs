@@ -218,7 +218,7 @@ async fn staged_bundle_handover_roundtrip() {
     assert_eq!(try_recv_byte(&sealer), Some(STAGED_ACK_COMMITTED));
     // Committed blobs are never swept.
     assert_eq!(e.rx.in_flight(), 0);
-    assert_eq!(e.rx.sweep_orphans(next_slot()).unwrap(), 0);
+    assert_eq!(e.rx.sweep(&s, next_slot()).await.unwrap(), 0);
     assert!(e.rx.blobs().exists(&id).unwrap());
     // The sealer's file is unchanged (read-only use with pread).
     let mut back = vec![0u8; data.len()];
@@ -466,7 +466,7 @@ async fn staged_commit_failure_refused_and_swept() {
     e.rx.refuse(store_sock.as_fd()).unwrap();
     assert_eq!(try_recv_byte(&sealer), Some(STAGED_ACK_REFUSED));
     assert_eq!(e.rx.blobs().list().unwrap().len(), 1);
-    assert_eq!(e.rx.sweep_orphans(next_slot()).unwrap(), 1);
+    assert_eq!(e.rx.sweep(&s, next_slot()).await.unwrap(), 1);
     assert_clean(&e, "commit failure");
 }
 
@@ -494,7 +494,7 @@ async fn staged_duplicate_envelope_orphan_swept() {
         e.rx.commit_staged(&s, env2, b2).await.unwrap_err(),
         StoreError::DuplicateEnvelope
     );
-    assert_eq!(e.rx.sweep_orphans(next_slot()).unwrap(), 1);
+    assert_eq!(e.rx.sweep(&s, next_slot()).await.unwrap(), 1);
     assert_eq!(e.rx.blobs().list().unwrap(), vec![keep]);
     assert_eq!(e.rx.in_flight(), 0);
 }
@@ -502,28 +502,30 @@ async fn staged_duplicate_envelope_orphan_swept() {
 /// STO-27(4): a received blob dropped without a commit attempt (e.g. the
 /// envelope could not be built) is swept at the next slot boundary; the
 /// sweep does nothing when there are no orphans.
-#[test]
-fn staged_dropped_blob_swept() {
+#[tokio::test]
+async fn staged_dropped_blob_swept() {
     let e = env();
+    let m = mem_store().await;
     let (sealer, store_sock) = pair();
     let data = bundle(5000);
     let file = memfile(&data);
-    assert_eq!(e.rx.sweep_orphans(slot()).unwrap(), 0);
+    assert_eq!(e.rx.sweep(&m, slot()).await.unwrap(), 0);
     send_staged_bundle(&sealer, &header(&data), file.as_fd()).unwrap();
     let blob = e.rx.receive(store_sock.as_fd(), slot()).unwrap();
     assert_eq!(e.rx.in_flight(), 1);
     drop(blob);
     assert_eq!(e.rx.blobs().list().unwrap().len(), 1);
-    assert_eq!(e.rx.sweep_orphans(next_slot()).unwrap(), 1);
+    assert_eq!(e.rx.sweep(&m, next_slot()).await.unwrap(), 1);
     assert_clean(&e, "dropped");
-    assert_eq!(e.rx.startup(next_slot()).unwrap(), 0);
+    assert_eq!(e.rx.startup(&m, next_slot()).await.unwrap(), 0);
 }
 
 /// Bounded in-flight blobs: beyond the limit a hand-over is refused with
 /// `Capacity` and nothing is written; after the sweep it works again.
-#[test]
-fn staged_in_flight_bounded() {
+#[tokio::test]
+async fn staged_in_flight_bounded() {
     let e = env();
+    let m = mem_store().await;
     let (sealer, store_sock) = pair();
     let data = bundle(64);
     let file = memfile(&data);
@@ -541,7 +543,7 @@ fn staged_in_flight_bounded() {
     assert_eq!(e.rx.blobs().list().unwrap().len(), STAGED_MAX_IN_FLIGHT);
     drop(held);
     assert_eq!(
-        e.rx.sweep_orphans(next_slot()).unwrap(),
+        e.rx.sweep(&m, next_slot()).await.unwrap(),
         STAGED_MAX_IN_FLIGHT
     );
     assert_clean(&e, "capacity");
@@ -611,13 +613,13 @@ async fn staged_backend_error_retry_commits() {
     assert_eq!(s.calls(), 2);
     assert_eq!(e.rx.in_flight(), 0);
     assert_eq!(e.rx.uncertain_count(), 0);
-    assert_eq!(e.rx.sweep_orphans(next_slot()).unwrap(), 0);
     assert_eq!(e.rx.blobs().list().unwrap().len(), 1);
 }
 
 /// STO-27(4): when the outcome stays unknown (backend error twice, or a
 /// duplicate/any error on the retry, meaning the first attempt may have
-/// committed), no token is issued and the blob is kept, never swept.
+/// committed), no token is issued; the blob is protected for one sweep and
+/// then kept only if a committed envelope references it.
 #[tokio::test]
 async fn staged_unknown_outcome_keeps_blob() {
     for second in [
@@ -629,15 +631,26 @@ async fn staged_unknown_outcome_keeps_blob() {
         let b = received(&e);
         let id = ObjectId::from_bytes(b.blob_id().0);
         let env_in = envelope_for(&b);
+        // The duplicate case: the first attempt did commit.
+        let m = mem_store().await;
+        let committed = second == StoreError::DuplicateEnvelope;
+        if committed {
+            m.commit_envelope(env_in.clone()).await.unwrap();
+        }
         let s = Scripted::new(vec![Some(Err(StoreError::Backend)), Some(Err(second))]);
         assert_eq!(
             e.rx.commit_staged(&s, env_in, b).await.unwrap_err(),
             StoreError::Backend
         );
         assert_eq!(e.rx.uncertain_count(), 1);
-        assert_eq!(e.rx.in_flight(), 0);
-        assert_eq!(e.rx.sweep_orphans(next_slot()).unwrap(), 0);
+        assert_eq!(e.rx.in_flight(), 1, "registered until resolved");
+        // Protected for one sweep even though unreferenced.
+        assert_eq!(e.rx.sweep(&m, slot()).await.unwrap(), 0);
         assert!(e.rx.blobs().exists(&id).unwrap());
+        // Then the database decides.
+        let n = e.rx.sweep(&m, next_slot()).await.unwrap();
+        assert_eq!(n, usize::from(!committed));
+        assert_eq!(e.rx.blobs().exists(&id).unwrap(), committed);
     }
 }
 
@@ -653,12 +666,13 @@ async fn staged_definite_rejection_not_retried() {
         StoreError::RestorePending
     );
     assert_eq!(s.calls(), 1);
-    assert_eq!(e.rx.sweep_orphans(next_slot()).unwrap(), 1);
+    let m = mem_store().await;
+    assert_eq!(e.rx.sweep(&m, next_slot()).await.unwrap(), 1);
     assert_clean(&e, "definite rejection");
 }
 
 /// A commit future dropped mid-await (cancelled): the outcome is unknown,
-/// so the blob is kept and counted.
+/// so the blob is protected for one sweep, then removed if unreferenced.
 #[tokio::test]
 async fn staged_cancelled_commit_keeps_blob() {
     let e = env();
@@ -674,9 +688,11 @@ async fn staged_cancelled_commit_keeps_blob() {
     assert!(cancelled);
     assert_eq!(s.calls(), 1);
     assert_eq!(e.rx.uncertain_count(), 1);
-    assert_eq!(e.rx.in_flight(), 0);
-    assert_eq!(e.rx.sweep_orphans(next_slot()).unwrap(), 0);
+    let m = mem_store().await;
+    assert_eq!(e.rx.sweep(&m, slot()).await.unwrap(), 0);
     assert_eq!(e.rx.blobs().list().unwrap().len(), 1);
+    assert_eq!(e.rx.sweep(&m, next_slot()).await.unwrap(), 1);
+    assert_clean(&e, "cancelled");
 }
 
 /// STO-27(3): the envelope must reference the blob exactly once, in the
@@ -705,6 +721,97 @@ async fn staged_envelope_must_reference_blob() {
         ));
         assert_eq!(s.calls(), 0);
     }
-    assert_eq!(e.rx.sweep_orphans(next_slot()).unwrap(), 4);
+    let m = mem_store().await;
+    assert_eq!(e.rx.sweep(&m, next_slot()).await.unwrap(), 4);
     assert_clean(&e, "unreferenced");
+}
+
+/// Reopen the receiver's directory as a restarted process would.
+fn restart(e: &Env) -> StagedReceiver {
+    let p = std::fs::canonicalize(e.tmp.path()).unwrap().join("blobs");
+    StagedReceiver::new(
+        SafeRoot::open(&p, RootPolicy::BlobStore).unwrap(),
+        my_uid(),
+        MAX,
+    )
+    .unwrap()
+}
+
+/// STO-27(4), crash between copy and commit: the copied blob is not in the
+/// restarted receiver's memory; the start-up sweep removes it because no
+/// committed envelope names it, and keeps the committed blob.
+#[tokio::test]
+async fn staged_crash_leftover_swept_at_startup() {
+    let e = env();
+    let m = mem_store().await;
+    let kept = received(&e);
+    let keep = ObjectId::from_bytes(kept.blob_id().0);
+    let c =
+        e.rx.commit_staged(&m, envelope_for(&kept), kept)
+            .await
+            .unwrap();
+    drop(c);
+    // "Crash": the blob is never committed and its handle never dropped.
+    std::mem::forget(received(&e));
+    assert_eq!(e.rx.blobs().list().unwrap().len(), 2);
+    let rx2 = restart(&e);
+    assert_eq!(rx2.startup(&m, next_slot()).await.unwrap(), 1);
+    assert_eq!(rx2.blobs().list().unwrap(), vec![keep]);
+}
+
+/// The sweep never removes a blob that is in flight in this receiver, even
+/// though no envelope references it yet.
+#[tokio::test]
+async fn staged_sweep_spares_in_flight() {
+    let e = env();
+    let m = mem_store().await;
+    let b = received(&e);
+    assert_eq!(e.rx.sweep(&m, next_slot()).await.unwrap(), 0);
+    assert!(
+        e.rx.blobs()
+            .exists(&ObjectId::from_bytes(b.blob_id().0))
+            .unwrap()
+    );
+    drop(b);
+    assert_eq!(e.rx.sweep(&m, next_slot()).await.unwrap(), 1);
+}
+
+/// Removals per sweep are bounded; the rest go at later slot boundaries.
+#[tokio::test]
+async fn staged_sweep_bounded_per_slot() {
+    use candor_intake_store::staged::STAGED_SWEEP_MAX_REMOVALS;
+    let e = env();
+    let m = mem_store().await;
+    for _ in 0..STAGED_SWEEP_MAX_REMOVALS + 6 {
+        std::mem::forget(received(&e));
+    }
+    let rx2 = restart(&e);
+    assert_eq!(
+        rx2.startup(&m, slot()).await.unwrap(),
+        STAGED_SWEEP_MAX_REMOVALS
+    );
+    assert_eq!(rx2.blobs().list().unwrap().len(), 6);
+    assert_eq!(rx2.sweep(&m, next_slot()).await.unwrap(), 6);
+    assert!(rx2.blobs().list().unwrap().is_empty());
+}
+
+/// A reference check that fails is "referenced": nothing is removed.
+#[tokio::test]
+async fn staged_sweep_fails_closed() {
+    struct Broken;
+    impl IntakeMaintenance for Broken {
+        async fn prune_deletion_list(&self, _today: Day) -> Result<u64> {
+            Err(StoreError::Backend)
+        }
+        async fn blob_referenced(&self, _blob: BlobId) -> Result<bool> {
+            Err(StoreError::Backend)
+        }
+    }
+    let e = env();
+    drop(received(&e));
+    assert_eq!(
+        e.rx.sweep(&Broken, next_slot()).await.unwrap_err(),
+        StoreError::Backend
+    );
+    assert_eq!(e.rx.blobs().list().unwrap().len(), 1);
 }

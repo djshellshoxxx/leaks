@@ -258,6 +258,8 @@ const SQL_OBJ_PART: &str = "SELECT p.blob_id, p.padded_size FROM candor.envelope
      JOIN candor.envelope e ON e.envelope_ref = p.envelope_ref \
      WHERE p.envelope_ref = $1 AND e.batch_no = $2 AND p.part_no = $3";
 const SQL_BATCH_DIGESTS: &str = "SELECT group_sha256 FROM candor.envelope WHERE batch_no = $1";
+const SQL_BLOB_REFERENCED: &str =
+    "SELECT EXISTS (SELECT 1 FROM candor.envelope_part WHERE blob_id = $1)";
 const SQL_ACK_BLOBS: &str = "SELECT p.blob_id FROM candor.envelope_part p \
      JOIN candor.envelope e ON e.envelope_ref = p.envelope_ref \
      WHERE e.batch_no = $1 AND e.group_sha256 = ANY($2) ORDER BY p.envelope_ref, p.part_no";
@@ -2248,6 +2250,20 @@ impl IntakeMaintenance for PgIntakeStore {
             .prune_deletion_list(today)
             .await
     }
+
+    /// Runs as the application role (least privilege: it already holds
+    /// `SELECT` on `envelope_part`); statement logging is disabled on the pool
+    /// and the id is a bind parameter.
+    async fn blob_referenced(&self, blob: BlobId) -> Result<bool> {
+        let mut tx = self.begin_raw().await?;
+        let found: bool = sqlx::query_scalar(SQL_BLOB_REFERENCED)
+            .bind(uuid(&blob.0))
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(db)?;
+        tx.rollback().await.map_err(db)?;
+        Ok(found)
+    }
 }
 
 /// Maintenance handle (`candor_intake_maint`, AUD-RM2-STO-03/11): the only role
@@ -2337,6 +2353,15 @@ impl IntakeMaintenance for PgIntakeMaintenance {
             .rows_affected();
         tx.commit().await.map_err(db)?;
         Ok(n)
+    }
+
+    /// The maintenance role has no access to `envelope_part` (least
+    /// privilege); blob references are checked through the application role
+    /// ([`PgIntakeStore`]). Fails closed.
+    async fn blob_referenced(&self, _blob: BlobId) -> Result<bool> {
+        Err(StoreError::Integrity(
+            "blob references are checked by the application role",
+        ))
     }
 }
 

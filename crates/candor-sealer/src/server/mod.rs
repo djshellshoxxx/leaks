@@ -9,6 +9,7 @@
 //! an audit-logged [`hardening::InsecureDevMode`] token is configured). See the
 //! crate README for the systemd unit.
 
+mod budget;
 pub mod clock;
 pub mod directory;
 pub mod handover;
@@ -87,6 +88,13 @@ pub struct Limits {
     pub max_bundle_bytes: u64,
     /// Files per envelope (07 §11: 20).
     pub max_parts: usize,
+    /// Sealer-wide memory budget for staged parts plus sealed bundles, in
+    /// bytes (AUD-RM2-SEA-26). Set it safely below the unit's `MemoryMax`
+    /// minus the base working set; default 3,840 MiB (CE-SINGLE: 6,656 MiB −
+    /// 2,560 MiB base − 256 MiB slack for chaff and empty bundles). A single
+    /// upload needs about twice its size (part + bundle), so the largest
+    /// accepted file is about half of this.
+    pub memory_budget_bytes: u64,
     /// Confirmation attempts before the draft is zeroized (07 §5.2: 5).
     pub max_confirm_failures: u8,
     /// Passphrase (re)generations per session (SW-25: 5).
@@ -115,6 +123,7 @@ impl Default for Limits {
             max_file_bytes: 4 << 30,
             max_bundle_bytes: 4 << 30,
             max_parts: 20,
+            memory_budget_bytes: 3_840 << 20,
             max_confirm_failures: 5,
             max_phrase_generations: 5,
             max_connections: 128,
@@ -177,6 +186,8 @@ const MAX_DUMMY_TAGS: usize = 1024;
 #[derive(Default)]
 struct AccountQueue {
     pending: Vec<AccountUpsert>,
+    /// Old lookup tags replaced by the batch being written right now.
+    inflight_replaced: Vec<[u8; 32]>,
     /// Current lookup tags of dummy accounts (synthetic rotations pick one).
     dummies: std::collections::VecDeque<[u8; 32]>,
 }
@@ -266,6 +277,8 @@ pub(crate) struct State {
     chaff_counter: Mutex<u64>,
     chaff_cancels: Mutex<HashMap<[u8; 16], u32>>,
     accounts: Mutex<AccountQueue>,
+    /// Attachment memory admission (SEA-26).
+    mem: Arc<budget::Budget>,
     /// Serialises flushes (a batch completes before the next starts).
     flush_lock: Mutex<()>,
     accept_errors: Arc<AtomicU64>,
@@ -448,6 +461,7 @@ impl Sealer {
             || cfg.chaff.account_flush_interval > Duration::from_secs(60 * 60)
             || cfg.limits.argon_permits == 0
             || cfg.limits.max_connections == 0
+            || cfg.limits.memory_budget_bytes == 0
             || cfg.directory_trust.tenant_id != cfg.tenant_id
             || cfg.directory_trust.org_root_pk == [0u8; 32]
             || cfg.directory_trust.min_external > cfg.directory_trust.min_cosignatures
@@ -466,6 +480,7 @@ impl Sealer {
             staging.remove(&id, slot).map_err(|_| StartError::Staging)?;
         }
         let chaff_seed = random_secret32().map_err(|_| StartError::Rng)?;
+        let mem = budget::Budget::new(cfg.limits.memory_budget_bytes);
         let argon = ArgonGate {
             sem: Arc::new(Semaphore::new(cfg.limits.argon_permits)),
             waiting: std::sync::atomic::AtomicUsize::new(0),
@@ -487,6 +502,7 @@ impl Sealer {
                 chaff_counter: Mutex::new(0),
                 chaff_cancels: Mutex::new(HashMap::new()),
                 accounts: Mutex::new(AccountQueue::default()),
+                mem,
                 flush_lock: Mutex::new(()),
                 accept_errors: Arc::new(AtomicU64::new(0)),
             }),
@@ -776,13 +792,16 @@ impl Sealer {
     }
 
     async fn draft_get(&self, sess: SessionHandle) -> Response {
-        let g = match self.locked(&sess).await {
+        let mut g = match self.locked(&sess).await {
             Ok(g) => g,
             Err(e) => return e,
         };
         if g.phase == Phase::Derived {
             return err(ErrorCode::BadState);
         }
+        // The source has now seen the draft as it is (SEA-26: attachments
+        // dropped by a failed seal are no longer listed).
+        g.parts_lost = false;
         Response::Draft(Box::new(DraftView {
             mode: g.draft.mode.unwrap_or(Mode::Anonymous),
             message: g.draft.message.clone(),
@@ -960,7 +979,15 @@ impl Sealer {
             Ok(k) => k,
             Err(e) => return e,
         };
-        let lookup_tag = keys.lookup_tag();
+        let mut lookup_tag = keys.lookup_tag();
+        // SEA-28(a): a passphrase rotated away (replacement still queued or
+        // being written) no longer logs in: the source gets a random locator,
+        // which the store cannot find — exactly what a wrong passphrase gets.
+        if replaced_pending(&self.st, &lookup_tag)
+            && candor_core::fill_random(&mut lookup_tag).is_err()
+        {
+            return err(ErrorCode::Internal);
+        }
         let k36 = match random_k36() {
             Ok(k) => k,
             Err(e) => return e,
@@ -1067,6 +1094,20 @@ impl Sealer {
             Ok(b) => b,
             Err(_) => return err(ErrorCode::Limit),
         };
+        // SEA-26: reserve what this session's attachments can occupy at once
+        // (every part's ciphertext plus the bundle for the declared total)
+        // against the sealer-wide budget; refuse with the uniform BUSY.
+        let Some(need) = attachment_need(&g.parts, padded_len, staged.saturating_add(declared_len))
+        else {
+            return err(ErrorCode::Limit);
+        };
+        let grant = g
+            .mem
+            .get_or_insert_with(|| budget::Grant::new(&self.st.mem));
+        if !grant.grow_to(need) {
+            return err(ErrorCode::Busy);
+        }
+        g.parts_lost = false;
         let fresh_part = match candor_core::stream::PartId::generate() {
             Ok(p) => p,
             Err(e) => return core_err(e),
@@ -1184,7 +1225,9 @@ impl Sealer {
             Ok(g) => g,
             Err(e) => return e,
         };
-        if g.upload.is_some() {
+        // A failed seal consumed the staged attachments: never submit without
+        // them silently; the source must look at the draft again first.
+        if g.upload.is_some() || g.parts_lost {
             return err(ErrorCode::BadState);
         }
         let initial = match g.phase {
@@ -1389,10 +1432,16 @@ impl Sealer {
             Err(e) => return e,
         };
         let tenant = self.st.cfg.tenant_id;
+        // Replies re-wrapped by a still-queued rotation open with the new key.
+        let pending = g
+            .keys
+            .as_ref()
+            .map(|k| pending_rewraps(&self.st, &k.lookup_tag()))
+            .unwrap_or_default();
         let r = blocking(move || {
             let mut g = g;
             let opened = match (g.keys.as_ref(), g.prefs.as_ref()) {
-                (Some(k), Some(p)) => seal::open_reply(&snap, tenant, k, p, &entry, today),
+                (Some(k), Some(p)) => seal::open_reply(&snap, tenant, k, p, &entry, today, &pending),
                 _ => None,
             };
             let Some((mailbox, inner)) = opened else {
@@ -1539,7 +1588,18 @@ impl Sealer {
     /// operations stay queued (in order) for the next flush.
     pub fn flush_accounts(&self) -> Result<usize, sink::SinkError> {
         let _serial = lock(&self.st.flush_lock);
-        let batch = core::mem::take(&mut lock(&self.st.accounts).pending);
+        let batch = {
+            let mut q = lock(&self.st.accounts);
+            let b = core::mem::take(&mut q.pending);
+            q.inflight_replaced = b.iter().filter_map(|a| a.replaces).collect();
+            b
+        };
+        let r = self.write_batch(batch);
+        lock(&self.st.accounts).inflight_replaced.clear();
+        r
+    }
+
+    fn write_batch(&self, batch: Vec<AccountUpsert>) -> Result<usize, sink::SinkError> {
         let batch = match shuffle_batch(batch.clone()) {
             Ok(b) => b,
             Err(_) => {
@@ -1558,6 +1618,12 @@ impl Sealer {
             }
         }
         Ok(total)
+    }
+
+    /// Attachment memory reserved now (SEA-26; health reporting and tests).
+    #[must_use]
+    pub fn memory_reserved(&self) -> u64 {
+        self.st.mem.used()
     }
 
     /// Number of queued account operations.
@@ -1787,11 +1853,50 @@ fn commit_group(
         .map_err(|_| ErrorCode::Internal)
 }
 
+/// `tag` is the old lookup tag of a replacement that is queued or being
+/// written (SEA-28(a)).
+fn replaced_pending(st: &State, tag: &[u8; 32]) -> bool {
+    let q = lock(&st.accounts);
+    q.pending
+        .iter()
+        .filter_map(|a| a.replaces.as_ref())
+        .chain(q.inflight_replaced.iter())
+        .any(|old| ct_eq(old, tag))
+}
+
+/// Re-wrapped reply stanzas still queued for the account `tag` (the latest
+/// state of the account's replies, SEA-28(b)).
+fn pending_rewraps(st: &State, tag: &[u8; 32]) -> Vec<([u8; 32], Vec<u8>)> {
+    lock(&st.accounts)
+        .pending
+        .iter()
+        .find(|a| ct_eq(&a.account.lookup_tag, tag))
+        .map(|a| a.rewrapped_replies.clone())
+        .unwrap_or_default()
+}
+
 /// Put unwritten operations back at the front of the queue.
 fn requeue(st: &State, mut ops: Vec<AccountUpsert>) {
     let mut q = lock(&st.accounts);
     ops.append(&mut q.pending);
     q.pending = ops;
+}
+
+/// Upper bound on the bytes a session's attachments occupy at once: the
+/// STREAM ciphertext of every staged part and of the new one, plus the sealed
+/// bundle for `declared_total` real bytes (SEA-26).
+fn attachment_need(parts: &[StagedPart], new_padded: u64, declared_total: u64) -> Option<u64> {
+    use candor_core::header::{HEADER_LEN, HEADER_MAC_LEN};
+    let mut sum = candor_core::stream::ciphertext_len(new_padded).ok()?;
+    for p in parts {
+        sum = sum.checked_add(candor_core::stream::ciphertext_len(p.padded_len).ok()?)?;
+    }
+    let bundle =
+        padding::bucket_for(ObjectType::AttachmentBundle, declared_total.checked_add(8)?).ok()?;
+    let bundle_ct = candor_core::stream::ciphertext_len(bundle)
+        .ok()?
+        .checked_add(u64::try_from(HEADER_LEN + HEADER_MAC_LEN).ok()?)?;
+    sum.checked_add(bundle_ct)
 }
 
 /// Room for one more queued account write.
@@ -1810,8 +1915,15 @@ fn enqueue_account(st: &State, a: AccountUpsert) {
             .iter_mut()
             .find(|p| ct_eq(&p.account.lookup_tag, &old))
     {
+        // SEA-28(b): merge re-wrapped replies by object hash; the newer wrap
+        // (to the newest key) wins, a wrap that was not redone is kept.
         prev.account = a.account;
-        prev.rewrapped_replies = a.rewrapped_replies;
+        for (h, stanza) in a.rewrapped_replies {
+            match prev.rewrapped_replies.iter_mut().find(|(ph, _)| ct_eq(ph, &h)) {
+                Some(slot) => slot.1 = stanza,
+                None => prev.rewrapped_replies.push((h, stanza)),
+            }
+        }
         return;
     }
     q.pending.push(a);
@@ -1948,6 +2060,12 @@ fn seal_blocking(mut g: OwnedMutexGuard<Session>, st: &State, job: SealJob) -> (
     let coi = sess.draft.coi.clone().unwrap_or_default();
     let identity = sess.draft.identity.as_ref().map(|t| t.expose().to_owned());
     let identity = identity.map(Zeroizing::new);
+    // SEA-26: the bundle is built part by part and each staged part is
+    // removed as soon as it is written, so the parts leave the session now;
+    // if this seal then fails, the attachments are gone and the session must
+    // re-show its draft before sealing again (`parts_lost`).
+    let parts = core::mem::take(&mut sess.parts);
+    sess.parts_lost = !parts.is_empty();
     let (group, account) = if job.initial {
         let draft = seal::DraftInput {
             mode: sess.draft.mode.unwrap_or(Mode::Anonymous),
@@ -1958,7 +2076,7 @@ fn seal_blocking(mut g: OwnedMutexGuard<Session>, st: &State, job: SealJob) -> (
             categories: &coi.categories,
         };
         let (group, sub_hash) =
-            match seal::seal_initial(&ctx, sel, keys, 0, &draft, &sess.parts, &sess.k36) {
+            match seal::seal_initial(&ctx, sel, keys, 0, &draft, &parts, &sess.k36) {
                 Ok(v) => v,
                 Err(e) => return (core_err(e), false),
             };
@@ -2008,7 +2126,7 @@ fn seal_blocking(mut g: OwnedMutexGuard<Session>, st: &State, job: SealJob) -> (
             message: sess.draft.message.expose(),
             new_keys: None,
         };
-        match seal::seal_source_message(&ctx, sel, &sm, &sess.parts, &sess.k36) {
+        match seal::seal_source_message(&ctx, sel, &sm, &parts, &sess.k36) {
             Ok(o) => (o, None),
             Err(e) => return (core_err(e), false),
         }
@@ -2091,8 +2209,31 @@ fn rotate_blocking(
     // Entries that do not open (corrupt, foreign or planted by a compromised
     // store) are skipped: they stay unreadable and cannot block the source's
     // recovery action (AUD-RM2-SEA-14).
-    let mut rewrapped = Vec::with_capacity(replies.len());
-    for r in replies {
+    // SEA-28(b): a rotation within the batch window starts from the latest
+    // pending state: a reply already re-wrapped to the current key by a queued
+    // rotation is re-wrapped from that stanza, not from the stale one the store
+    // still holds, and queued re-wraps the caller did not resend are redone.
+    let queued = pending_rewraps(st, &old.lookup_tag());
+    let mut inputs: Vec<PendingReply> = replies
+        .iter()
+        .map(|r| PendingReply {
+            object_hash: r.object_hash,
+            stanza: queued
+                .iter()
+                .find(|(h, _)| ct_eq(h, &r.object_hash))
+                .map_or_else(|| r.stanza.clone(), |(_, s)| s.clone()),
+        })
+        .collect();
+    for (h, s) in &queued {
+        if !inputs.iter().any(|r| ct_eq(&r.object_hash, h)) {
+            inputs.push(PendingReply {
+                object_hash: *h,
+                stanza: s.clone(),
+            });
+        }
+    }
+    let mut rewrapped = Vec::with_capacity(inputs.len());
+    for r in &inputs {
         if let Ok(s) = seal::rewrap_reply(
             st.cfg.suite,
             st.cfg.tenant_id,

@@ -407,23 +407,36 @@ fn revocations_rotations_and_objections_shrink_the_recipient_set() {
     };
     let base = verify(&f, f.current_bundle()).unwrap();
     assert!(usable(&base, u1) && usable(&base, u2));
-    // REVOCATION of member 1's MEK key id (honoured whoever signed it).
-    let bd = compromised(&f, |log| {
-        let kid = candor_core::hash::key_id(
-            Suite::CandorStd1,
-            candor_core::hash::KeyKind::Mek,
-            &f.members[0].mek.public.to_bytes(),
+    // AUD-RM2-SEA-25 PoC: a REVOCATION of member 1's MEK signed by an
+    // attacker (or by a key admin alone) makes the snapshot invalid…
+    let kid = candor_core::hash::key_id(
+        Suite::CandorStd1,
+        candor_core::hash::KeyKind::Mek,
+        &f.members[0].mek.public.to_bytes(),
+    );
+    let revoke_mek = |signers: &[&SigningKey]| {
+        compromised(&f, |log| {
+            log.append(
+                ty::REVOCATION,
+                &kid,
+                0,
+                m(vec![(1, b(&kid)), (2, u(1)), (3, u(u64::from(TODAY)))]),
+                signers,
+            );
+        })
+    };
+    let (att, a1, c, root) = (attacker(), admin1(), cik(), k01());
+    for bad in [vec![&att], vec![&a1], vec![&f.members[1].k08]] {
+        assert_eq!(
+            verify(&f, revoke_mek(&bad)).map(|_| ()).unwrap_err(),
+            SnapshotError::Entry
         );
-        log.append(
-            ty::REVOCATION,
-            &kid,
-            0,
-            m(vec![(1, b(&kid)), (2, u(1)), (3, u(u64::from(TODAY)))]),
-            &[&attacker()],
-        );
-    });
-    let s = verify(&f, bd).unwrap();
-    assert!(!usable(&s, u1) && usable(&s, u2));
+    }
+    // …while the member's own K08, the CIK with a K15, or K01 may revoke it.
+    for good in [vec![&f.members[0].k08], vec![&c, &a1], vec![&root]] {
+        let s = verify(&f, revoke_mek(&good)).unwrap();
+        assert!(!usable(&s, u1) && usable(&s, u2));
+    }
     // Member 2 rotates K08 (a valid USER_KEYS seq 2): the MEK signed by the old
     // K08 is no longer usable until re-published (§12.1 step 6).
     let bd = compromised(&f, |log| {
@@ -431,20 +444,53 @@ fn revocations_rotations_and_objections_shrink_the_recipient_set() {
     });
     let s = verify(&f, bd).unwrap();
     assert!(usable(&s, u1) && !usable(&s, u2));
-    // Revoking member 2's K08 public key has the same effect.
-    let bd = compromised(&f, |log| {
-        let pk = f.members[1].k08.verifying_key_bytes();
-        log.append(
-            ty::REVOCATION,
-            &pk,
-            0,
-            m(vec![(1, b(&pk)), (2, u(1)), (3, u(u64::from(TODAY)))]),
-            &[&admin1()],
-        );
-    });
-    let s = verify(&f, bd).unwrap();
-    assert!(!usable(&s, u2));
-    assert!(!s.user_keys.iter().any(|k| k.user_id == u2));
+    // Revoking member 2's K08 public key has the same effect, if signed by
+    // that key itself (or K15 + OVERSIGHT, or K01); a K15 alone is refused.
+    let revoke_k08 = |signers: &[&SigningKey]| {
+        compromised(&f, |log| {
+            let pk = f.members[1].k08.verifying_key_bytes();
+            log.append(
+                ty::REVOCATION,
+                &pk,
+                0,
+                m(vec![(1, b(&pk)), (2, u(1)), (3, u(u64::from(TODAY)))]),
+                signers,
+            );
+        })
+    };
+    assert_eq!(
+        verify(&f, revoke_k08(&[&admin1()]))
+            .map(|_| ())
+            .unwrap_err(),
+        SnapshotError::Entry
+    );
+    for s in [
+        verify(&f, revoke_k08(&[&f.members[1].k08])).unwrap(),
+        verify(&f, revoke_k08(&[&admin1(), &oversight_k08()])).unwrap(),
+    ] {
+        assert!(!usable(&s, u2));
+        assert!(!s.user_keys.iter().any(|k| k.user_id == u2));
+    }
+    // Revoking an unknown key or the LOG_KEY needs K01.
+    let revoke_other = |key: [u8; 32], signers: &[&SigningKey]| {
+        compromised(&f, |log| {
+            log.append(
+                ty::REVOCATION,
+                &key,
+                0,
+                m(vec![(1, b(&key)), (2, u(1)), (3, u(u64::from(TODAY)))]),
+                signers,
+            );
+        })
+    };
+    let lk = log_key().verifying_key_bytes();
+    assert_eq!(
+        verify(&f, revoke_other(lk, &[&log_key()]))
+            .map(|_| ())
+            .unwrap_err(),
+        SnapshotError::Entry
+    );
+    assert!(verify(&f, revoke_other([0x5a; 32], &[&k01()])).is_ok());
     // A properly approved loosening roster (adds member 5, active in 3 days)
     // activates — unless an OBJECTION references it (§14.4 rule 8).
     let k5 = SigningKey::from_seed(&[0x55; 32]);
@@ -480,7 +526,7 @@ fn revocations_rotations_and_objections_shrink_the_recipient_set() {
     )
     .unwrap();
     assert!(!in_active(&s, TODAY + 2) && in_active(&s, TODAY + 3));
-    let objected = |resolve: bool| {
+    let objected = |resolve: bool, objector: &SigningKey| {
         compromised(&f, |log| {
             let h = add5(log);
             let subject = kd::objection_subject(&CHANNEL, &h);
@@ -492,23 +538,128 @@ fn revocations_rotations_and_objections_shrink_the_recipient_set() {
                     (4, candor_sealer::proto::cbor::Value::Bool(r)),
                 ])
             };
-            log.append(
-                ty::OBJECTION,
-                &subject,
-                0,
-                body(false),
-                &[&f.members[2].k08],
-            );
+            log.append(ty::OBJECTION, &subject, 0, body(false), &[objector]);
             if resolve {
                 // A resolution needs two OVERSIGHT signatures; one is refused.
                 log.append(ty::OBJECTION, &subject, 0, body(true), &[&oversight_k08()]);
             }
         })
     };
-    let s = verify(&f, objected(false)).unwrap();
+    let s = verify(&f, objected(false, &f.members[2].k08)).unwrap();
+    assert!(!in_active(&s, TODAY + 3));
+    let s = verify(&f, objected(false, &oversight_k08())).unwrap();
     assert!(!in_active(&s, TODAY + 3));
     assert_eq!(
-        verify(&f, objected(true)).map(|_| ()).unwrap_err(),
+        verify(&f, objected(true, &f.members[2].k08))
+            .map(|_| ())
+            .unwrap_err(),
+        SnapshotError::Entry
+    );
+    // SEA-25 PoC: an objection by a non-member cannot block the loosening.
+    assert_eq!(
+        verify(&f, objected(false, &attacker()))
+            .map(|_| ())
+            .unwrap_err(),
+        SnapshotError::Entry
+    );
+}
+
+/// AUD-RM2-SEA-27: K01 signatures are hybrid; both halves must verify, and
+/// every ML-DSA half on any entry must verify against a known key.
+#[test]
+fn k01_entries_need_both_signature_halves() {
+    let f = fixture();
+    let verify_raw = |edit: &dyn Fn(&mut TestLog)| verify(&f, compromised(&f, |log| edit(log)));
+    // A new KEY_ADMIN (K01-signed, 04 §14.2 "both algs").
+    let body = || {
+        m(vec![
+            (
+                1,
+                b(&SigningKey::from_seed(&[0x77; 32]).verifying_key_bytes()),
+            ),
+            (2, u(1)),
+        ])
+    };
+    let entry = |log: &TestLog| {
+        let _ = log;
+        kd_entry(ty::KEY_ADMIN, &[0x12; 16], 1, None, 0, 1, body())
+    };
+    let raw = |sigs: Vec<candor_sealer::proto::cbor::Value>, e: &[u8]| {
+        m(vec![(1, b(e)), (2, a(sigs))]).encode().unwrap().to_vec()
+    };
+    let ed = |k: &SigningKey, e: &[u8]| {
+        m(vec![
+            (1, b(&k.verifying_key_bytes())),
+            (2, u(kd::alg::ED25519)),
+            (3, b(&k.sign(&kd::signing_message(e)))),
+        ])
+    };
+    // Control: both halves.
+    assert!(
+        verify_raw(&|log| {
+            let e = entry(log);
+            log.push_raw(signed_entry(&e, &[&k01()]));
+        })
+        .is_ok()
+    );
+    // Ed25519 half only.
+    assert_eq!(
+        verify_raw(&|log| {
+            let e = entry(log);
+            log.push_raw(raw(vec![ed(&k01(), &e)], &e));
+        })
+        .map(|_| ())
+        .unwrap_err(),
+        SnapshotError::Entry
+    );
+    // ML-DSA half over a different message.
+    assert_eq!(
+        verify_raw(&|log| {
+            let e = entry(log);
+            let pq = mldsa_sig(k01_mldsa(), b"another message");
+            log.push_raw(raw(vec![ed(&k01(), &e), pq], &e));
+        })
+        .map(|_| ())
+        .unwrap_err(),
+        SnapshotError::Entry
+    );
+    // An ML-DSA half by an unknown key on an otherwise valid entry.
+    assert_eq!(
+        verify_raw(&|log| {
+            let e = entry(log);
+            let other =
+                ml_dsa::SigningKey::<ml_dsa::MlDsa65>::from_seed(&ml_dsa::B32::from([9; 32]));
+            let msg = kd::signing_message(&e);
+            log.push_raw(raw(
+                vec![
+                    ed(&k01(), &e),
+                    mldsa_sig(k01_mldsa(), &msg),
+                    mldsa_sig(&other, &msg),
+                ],
+                &e,
+            ));
+        })
+        .map(|_| ())
+        .unwrap_err(),
+        SnapshotError::Entry
+    );
+    // An ECDSA-P384 entry is not carried unverified.
+    assert_eq!(
+        verify_raw(&|log| {
+            let e = entry(log);
+            let msg = kd::signing_message(&e);
+            let ec = m(vec![
+                (1, b(&[1; 32])),
+                (2, u(kd::alg::ECDSA_P384)),
+                (3, b(&[0; 96])),
+            ]);
+            log.push_raw(raw(
+                vec![ed(&k01(), &e), mldsa_sig(k01_mldsa(), &msg), ec],
+                &e,
+            ));
+        })
+        .map(|_| ())
+        .unwrap_err(),
         SnapshotError::Entry
     );
 }

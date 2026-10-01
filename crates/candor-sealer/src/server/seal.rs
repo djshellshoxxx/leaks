@@ -312,6 +312,9 @@ pub(crate) fn seal_bundle(
         }
         // Every chunk, including the padding and the final flag, must verify.
         chunks.finish()?;
+        // SEA-26: the part's ciphertext is in the bundle now; free its tmpfs
+        // pages at once so the peak is about one bundle, not parts + bundle.
+        let _ = p.root.remove(&p.object, p.slot);
         if left != 0 {
             return Err(Error::Stream("staged part shorter than recorded"));
         }
@@ -909,6 +912,7 @@ pub(crate) fn open_reply(
     prefs: &Prefs,
     entry: &[u8],
     today: u32,
+    pending: &[([u8; 32], Vec<u8>)],
 ) -> Option<([u8; 32], ReplyInner)> {
     let (len, rest) = entry.split_first_chunk::<4>()?;
     if usize::try_from(u32::from_be_bytes(*len)).ok()? != rest.len() {
@@ -922,8 +926,13 @@ pub(crate) fn open_reply(
         .ok()?
         .checked_add(HEADER_LEN + HEADER_MAC_LEN)?;
     let parsed = object::parse(rest.get(..obj_len)?).ok()?;
-    let stanza = WrapStanza::decode(rest.get(obj_len..)?).ok()?;
     let oh = parsed.object_hash();
+    // A re-wrap still queued for this account supersedes the stored stanza.
+    let stanza_bytes = pending
+        .iter()
+        .find(|(h, _)| ct_eq(h, &oh))
+        .map_or(rest.get(obj_len..)?, |(_, s)| s.as_slice());
+    let stanza = WrapStanza::decode(stanza_bytes).ok()?;
     let header_bytes = rest.get(..HEADER_LEN)?;
     for rep in &prefs.reports {
         let wctx = HpkeWrapContext::Reply {

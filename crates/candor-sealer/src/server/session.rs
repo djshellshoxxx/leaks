@@ -114,6 +114,12 @@ pub(crate) struct Session {
     pub prefs: Option<Prefs>,
     /// `(mailbox_id, reply_seq)` already rendered (replay detection).
     pub seen_replies: Vec<([u8; 32], u64)>,
+    /// Attachment memory reservation (SEA-26), released with the draft.
+    pub mem: Option<super::budget::Grant>,
+    /// A failed seal consumed the staged parts; `SEAL_FINISH` is refused until
+    /// the draft is shown again (`DRAFT_GET`), a part is started or the draft
+    /// is aborted.
+    pub parts_lost: bool,
 }
 
 impl Session {
@@ -131,6 +137,8 @@ impl Session {
             keys: None,
             prefs: None,
             seen_replies: Vec::new(),
+            mem: None,
+            parts_lost: false,
         }
     }
 
@@ -147,5 +155,7 @@ impl Session {
         self.draft = Draft::default();
         self.parts.clear();
         self.upload = None;
+        self.mem = None;
+        self.parts_lost = false;
     }
 }

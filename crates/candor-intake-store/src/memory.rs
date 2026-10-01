@@ -1108,6 +1108,14 @@ impl IntakeMaintenance for MemoryStore {
             .retain(|s, e| !(e.relayed && e.del_day < cutoff && *s < head));
         Ok(u64::try_from(before.saturating_sub(st.deletion.len())).unwrap_or(u64::MAX))
     }
+
+    async fn blob_referenced(&self, blob: BlobId) -> Result<bool> {
+        let st = self.state.lock().await;
+        Ok(st
+            .envelopes
+            .values()
+            .any(|e| e.objects.iter().any(|o| o.blob.blob_id == blob)))
+    }
 }
 
 /// Restore keeps the higher of the two high-water marks (09 `kd_tree_size_hwm`).

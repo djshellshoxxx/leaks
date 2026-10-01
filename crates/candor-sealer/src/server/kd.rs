@@ -964,7 +964,9 @@ impl<'c> State<'c> {
             let own = self
                 .users
                 .iter()
-                .filter(|u| u.k08.as_slice() == key || u.key_ids.iter().any(|k| k.as_slice() == key))
+                .filter(|u| {
+                    u.k08.as_slice() == key || u.key_ids.iter().any(|k| k.as_slice() == key)
+                })
                 .any(|u| e.has(&u.k08) && self.usable(&u.k08));
             let governance =
                 !self.admin_signers(e).is_empty() && !self.oversight_signers(e).is_empty();
@@ -974,7 +976,10 @@ impl<'c> State<'c> {
             return false;
         };
         let admin = self.admins.values().any(|pk| pk == &k32);
-        let cik = self.channels.values().any(|c| c.ciks.iter().any(|x| x.pk == k32));
+        let cik = self
+            .channels
+            .values()
+            .any(|c| c.ciks.iter().any(|x| x.pk == k32));
         (admin || cik) && e.has(&k32) && self.usable(&k32)
     }
 

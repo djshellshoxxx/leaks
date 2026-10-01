@@ -1951,7 +1951,7 @@ async fn pg_staged_ack_after_commit() {
         );
         rx.refuse(store_sock.as_fd()).unwrap();
         ack(0x00);
-        assert_eq!(rx.sweep_orphans(next).unwrap(), 1);
+        assert_eq!(rx.sweep(&s, next).await.unwrap(), 1);
         assert_eq!(
             rx.blobs().list().unwrap(),
             vec![ObjectId::from_bytes(keep.0)]
@@ -1973,7 +1973,103 @@ async fn pg_staged_ack_after_commit() {
     );
     rx.refuse(store_sock.as_fd()).unwrap();
     ack(0x00);
-    assert_eq!(rx.sweep_orphans(next).unwrap(), 1);
+    assert_eq!(rx.sweep(&s, next).await.unwrap(), 1);
     assert_eq!(rx.blobs().list().unwrap().len(), 1);
     assert_eq!(rx.in_flight(), 0);
+}
+
+/// AUD-RM2-STO-27(4) against PostgreSQL: a crash between the blob copy and
+/// the envelope commit leaves a blob no restarted receiver knows; the
+/// start-up sweep removes it (no `envelope_part` row names it) and keeps the
+/// committed one. The check runs as the application role; the maintenance
+/// role has no access to `envelope_part` and fails closed (nothing removed).
+#[tokio::test]
+async fn pg_staged_crash_between_copy_and_commit() {
+    use candor_intake_store::staged::{
+        STAGED_BUNDLE_INDEX, StagedHeader, StagedReceiver, send_staged_bundle,
+    };
+    use candor_safefs::{ObjectId, RootPolicy, SafeRoot, SlotTime};
+    use sha2::Digest;
+    use std::io::Write;
+    use std::os::fd::AsFd;
+    use std::os::unix::fs::PermissionsExt;
+
+    let Some(b) = base() else { return };
+    let db = fresh_db(&b).await;
+    let tmp = tempfile::Builder::new()
+        .permissions(PermissionsExt::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let (sealer, store_sock) = rustix::net::socketpair(
+        rustix::net::AddressFamily::UNIX,
+        rustix::net::SocketType::SEQPACKET,
+        rustix::net::SocketFlags::CLOEXEC,
+        None,
+    )
+    .unwrap();
+    let uid = rustix::net::sockopt::socket_peercred(&store_sock)
+        .unwrap()
+        .uid
+        .as_raw();
+    let receiver = || {
+        StagedReceiver::new(
+            SafeRoot::open(tmp.path(), RootPolicy::BlobStore).unwrap(),
+            uid,
+            1 << 20,
+        )
+        .unwrap()
+    };
+    let slot = SlotTime::from_unix_secs(1_790_000_100).unwrap();
+    let data = vec![0x17u8; 4000];
+    let mut f = std::fs::File::from(
+        rustix::fs::memfd_create(
+            "staged",
+            rustix::fs::MemfdFlags::CLOEXEC | rustix::fs::MemfdFlags::ALLOW_SEALING,
+        )
+        .unwrap(),
+    );
+    f.write_all(&data).unwrap();
+    let fd: std::os::fd::OwnedFd = f.into();
+    rustix::fs::fcntl_add_seals(
+        &fd,
+        rustix::fs::SealFlags::WRITE
+            | rustix::fs::SealFlags::GROW
+            | rustix::fs::SealFlags::SHRINK
+            | rustix::fs::SealFlags::SEAL,
+    )
+    .unwrap();
+    let h = StagedHeader {
+        len: data.len() as u64,
+        sha256: sha2::Sha256::digest(&data).into(),
+    };
+    let s = open(&b, &db, common::TENANT).await;
+    s.init(common::TENANT, common::SALT).await.unwrap();
+    let rx = receiver();
+    send_staged_bundle(&sealer, &h, fd.as_fd()).unwrap();
+    let kept = rx.receive(store_sock.as_fd(), slot).unwrap();
+    let keep = ObjectId::from_bytes(kept.blob_id().0);
+    let mut env = common::envelope(0);
+    env.objects[STAGED_BUNDLE_INDEX].blob = PartRef {
+        blob_id: kept.blob_id(),
+        padded_size: kept.len(),
+    };
+    let c = rx.commit_staged(&s, env, kept).await.unwrap();
+    rx.acknowledge(store_sock.as_fd(), c).unwrap();
+    // Copy done, then the process dies before the envelope commit.
+    send_staged_bundle(&sealer, &h, fd.as_fd()).unwrap();
+    std::mem::forget(rx.receive(store_sock.as_fd(), slot).unwrap());
+    drop(rx);
+    // Restart.
+    let rx2 = receiver();
+    assert_eq!(rx2.blobs().list().unwrap().len(), 2);
+    let m = maint(&b, &db, common::TENANT).await;
+    assert!(
+        rx2.startup(&m, slot).await.is_err(),
+        "maint role fails closed"
+    );
+    assert_eq!(rx2.blobs().list().unwrap().len(), 2);
+    assert_eq!(rx2.startup(&s, slot).await.unwrap(), 1);
+    assert_eq!(rx2.blobs().list().unwrap(), vec![keep]);
+    // Idempotent.
+    assert_eq!(rx2.sweep(&s, slot).await.unwrap(), 0);
 }
