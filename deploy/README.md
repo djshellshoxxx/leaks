@@ -94,13 +94,13 @@ and with the users from `sysusers.d` created.
 |---|---|
 | shellcheck (tools, tests) | clean |
 | `config-check.sh` on the shipped tree (base, `--profile ce-single`, `--profile ce-hardened`) | 365 checks OK, exit 0 |
-| `config-check.sh` on 79 deliberately broken copies | every copy rejected with exit 30 |
+| `config-check.sh` on 78 deliberately broken copies | every copy rejected with exit 30 |
 | `systemd-analyze verify --man=no` (10 units) | clean apart from the expected messages below |
 | `systemd-analyze security --offline --threshold` | web 0.4, sealer 0.4, store 0.4, PostgreSQL 0.5 (budget 0.5); tor 1.4 (budget 1.5, 17 §5.3) |
 | `nft -c -f nftables.conf` | OK |
 | `apparmor_parser -Q -K` (3 profiles) | OK |
 | `tor --verify-config` (as `_tor-candor-intake`) | valid. A `DisableNetwork 1` start also confirmed the socket and cookie group `_candor-torctl` and the key modes. |
-| `check-placement.sh` | 2 clean cases pass; 19 negative cases fail as expected (exit 30 or 2) |
+| `check-placement.sh` | 3 positive cases pass (clean host with full and light scans; ssh host key with the `sshd` flag); 19 negative cases fail as expected (exit 30 or 2) |
 | PostgreSQL 16 with `candor-intake.conf` | effective settings match. Peer map, database restriction and socket permissions refuse other users and roles. The log has no connection records and no SQL. |
 
 **Expected `systemd-analyze verify` messages**, filtered by `validate.sh`:

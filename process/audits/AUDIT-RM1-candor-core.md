@@ -82,7 +82,7 @@ Toolchain `1.94.1` (cargo 1.94.1, clippy 0.1.94); nightly `nightly-2026-09-28`. 
 | tests | `cargo test -p candor-core --locked` | 89 passed (73 unit, 4 KAT, 2 label-registry, 4 properties, 6 vectors), 0 failed | — |
 | cargo-careful 0.4.10 | `cargo +nightly-2026-09-28 careful test -p candor-core` | 89 passed, 0 failed | — |
 | Miri | `MIRIFLAGS=-Zmiri-disable-isolation PROPTEST_CASES=4 cargo +nightly-2026-09-28 miri test -p candor-core --lib -- bytes:: rand:: stream:: header:: padding:: labels:: secret:: suite:: record:: stanza::tests::case_aead` | MIRI_RESULT | The first run with isolation failed on proptest's `getcwd` (tool limitation, not a finding). Argon2/X-Wing-heavy tests were excluded as infeasible under Miri; the crate has no `unsafe` (`forbid`), so Miri is optional here (§C) |
-| cargo-fuzz 0.13.1 | `cargo +nightly-2026-09-28 fuzz run <t> <scratch corpus> -- -max_total_time=120 -rss_limit_mb=2048 -timeout=10` for all 6 targets | FUZZ_RESULT | No crash, OOM or timeout. Coverage is shallow for `fuzz_slot_block` and `fuzz_envelope_parse` → AUD-RM1-CORE-06 |
+| cargo-fuzz 0.13.1 | `cargo +nightly-2026-09-28 fuzz run <t> <scratch corpus> -- -max_total_time=120 -rss_limit_mb=2048 -timeout=10` for all 6 targets | All 6 targets exit 0, 120 s each, no crash/OOM/timeout. Execs / coverage: header 31.7 M / cov 170; slot_block 47.2 M / cov 40; stanza 47.5 M / cov 64; record 5.1 M / cov 535; envelope_parse 30.7 M / cov 126; stream_decrypt 4.7 M / cov 586 | No crash, OOM or timeout. Coverage is shallow for `fuzz_slot_block`, `fuzz_stanza` and `fuzz_envelope_parse` → AUD-RM1-CORE-06. Corpora and artifacts were written to scratch only |
 | cargo-deny 0.20.2 | `cargo deny --offline check` | advisories ok, licenses ok, sources ok; **bans FAILED** (duplicate `sha2` 0.10.9 via `sqlx` → `candor-intake-store`) | Not in candor-core's tree; belongs to the RM-2 audit. The `sha3` 0.11/0.12 duplicate in candor-core's tree is the ADR-051(1) dated exception (expires 2026-12-30) |
 | cargo-audit 0.22.1 | `cargo audit --db <mirror> --no-fetch --deny warnings` | 0 vulnerabilities, 0 warnings (300 crates, 1,277 advisories) | — |
 | cargo-vet 0.10.2 | `cargo vet --locked` | Workspace fails: 101 unvetted crates | None of the 66 crates in `cargo tree -p candor-core -e normal,build` is unvetted (set intersection is empty) |
@@ -184,11 +184,11 @@ Toolchain `1.94.1` (cargo 1.94.1, clippy 0.1.94); nightly `nightly-2026-09-28`. 
 - Spec / requirement reference: IMPL-RM1 §1.2 Verify, §1.3 Verify, §4 A14; 04 §22.2–22.3; ST-023/026/027/042; BUILD-BRIEF "fuzz/proptest covered".
 - Status: Open
 
-### AUD-RM1-CORE-06 — Two fuzz targets cannot reach the parsers they claim to cover
+### AUD-RM1-CORE-06 — Three fuzz targets cannot reach the parsers they claim to cover
 - Severity: Medium
-- Location: crates/candor-core/fuzz/fuzz_targets/fuzz_slot_block.rs, fuzz_envelope_parse.rs; crates/candor-core/fuzz/corpus/ (seed corpus only for `fuzz_header`) (commit 60e732f)
+- Location: crates/candor-core/fuzz/fuzz_targets/fuzz_slot_block.rs, fuzz_envelope_parse.rs, fuzz_stanza.rs; crates/candor-core/fuzz/corpus/ (seed corpus only for `fuzz_header`) (commit 60e732f)
 - Category: B2.9
-- Description: libFuzzer's default `-max_len` is 4096. A valid slot block is exactly 18,692 bytes, and the smallest valid sealed object is 128 + 32 + 4112 = 4,272 bytes. With no seed corpus, the slot-block decoder never gets past the length check, and `parse` never reaches `ParsedObject::open`, `check_slot_block` or `object_hash` on a structurally valid object. In the audit run, `fuzz_slot_block` plateaued at cov 40 after more than 4 M executions. So ST-040/041 evidence for these targets is mostly vacuous.
+- Description: libFuzzer's default `-max_len` is 4096. A valid slot block is exactly 18,692 bytes, and the smallest valid sealed object is 128 + 32 + 4112 = 4,272 bytes. With no seed corpus, the slot-block decoder never gets past the length check, and `parse` never reaches `ParsedObject::open`, `check_slot_block` or `object_hash` on a structurally valid object. In the audit run, `fuzz_slot_block` plateaued at cov 40 after 47 M executions. `fuzz_stanza` also stayed at cov 64 after 47 M executions: it never synthesised a structurally valid 1,210-byte HPKE_BASE stanza, so `encode` round-trip and `open_casekey_ek` went unexercised. So ST-040/041 evidence for these targets is mostly vacuous.
 - Exploit scenario: a future change in the slot-block or open path could introduce a panic or overflow reachable by a source-supplied envelope (ADV over Tor, remote abort with `panic = "abort"`) that fuzzing would not find.
 - Fix recommendation:
   - Commit seed corpora generated from `tests/vectors/*.json`: a valid slot block, valid SUBMISSION/REPLY objects, and stanzas.

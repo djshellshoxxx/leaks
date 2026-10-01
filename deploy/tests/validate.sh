@@ -143,7 +143,7 @@ mutate "privileged ExecStartPre"       systemd/candor-intake-web.service 's|^Exe
 mutate "AppArmor soft-fail"            systemd/candor-intake-web.service 's|^AppArmorProfile=candor-web$|AppArmorProfile=-candor-web|'
 mutate "stdout to journal"             systemd/candor-sealer.service 's|^StandardOutput=null$|StandardOutput=journal|'
 mutate "no log namespace"              systemd/candor-intake-store.service '/^LogNamespace=candor-intake$/d'
-mutate "syscall re-allow ptrace"       systemd/candor-sealer.service 's|^SystemCallFilter=seccomp$|SystemCallFilter=seccomp ptrace|'
+mutate "syscall re-allow ptrace"       systemd/candor-sealer.service 's|^SystemCallFilter=seccomp landlock|SystemCallFilter=ptrace seccomp landlock|'
 mutate "sealer hides own credentials"  systemd/candor-sealer.service 's|^InaccessiblePaths=-/run/candor/source-web$|InaccessiblePaths=-/run/candor/source-web -/run/credentials/candor-sealer.service|'
 mutate "capability granted"            systemd/candor-sealer.service 's|^CapabilityBoundingSet=$|CapabilityBoundingSet=CAP_IPC_LOCK|'
 mutate "no nftables dependency"        systemd/candor-intake-web.service 's|^Requires=candor-intake-web.socket nftables.service$|Requires=candor-intake-web.socket|'
