@@ -17,7 +17,7 @@ Licence: AGPL-3.0-or-later. No `unsafe`. Nothing is logged, printed or written t
 | Module | Feature | Content |
 |---|---|---|
 | `proto` | always (needs only `zeroize`) | IPC types (`Request`, `Response`, `ErrorCode`, `Op`), strict deterministic CBOR (`proto::cbor`), framing (`frame`, `read_frame`, `write_frame`, `call`) |
-| `server` | `server` (default) | `Sealer` (sessions, operations, Argon2id gate, chaff), `directory` (verified snapshot view and high-water mark), `clock::Clock`, `sink::EnvelopeSink`, `hardening` |
+| `server` | `server` (default) | `Sealer` (sessions, operations, Argon2id gate, chaff, account batches), `directory` (verified snapshot and high-water mark), `kd` (Key Directory entry verifier), `merkle` (RFC 9162), `clock::Clock`, `sink::EnvelopeSink`, `handover` (sealed-bundle descriptor hand-over), `hardening` |
 
 `candor-web` depends on the crate with `default-features = false` and uses `proto` only.
 
@@ -43,23 +43,27 @@ The wire format is `u32be(len) ‖ CBOR {"v": 1, "op", "rid", "body"}`, with 1 �
 ## Use
 
 ```rust
-use candor_sealer::server::{Sealer, SealerConfig, hardening::{harden_process, LandlockLevel}};
+use candor_sealer::server::{Sealer, SealerConfig, hardening::{confined_runtime, harden_process, LandlockLevel}};
 
-// main thread, before the tokio runtime:
-harden_process(&staging_path, LandlockLevel::Required)?;   // no dumps, mlockall, Landlock
+// main thread, no other thread and no runtime yet (AUD-RM2-SEA-20):
 let staging: &'static SafeRoot = Box::leak(Box::new(SafeRoot::open(&staging_path, RootPolicy::Staging)?));
+harden_process(&staging_path, LandlockLevel::Required)?;   // no dumps, mlockall, Landlock
+let rt = confined_runtime(workers)?;                       // the only runtime the sealer serves on
 let k35 = SigningKey::from_seed(&credential_bytes);       // from $CREDENTIALS_DIRECTORY, never env
 let sealer = Sealer::new(config, k35, staging, clock, store_sink)?;  // self-test, empties staging
 sealer.set_high_water_mark(persisted_hwm);
-sealer.install_snapshot(bundle, |hwm| persist(hwm))?;     // VerifiedSnapshot: signatures, proof, HWM
-sealer.spawn_background();                                 // reaper + chaff
-sealer.serve(listener).await?;                             // refuses unless hardened (self-check)
+sealer.install_snapshot(bundle, |hwm| persist(hwm))?;     // derives the view from the signed log
+rt.block_on(async {
+    sealer.spawn_background();                             // reaper, account batches, chaff
+    sealer.serve(listener).await                           // refuses unless hardened, per thread
+})?;
+// at shutdown: sealer.flush_accounts()
 ```
 
 The integrator supplies four things:
 - `Clock` (16 §14.3): the independent day clock, built from the Tor consensus and Roughtime.
-- `EnvelopeSink`: the store client: `commit_envelope_group` (no account reference) and `upsert_account` (ADR-052(2)).
-- `SnapshotBundle`s (flattened, entry-verified view + signed checkpoint + consistency proof), refreshed hourly; the pinned `DirectoryTrust` in the config.
+- `EnvelopeSink`: the store client. `commit_envelope_group` (no account reference) hands the sealed bundle (`Blob::Staged`, a sealed memfd) to the store with `handover::hand_over` over `istore.sock` (`SCM_RIGHTS`, deploy D-33) and returns only after the store's commit acknowledgement; `upsert_account` is called from the shuffled account batches (`flush_accounts`, every `account_flush_interval`; ADR-052(2), SEA-21).
+- `SnapshotBundle`s (the signed checkpoint, the consistency proof from the high-water mark and **every** SignedKDEntry of the log), refreshed hourly; the pinned `DirectoryTrust` (K01, epoch origin, cosignature floors) in the config. The sealer verifies every entry itself (`kd`, AUD-RM2-SEA-19).
 - K35, loaded from a systemd credential.
 
 ## systemd unit (07 §4.2/4.3, BE-003; R7 §B)
@@ -87,7 +91,7 @@ SystemCallArchitectures=native
 # 07 §4.3 list plus what tmpfs staging needs (SPEC-NOTES item 7). The shipped unit
 # (deploy/intake/systemd/candor-sealer.service) expresses the same allow-list as the
 # @system-service baseline minus every other call (config-check.sh requires that form):
-SystemCallFilter=read write readv writev pread64 pwrite64 preadv pwritev lseek _llseek recvmsg sendmsg recvfrom sendto recv send accept accept4 socket connect getsockopt setsockopt getsockname getpeername shutdown close close_range fcntl fcntl64 ioctl dup dup3 epoll_create epoll_create1 epoll_ctl epoll_wait epoll_pwait epoll_pwait2 eventfd2 poll ppoll ppoll_time64 futex futex_time64 futex_waitv mmap mmap2 munmap mremap madvise mprotect brk mlock mlock2 mlockall munlock membarrier rt_sigreturn sigreturn rt_sigprocmask rt_sigaction sigaltstack tgkill tkill getpid gettid clock_gettime clock_gettime64 clock_getres clock_getres_time64 clock_nanosleep clock_nanosleep_time64 nanosleep gettimeofday time getrandom exit exit_group restart_syscall sched_yield sched_getaffinity clone clone3 set_robust_list get_robust_list rseq set_tid_address arch_prctl set_thread_area set_tls execve prctl prlimit64 getrlimit ugetrlimit fstat fstat64 newfstatat fstatat64 statx fstatfs fstatfs64 openat unlinkat renameat2 linkat mkdirat fsync fdatasync fchmod fchmodat utimensat utimensat_time64 getdents64 readlinkat getuid geteuid getgid getegid getuid32 geteuid32 getgid32 getegid32 uname sysinfo access faccessat faccessat2 landlock_create_ruleset landlock_add_rule landlock_restrict_self
+SystemCallFilter=read write readv writev pread64 pwrite64 preadv pwritev lseek _llseek recvmsg sendmsg recvfrom sendto recv send accept accept4 socket connect getsockopt setsockopt getsockname getpeername shutdown close close_range fcntl fcntl64 ioctl memfd_create dup dup3 epoll_create epoll_create1 epoll_ctl epoll_wait epoll_pwait epoll_pwait2 eventfd2 poll ppoll ppoll_time64 futex futex_time64 futex_waitv mmap mmap2 munmap mremap madvise mprotect brk mlock mlock2 mlockall munlock membarrier rt_sigreturn sigreturn rt_sigprocmask rt_sigaction sigaltstack tgkill tkill getpid gettid clock_gettime clock_gettime64 clock_getres clock_getres_time64 clock_nanosleep clock_nanosleep_time64 nanosleep gettimeofday time getrandom exit exit_group restart_syscall sched_yield sched_getaffinity clone clone3 set_robust_list get_robust_list rseq set_tid_address arch_prctl set_thread_area set_tls execve prctl prlimit64 getrlimit ugetrlimit fstat fstat64 newfstatat fstatat64 statx fstatfs fstatfs64 openat unlinkat renameat2 linkat mkdirat fsync fdatasync fchmod fchmodat utimensat utimensat_time64 getdents64 readlinkat getuid geteuid getgid getegid getuid32 geteuid32 getgid32 getegid32 uname sysinfo access faccessat faccessat2 landlock_create_ruleset landlock_add_rule landlock_restrict_self
 SystemCallErrorNumber=EPERM
 Restart=on-failure
 RestartSec=2s
@@ -102,6 +106,6 @@ cargo clippy -p candor-sealer --no-default-features --lib -- -D warnings   # pro
 cargo test -p candor-sealer
 ```
 
-Fuzzing (ST-043): `cd crates/candor-sealer && cargo +nightly fuzz run fuzz_sealer_ipc -- -max_total_time=600 -rss_limit_mb=2048`.
+Fuzzing (ST-043): `cd crates/candor-sealer && cargo +nightly fuzz run fuzz_sealer_ipc fuzz/corpus/fuzz_sealer_ipc fuzz/seeds/fuzz_sealer_ipc -- -max_total_time=600 -rss_limit_mb=2048` (seed corpus: `cd fuzz && cargo +nightly run --release --bin gen_seeds`).
 
 The full flow test runs four Argon2id derivations at m = 64 MiB, so it takes about 20–30 s in debug builds.

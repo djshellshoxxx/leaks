@@ -17,8 +17,8 @@ mod common;
 
 use candor_core::sig::SigningKey;
 use candor_sealer::server::hardening::{
-    HardeningError, InsecureDevMode, LandlockLevel, harden_process, report, self_check,
-    thread_confined,
+    HardeningError, InsecureDevMode, LandlockLevel, confined_runtime, harden_process, report,
+    self_check, thread_confined,
 };
 use candor_sealer::server::{ChaffConfig, Limits, Sealer};
 use common::*;
@@ -76,6 +76,7 @@ fn hardening_is_applied_and_enforced_before_serving() {
     //    serve (fail closed), whatever the peer UID.
     assert_eq!(self_check().unwrap_err(), HardeningError::NotApplied);
     assert!(!thread_confined());
+    assert_eq!(confined_runtime(1).unwrap_err(), HardeningError::NotApplied);
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -187,13 +188,19 @@ fn hardening_is_applied_and_enforced_before_serving() {
     );
     early_rt.shutdown_background();
 
-    // 4. Runtime workers created after hardening are confined, and the
-    //    self-check passes from inside a worker.
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
+    // A runtime built by hand after hardening is not trusted either (its
+    // threads were not recorded): serving from it fails closed.
+    let manual = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
         .enable_all()
         .build()
         .unwrap();
+    assert!(!manual.block_on(async { tokio::spawn(async { thread_confined() }).await.unwrap() }));
+    manual.shutdown_background();
+
+    // 4. The sealer's runtime (built after hardening): every worker and
+    //    blocking thread is confined, and the self-check passes inside it.
+    let rt = confined_runtime(2).unwrap();
     let per_worker = rt.block_on(async {
         let mut v = Vec::new();
         for _ in 0..16 {

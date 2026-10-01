@@ -204,6 +204,7 @@ fn harness() -> &'static Harness {
             .install_snapshot(log.bundle(&view, 0), |_| true)
             .unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
             .build()
             .unwrap();
         Harness {

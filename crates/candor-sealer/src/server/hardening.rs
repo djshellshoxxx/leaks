@@ -20,11 +20,11 @@
 //! calling thread and the threads it creates afterwards, so a process-global
 //! record is not proof that the threads serving requests are confined:
 //! * [`harden_process`] refuses unless it runs on the process's main thread
-//!   outside any tokio runtime, and probes the confinement of the calling
-//!   thread after `restrict_self`;
-//! * [`thread_confined`] probes the *calling* thread through `candor-safefs`
-//!   (opening `/` must fail with `EACCES`; cached per thread once confined),
-//!   so a runtime worker created before hardening is detected. In serve mode
+//!   outside any tokio runtime;
+//! * the sealer serves on [`confined_runtime`], built only after hardening;
+//!   its threads (and the hardened main thread) are recorded as confined, and
+//!   [`thread_confined`] reads that per-thread record, so a worker of a runtime
+//!   built before hardening (or by anyone else) is never trusted. In serve mode
 //!   ([`enforce_threads`]) every request, every frame and every blocking job
 //!   checks it first ([`guard`]); one unconfined thread poisons the sealer,
 //!   which then refuses all work and stops accepting (fail closed).
@@ -62,33 +62,36 @@ thread_local! {
     static CONFINED: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Probe the calling thread through the audited filesystem API (ADR-027):
-/// opening `/` as a directory is denied with `EACCES` inside the sealer's
-/// Landlock domain (`READ_DIR` is handled and only the staging root is
-/// allowed). Unconfined, the open succeeds and `candor-safefs` then refuses
-/// `/` as a root for its owner and mode, which is a different error. Nothing
-/// is read or written either way.
-fn probe_confined() -> bool {
-    matches!(
-        candor_safefs::SafeRoot::open(Path::new("/"), candor_safefs::RootPolicy::Staging),
-        Err(candor_safefs::SafeFsError::Io(
-            std::io::ErrorKind::PermissionDenied
-        ))
-    )
-}
-
-/// Whether the calling thread is confined (probed; a positive result is cached
-/// for the thread, since a Landlock domain cannot be left).
+/// Whether the calling thread is known to be confined: the main thread after
+/// [`harden_process`] enforced Landlock on it, or a thread of a runtime built
+/// by [`confined_runtime`] (created by a confined thread after hardening, so
+/// inside the same Landlock domain). Landlock has no "am I confined" query,
+/// and ADR-027 rules out path probes outside `candor-safefs`, so confinement
+/// is established by construction and recorded per thread.
 #[must_use]
 pub fn thread_confined() -> bool {
-    CONFINED.with(|c| {
-        if c.get() {
-            return true;
-        }
-        let v = probe_confined();
-        c.set(v);
-        v
-    })
+    CONFINED.with(Cell::get)
+}
+
+fn mark_thread_confined() {
+    CONFINED.with(|c| c.set(true));
+}
+
+/// The multi-thread runtime the sealer must serve on (AUD-RM2-SEA-20): built
+/// only after [`harden_process`] enforced Landlock (from the hardened main
+/// thread), and every runtime thread — workers and blocking-pool threads — is
+/// recorded as confined when it starts. Serving from any other runtime fails
+/// closed ([`crate::server::Sealer::serve`] and [`guard`]).
+pub fn confined_runtime(worker_threads: usize) -> Result<tokio::runtime::Runtime, HardeningError> {
+    if !report().is_some_and(|r| r.landlock_enforced) || !thread_confined() {
+        return Err(HardeningError::NotApplied);
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_threads.max(1))
+        .enable_all()
+        .on_thread_start(mark_thread_confined)
+        .build()
+        .map_err(|_| HardeningError::NotApplied)
 }
 
 /// Enter serve mode: from now on [`guard`] requires every calling thread to be
@@ -179,12 +182,17 @@ impl InsecureDevMode {
         C: candor_log::chain::AuditClock,
     {
         use candor_log::codes::{HealthCheck, HealthStatus, Service};
+        // candor-log has no sealer service or developer-override code yet
+        // (AUD-RM2-SEA-24(a), coordination item for the candor-log owner);
+        // switch these two constants when it does.
+        const SERVICE: Service = Service::Upload;
+        const CHECK: HealthCheck = HealthCheck::Readiness;
         log.emit(
-            candor_log::EventContext::system(Service::Upload),
+            candor_log::EventContext::system(SERVICE),
             candor_log::AuditEvent::SysHealth {
-                service: Service::Upload,
+                service: SERVICE,
                 status: HealthStatus::Degraded,
-                check_code: HealthCheck::Readiness,
+                check_code: CHECK,
             },
         )
         .map_err(|_| HardeningError::DevFlagNotLogged)?;
@@ -295,8 +303,8 @@ pub fn restrict_filesystem(staging: &Path, level: LandlockLevel) -> Result<bool,
 
 /// The caller is the process's main thread and has no tokio runtime context
 /// (a thread count needs a `/proc` read, which ADR-027 reserves to
-/// `candor-safefs`; worker threads created before hardening are caught by the
-/// per-thread [`guard`] instead).
+/// `candor-safefs`; threads created before hardening are never recorded as
+/// confined, so [`guard`] refuses work on them).
 fn on_main_thread() -> bool {
     rustix::thread::gettid() == rustix::process::getpid()
         && tokio::runtime::Handle::try_current().is_err()
@@ -314,8 +322,8 @@ pub fn harden_process(staging: &Path, landlock: LandlockLevel) -> Result<bool, H
     disable_core_dumps()?;
     lock_memory()?;
     let full = restrict_filesystem(staging, landlock)?;
-    if full && !thread_confined() {
-        return Err(HardeningError::Landlock);
+    if full {
+        mark_thread_confined();
     }
     let _ = REPORT.set(HardeningReport {
         core_dumps_disabled: true,
