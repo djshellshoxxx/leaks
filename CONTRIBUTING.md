@@ -24,7 +24,9 @@ git commit -s -m "candor-core: reject truncated envelope header"
 
 A pseudonym is acceptable if you use it consistently and can be contacted at the
 address given. CI (`scripts/check-dco.sh`) rejects PRs containing unsigned commits.
-To fix a branch: `git rebase --signoff <base>`.
+To fix a branch: `git rebase --signoff <base>`. Commits that predate the DCO
+policy (reachable from the commit recorded in `.dco-epoch` at the repository
+root) are exempt; every later commit must be signed off.
 
 ## 2. Licensing of your contribution
 
