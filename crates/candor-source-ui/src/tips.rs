@@ -144,7 +144,7 @@ impl Screen {
             Screen::Landing => &[Device, Network, Limits],
             Screen::Safety => &[Timing],
             Screen::SafetyTips => &[Limits],
-            Screen::Status => &[Limits, Browser],
+            Screen::Status => &[Limits, Browser, Accounts],
             Screen::NewReport => &[Mode, Place],
             Screen::Concerns => &[Concerns],
             Screen::NoReader => &[Concerns, Limits],
