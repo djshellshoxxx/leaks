@@ -2253,9 +2253,16 @@ impl IntakeMaintenance for PgIntakeStore {
 
     /// Runs as the application role (least privilege: it already holds
     /// `SELECT` on `envelope_part`); statement logging is disabled on the pool
-    /// and the id is a bind parameter.
+    /// and the id is a bind parameter. Fails closed (AUD-RM2-STO-28): the
+    /// tenant's `intake_meta` row must be visible in the same transaction
+    /// (`NotInitialized` otherwise) and name this store's tenant, so row-level
+    /// security hiding every row (wrong tenant, empty database) can never be
+    /// read as "not referenced".
     async fn blob_referenced(&self, blob: BlobId) -> Result<bool> {
-        let mut tx = self.begin_raw().await?;
+        let (mut tx, meta) = self.begin(false).await?;
+        if meta.tenant != self.tenant {
+            return Err(StoreError::TenantMismatch);
+        }
         let found: bool = sqlx::query_scalar(SQL_BLOB_REFERENCED)
             .bind(uuid(&blob.0))
             .fetch_one(&mut *tx)

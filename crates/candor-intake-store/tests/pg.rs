@@ -1982,7 +1982,8 @@ async fn pg_staged_ack_after_commit() {
 /// the envelope commit leaves a blob no restarted receiver knows; the
 /// start-up sweep removes it (no `envelope_part` row names it) and keeps the
 /// committed one. The check runs as the application role; the maintenance
-/// role has no access to `envelope_part` and fails closed (nothing removed).
+/// role has no access to `envelope_part` and fails closed (nothing removed);
+/// so does a wrong-tenant or uninitialised store (AUD-RM2-STO-28).
 #[tokio::test]
 async fn pg_staged_crash_between_copy_and_commit() {
     use candor_intake_store::staged::{
@@ -2072,4 +2073,26 @@ async fn pg_staged_crash_between_copy_and_commit() {
     assert_eq!(rx2.blobs().list().unwrap(), vec![keep]);
     // Idempotent.
     assert_eq!(rx2.sweep(&s, slot).await.unwrap(), 0);
+    // AUD-RM2-STO-28: a store opened with the wrong tenant sees no rows
+    // (RLS); the check must fail, not report "unreferenced", and the sweep
+    // must delete nothing.
+    let wrong = open(&b, &db, common::OTHER_TENANT).await;
+    let keep_id = BlobId(*keep.as_bytes());
+    assert_eq!(
+        wrong.blob_referenced(keep_id).await,
+        Err(StoreError::NotInitialized)
+    );
+    assert!(rx2.sweep(&wrong, slot).await.is_err());
+    assert!(rx2.startup(&wrong, slot).await.is_err());
+    assert_eq!(rx2.blobs().list().unwrap(), vec![keep]);
+    // An uninitialised database fails the same way.
+    let empty_db = fresh_db(&b).await;
+    let empty = open(&b, &empty_db, common::TENANT).await;
+    assert_eq!(
+        empty.blob_referenced(keep_id).await,
+        Err(StoreError::NotInitialized)
+    );
+    assert!(rx2.sweep(&empty, slot).await.is_err());
+    assert_eq!(rx2.blobs().list().unwrap(), vec![keep]);
+    assert_eq!(s.blob_referenced(keep_id).await, Ok(true));
 }
