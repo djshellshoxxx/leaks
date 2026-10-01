@@ -998,11 +998,12 @@ fn uniform_below(bound: u64) -> Result<u64, RandomError> {
     if bound <= 1 {
         return Ok(0);
     }
-    let zone = u64::MAX - (u64::MAX % bound);
+    // Largest multiple of `bound` (bound ≥ 2, so no underflow/zero divisor).
+    let zone = u64::MAX.saturating_sub(u64::MAX.checked_rem(bound).unwrap_or(0));
     loop {
         let v = u64::from_le_bytes(random_bytes::<8>()?);
         if v < zone {
-            return Ok(v % bound);
+            return v.checked_rem(bound).ok_or(RandomError);
         }
     }
 }
@@ -1013,7 +1014,7 @@ fn shuffle<T>(v: &mut [T]) -> Result<(), RandomError> {
     while i > 1 {
         let j = usize::try_from(uniform_below(u64::try_from(i).map_err(|_| RandomError)?)?)
             .map_err(|_| RandomError)?;
-        i -= 1;
+        i = i.saturating_sub(1);
         v.swap(i, j);
     }
     Ok(())

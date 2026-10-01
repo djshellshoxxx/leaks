@@ -11,7 +11,10 @@
 #
 # Usage:
 #   config-check.sh [--dir DIR] [--profile ce-single|ce-hardened]   static check of a tree
-#   config-check.sh --host [--root DIR]                             installed host (ST-120)
+#   config-check.sh --host [--root DIR] [--pg-db NAME]              installed host (ST-120)
+#   --pg-db NAME  a provisioned tenant database (candor_intake_*): --host then checks the
+#                 maintenance role's memberships and ownerships through the running server
+#                 (required whenever the server's socket exists)
 #   --only LIST   comma list of sections: tor,nft,pg,units,journald,kernel,dns,apparmor,host
 #                 (an unknown name, or a selection that runs no check, is a usage error: exit 2)
 #   --emit-baseline   (maintainers) print the effective units/nft/tor/security values of the
@@ -34,26 +37,34 @@
 #             and pg_ident.conf must equal the release files line by line; --host also asks the
 #             server binary for the effective values (postgres -C, includes postgresql.auto.conf).
 #   AppArmor  every profile must equal the release profile statement by statement; rule classes
-#             (exec transitions, broad write globs, network, capabilities, change_profile,
-#             complain/other flags) are also rejected individually; --host adds disable/
-#             force-complain links, foreign profiles using the names, the enforce state and a
-#             comparison of the loaded policy with the checked file.
+#             (any include, variables other than the two pinned ones, exec transitions, broad
+#             write globs, network, capabilities, change_profile, complain/other flags) are
+#             also rejected individually. Profiles are self-contained (AUD-RM2-DEP-23): no
+#             include, only `abi <abi/3.0>`, whose file digest is pinned. --host adds
+#             disable/force-complain links, foreign profiles using the names, empty snippet
+#             directories (abstractions/*.d, tunables/*.d, local/), and compares the policy
+#             compiled from the installed file against the system tree with the policy
+#             compiled from the release statements in isolation (--base = a private directory
+#             holding only the pinned abi file, empty parser config); live also the enforce
+#             state and the loaded raw policy against that isolated compile.
 # --host without --root also reads live state (/proc/sys, loaded nft ruleset, systemctl show,
 # AppArmor). With --root (offline image or tests) live-only checks are reported as SKIP; only
 # `--host` without --root is the ST-120 gate.
 #
 # Requirements (fail closed if missing): root, bash, awk, jq, tor, nft, unshare, setpriv,
-# systemd-analyze, sha256sum, dd; --host additionally the PostgreSQL 16 server binary and,
-# live, apparmor_parser.
-# Input hygiene (AUD-RM2-DEP-17): an input that is a symlink, or whose path has a symlinked
-# component below the tree / --root, is refused and never read; every input is copied once
-# (dd iflag=nofollow, size-capped) into a private 0700 work directory and only the copy is
-# used. --root paths are resolved inside the root only.
+# systemd-analyze, sha256sum, dd, timeout, python3; --host additionally the PostgreSQL 16
+# server binary (psql with --pg-db) and apparmor_parser.
+# Input hygiene (AUD-RM2-DEP-17/24): an input that is a symlink, or whose path has a symlinked
+# component below the tree / --root, is refused and never read; every input is copied once by
+# safe-read.py (openat walk from / with O_NOFOLLOW on every component, O_NONBLOCK|O_NOCTTY,
+# fstat: regular file, one link, allowed owner, no group/world write on a host, size cap; under
+# `timeout`) into a private 0700 work directory and only the copy is used. --root paths are
+# resolved inside the root only.
 # Output: "HOST RULE CLASS STATUS DETAIL" table (18 §14). Details never contain file contents:
 # only rule names, counts, line/statement numbers, baseline values and sanitised, length-capped
 # option/key names (AUD-RM2-DEP-17).
 # Policy integrity (AUD-RM2-DEP-21): config-check.manifest (sha256 pinned below) lists the
-# sha256 of config-check.baseline; both are verified before any check runs.
+# sha256 of config-check.baseline and of safe-read.py; all are verified before any check runs.
 # Exit codes (18 §14): 0 = all OK; 30 = baseline failure (any FAIL, including a policy digest
 # mismatch); 2 = usage / missing input / no check selected.
 
@@ -73,6 +84,7 @@ DIR="$SCRIPT_DIR/../intake"
 ROOT=""
 PROFILE=""
 ONLY=""
+PGDB=""
 QUIET=0
 EMIT=0
 FAILS=0
@@ -80,7 +92,7 @@ CHECKS=0
 SKIPS=0
 
 usage() {
-  sed -n '4,41p' "$0" | sed 's/^# \{0,1\}//' >&2
+  sed -n '4,53p' "$0" | sed 's/^# \{0,1\}//' >&2
   exit 2
 }
 
@@ -91,6 +103,7 @@ while [ $# -gt 0 ]; do
     --root) [ $# -ge 2 ] || usage; ROOT=${2%/}; shift 2 ;;
     --profile) [ $# -ge 2 ] || usage; PROFILE=$2; shift 2 ;;
     --only) [ $# -ge 2 ] || usage; ONLY=$2; shift 2 ;;
+    --pg-db) [ $# -ge 2 ] || usage; PGDB=$2; shift 2 ;;
     --emit-baseline) EMIT=1; shift ;;
     -q) QUIET=1; shift ;;
     -h|--help) usage ;;
@@ -105,6 +118,9 @@ if [ -n "$ONLY" ]; then
   done
   [ -n "$(printf '%s' "$ONLY" | tr -d ',')" ] || { echo "config-check: empty --only" >&2; exit 2; }
 fi
+case "$PGDB" in "") ;; candor_intake_*) case "$PGDB" in *[!a-z0-9_]*) echo "config-check: invalid --pg-db" >&2; exit 2 ;; esac
+  [ "${#PGDB}" -le 63 ] || { echo "config-check: invalid --pg-db" >&2; exit 2; } ;;
+  *) echo "config-check: --pg-db must name a candor_intake_* database" >&2; exit 2 ;; esac
 if [ ! -f "$BASE" ] || [ ! -r "$BASE" ]; then echo "config-check: baseline file missing" >&2; exit 2; fi
 is_root() { [ "$(id -u)" -eq 0 ]; }
 
@@ -132,6 +148,8 @@ if [ "$MODE" = host ]; then
   else LIVE=1; fi
   INPREFIX=$ROOT
   [ -z "$PROFILE" ] || { echo "config-check: --profile is static-mode only (a host has its drop-ins installed)" >&2; exit 2; }
+  # Inputs on a host: owned by root, no group/world write (AUD-RM2-DEP-24).
+  OWNERS=0; DENYMODE=022
   TORRC="$ROOT/etc/tor/instances/candor-intake/torrc"
   NFT="$ROOT/etc/nftables.conf"
   PGCONF="$ROOT/etc/candor/intake/postgresql/candor-intake.conf"
@@ -146,6 +164,9 @@ else
   [ -d "$DIR" ] || { echo "config-check: no such directory" >&2; exit 2; }
   DIR=$(realpath -e -- "$DIR") || exit 2
   INPREFIX=$DIR
+  # Inputs of a tree: owned by root or the tree's owner, not world-writable (AUD-RM2-DEP-24).
+  OWNERS="0,$(stat -c %u -- "$DIR")"; DENYMODE=002
+  [ -z "$PGDB" ] || { echo "config-check: --pg-db is --host only" >&2; exit 2; }
   case "$PROFILE" in ""|ce-single|ce-hardened) ;; *) echo "config-check: unknown profile" >&2; exit 2 ;; esac
   if [ -n "$PROFILE" ] && [ ! -d "$DIR/profiles/$PROFILE" ]; then echo "config-check: profile directory missing" >&2; exit 2; fi
   TORRC="$DIR/torrc"
@@ -196,23 +217,36 @@ symlinked_component() { # prefix path -> prints the component, returns 0 if ther
   done
   return 1
 }
-# Copy one input into the work directory without following symlinks (AUD-RM2-DEP-17).
+# Copy one input into the work directory without following symlinks (AUD-RM2-DEP-17/24).
 MAXIN=1048576
 SNAP=""
-snap() { # rule path name -> SNAP=copy; FAIL + return 1 when refused
-  local r=$1 p=$2 l sz
+SAFE_READ="$SCRIPT_DIR/safe-read.py"
+PY=""
+safe_copy() { # abs-path out [extra-owner-uid] -> safe-read.py status (see there); never prints content
+  [ -n "$PY" ] || return 15
+  timeout -k 2 20 "$PY" -I -S -B "$SAFE_READ" "$1" "$2" "$MAXIN" "$OWNERS${3:+,$3}" "$DENYMODE" </dev/null >/dev/null 2>&1
+}
+snap() { # rule path name [extra-owner-uid] -> SNAP=copy; FAIL + return 1 when refused
+  local r=$1 p=$2 l rc
   SNAP="$WORK/in/$3"
   mkdir -p "$WORK/in" || { fail "$r" "work directory"; return 1; }
+  # Early, readable refusal; the race-free walk in safe-read.py is the authoritative check.
   if l=$(symlinked_component "$INPREFIX" "$p"); then fail "$r" "refused: symlinked path component $l (inputs are never followed)"; return 1; fi
-  if [ ! -f "$p" ]; then fail "$r" "missing or not a regular file: ${p#"$INPREFIX"}"; return 1; fi
-  sz=$(stat -c %s -- "$p" 2>/dev/null) || { fail "$r" "unreadable: ${p#"$INPREFIX"}"; return 1; }
-  if [ "$sz" -gt "$MAXIN" ]; then fail "$r" "larger than $MAXIN bytes: ${p#"$INPREFIX"}"; return 1; fi
-  if ! dd if="$p" of="$SNAP" iflag=nofollow bs=65536 count=17 status=none 2>/dev/null ||
-     [ "$(stat -c %s -- "$SNAP")" -gt "$MAXIN" ]; then fail "$r" "unreadable: ${p#"$INPREFIX"}"; return 1; fi
-  return 0
+  safe_copy "$p" "$SNAP" "${4:-}"; rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    10) fail "$r" "refused: symlinked or swapped path component (inputs are never followed): ${p#"$INPREFIX"}" ;;
+    11|12) fail "$r" "missing or not a regular file: ${p#"$INPREFIX"}" ;;
+    13) fail "$r" "refused: owner, mode (group/world write) or link count not allowed: ${p#"$INPREFIX"}" ;;
+    14) fail "$r" "larger than $MAXIN bytes: ${p#"$INPREFIX"}" ;;
+    124|137) fail "$r" "read timed out: ${p#"$INPREFIX"}" ;;
+    *) fail "$r" "unreadable: ${p#"$INPREFIX"}" ;;
+  esac
+  rm -f -- "$SNAP"
+  return 1
 }
 # Optional input: absent -> empty copy; present -> as snap.
-snap_opt() { # rule path name
+snap_opt() { # rule path name [extra-owner-uid]
   if [ ! -e "$2" ] && [ ! -L "$2" ] && ! symlinked_component "$INPREFIX" "$2" >/dev/null; then
     mkdir -p "$WORK/in"; SNAP="$WORK/in/$3"; : > "$SNAP"; return 0
   fi
@@ -243,9 +277,18 @@ verify_policy() {
   if [ "$got" != "$MANIFEST_SHA256" ]; then fail tool.baseline_integrity "config-check.manifest digest differs from the release pin"; return 1; fi
   dd if="$BASE" of="$WORK/baseline" iflag=nofollow bs=65536 count=64 status=none 2>/dev/null || { fail tool.baseline_integrity "baseline unreadable"; return 1; }
   want=$(awk '$2=="config-check.baseline" && $1 ~ /^[0-9a-f]{64}$/ {print $1}' "$MANIFEST")
-  extra=$(awk '$2!="config-check.baseline" && NF' "$MANIFEST" | wc -l)
+  extra=$(awk '$2!="config-check.baseline" && $2!="safe-read.py" && NF' "$MANIFEST" | wc -l)
   got=$(sha256sum < "$WORK/baseline" | cut -c1-64)
   if [ -z "$want" ] || [ "$extra" -ne 0 ] || [ "$got" != "$want" ]; then fail tool.baseline_integrity "config-check.baseline digest differs from the manifest"; return 1; fi
+  # The input reader (AUD-RM2-DEP-24) is policy too: pinned by the manifest, run from a copy.
+  want=$(awk '$2=="safe-read.py" && $1 ~ /^[0-9a-f]{64}$/ {print $1}' "$MANIFEST")
+  if [ -L "$SAFE_READ" ] || ! dd if="$SAFE_READ" of="$WORK/safe-read.py" iflag=nofollow bs=65536 count=4 status=none 2>/dev/null ||
+     [ -z "$want" ] || [ "$(sha256sum < "$WORK/safe-read.py" | cut -c1-64)" != "$want" ]; then
+    fail tool.baseline_integrity "safe-read.py missing or its digest differs from the manifest"; return 1
+  fi
+  SAFE_READ="$WORK/safe-read.py"
+  PY=$(command -v python3) || { fail tool.baseline_integrity "python3 missing (input reader)"; return 1; }
+  have timeout || { fail tool.baseline_integrity "timeout missing"; return 1; }
   BASE="$WORK/baseline"
   name=$(sha256sum < "$BASE" | cut -c1-12)
   ok tool.baseline_integrity "baseline sha256 ${name}... matches the pinned manifest"
@@ -295,9 +338,12 @@ check_torrc() {
   if grep -qiE '^%' "$WORK/torrc.clean"; then fail tor.raw.no_include "%include or other % directive present"; else ok tor.raw.no_include; fi
   if grep -qE '^[+/]' "$WORK/torrc.clean"; then fail tor.raw.no_prefix "'+Option' (append) or '/Option' (reset) line present"; else ok tor.raw.no_prefix; fi
   local unknown dup
-  unknown=$(awk 'NR==FNR { if ($1=="tor-raw") ok[tolower($2)]=1; next } !(tolower($1) in ok) { print $1 }' FS='|' "$BASE" FS=' ' "$WORK/torrc.clean" | sort -u | san_names)
-  if [ -n "$unknown" ]; then fail tor.raw.allowed_keys "option(s) not in the template (abbreviations are rejected too): $unknown"; else ok tor.raw.allowed_keys; fi
-  dup=$(awk '{ print tolower($1) }' "$WORK/torrc.clean" | sort | uniq -d | san_names)
+  # Counts only, never the tokens (AUD-RM2-DEP-24): a first token of an arbitrary file could
+  # carry secret material.
+  unknown=$(awk 'NR==FNR { if ($1=="tor-raw") ok[tolower($2)]=1; next } !(tolower($1) in ok) { print tolower($1) }' FS='|' "$BASE" FS=' ' "$WORK/torrc.clean" | sort -u | wc -l)
+  if [ "$unknown" -gt 0 ]; then fail tor.raw.allowed_keys "$unknown option name(s) not in the template (abbreviations are rejected too; names not shown)"; else ok tor.raw.allowed_keys; fi
+  dup=$(awk '{ print tolower($1) }' "$WORK/torrc.clean" | sort | uniq -d | wc -l); [ "$dup" -gt 0 ] || dup=""
+  [ -z "$dup" ] || dup="$dup option name(s) (names not shown)"
   if [ -n "$dup" ]; then fail tor.raw.no_duplicates "repeated option(s): $dup"; else ok tor.raw.no_duplicates; fi
   # Never hand an %include line to tor (it could make tor read an arbitrary file).
   if grep -qiE '^%' "$WORK/torrc.clean"; then fail tor.effective "not canonicalised: % directive present"; return; fi
@@ -622,14 +668,25 @@ units_root() { # static: a scratch root holding the tree (+ profile drop-ins) as
       mkdir -p "$SR/etc/systemd/system/$(basename "$d")" && cp -a "$d/." "$SR/etc/systemd/system/$(basename "$d")/" || return 1
     done
   fi
+  # The copy is checked again (AUD-RM2-DEP-24): an entry swapped for a symlink, FIFO or device
+  # between the check above and cp is copied as such (cp -a never follows or reads it) and is
+  # refused here, before systemd or the merge could open it.
+  if [ -n "$(find "$SR" ! -type f ! -type d -print -quit 2>/dev/null)" ]; then
+    fail unit.no_symlinks "symlink or special file in the unit tree (refused, not followed)"; return 1
+  fi
 }
 rootopt() { if [ "$SR" != / ]; then printf -- '--root=%s' "$SR"; else printf -- '--root=/'; fi; }
 
 # Merge fragment + drop-ins (in systemd's order) into "Section|Key|v1 ;; v2 ;; ..." lines.
 # An empty assignment is kept as an empty element, so a reset is always visible.
-unit_merge() { # files... -> stdout (callers checked every path for symlinks)
+unit_merge() { # files... -> stdout (callers checked every path for symlinks; read race-free)
   local f
-  for f in "$@"; do printf '#@@FILE\n'; dd if="$f" iflag=nofollow bs=65536 count=17 status=none 2>/dev/null; printf '\n'; done | awk '
+  for f in "$@"; do
+    printf '#@@FILE\n'
+    # An unreadable or refused file becomes a directive no baseline has, so the unit fails.
+    if safe_copy "$f" "$WORK/um.tmp"; then cat -- "$WORK/um.tmp"; else printf '[X-Candor-Refused]\nUnreadableOrUnsafeFile=1\n'; fi
+    rm -f -- "$WORK/um.tmp"; printf '\n'
+  done | awk '
     function flush_line(l,   k, v, e, id) {
       sub(/^[ \t]+/, "", l); sub(/[ \t]+$/, "", l)
       if (l == "" || l ~ /^[#;]/) return
@@ -1062,10 +1119,17 @@ aa_classes() { # profile normalised-file inet-allowed(0|1) caps-allowed(space li
         if (match(t, /\(.*\)/)) { f=substr(t, RSTART+1, RLENGTH-2); gsub(/flags *= */, "", f); gsub(/[ ,]+/, " ", f); gsub(/^ | $/, "", f)
           if (f != "attach_disconnected") bad["flags"]=bad["flags"] " " f }
         return }
-      if (kw=="abi") return
-      if (kw=="include") { if (t != "include <tunables/global>" && t != "include <abstractions/base>" && t != "include <abstractions/openssl>") bad["include"]=bad["include"] " " ns; return }
+      # Self-contained profiles (AUD-RM2-DEP-23): the only file reference is the pinned ABI;
+      # no include of any kind ("include", "include if exists", "#include").
+      if (kw=="abi") { if (t != "abi <abi/3.0>") bad["abi"]=bad["abi"] " " ns; return }
+      if (kw=="include" || kw=="#include" || kw=="!HASH-INCLUDE") { bad["include"]=bad["include"] " " ns; return }
+      # Variables: only @{PROC} and @{pid}, defined once each, outside the profile, never "+=".
+      if (t ~ /^@\{[^}]*\} *\+?=/) {
+        vn=t; sub(/\}.*$/, "", vn); sub(/^@\{/, "", vn)
+        if (t ~ /^@\{[^}]*\} *\+=/ || depth > 0 || (vn != "PROC" && vn != "pid") || (vn in vseen)) bad["variable"]=bad["variable"] " " ns
+        vseen[vn]=1; return }
       if (deny) return
-      if (kw ~ /^(change_profile|change_hat|pivot_root|mount|remount|umount|ptrace|userns|io_uring|mqueue|dbus|all|file|set|link|rlimit|unconfined)$/ || kw ~ /^\^/) { bad["forbidden_rule"]=bad["forbidden_rule"] " " kw; return }
+      if (kw ~ /^(change_profile|change_hat|pivot_root|mount|remount|umount|ptrace|userns|io_uring|mqueue|dbus|all|file|set|link|rlimit|unconfined|alias|hat)$/ || kw ~ /^\^/) { bad["forbidden_rule"]=bad["forbidden_rule"] " " kw; return }
       if (kw=="capability") { if (i == n) bad["capability"]=bad["capability"] " all"; for (j=i+1; j<=n; j++) if (index(caps, " " w[j] " ") == 0) bad["capability"]=bad["capability"] " " w[j]; return }
       if (kw=="network") {
         if (!(n == i+2 && (w[i+1]=="unix" && w[i+2] ~ /^(stream|dgram|seqpacket)$/ || w[i+1]=="inet" && w[i+2]=="stream" && inet==1)))
@@ -1083,12 +1147,12 @@ aa_classes() { # profile normalised-file inet-allowed(0|1) caps-allowed(space li
       if (line ~ /^profile / || line ~ /^\/[^ ]* .*\{$/ || line ~ /^\/[^ ]* *\{$/) hdr=1; else hdr=0
       for (c=1; c<=length(line); c++) { ch=substr(line, c, 1)
         if (ch=="(") par++; else if (ch==")" && par>0) par--
-        if (ch=="{") { if (c>1 && substr(line, c-1, 1) != " ") { gl++; cur=cur ch; continue } stmt(cur); hdr=0; cur=""; continue }
-        if (ch=="}") { if (gl>0) { gl--; cur=cur ch; continue } stmt(cur); cur=""; continue }
+        if (ch=="{") { if (c>1 && substr(line, c-1, 1) != " ") { gl++; cur=cur ch; continue } stmt(cur); hdr=0; cur=""; depth++; continue }
+        if (ch=="}") { if (gl>0) { gl--; cur=cur ch; continue } stmt(cur); cur=""; if (depth > 0) depth--; continue }
         if (ch=="," && par==0 && gl==0) { stmt(cur); cur=""; continue }
         cur=cur ch }
       stmt(cur) }
-    END { n=split("flags include forbidden_rule capability network exec broad_write unknown_rule", cls, " ")
+    END { n=split("flags abi include variable forbidden_rule capability network exec broad_write unknown_rule", cls, " ")
       for (i=1; i<=n; i++) { c=cls[i]
         if (c in bad) { d=bad[c]; gsub(/[^A-Za-z0-9_ ]/, "?", d); printf "FAIL\tapparmor.%s.%s\t%s at statement(s)/name(s):%s\n", p, c, c, substr(d, 1, 200) }
         else printf "OK\tapparmor.%s.%s\tnone\n", p, c } }' "$2"

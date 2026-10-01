@@ -98,13 +98,10 @@ impl MemorySink {
     fn take(&self, o: &EnvelopeObject) -> StoredObject {
         let bytes = match &o.blob {
             Blob::Inline(b) => b.clone(),
-            Blob::Staged { id, len } => {
-                let b = self.staging.read_to_vec(id, *len).unwrap();
-                assert_eq!(b.len() as u64, *len);
-                self.staging
-                    .remove(id, candor_safefs::SlotTime::utc_day_start(0))
-                    .unwrap();
-                b
+            Blob::Staged(b) => {
+                let v = b.read_to_vec().unwrap();
+                assert_eq!(v.len() as u64, b.len());
+                v
             }
         };
         StoredObject {

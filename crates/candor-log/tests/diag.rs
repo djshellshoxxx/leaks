@@ -54,6 +54,7 @@ fn diag_reaches_sink_with_static_contents() {
         const MESSAGE: &'static str = "203.0.113.7\n/home/src/leak.pdf";
         const MODULE: &'static str = "m";
         const LINE: u32 = 1;
+        const DEBUG_ASSERTIONS: bool = true;
     }
     assert!(!candor_log::diag::__private::message_ok(
         <Bad as candor_log::diag::__private::Site>::MESSAGE

@@ -192,6 +192,14 @@ fn pinned_cells(rel: &Released, vals: &[u64]) -> Vec<usize> {
     exposed(rel.rows * rel.cols, vals, &equations(rel))
 }
 
+/// `n` generated channel ids in ascending order (identifiers are random
+/// only, AUD-RM1-LOG-17).
+fn chans(n: usize) -> Vec<ChannelId> {
+    let mut v: Vec<ChannelId> = (0..n).map(|_| ChannelId::generate().unwrap()).collect();
+    v.sort();
+    v
+}
+
 fn reg() -> PeriodRegistry<MemoryReleaseHistory> {
     PeriodRegistry::new(MemoryReleaseHistory::new())
 }
@@ -428,9 +436,7 @@ fn tumbling_frozen_periods() {
 // memory when released; before/after one submission across periods.
 #[test]
 fn counter_aggregation_and_release() {
-    let ch: Vec<ChannelId> = (1..=4)
-        .map(|n| ChannelId::derive(&candor_log::ids::AuditIdKey::new([1; 32]), &[n]))
-        .collect();
+    let ch: Vec<ChannelId> = chans(4);
     let mut agg = CounterAggregator::new(m(2026, 9));
     let sub = IntakeCounter::Submissions;
     for _ in 0..14 {
@@ -494,9 +500,7 @@ fn counter_aggregation_and_release() {
 
 #[test]
 fn group_with_one_folded_channel_absorbs_another() {
-    let ch: Vec<ChannelId> = (1..=3)
-        .map(|n| ChannelId::derive(&candor_log::ids::AuditIdKey::new([1; 32]), &[n]))
-        .collect();
+    let ch: Vec<ChannelId> = chans(3);
     let pop = BTreeMap::from([(ch[0], 500), (ch[1], 500), (ch[2], 500)]);
     let groups = ChannelGroups::new(vec![ch.clone()], pop).unwrap();
     let closed = ClosedMonth::from_counts(
@@ -524,7 +528,7 @@ fn group_with_one_folded_channel_absorbs_another() {
         m(2026, 9),
         [(
             (
-                ChannelId::derive(&candor_log::ids::AuditIdKey::new([1; 32]), &[9]),
+                ChannelId::generate().unwrap(),
                 IntakeCounter::Submissions,
             ),
             50,
@@ -537,9 +541,7 @@ fn group_with_one_folded_channel_absorbs_another() {
 fn folded_channel_not_recoverable_from_second_report() {
     // A later report showing the group's other channel individually must not
     // reveal the folded small channel by subtraction.
-    let ch: Vec<ChannelId> = (1..=2)
-        .map(|n| ChannelId::derive(&candor_log::ids::AuditIdKey::new([1; 32]), &[n]))
-        .collect();
+    let ch: Vec<ChannelId> = chans(2);
     let pop = BTreeMap::from([(ch[0], 500), (ch[1], 10)]);
     let groups = ChannelGroups::new(vec![ch.clone()], pop).unwrap();
     let closed = ClosedMonth::from_counts(
