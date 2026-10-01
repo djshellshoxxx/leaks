@@ -25,22 +25,17 @@ const LIMITS: ArchiveLimits = ArchiveLimits {
     max_path_components: 32,
 };
 
-/// Private per-process base directory: `<tmp>/candor-safefs-fuzz-<pid>`,
-/// mode 0700. It must contain nothing but the per-input root afterwards.
+/// Private per-process base path: `<tmp>/candor-safefs-fuzz-<pid>`. It is
+/// created (mode 0700, failing if it already exists) for every input, must
+/// contain nothing but the per-input root afterwards, and is removed again,
+/// so no residue is left between inputs or after a clean run.
 fn base() -> &'static Path {
     static BASE: OnceLock<PathBuf> = OnceLock::new();
     BASE.get_or_init(|| {
         let tmp = std::env::temp_dir()
             .canonicalize()
             .expect("temp dir resolves");
-        let p = tmp.join(format!("candor-safefs-fuzz-{}", std::process::id()));
-        // create (not create_all): fail if it already exists (no reuse of a
-        // directory another user may have prepared).
-        fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&p)
-            .expect("create private fuzz base dir");
-        p
+        tmp.join(format!("candor-safefs-fuzz-{}", std::process::id()))
     })
 }
 
@@ -90,7 +85,10 @@ fn check_report(root: &SafeRoot, r: &ExtractionReport) {
     let l = LIMITS;
     let n = (r.members.len() as u64).saturating_add(r.rejected.len() as u64);
     assert!(n <= l.max_entries, "entry limit exceeded");
-    assert!(r.total_bytes <= l.max_total_uncompressed, "total limit exceeded");
+    assert!(
+        r.total_bytes <= l.max_total_uncompressed,
+        "total limit exceeded"
+    );
     let mut sum: u64 = 0;
     for m in &r.members {
         assert!(m.size <= l.max_entry_size, "entry size limit exceeded");
@@ -113,6 +111,11 @@ pub fn extract_and_check(
     f: impl FnOnce(&SafeRoot, &ExtractOptions) -> Result<ExtractionReport, ArchiveError>,
 ) {
     let base = base();
+    // create (not create_all): never reuse a directory someone else prepared.
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(base)
+        .expect("create private fuzz base dir");
     let root_path = base.join("root");
     fs::DirBuilder::new()
         .mode(0o700)
@@ -132,8 +135,12 @@ pub fn extract_and_check(
             .expect("read base")
             .map(|e| e.expect("base entry").file_name())
             .collect();
-        assert_eq!(names, [std::ffi::OsString::from("root")], "write escaped root");
+        assert_eq!(
+            names,
+            [std::ffi::OsString::from("root")],
+            "write escaped root"
+        );
         check_tree(&root_path, uid, 0);
     }
-    fs::remove_dir_all(&root_path).expect("remove per-input root");
+    fs::remove_dir_all(base).expect("remove per-input base");
 }

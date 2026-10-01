@@ -11,5 +11,7 @@ use candor_safefs::archive;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    common::extract_and_check(|root, opts| archive::extract_zip(std::io::Cursor::new(data), root, opts));
+    common::extract_and_check(|root, opts| {
+        archive::extract_zip(std::io::Cursor::new(data), root, opts)
+    });
 });
