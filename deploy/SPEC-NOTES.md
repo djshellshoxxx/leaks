@@ -378,3 +378,12 @@ Any violation exits 30. The per-draft quota must be set explicitly so the half-b
 - The new rule's results were first piped into `report_lines`, a subshell, so FAILs were printed but not counted. It now uses a here-string.
 
 validate.sh adds 21 cases: 18 must exit 30 and name their rule, and 3 must be accepted. They cover the base tree, ce-single and ce-hardened. `CANDOR_TEST_PG=1 validate.sh`: 402 PASS, 0 FAIL; 882 static checks OK.
+
+### ADR-056 sessions, kernel floor, DEP-31, DEP-32
+
+| Item | Fix | Tests |
+|---|---|---|
+| ADR-056 | The sealer unit sets `CANDOR_SEALER_MAX_SESSIONS=512` and `CANDOR_SEALER_UPLOAD_SLOTS=512`. config-check requires MAX_SESSIONS 16..65536, UPLOAD_SLOTS ≥ MAX_SESSIONS, and a guaranteed slice (budget / 2) / UPLOAD_SLOTS ≥ 1 MiB. | missing, 15, 65537, slots < sessions, slice < 1 MiB; accepted at exactly 1 MiB |
+| Kernel floor | H-INTAKE needs Linux ≥ 6.3 for `memfd_noexec`, `MFD_NOEXEC_SEAL` and `F_SEAL_EXEC`. This is recorded in 17 (Distribution row, Platform Manifest) and in README step 1. `host.kernel_floor`: `uname -r` on a live host; with `--root`, `$ROOT/proc/sys/kernel/osrelease` read with the safe reader (SKIP if absent). Anything below 6.3 or unparseable exits 30. | synthetic host: 6.1, 6.2.16, unparseable |
+| DEP-31 | config-check runs `set -o pipefail`; it runs no helper scripts, only the compiled reader. Before any check, a self-test of sort, uniq, comm, cut, tr, sed, awk, grep and wc exits 2 on failure. Every comparison substitution checks its status (`tool_err` reports FAIL "comparison failed"). This covers the manifest, tor keys and duplicates, pg duplicates and allow-list, pg_hba databases, unit security items, the syscall set and never-list, sysctl keys, host and live drop-ins, and resolv. Every "FAIL if it matches" test goes through `nomatch` (only exit 1 means no match): tor control interface, nft include/define, pg include, and the four pg_hba awk tests. `\| grep -q` on a pipeline is replaced by here-strings, so an early-exiting grep cannot make a SIGPIPE in the writer read as "no match" under pipefail. `grep -v '^$'` stages whose status is now checked became `sed '/^$/d'`. | `comm` and `uniq` shims: one always exits 2 (exit 2 from the self-test); one fails after the self-test (exit 30, "comparison failed"), on a tree with `cluster_name = 'x'` |
+| DEP-32 | No persistent `{WORKFD}`. Each reader call opens `3<"$WORK"` for that child only. The path is safe to reopen because of DEP-30's ancestor rule. | a `tr` shim logs its inherited fds; no work-directory descriptor appears |

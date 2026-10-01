@@ -535,6 +535,35 @@ if [ -x "$TOOLS/candor-safe-read" ] && have timeout && have mkfifo; then
   timeout -k 1 10 "$TOOLS/candor-safe-read" "$D/real/f" out 4096 "0,$me" 002 > "$D/stdout" 2>&1 3<&-; rc=$?
   if [ "$rc" -eq 15 ] && [ ! -e "$D/o/out" ]; then pass "candor-safe-read output: no fd 3, nothing written (status 15)"; else bad "candor-safe-read output: without fd 3: status $rc"; fi
   rm -f "$D/o/out" "$D/o/ff" "$D/o/sl" "$D/o/sd" "$D/o/exists"
+  # AUD-RM2-DEP-31: a failing comm/uniq must never read as "no difference". Shims ahead of
+  # PATH: "always" exits 2 (caught by the start-up self-test: exit 2), "late" works for the
+  # self-test and fails afterwards (caught by the per-site status checks: exit 30). The
+  # tree carries a pg key that only the comm allow-list comparison reports.
+  SH="$T/shim"; mkdir -p "$SH"; RD="$T/dep31"; cp -a "$INTAKE" "$RD"
+  printf "cluster_name = 'x'\n" >> "$RD/postgresql/candor-intake.conf"
+  for tool in comm uniq; do
+    real=$(command -v "$tool")
+    for kind in always late; do
+      rm -f "$SH"/*; printf '0\n' > "$T/shim.cnt"
+      # shellcheck disable=SC2016 # shim script text
+      if [ "$kind" = always ]; then printf '#!/bin/sh\nexit 2\n' > "$SH/$tool"
+      else printf '#!/bin/sh\nn=$(cat "%s"); n=$((n + 1)); echo "$n" > "%s"\n[ "$n" -le 1 ] && exec %s "$@"\nexit 2\n' "$T/shim.cnt" "$T/shim.cnt" "$real" > "$SH/$tool"; fi
+      chmod 0755 "$SH/$tool"
+      PATH="$SH:$PATH" "$TOOLS/config-check.sh" "${CC_WB[@]}" -q --dir "$RD" > "$T/dep31.out" 2>&1; rc=$?
+      if [ "$kind" = always ] && { [ "$rc" -eq 2 ] || [ "$rc" -eq 30 ]; }; then pass "DEP-31: $tool always exiting 2: config-check exit $rc (never 0)"
+      elif [ "$kind" = late ] && [ "$rc" -eq 30 ] && grep -q 'comparison failed' "$T/dep31.out"; then pass "DEP-31: $tool failing after the self-test: exit 30, comparison reported as failed"
+      else bad "DEP-31: $tool shim ($kind): exit $rc"; fi
+    done
+  done
+  # DEP-32: only the reader gets a descriptor of the work directory. A tr shim records the
+  # descriptors every tr child inherits.
+  rm -f "$SH"/*; real=$(command -v tr)
+  printf '#!/bin/sh\nls -l /proc/$$/fd/ >> "%s" 2>/dev/null\nexec %s "$@"\n' "$T/fds.log" "$real" > "$SH/tr"; chmod 0755 "$SH/tr"; : > "$T/fds.log"
+  PATH="$SH:$PATH" "$TOOLS/config-check.sh" "${CC_WB[@]}" -q --dir "$INTAKE" > "$T/dep32.out" 2>&1; rc=$?
+  if [ "$rc" -eq 0 ] && [ -s "$T/fds.log" ] && ! grep -qE -- '-> (/run/candor-validate-wb|/tmp/tmp\.|/run/candor-config-check)[^ ]*/run\.[A-Za-z0-9]+$' "$T/fds.log"; then
+    pass "DEP-32: no non-reader child inherits the work-directory descriptor"
+  else bad "DEP-32: work-directory descriptor leaked to a child, or run failed (exit $rc)"; fi
+  rm -rf "$SH" "$RD"
   # DEP-30: --work-base ancestors must be root-owned, not group/world-writable, not sticky.
   if is_root; then
     wbcase() { # name base

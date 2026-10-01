@@ -76,10 +76,25 @@
 # Exit codes (18 §14): 0 = all OK; 30 = baseline failure (any FAIL, including a policy digest
 # mismatch); 2 = usage / missing input / no check selected.
 
-set -u
+# AUD-RM2-DEP-31: a failing stage fails the pipeline; every comparison substitution checks
+# its status (tool_err), every "FAIL if it matches" test uses nomatch, and the text tools pass
+# a self-test before any check runs. Matches are tested on here-strings, not "| grep -q",
+# so an early-exiting grep cannot turn a SIGPIPE in the writer into "no match".
+set -u -o pipefail
 LC_ALL=C
 export LC_ALL
 umask 077
+tool_selftest() {
+  local r
+  r=$(printf 'b\na\na\n' | sort | uniq -d) && [ "$r" = a ] || return 1
+  r=$(printf 'a\nb\n' | comm -23 - <(printf 'b\n')) && [ "$r" = a ] || return 1
+  r=$(printf 'x\ty\n' | cut -f1 | tr x z | sed 's/z/w/' | awk '{print $1}') && [ "$r" = w ] || return 1
+  r=$(printf 'b\na\nb\n' | sort -u | wc -l | tr -d ' ') && [ "$r" = 2 ] || return 1
+  grep -qx q <<< q || return 1
+  grep -qx r <<< q; [ $? -eq 1 ] || return 1
+  r=$(printf 'q\n\nq\n' | grep -c .) && [ "$r" = 2 ] || return 1
+}
+tool_selftest || { echo "config-check: core text tools (sort, uniq, comm, cut, tr, sed, awk, grep, wc) fail their self-test (AUD-RM2-DEP-31)" >&2; exit 2; }
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd -P)
 BASE="$SCRIPT_DIR/config-check.baseline"
@@ -157,8 +172,10 @@ if is_root; then
 else [ -z "$WBASE_OPT" ] || { echo "config-check: --work-base needs root" >&2; exit 2; }; WBASE=/tmp; fi
 WORK=$(mktemp -d "$WBASE/run.XXXXXXXX") || exit 2
 chmod 0700 "$WORK" || exit 2
-# The reader creates its outputs beneath this descriptor only (fd 3 of each run; DEP-30).
-exec {WORKFD}<"$WORK" || exit 2
+# The reader creates its outputs beneath fd 3 = $WORK, opened for that one child only
+# (AUD-RM2-DEP-32: no other child inherits a descriptor of the work directory). The path is
+# safe to reopen: $WORK and every ancestor are root-only (DEP-30) or, unprivileged, the
+# caller's own 0700 directory under a sticky /tmp.
 trap 'rm -rf -- "$WORK"' EXIT
 trap 'exit 2' INT TERM HUP
 
@@ -216,6 +233,10 @@ report() { # rule class status detail
 }
 ok()   { report "$1" baseline OK "${2:-}"; }
 fail() { report "$1" baseline FAIL "${2:-}"; }
+tool_err() { fail "$1" "comparison failed: a text tool exited non-zero (fail closed, AUD-RM2-DEP-31)"; }
+# nomatch CMD...: 0 only on a definite "no match" (exit 1); a match (0) or a tool error (>= 2)
+# returns 1, so "if ! nomatch ...; then fail" fails closed.
+nomatch() { "$@"; [ $? -eq 1 ]; }
 skip() { report "$1" baseline SKIP "${2:-}"; }
 # Feed "STATUS<TAB>rule<TAB>detail" lines (from awk/jq helpers) into report().
 report_lines() { local st r d; while IFS="$(printf '\t')" read -r st r d; do case "$st" in OK) ok "$r" "$d" ;; SKIP) skip "$r" "$d" ;; *) fail "$r" "$d" ;; esac; done; }
@@ -250,7 +271,7 @@ safe_copy() { # abs-path out-under-$WORK [extra-owner-uid] -> candor-safe-read s
   [ "$SAFE_OK" -eq 1 ] || return 15
   case "$2" in "$WORK"/?*) ;; *) return 15 ;; esac
   rm -f -- "$2"   # the reader creates OUT with O_EXCL
-  timeout -k 2 20 "$SAFE_READ" "$1" "${2#"$WORK"/}" "$MAXIN" "$OWNERS${3:+,$3}" "$DENYMODE" </dev/null >/dev/null 2>&1 3<&"$WORKFD"
+  timeout -k 2 20 "$SAFE_READ" "$1" "${2#"$WORK"/}" "$MAXIN" "$OWNERS${3:+,$3}" "$DENYMODE" </dev/null >/dev/null 2>&1 3<"$WORK"
 }
 snap() { # rule path name [extra-owner-uid] -> SNAP=copy; FAIL + return 1 when refused
   local r=$1 p=$2 l rc
@@ -302,8 +323,8 @@ verify_policy() {
   got=$(sha256sum < "$MANIFEST" | cut -c1-64)
   if [ "$got" != "$MANIFEST_SHA256" ]; then fail tool.baseline_integrity "config-check.manifest digest differs from the release pin"; return 1; fi
   dd if="$BASE" of="$WORK/baseline" iflag=nofollow bs=65536 count=64 status=none 2>/dev/null || { fail tool.baseline_integrity "baseline unreadable"; return 1; }
-  want=$(awk '$2=="config-check.baseline" && $1 ~ /^[0-9a-f]{64}$/ {print $1}' "$MANIFEST")
-  extra=$(awk '$2!="config-check.baseline" && $2!="candor-safe-read" && NF' "$MANIFEST" | wc -l)
+  want=$(awk '$2=="config-check.baseline" && $1 ~ /^[0-9a-f]{64}$/ {print $1}' "$MANIFEST") || want=""
+  extra=$(awk '$2!="config-check.baseline" && $2!="candor-safe-read" && NF' "$MANIFEST" | wc -l) || extra=1
   got=$(sha256sum < "$WORK/baseline" | cut -c1-64)
   if [ -z "$want" ] || [ "$extra" -ne 0 ] || [ "$got" != "$want" ]; then fail tool.baseline_integrity "config-check.baseline digest differs from the manifest"; return 1; fi
   # The input reader (AUD-RM2-DEP-24) is policy too: pinned by the manifest, run from a copy.
@@ -367,11 +388,14 @@ check_torrc() {
   local unknown dup
   # Counts only, never the tokens (AUD-RM2-DEP-24): a first token of an arbitrary file could
   # carry secret material.
-  unknown=$(awk 'NR==FNR { if ($1=="tor-raw") ok[tolower($2)]=1; next } !(tolower($1) in ok) { print tolower($1) }' FS='|' "$BASE" FS=' ' "$WORK/torrc.clean" | sort -u | wc -l)
-  if [ "$unknown" -gt 0 ]; then fail tor.raw.allowed_keys "$unknown option name(s) not in the template (abbreviations are rejected too; names not shown)"; else ok tor.raw.allowed_keys; fi
-  dup=$(awk '{ print tolower($1) }' "$WORK/torrc.clean" | sort | uniq -d | wc -l); [ "$dup" -gt 0 ] || dup=""
-  [ -z "$dup" ] || dup="$dup option name(s) (names not shown)"
-  if [ -n "$dup" ]; then fail tor.raw.no_duplicates "repeated option(s): $dup"; else ok tor.raw.no_duplicates; fi
+  unknown=$(awk 'NR==FNR { if ($1=="tor-raw") ok[tolower($2)]=1; next } !(tolower($1) in ok) { print tolower($1) }' FS='|' "$BASE" FS=' ' "$WORK/torrc.clean" | sort -u | wc -l) || { tool_err tor.raw.allowed_keys; unknown=-1; }
+  if [ "$unknown" -lt 0 ]; then :
+  elif [ "$unknown" -gt 0 ]; then fail tor.raw.allowed_keys "$unknown option name(s) not in the template (abbreviations are rejected too; names not shown)"; else ok tor.raw.allowed_keys; fi
+  dup=$(awk '{ print tolower($1) }' "$WORK/torrc.clean" | sort | uniq -d | wc -l) || { tool_err tor.raw.no_duplicates; dup=-1; }
+  [ "$dup" -ne 0 ] || dup=""
+  [ -z "$dup" ] || [ "$dup" -lt 0 ] || dup="$dup option name(s) (names not shown)"
+  if [ "$dup" = -1 ]; then :
+  elif [ -n "$dup" ]; then fail tor.raw.no_duplicates "repeated option(s): $dup"; else ok tor.raw.no_duplicates; fi
   # Never hand an %include line to tor (it could make tor read an arbitrary file).
   if grep -qiE '^%' "$WORK/torrc.clean"; then fail tor.effective "not canonicalised: % directive present"; return; fi
 
@@ -408,7 +432,7 @@ check_torrc() {
       else if (got[k]!=want[k]) printf "FAIL\ttor.full.%s\texpected [%s], effective value differs\n", k, want[k]
       else printf "OK\ttor.full.%s\t%s\n", k, got[k] } }' "$BASE" FS=' ' "$WORK/tor/full.out" > "$WORK/rl"; report_lines < "$WORK/rl"
   # No control interface of any kind (AUD-RM2-DEP-04; NET-009).
-  if grep -qE '^(ControlSocket|ControlPort|__ControlPort|__OwningControllerProcess|HashedControlPassword) [^0]' "$WORK/tor/full.out"; then
+  if ! nomatch grep -qE '^(ControlSocket|ControlPort|__ControlPort|__OwningControllerProcess|HashedControlPassword) [^0]' "$WORK/tor/full.out"; then
     fail tor.no_control_interface "a control listener or password is configured"
   else ok tor.no_control_interface; fi
 }
@@ -529,8 +553,9 @@ check_nft() {
   # also make the root-run checker read an arbitrary file).
   local body
   body=$(grep -vE '^[[:space:]]*(#|$)' "$NFT")
-  if printf '%s\n' "$body" | head -n 1 | trim | grep -qx 'flush ruleset'; then ok nft.flush_ruleset; else fail nft.flush_ruleset "first statement must be 'flush ruleset'"; fi
-  if printf '%s\n' "$body" | grep -qE '(^|[^[:alnum:]_])(include|define|undefine|redefine)([^[:alnum:]_]|$)|\$'; then
+  local first; first=$(head -n 1 <<< "$body" | trim) || first=""
+  if [ "$first" = 'flush ruleset' ]; then ok nft.flush_ruleset; else fail nft.flush_ruleset "first statement must be 'flush ruleset'"; fi
+  if ! nomatch grep -qE '(^|[^[:alnum:]_])(include|define|undefine|redefine)([^[:alnum:]_]|$)|\$' <<< "$body"; then
     fail nft.no_include_define "include/define/\$variable present (ruleset must be self-contained)"; return
   fi
   ok nft.no_include_define
@@ -581,29 +606,35 @@ pg_bool() { case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in on|true|y
 check_pg() {
   snap pg.file "$PGCONF" pg.conf || return
   local conf=$SNAP norm dup unknown
-  norm=$(pg_norm "$conf")
-  if printf '%s\n' "$norm" | cut -f1 | grep -qE '^(include|include_dir|include_if_exists)$'; then
+  norm=$(pg_norm "$conf") || { tool_err pg.conf_parse; return; }
+  local keys
+  keys=$(cut -f1 <<< "$norm") || { tool_err pg.conf_parse; return; }
+  if ! nomatch grep -qE '^(include|include_dir|include_if_exists)$' <<< "$keys"; then
     fail pg.no_include "include directive present (effective config must be this file)"
   else ok pg.no_include; fi
-  dup=$(printf '%s\n' "$norm" | cut -f1 | sort | uniq -d | san_names)
-  if [ -n "$dup" ]; then fail pg.no_duplicates "duplicate keys: $dup"; else ok pg.no_duplicates; fi
+  if ! dup=$(sort <<< "$keys" | uniq -d | san_names); then tool_err pg.no_duplicates
+  elif [ -n "$dup" ]; then fail pg.no_duplicates "duplicate keys: $dup"; else ok pg.no_duplicates; fi
   # Allow-list (AUD-RM2-DEP-19): every key in the file must be a pg| key of the baseline.
-  unknown=$(printf '%s\n' "$norm" | cut -f1 | grep -v '^$' | sort -u | comm -23 - <(base pg | cut -d'|' -f2 | sort -u) | san_names)
-  if [ -n "$unknown" ]; then fail pg.allowed_keys "key(s) not in the baseline: $unknown"; else ok pg.allowed_keys "every key is on the allow-list"; fi
+  local pgallow
+  if ! pgallow=$(base pg | cut -d'|' -f2 | sort -u) || [ -z "$pgallow" ]; then tool_err pg.allowed_keys
+  elif ! unknown=$(sed '/^$/d' <<< "$keys" | sort -u | comm -23 - <(printf '%s\n' "$pgallow") | san_names); then tool_err pg.allowed_keys
+  elif [ -n "$unknown" ]; then fail pg.allowed_keys "key(s) not in the baseline: $unknown"; else ok pg.allowed_keys "every key is on the allow-list"; fi
 
   # Values (pg|key|kind|value; kind b = boolean, s = case-insensitive string). Found values
   # are never echoed (AUD-RM2-DEP-17).
   local key kind want got
   while IFS='|' read -r _ key kind want; do
-    if ! printf '%s\n' "$norm" | cut -f1 | grep -qx -- "$key"; then fail "pg.$key" "not set explicitly (expected '$want')"; continue; fi
+    if ! grep -qx -- "$key" <<< "$keys"; then fail "pg.$key" "not set explicitly (expected '$want')"; continue; fi
     got=$(printf '%s\n' "$norm" | awk -F'\t' -v k="$key" '$1==k {print $2}')
     if [ "$kind" = b ]; then got=$(pg_bool "$got"); else got=$(printf '%s' "$got" | tr '[:upper:]' '[:lower:]'); fi
     if [ "$got" = "$want" ]; then ok "pg.$key" "'$want'"; else fail "pg.$key" "expected '$want', file value differs"; fi
   done < <(base pg)
 
   got=$(printf '%s\n' "$norm" | awk -F'\t' '$1=="log_line_prefix" {print $2}')
-  if ! printf '%s\n' "$norm" | cut -f1 | grep -qx log_line_prefix; then fail pg.log_line_prefix "not set (PG default contains %m and %p)"
-  elif printf '%s' "$got" | sed 's/%%//g; s/%e//g' | grep -q '%'; then fail pg.log_line_prefix "only %e allowed"
+  local llp
+  llp=$(sed 's/%%//g; s/%e//g' <<< "$got") || llp=%
+  if ! grep -qx log_line_prefix <<< "$keys"; then fail pg.log_line_prefix "not set (PG default contains %m and %p)"
+  elif [[ "$llp" == *%* ]]; then fail pg.log_line_prefix "only %e allowed"
   else ok pg.log_line_prefix "only %e"; fi
   got=$(printf '%s\n' "$norm" | awk -F'\t' '$1=="unix_socket_permissions" {print $2}')
   case "$got" in 0770|0750|0700|770|750|700) ok pg.unix_socket_permissions "$got" ;;
@@ -614,20 +645,26 @@ check_pg() {
   if snap pg.hba_conf "$PGHBA" pg_hba.conf; then
     local hba last
     hba=$(sed -e 's/#.*$//' "$SNAP" | trim | tr -s ' \t' '  ' | grep -v '^$')
-    if printf '%s\n' "$hba" | awk '$1 != "local" {bad=1} END {exit bad?0:1}'; then fail pg.hba_local_only "non-local (TCP) line present"; else ok pg.hba_local_only; fi
-    if printf '%s\n' "$hba" | awk '$1=="include" || $1=="include_dir" || $1=="include_if_exists" || $0 ~ /@/ {bad=1} END {exit bad?0:1}'; then fail pg.hba_no_include "include or @file reference present"; else ok pg.hba_no_include; fi
-    if printf '%s\n' "$hba" | awk '{m=$4} m!="peer" && m!="reject" {bad=1} END {exit bad?0:1}'; then fail pg.hba_methods "only peer/reject allowed"; else ok pg.hba_methods; fi
-    if printf '%s\n' "$hba" | awk '$3 ~ /(^|,)\+?(postgres|all)(,|$)/ && $4!="reject" {bad=1} END {exit bad?0:1}'; then fail pg.hba_no_superuser "a postgres/all line other than reject is present (09 s10, D-11)"; else ok pg.hba_no_superuser; fi
+    # shellcheck disable=SC2016 # awk program
+    if ! nomatch awk '$1 != "local" {bad=1} END {exit bad?0:1}' <<< "$hba"; then fail pg.hba_local_only "non-local (TCP) line present"; else ok pg.hba_local_only; fi
+    # shellcheck disable=SC2016 # awk program
+    if ! nomatch awk '$1=="include" || $1=="include_dir" || $1=="include_if_exists" || $0 ~ /@/ {bad=1} END {exit bad?0:1}' <<< "$hba"; then fail pg.hba_no_include "include or @file reference present"; else ok pg.hba_no_include; fi
+    # shellcheck disable=SC2016 # awk program
+    if ! nomatch awk '{m=$4} m!="peer" && m!="reject" {bad=1} END {exit bad?0:1}' <<< "$hba"; then fail pg.hba_methods "only peer/reject allowed"; else ok pg.hba_methods; fi
+    # shellcheck disable=SC2016 # awk program
+    if ! nomatch awk '$3 ~ /(^|,)\+?(postgres|all)(,|$)/ && $4!="reject" {bad=1} END {exit bad?0:1}' <<< "$hba"; then fail pg.hba_no_superuser "a postgres/all line other than reject is present (09 s10, D-11)"; else ok pg.hba_no_superuser; fi
     last=$(printf '%s\n' "$hba" | tail -n 1)
     if [ "$last" = "local all all reject" ]; then ok pg.hba_reject_last; else fail pg.hba_reject_last "last line must be 'local all all reject'"; fi
     # ADR-054 / AUD-RM2-DEP-25: every peer line names the same single database, exactly. The
     # release tree carries the installer placeholder; an installed host must have a real name
     # (and the --pg-db name, when given).
     local hdb
-    hdb=$(printf '%s\n' "$hba" | awk '$4 != "reject" {print $2}' | sort -u)
-    if [ "$(printf '%s\n' "$hdb" | grep -c .)" -ne 1 ]; then fail pg.hba_database "peer lines must name one and the same database"; hdb=""
+    local nhdb
+    hdb=$(awk '$4 != "reject" {print $2}' <<< "$hba" | sort -u) || hdb=""
+    nhdb=$(grep -c . <<< "$hdb") || nhdb=0
+    if [ "$nhdb" -ne 1 ]; then fail pg.hba_database "peer lines must name one and the same database"; hdb=""
     elif [ "$MODE" = static ] && [ "$hdb" = candor_intake_TENANT ]; then ok pg.hba_database "installer placeholder candor_intake_TENANT"
-    elif ! printf '%s' "$hdb" | grep -qxE 'candor_intake_[a-z0-9_]{1,49}'; then fail pg.hba_database "database field must be one exact candor_intake_<tenant> name (no regex, list, all or placeholder)"; hdb=""
+    elif ! grep -qxE 'candor_intake_[a-z0-9_]{1,49}' <<< "$hdb"; then fail pg.hba_database "database field must be one exact candor_intake_<tenant> name (no regex, list, all or placeholder)"; hdb=""
     elif [ -n "$PGDB" ] && [ "$hdb" != "$PGDB" ]; then fail pg.hba_database "pg_hba names another database than --pg-db"; hdb=""
     else ok pg.hba_database "exactly one intake database"; fi
     pg_exact pg.hba_exact hba "$hba" "${hdb:-<invalid>}"
@@ -878,11 +915,12 @@ check_units() {
     if systemd-analyze security "${sopt[@]}" --threshold="$thr" --json=short --no-pager "$name" > "$WORK/sec.json" 2>/dev/null; then
       ok "unit.$name.security_threshold" "exposure within $((thr / 10)).$((thr % 10))"
     else fail "unit.$name.security_threshold" "exposure over budget $((thr / 10)).$((thr % 10)) (or assessment failed)"; fi
-    jq -r '.[] | select(.exposure != null and (.exposure|tostring|tonumber) > 0) | .name' "$WORK/sec.json" 2>/dev/null | sort > "$WORK/sec.bad"
-    awk -F'|' -v u="$name" '$1=="sec" && $2==u {print substr($0, length($1 $2)+3)}' "$BASE" | sort > "$WORK/sec.ok"
-    local extra
-    extra=$(comm -23 "$WORK/sec.bad" "$WORK/sec.ok" | tr '\n' ' ')
+    local extra secrc=0
+    jq -r '.[] | select(.exposure != null and (.exposure|tostring|tonumber) > 0) | .name' "$WORK/sec.json" 2>/dev/null | sort > "$WORK/sec.bad" || secrc=1
+    awk -F'|' -v u="$name" '$1=="sec" && $2==u {print substr($0, length($1 $2)+3)}' "$BASE" | sort > "$WORK/sec.ok" || secrc=1
+    extra=$(comm -23 "$WORK/sec.bad" "$WORK/sec.ok" | tr '\n' ' ') || secrc=1
     if [ ! -s "$WORK/sec.json" ]; then fail "unit.$name.security_items" "no assessment"
+    elif [ "$secrc" -ne 0 ]; then tool_err "unit.$name.security_items"
     elif [ -n "$extra" ]; then fail "unit.$name.security_items" "new exposure item(s): $(printf '%s' "$extra" | san_names)"
     else ok "unit.$name.security_items" "only documented residual items"; fi
   done
@@ -993,14 +1031,14 @@ check_sealer_syscalls() { # effective-unit-file
     END { if (mode != "allow") print "!MODE"; if (unknown) print "!UNKNOWN"; for (x in set) print x }' "$WORK/scf.groups" - | sort > "$WORK/scf.eff"
   if grep -q '^!MODE$' "$WORK/scf.eff"; then fail unit.candor-sealer.syscall_set "SystemCallFilter is not in allow-list mode"; return; fi
   if grep -q '^!UNKNOWN$' "$WORK/scf.eff"; then fail unit.candor-sealer.syscall_set "unknown syscall group referenced"; return; fi
-  base scf | cut -d'|' -f2 | sort -u > "$WORK/scf.want"
   local extra missing never
-  extra=$(comm -13 "$WORK/scf.want" "$WORK/scf.eff" | san_names)
-  missing=$(comm -23 "$WORK/scf.want" "$WORK/scf.eff" | san_names)
-  if [ -z "$extra" ] && [ -z "$missing" ]; then ok unit.candor-sealer.syscall_set "$(wc -l < "$WORK/scf.eff") syscalls, equal to the release allow-set"
+  if ! base scf | cut -d'|' -f2 | sort -u > "$WORK/scf.want" || [ ! -s "$WORK/scf.want" ] ||
+     ! extra=$(comm -13 "$WORK/scf.want" "$WORK/scf.eff" | san_names) ||
+     ! missing=$(comm -23 "$WORK/scf.want" "$WORK/scf.eff" | san_names); then tool_err unit.candor-sealer.syscall_set
+  elif [ -z "$extra" ] && [ -z "$missing" ]; then ok unit.candor-sealer.syscall_set "$(wc -l < "$WORK/scf.eff") syscalls, equal to the release allow-set"
   else fail unit.candor-sealer.syscall_set "effective allow-set differs from the release set; extra: [${extra}] missing: [${missing}]"; fi
-  never=$(base scf-never | cut -d'|' -f2 | sort -u | comm -12 - "$WORK/scf.eff" | san_names)
-  if [ -n "$never" ]; then fail unit.candor-sealer.syscall_never "explicitly denied syscall(s) allowed: $never"
+  if ! never=$(base scf-never | cut -d'|' -f2 | sort -u | comm -12 - "$WORK/scf.eff" | san_names); then tool_err unit.candor-sealer.syscall_never
+  elif [ -n "$never" ]; then fail unit.candor-sealer.syscall_never "explicitly denied syscall(s) allowed: $never"
   else ok unit.candor-sealer.syscall_never "$(base scf-never | wc -l) explicitly denied syscalls (io_uring, userfaultfd, ptrace, ...) stay denied"; fi
 }
 
@@ -1021,8 +1059,8 @@ check_host_units() {
     if [ "$frag" != "$ROOT/usr/lib/systemd/system/$u" ] || [ ! -f "$frag" ] || l=$(symlinked_component "$INPREFIX" "$frag"); then
       fail "host.unit.$u.fragment" "must load from /usr/lib/systemd/system/$u (missing, masked or overridden)"; continue
     fi
-    got=$(awk -F'\t' -v u="$u" '$1==u && $2=="D" {print $3}' "$WORK/hunitpaths" | sed "s|^$ROOT||" | sort | tr '\n' ' ')
-    want=$(awk -F'|' -v u="$u" '$1=="hdropin" && $2==u {print $3}' "$BASE" | sort | tr '\n' ' ')
+    if ! got=$(awk -F'\t' -v u="$u" '$1==u && $2=="D" {print $3}' "$WORK/hunitpaths" | sed "s|^$ROOT||" | sort | tr '\n' ' ') ||
+       ! want=$(awk -F'|' -v u="$u" '$1=="hdropin" && $2==u {print $3}' "$BASE" | sort | tr '\n' ' '); then tool_err "host.unit.$u.dropins"; continue; fi
     if [ "$got" != "$want" ]; then fail "host.unit.$u.dropins" "drop-ins differ from the release set (expected: ${want:-none})"; continue; fi
     ok "host.unit.$u.dropins" "${want:-none}"
     files=("$frag")
@@ -1061,9 +1099,9 @@ check_units_live() {
     u=${spec%%:*}; kind=${spec##*:}
     if ! systemctl show --no-pager "$u" > "$WORK/show" 2>/dev/null || [ ! -s "$WORK/show" ]; then fail "unit.$u.live" "systemctl show failed"; continue; fi
     # Drop-ins actually loaded must be the ones systemd-analyze verify found.
-    got=$(sed -n 's/^DropInPaths=//p' "$WORK/show" | tr ' ' '\n' | grep -v '^$' | sort | tr '\n' ' ')
-    want=$(awk -F'\t' -v u="$u" '$1==u && $2=="D" {print $3}' "$WORK/unitpaths" | sort | tr '\n' ' ')
-    if [ "$got" = "$want" ]; then ok "unit.$u.live.dropins"; else fail "unit.$u.live.dropins" "loaded drop-ins differ from the files (transient, control or generated drop-in?)"; fi
+    if ! got=$(sed -n 's/^DropInPaths=//p' "$WORK/show" | tr ' ' '\n' | sed '/^$/d' | sort | tr '\n' ' ') ||
+       ! want=$(awk -F'\t' -v u="$u" '$1==u && $2=="D" {print $3}' "$WORK/unitpaths" | sort | tr '\n' ' '); then tool_err "unit.$u.live.dropins"
+    elif [ "$got" = "$want" ]; then ok "unit.$u.live.dropins"; else fail "unit.$u.live.dropins" "loaded drop-ins differ from the files (transient, control or generated drop-in?)"; fi
     while IFS='|' read -r _ kinds p want; do
       case ",$kinds," in *",all,"*|*",$kind,"*) ;; *) continue ;; esac
       got=$(sed -n "s/^$p=//p" "$WORK/show" | head -n 1)
@@ -1129,8 +1167,9 @@ check_kernel() {
     local extra
     extra=$(awk -F'|' 'NR==FNR { if ($1=="sysctl") ok[$2]=1; next }
       /^[ \t]*[#;]/ || /^[ \t]*$/ { next }
-      { l=$0; sub(/^[ \t]*-?/, "", l); e=index(l, "="); k=substr(l, 1, e-1); gsub(/[ \t]+$/, "", k); if (!(k in ok)) print k }' "$BASE" "$SYSCTL" | san_names)
-    if [ -n "$extra" ]; then fail kernel.sysctl.allowed_keys "keys not in the baseline: $extra"; else ok kernel.sysctl.allowed_keys; fi
+      { l=$0; sub(/^[ \t]*-?/, "", l); e=index(l, "="); k=substr(l, 1, e-1); gsub(/[ \t]+$/, "", k); if (!(k in ok)) print k }' "$BASE" "$SYSCTL" | san_names) || extra=ERR
+    if [ "$extra" = ERR ]; then tool_err kernel.sysctl.allowed_keys
+    elif [ -n "$extra" ]; then fail kernel.sysctl.allowed_keys "keys not in the baseline: $extra"; else ok kernel.sysctl.allowed_keys; fi
   fi
   # Offline precedence = systemd-sysctl's (AUD-RM2-DEP-18): sysctl.d only, in systemd's order;
   # /etc/sysctl.conf counts only through Debian's 99-sysctl.conf link inside sysctl.d.
@@ -1187,7 +1226,7 @@ check_kernel() {
 check_resolv() {
   snap dns.resolv "$RESOLV" resolv.conf || return
   local ns
-  ns=$(sed -e 's/#.*$//' "$SNAP" | awk '$1=="nameserver" {print $2}' | sort -u | tr '\n' ' ')
+  ns=$(sed -e 's/#.*$//' "$SNAP" | awk '$1=="nameserver" {print $2}' | sort -u | tr '\n' ' ') || ns=ERR
   if [ "$ns" = "127.0.0.1 " ] || [ "$ns" = "::1 " ]; then ok dns.no_resolver "nameserver $ns(nothing listens)"; else fail dns.no_resolver "only a loopback nameserver allowed"; fi
 }
 
@@ -1216,7 +1255,8 @@ check_host() {
   if [ "$LIVE" -eq 1 ]; then
     if ! have tor; then fail host.tor_installed "tor binary not found"
     else
-      if tor --list-modules 2>/dev/null | grep -qx 'pow: yes'; then ok host.tor_pow_module "pow: yes"; else fail host.tor_pow_module "tor built without PoW (R7 SI-D-01)"; fi
+      v=$(tor --list-modules 2>/dev/null) || v=""
+      if grep -qx 'pow: yes' <<< "$v"; then ok host.tor_pow_module "pow: yes"; else fail host.tor_pow_module "tor built without PoW (R7 SI-D-01)"; fi
       v=$(tor --version 2>/dev/null | head -n 1 | sed -n 's/^Tor version \([0-9][0-9.]*\).*/\1/p')
       if [ -n "$v" ] && [ "$(printf '%s\n0.4.8\n' "$v" | sort -V | head -n 1)" = 0.4.8 ]; then ok host.tor_version_floor ">= 0.4.8"; else fail host.tor_version_floor "tor >= 0.4.8 required (NET-003)"; fi
     fi
@@ -1352,7 +1392,7 @@ aa_dist_conffiles() {
   done < "$WORK/aa.conff"
   [ "${#paths[@]}" -gt 0 ] || { fail apparmor.dist_conffiles "none of the apparmor conffiles is present"; return; }
   rm -f -- "$WORK/aa.md5"
-  if [ "$SAFE_OK" -eq 1 ]; then timeout -k 2 60 "$SAFE_READ" --md5 aa.md5 "$MAXIN" "$OWNERS" "$DENYMODE" "${paths[@]}" </dev/null >/dev/null 2>&1 3<&"$WORKFD"; fi
+  if [ "$SAFE_OK" -eq 1 ]; then timeout -k 2 60 "$SAFE_READ" --md5 aa.md5 "$MAXIN" "$OWNERS" "$DENYMODE" "${paths[@]}" </dev/null >/dev/null 2>&1 3<"$WORK"; fi
   mapfile -t got < <(cat -- "$WORK/aa.md5" 2>/dev/null)
   for i in "${!paths[@]}"; do
     n=$((n + 1))

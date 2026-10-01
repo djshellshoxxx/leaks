@@ -730,3 +730,30 @@ The session cap itself is the remaining problem. 07 §11 sets "Sealer sessions 6
 | Info | SEA-33 (spec), SEA-17 (workspace), C-5 hash echo (wave 2), deploy config-check rule (assigned) |
 
 **Gate: PASS 2026-10-01 bed0377**: there are no open Critical, High or Medium findings, and the Lows are tracked. SEA-30 and the residuals listed under round 5 remain accepted as recorded.
+
+---
+
+## Re-test (round 7, delta: ADR-056 / SEA-32, SEA-33)
+
+| Item | Value |
+|---|---|
+| Re-tested revision | HEAD `3f41a3a`; the working tree is clean for the sealer |
+| Results | `cargo test -p candor-sealer --locked`: 84 pass, 0 fail (scratch target directory, removed afterwards) |
+
+| Claim | Verdict |
+|---|---|
+| `CANDOR_SEALER_MAX_SESSIONS` is parsed strictly and required in production | **Verified.** `parse_count` accepts digits only, at most 5 characters, 1..=65,536. With no dev override, a missing variable gives `StartError::Config`; with the override it is optional but still validated. Unit-tested with the same negative corpus as the slot variable |
+| Defaults 512/512 | **Verified** (`Limits::default`) |
+| Start-up refused when slots < sessions, or when the slice is < 1 MiB | **Verified.** `upload_slots < max_sessions` → `Config` (`budget.rs::startup_refused_when_slots_below_sessions`); the slice check is unchanged. Defaults give 1,920 MiB / 512 = 3.75 MiB slices |
+| An idle session costs 6,616 B | **Verified as a shallow `size_of` figure** (`session_baseline_is_small` passes). Heap use of logged-in sessions is not included: source keys, prefs, and `seen_replies` up to 4,096 × 40 B. The worst case at 512 sessions is about 80 MiB, still inside the 2,560 MiB base. Info only |
+| Argon2 is bounded by 4 permits + a 32-deep queue | **Verified.** `ArgonGate` is unchanged and independent of `max_sessions` |
+
+**Argon2 queue at 512 sessions.** Raising the session cap adds no new signal. Argon2id concurrency is still 4 permits, 32 queued, 30 s wait, and the 34 §3.1 burst of 3,000 logins a day (about 0.035/s) keeps the queue empty at peak, so `BUSY` needs attack-level load (PERF-019 holds). Two signals remain, both covered elsewhere:
+- **Queue-wait timing.** When ≥ 4 derivations run at once, a login waits measurably longer. The C-06 uniform 0–2 s delay and LT-7 cover this (34 F20).
+- **New-account sealing shares the gate.** `SEAL_FINISH` for a new account can get `BUSY` under a login flood. It fails closed and the passphrase is kept.
+
+Both are Info and already accounted for; there is no sealer finding.
+
+SEA-32: **Fixed.** SEA-33: **Fixed** (ADR-056).
+
+**Gate: PASS 2026-10-01 3f41a3a.**
