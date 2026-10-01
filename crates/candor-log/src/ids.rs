@@ -7,6 +7,22 @@
 //! IP addresses, ports, user agents, filenames, sizes or exact source-action
 //! times (20 §6.1 P-01..P-17); see [`crate::sensitive`] for wrappers that
 //! cannot reach any sink.
+//!
+//! **No constructor takes caller bytes** (AUD-RM1-LOG-03, AUD-RM1-LOG-17):
+//! * identifiers are minted from the OS CSPRNG ([`CaseRef::generate`] etc.)
+//!   and persisted by their owner as a MAC-sealed [`IdToken`]
+//!   (`id ‖ HMAC(K_audit_id, "candor/v1/audit/id-token/<Type>\0" ‖ id)[..16]`);
+//!   [`CaseRef::unseal`] accepts only tokens minted by this code under the
+//!   deployment key, so arbitrary bytes (an address) cannot be loaded as an
+//!   identifier and there is no keyed pseudonym of caller data;
+//! * value hashes (`query_hash`, `policy_hash`, …) are **randomized hiding
+//!   commitments** ([`Hash32::commit`]): the logged value is independent of
+//!   the input for anyone without the opening, which stays with the producing
+//!   component, so it cannot carry (or be tested against) a network
+//!   identifier;
+//! * session tags derive only from a random [`StaffSessionId`];
+//! * checkpoint-derived values are obtainable only from the writing
+//!   [`crate::AuditLog`] for its own checkpoints and are bound to its key.
 
 use core::fmt;
 
@@ -57,9 +73,8 @@ macro_rules! opaque_id {
 
         impl $name {
             /// Wrap raw identifier bytes. Crate-internal only (stored records,
-            /// samples): callers derive identifiers with a keyed hash
-            /// ([`AuditIdKey`]) so no raw caller data can be laundered into an
-            /// identifier field (AUD-RM1-LOG-03).
+            /// samples): no raw caller data can be laundered into an
+            /// identifier field (AUD-RM1-LOG-03, AUD-RM1-LOG-17).
             #[allow(dead_code)]
             pub(crate) const fn from_bytes(b: [u8; $len]) -> Self {
                 Self(b)
@@ -133,20 +148,84 @@ pub(crate) fn keyed32(key: &[u8; 32], label: &[u8], data: &[u8]) -> [u8; 32] {
     }
 }
 
-macro_rules! derived_id {
+/// The OS random number generator failed (fail closed: nothing is
+/// generated or emitted).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct RandomError;
+
+pub(crate) fn random_bytes<const N: usize>() -> Result<[u8; N], RandomError> {
+    let mut b = [0u8; N];
+    getrandom::fill(&mut b).map_err(|_| RandomError)?;
+    Ok(b)
+}
+
+/// Persisted form of an identifier: `id ‖ tag` with
+/// `tag = HMAC-SHA-256(K_audit_id, "candor/v1/audit/id-token/<Type>" ‖ 0 ‖ id)[..16]`.
+/// Owners store tokens (e.g. next to their own row) and load them back with
+/// `unseal`; a token for another type or key, or arbitrary bytes, is
+/// refused (AUD-RM1-LOG-17).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct IdToken([u8; 32]);
+
+impl IdToken {
+    /// Wrap stored token bytes (unverified until `unseal`).
+    pub const fn from_bytes(b: [u8; 32]) -> Self {
+        Self(b)
+    }
+    /// Token bytes for storage.
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for IdToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("IdToken(..)")
+    }
+}
+
+fn id_tag(key: &AuditIdKey, label: &[u8], id: &[u8; 16]) -> [u8; 16] {
+    let d = keyed32(&key.0, label, id);
+    let mut out = [0u8; 16];
+    for (o, i) in out.iter_mut().zip(d.iter()) {
+        *o = *i;
+    }
+    out
+}
+
+macro_rules! random_id {
     ($($name:ident),+ $(,)?) => { $(
         impl $name {
-            /// Derive this identifier from the owning service's raw ID with
-            /// the keyed pseudonymisation key:
-            /// `HMAC-SHA-256(key, "candor/v1/audit/id/<Type>" ‖ 0 ‖ raw)[..16]`.
-            /// The audit log never stores the raw ID.
-            pub fn derive(key: &AuditIdKey, raw: &[u8]) -> Self {
-                let d = keyed32(&key.0, concat!("candor/v1/audit/id/", stringify!($name)).as_bytes(), raw);
-                let mut out = [0u8; 16];
-                for (o, i) in out.iter_mut().zip(d.iter()) {
+            /// Mint a fresh identifier from the OS CSPRNG (the only way to
+            /// create one; AUD-RM1-LOG-17).
+            pub fn generate() -> Result<Self, RandomError> {
+                random_bytes::<16>().map(Self)
+            }
+            /// Persisted, MAC-sealed form (see [`IdToken`]).
+            pub fn seal(&self, key: &AuditIdKey) -> IdToken {
+                let tag = id_tag(
+                    key,
+                    concat!("candor/v1/audit/id-token/", stringify!($name)).as_bytes(),
+                    &self.0,
+                );
+                let mut t = [0u8; 32];
+                for (o, i) in t.iter_mut().zip(self.0.iter().chain(tag.iter())) {
                     *o = *i;
                 }
-                Self(out)
+                IdToken(t)
+            }
+            /// Load a token minted by [`Self::seal`] under `key`; `None` for
+            /// any other bytes (constant-time tag check).
+            pub fn unseal(key: &AuditIdKey, token: &IdToken) -> Option<Self> {
+                use subtle::ConstantTimeEq;
+                let (id, tag) = token.0.split_at(16);
+                let id: [u8; 16] = id.try_into().ok()?;
+                let want = id_tag(
+                    key,
+                    concat!("candor/v1/audit/id-token/", stringify!($name)).as_bytes(),
+                    &id,
+                );
+                bool::from(want.ct_eq(tag)).then_some(Self(id))
             }
         }
     )+ };
@@ -210,7 +289,7 @@ opaque_id!(
     /// Salted, truncated (64-bit) staff session hash (20 §4, LOG-012).
     SessionTag, 8);
 
-derived_id!(
+random_id!(
     CaseRef,
     EvidRef,
     UserRef,
@@ -266,36 +345,77 @@ impl HashPurpose {
     }
 }
 
-impl Hash32 {
-    /// Keyed, purpose-separated value hash
-    /// `HMAC-SHA-256(key, label(purpose) ‖ 0 ‖ data)` (AUD-RM1-LOG-03): an
-    /// unkeyed digest of a search term, filename or config value could be
-    /// confirmed by dictionary; a keyed one cannot without the key.
-    pub fn derive(key: &AuditIdKey, purpose: HashPurpose, data: &[u8]) -> Self {
-        Self(keyed32(&key.0, purpose.label(), data))
-    }
+/// Domain label of a value commitment.
+const VALUE_COMMIT_DOMAIN: &[u8] = b"candor/v1/audit/value-commit\0";
 
-    /// The Merkle root of a checkpoint whose signature verifies under `key`
-    /// (for `audit.checkpoint_signed`); `None` if the signature is invalid,
-    /// so arbitrary bytes cannot be laundered through a parsed checkpoint.
-    pub fn checkpoint_root(
-        cp: &crate::chain::SignedCheckpoint,
-        key: &ed25519_dalek::VerifyingKey,
-    ) -> Option<Self> {
-        cp.verify_signature(key)
-            .then(|| Self(cp.body().merkle_root))
+/// Opening (randomness) of a value commitment. Kept by the producing
+/// component, never logged; with it and the value an auditor can check the
+/// logged commitment ([`Opening::verifies`]). Zeroized, not printed.
+pub struct Opening(Zeroizing<[u8; 32]>);
+
+impl Opening {
+    /// Stored opening bytes (only useful for [`Opening::verifies`]).
+    pub fn from_bytes(b: [u8; 32]) -> Self {
+        Self(Zeroizing::new(b))
+    }
+    /// Opening bytes for the producer's own storage.
+    pub fn to_bytes(&self) -> [u8; 32] {
+        *self.0
+    }
+    /// Whether `commitment` commits to `value` under `purpose` with this
+    /// opening (constant-time comparison).
+    pub fn verifies(&self, purpose: HashPurpose, value: &[u8], commitment: &Hash32) -> bool {
+        use subtle::ConstantTimeEq;
+        bool::from(commit_with(&self.0, purpose, value).ct_eq(&commitment.0))
+    }
+    /// As [`Opening::verifies`] for an 8-byte prefix commitment.
+    pub fn verifies_prefix(&self, purpose: HashPurpose, value: &[u8], c: &HashPrefix8) -> bool {
+        use subtle::ConstantTimeEq;
+        let full = commit_with(&self.0, purpose, value);
+        full.get(..8).is_some_and(|p| bool::from(p.ct_eq(&c.0)))
+    }
+}
+
+impl fmt::Debug for Opening {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Opening(<redacted>)")
+    }
+}
+
+fn commit_with(r: &[u8; 32], purpose: HashPurpose, value: &[u8]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(VALUE_COMMIT_DOMAIN);
+    h.update(purpose.label());
+    h.update([0]);
+    h.update(r);
+    h.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_be_bytes());
+    h.update(value);
+    h.finalize().into()
+}
+
+impl Hash32 {
+    /// Randomized, purpose-separated **hiding commitment** to a value
+    /// (AUD-RM1-LOG-17): `SHA-256("candor/v1/audit/value-commit\0" ‖
+    /// label(purpose) ‖ 0 ‖ r ‖ len ‖ value)` with a fresh 256-bit `r` from
+    /// the OS CSPRNG, returned as the [`Opening`]. The logged value is
+    /// independent of `value` for anyone without the opening, so neither a
+    /// log reader nor the writer's own key can test it against candidate
+    /// addresses, names or terms; the caller cannot choose `r`.
+    pub fn commit(purpose: HashPurpose, value: &[u8]) -> Result<(Self, Opening), RandomError> {
+        let r = Zeroizing::new(random_bytes::<32>()?);
+        Ok((Self(commit_with(&r, purpose, value)), Opening(r)))
     }
 }
 
 impl HashPrefix8 {
-    /// First 8 bytes of [`Hash32::derive`].
-    pub fn derive(key: &AuditIdKey, purpose: HashPurpose, data: &[u8]) -> Self {
-        let d = keyed32(&key.0, purpose.label(), data);
+    /// First 8 bytes of a [`Hash32::commit`] commitment.
+    pub fn commit(purpose: HashPurpose, value: &[u8]) -> Result<(Self, Opening), RandomError> {
+        let (h, o) = Hash32::commit(purpose, value)?;
         let mut out = [0u8; 8];
-        for (o, i) in out.iter_mut().zip(d.iter()) {
-            *o = *i;
+        for (d, s) in out.iter_mut().zip(h.0.iter()) {
+            *d = *s;
         }
-        Self(out)
+        Ok((Self(out), o))
     }
 }
 
@@ -308,16 +428,59 @@ impl DaySalt {
     pub fn new(salt: [u8; 32]) -> Self {
         Self(Zeroizing::new(salt))
     }
+    /// Fresh random salt.
+    pub fn generate() -> Result<Self, RandomError> {
+        Ok(Self(Zeroizing::new(random_bytes::<32>()?)))
+    }
+}
+
+/// A staff session secret (the auth service's session identifier). Minted
+/// only from the CSPRNG and persisted only as a sealed token, so a session
+/// tag cannot be a pseudonym of caller data (AUD-RM1-LOG-17). Secret:
+/// zeroized, never printed, not `Clone`.
+pub struct StaffSessionId(Zeroizing<[u8; 32]>);
+
+const SESSION_TOKEN_LABEL: &[u8] = b"candor/v1/audit/session-token";
+
+impl StaffSessionId {
+    /// Fresh session secret.
+    pub fn generate() -> Result<Self, RandomError> {
+        Ok(Self(Zeroizing::new(random_bytes::<32>()?)))
+    }
+    /// Sealed form for the auth service's session store:
+    /// `id ‖ HMAC(key, label ‖ 0 ‖ id)` (64 bytes).
+    pub fn seal(&self, key: &AuditIdKey) -> Zeroizing<[u8; 64]> {
+        let tag = keyed32(&key.0, SESSION_TOKEN_LABEL, self.0.as_slice());
+        let mut t = Zeroizing::new([0u8; 64]);
+        for (o, i) in t.iter_mut().zip(self.0.iter().chain(tag.iter())) {
+            *o = *i;
+        }
+        t
+    }
+    /// Load a sealed session id; `None` unless minted by [`Self::seal`]
+    /// under `key` (constant-time check).
+    pub fn unseal(key: &AuditIdKey, token: &[u8; 64]) -> Option<Self> {
+        use subtle::ConstantTimeEq;
+        let (id, tag) = token.split_at(32);
+        let want = keyed32(&key.0, SESSION_TOKEN_LABEL, id);
+        let id: [u8; 32] = id.try_into().ok()?;
+        bool::from(want.ct_eq(tag)).then(|| Self(Zeroizing::new(id)))
+    }
+}
+
+impl fmt::Debug for StaffSessionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("StaffSessionId(<redacted>)")
+    }
 }
 
 impl SessionTag {
-    /// `SHA-256("candor/v1/audit/session" ‖ day_salt ‖ session_id)[..8]`.
-    /// The session ID is a staff session secret; it is consumed only here.
-    pub fn derive(salt: &DaySalt, session_id: &[u8]) -> Self {
+    /// `SHA-256("candor/v1/audit/session\0" ‖ day_salt ‖ session_id)[..8]`.
+    pub fn derive(salt: &DaySalt, session: &StaffSessionId) -> Self {
         let mut h = Sha256::new();
-        h.update(b"candor/v1/audit/session");
+        h.update(b"candor/v1/audit/session\0");
         h.update(salt.0.as_slice());
-        h.update(session_id);
+        h.update(session.0.as_slice());
         let d: [u8; 32] = h.finalize().into();
         let mut out = [0u8; 8];
         for (o, i) in out.iter_mut().zip(d.iter()) {
@@ -522,9 +685,49 @@ mod tests {
 
     #[test]
     fn session_tag_rotates_with_salt() {
-        let a = SessionTag::derive(&DaySalt::new([1; 32]), b"session");
-        let b = SessionTag::derive(&DaySalt::new([2; 32]), b"session");
+        let s = StaffSessionId::generate().unwrap();
+        let a = SessionTag::derive(&DaySalt::new([1; 32]), &s);
+        let b = SessionTag::derive(&DaySalt::new([2; 32]), &s);
         assert_ne!(a, b);
+        let k = AuditIdKey::new([4; 32]);
+        let t = s.seal(&k);
+        let back = StaffSessionId::unseal(&k, &t).unwrap();
+        assert_eq!(SessionTag::derive(&DaySalt::new([1; 32]), &back), a);
+        let mut bad = *t;
+        bad[0] ^= 1;
+        assert!(StaffSessionId::unseal(&k, &bad).is_none());
+        assert!(StaffSessionId::unseal(&AuditIdKey::new([5; 32]), &t).is_none());
+    }
+
+    // AUD-RM1-LOG-17: identifiers load only from tokens minted under the
+    // key and for the same type; arbitrary bytes (an address) are refused.
+    #[test]
+    fn id_tokens_bind_key_and_type() {
+        let k = AuditIdKey::new([4; 32]);
+        let c = CaseRef::generate().unwrap();
+        let t = c.seal(&k);
+        assert_eq!(CaseRef::unseal(&k, &t), Some(c));
+        assert_eq!(UserRef::unseal(&k, &t), None);
+        assert_eq!(CaseRef::unseal(&AuditIdKey::new([5; 32]), &t), None);
+        let mut ip = [0u8; 32];
+        ip[..4].copy_from_slice(&[203, 0, 113, 7]);
+        assert_eq!(CaseRef::unseal(&k, &IdToken::from_bytes(ip)), None);
+        assert_ne!(CaseRef::generate().unwrap(), CaseRef::generate().unwrap());
+    }
+
+    // AUD-RM1-LOG-17: value commitments are hiding (same input, different
+    // commitments), purpose-separated and checkable with the opening.
+    #[test]
+    fn value_commitments_hide_and_open() {
+        let (a, oa) = Hash32::commit(HashPurpose::Query, b"203.0.113.7").unwrap();
+        let (b, _) = Hash32::commit(HashPurpose::Query, b"203.0.113.7").unwrap();
+        assert_ne!(a, b);
+        assert!(oa.verifies(HashPurpose::Query, b"203.0.113.7", &a));
+        assert!(!oa.verifies(HashPurpose::Policy, b"203.0.113.7", &a));
+        assert!(!oa.verifies(HashPurpose::Query, b"203.0.113.8", &a));
+        let (p, op) = HashPrefix8::commit(HashPurpose::Manifest, b"m").unwrap();
+        assert!(op.verifies_prefix(HashPurpose::Manifest, b"m", &p));
+        assert!(!format!("{oa:?}").contains(&hex(&oa.to_bytes())));
     }
 
     #[test]
