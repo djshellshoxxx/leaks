@@ -1147,9 +1147,10 @@ fn oversized_chrome_fails_closed() {
 // so with the fixed body every response of a class has the same wire size.
 #[test]
 fn response_head_length_is_constant() {
+    let attrs = "; Path=/; Secure; HttpOnly; SameSite=Strict";
     let max_cookie = format!(
-        "__Host-cs={}; Path=/; Secure; HttpOnly; SameSite=Strict",
-        "A".repeat(MAX_SET_COOKIE_BYTES - 51)
+        "__Host-cs={}{attrs}",
+        "A".repeat(MAX_SET_COOKIE_BYTES - "__Host-cs=".len() - attrs.len())
     );
     assert_eq!(max_cookie.len(), MAX_SET_COOKIE_BYTES);
     let cookies = [

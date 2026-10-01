@@ -343,3 +343,143 @@ new connect after limit restored: Err(ConnectionRefused)
 - Peer-UID coverage: there is no test that runs as a second OS user (ST-097 `peer_uid`). `ipc.rs` covers the logic by configuring a different allowed uid, which is acceptable.
 
 Gate: FAIL 2026-10-01 d21981fea263b5a5926922b3f13147d6b0c00932
+
+---
+
+## Re-test (round 2)
+
+| Item | Value |
+|---|---|
+| Re-tested revision | `candor-sealer` at `cbf7c0f` (HEAD). Builder notes: `crates/candor-sealer/SPEC-NOTES.md` "Fixes for AUD-RM2-SEA"; decisions in ADR-052 |
+| Build setup | `candor-core` was mid-fix in the live tree, so I tested a scratch copy of the workspace outside the repo, as the builder did: `git archive HEAD`, with `candor-core`/`candor-safefs` replaced by commit `b38ae65` and the live `Cargo.lock` |
+| Date | 2026-10-01 |
+| Procedure | AUDIT-CHECKLIST §G: fix diff read (3,516+/653− lines in the crate); regression tests run; round-1 PoCs re-run; variant hunt; delta review of the new code (`directory.rs` verifier and Merkle code, `listener.rs`, `hardening.rs`, `sink.rs`, the `seal.rs` group builder, `select.rs`, the fuzz target) |
+
+### Tool and test results (round 2)
+
+| Check | Result |
+|---|---|
+| `cargo test -p candor-sealer` (scratch) | 63/63 pass: 23 unit; chaff 7, fail_closed 13, flow 1, hardening 2, hygiene 3, ipc 2, listener 3, listener_emfile 1, proto_props 6, shape 1 |
+| Round-1 PoCs re-run against the new API | **PoC A (shape):** every real and chaff group is `[main 65,536 | bundle | IDENTITY 16,384]`, and real bundles without attachments are 262,144, inside the chaff support. Store op order is `AG` for initial (real and chaff) and `G` for follow-ups, and every account has `prefs_ct` length 2,095 with one mailbox. **PoC B (COI duplicate):** the excluded person can no longer open the SUBMISSION. **PoC C (EMFILE):** covered by `tests/listener_emfile.rs` (my PoC), which passes |
+| New PoCs (scratch only, deleted after the run) | `rt2_view_not_bound_to_checkpoint` (SEA-19), `rt2_self_check_passes_for_unconfined_thread` (SEA-20), NFC-expansion seal (SEA-22). All three confirm |
+| clippy deny set, lib | clean (`--no-deps`; `candor-log` HEAD fails its own lint, as the builder noted) |
+| clippy deny set, `--all-targets` | **fails** on test fixtures (`tests/common/mod.rs:353-366` `Path::join`, `std::fs::create_dir`/`set_permissions`) under HEAD's workspace `clippy.toml` `disallowed-methods` → SEA-24 |
+| clippy audit extras | 13 `as_conversions` (same benign class as round 1); no new arithmetic, indexing or print warnings |
+| `fuzz_sealer_ipc` | builds with nightly-2026-09-28; my 60 s run: 3.9 M execs, no crash, **cov 154** → SEA-23 |
+| grep sweeps (print/log/fs/env/fixed key) | no hits in `src`; no `from_bytes([0u8…` outside tests |
+
+### Per-finding status
+
+| ID | Sev | Status | Evidence / note |
+|---|---|---|---|
+| SEA-01 | High | **Fixed** | ADR-052(1). Text objects always use the maximum bucket; every group is main + bundle + IDENTITY; chaff groups are built identically. `tests/shape.rs` plus the PoC A re-run. Residuals: bundles above the chaff support (documented, ADR-052(1)); NFC variant → SEA-22 |
+| SEA-02 | High | **Fixed (sealer side)** | ADR-052(2). `commit_envelope_group` has no account field; chaff initials write a dummy account of identical shape; chaff draws delays at `delayed_share_permille` × U{1,2,3}. Tests: `shape.rs`, `chaff_delay_follows_real_distribution`. The store side must match (no account reference on envelope rows). Residual linkage → SEA-21 |
+| SEA-03 | High | **Fixed** | Exclusion and the 16-person limit are per `user_id` (`select.rs`); `check_invariants` counts persons. The PoC B re-run passes; regression tests `coi_applies_per_person_not_per_roster_entry` and `coi_excluded_person_listed_under_two_labels_gets_no_slot`. Variant (key rotation / new MEK): exclusion is keyed by `user_id` and MEKs are selected per `user_id`, so a new MEK for an excluded person stays excluded. Residual: one human holding two `user_id`s is outside the sealer's view (C-14 `person_ref` rule) |
+| SEA-04 | High | **Fixed** | Connection cap of 128 with a non-blocking `ERR{BUSY}`; 256 B pre-HELLO frames; handshake/frame/idle/write timeouts of 5 s/5 s/120 s/5 s; `accept` errors counted with 10 ms→1 s back-off, and the loop never returns. Worst-case buffered memory is 128 × 128 KiB. Tests `listener.rs` and `listener_emfile.rs` pass |
+| SEA-05 | Med | **Fixed** | `rekey_after_commit` removes the session on CSPRNG failure, and no fixed key remains in `src`. Test `rng_failure_after_commit_never_installs_a_fixed_key` |
+| SEA-06 | Med | **Partially fixed** | `serve` now refuses unless `self_check` passes, or a dev token is present; uid 0 and the sealer's own uid are refused. Bypass → SEA-20. The unit allow-list is now explicit (outside this crate, not re-reviewed beyond `config-check.sh` being green per the builder) |
+| SEA-07 | Med | **Partially fixed → superseded by SEA-19** | Checkpoint signature, cosignature policy, RFC 9162 consistency, equal-size ⇒ equal-root, HWM persist-before-swap (persist failure → no change) and view invariants are all correct; I read the Merkle code and the note body matches 04 §14.3. The view content is still unbound, which is SEA-19 |
+| SEA-08 | Med | **Fixed** | `Value` wipes integers on drop; ticks, eligible and triage lists are `Zeroizing`; `Selection` has no `Debug`. Minor residual: `select.rs` `excluded.reserve(..)` can reallocate the zeroizing vec when policy labels exceed the pre-size (flags + 16), leaving one unzeroized copy (Info, mlocked memory) |
+| SEA-09 | Med | **Fixed** (target exists, runs clean) | Shallow coverage → SEA-23 |
+| SEA-10 | Low | **Fixed** | Categories are stored in `prefs_ct` (report key 1002) and re-applied to follow-ups and rotations; `follow_up_reapplies_tightened_coi_policy` |
+| SEA-11 | Low | **Fixed** | Constant-time `PartialEq` on secret wrappers; `Debug` redacted across proto and sink types (verified in the PoC output: `Response::Sealed(<redacted>)`) |
+| SEA-12 | Low | **Fixed** | `NOTE_REAL` is off unless `enable_note_real` is set; `note_real_disabled_by_default` |
+| SEA-13 | Low | **Fixed** | `stage_create`/`stage_commit` remove by known id on commit failure; the reaper unlinks outside the lock via `spawn_blocking` |
+| SEA-14 | Low | **Fixed** | Unopenable replies are skipped; covered in `flow.rs` |
+| SEA-15 | Info | **Fixed** | `chaff_event` is gated like real sealing; disabling chaff needs the dev token (`chaff_gated_like_real_sealing`) |
+| SEA-16 | Info | **Open** (deploy-owned) | Unchanged by design |
+| SEA-17 | Info | **Open** (workspace) | No new third-party dependency (`candor-log` is a workspace crate); the vet and deny gates are workspace items under ADR-052(7)/(8) |
+| SEA-18 | Info | **Fixed / residual documented** | uid 0 and own uid refused in `serve`; tmpfs ctime listed as a residual |
+
+### New findings (round 2)
+
+### AUD-RM2-SEA-19 — `VerifiedSnapshot` does not bind the view's content to the verified checkpoint
+- Severity: High
+- Location: crates/candor-sealer/src/server/directory.rs `VerifiedSnapshot::verify` ("The view must be bound to the checkpoint it claims": compares only `tree_size`, `root_hash`, `issued_hour`); src/server/mod.rs `install_snapshot` (commit cbf7c0f)
+- Category: B4.4/B5 (+ CWE-345, CWE-347); IMPL-RM2 A4
+- Description:
+  - `verify` authenticates the checkpoint (LOG_KEY signature, cosignatures, consistency). However, `channels` (roster members, COI policies, MEK public keys), `user_keys`, `custodian_pk` and `disposition_pk` are not tied to the signed root. There are no inclusion proofs and no per-entry signatures.
+  - When the tree size equals the high-water mark, an empty proof with an equal root is accepted, so a genuine, already-installed checkpoint can be **replayed with any view**.
+  - PoC (`rt2_view_not_bound_to_checkpoint`): reuse the installed checkpoint, replace member 1's MEK with an attacker key → `install_snapshot` returns `Ok(())` → the next SUBMISSION opens with the attacker key.
+  - The type name, ADR-052(6) ("produced by checking signatures, witness cosignatures, continuity…") and the self-review ("unsigned … snapshot" fails closed) suggest an assurance the code does not give. Integrators may therefore omit the C-14 entry verification that SPEC-NOTES still assigns to them.
+- Exploit scenario: the snapshot feed reaches the sealer through the relay control cycle from Z-CORE (C-09). An adversary who controls that feed (compromised Z-CORE/relay, or ADV insider at the core) does not need the LOG_KEY or witnesses. They re-send the current signed checkpoint with a substituted MEK, an added Triage member, a loosened COI policy or a replaced custodian key. Every subsequent Tier W submission (plaintext and identity block) is then sealed to them. Directory transparency and witnesses exist to prevent exactly this. The impact is Critical-class; one level lower because the adversary must control the snapshot channel.
+- Fix recommendation:
+  - Bind every entry the sealer uses to the checkpoint root. The bundle carries the referenced KD entries (CHANNEL_ROSTER, COI_POLICY, MEMBER_EPOCH, USER_KEYS, CUSTODIAN, DISPOSITION_KEY) with RFC 9162 inclusion proofs against `cp.root_hash`, and their signatures are verified (§14.4 rules). The view is derived from those verified entries, never accepted as a free-standing struct.
+  - Until that exists, do not construct `VerifiedSnapshot` from an unverified view. Name the current type for what it checks, and make RM-2 integration conditional on the entry verifier.
+  - Also reject a same-size re-install whose view differs from the installed one.
+  - Regression: the PoC (tampered view with replayed checkpoint → `Err`).
+- Spec / requirement reference: 04 §12.1 steps 1–2, §14.3–§14.5 (VR-2..VR-5); ADR-036(5)/(6); ADR-052(6); ST-172.
+- Status: Open
+
+### AUD-RM2-SEA-20 — Hardening self-check trusts a process-global report; the serving threads may be unconfined
+- Severity: Medium
+- Location: crates/candor-sealer/src/server/hardening.rs `harden_process` (`REPORT.set`), `self_check` (commit cbf7c0f)
+- Category: B1.12, B3.4 (+ CWE-693)
+- Description: Landlock confines only the calling thread and threads it creates afterwards. `harden_process` records `landlock_enforced = true` in a process-global `OnceLock`, and `self_check` only reads that record plus dumpable state and `RLIMIT_CORE`. If the integrator calls `harden_process` anywhere other than the main thread before the runtime starts (inside `block_on`, from a helper thread, or after the runtime exists), the tokio workers that serve IPC run outside the Landlock domain while `serve` accepts. PoC (`rt2_self_check_passes_for_unconfined_thread`): `harden_process(Required)` on a helper thread → `self_check()` is `Ok` on the main thread, and that thread reads `/etc/hostname` and `/proc/self/status`. VmLck is not re-checked either.
+- Exploit scenario: an integration error silently removes filesystem confinement (and the ABI-4 TCP denial) from the plaintext-holding threads, against ADR-052(5)'s intent to refuse to run unhardened. It needs a misuse, but the check exists precisely to catch misuse.
+- Fix recommendation: make `self_check` probe the actual confinement from the serving context. Run it on every runtime worker, for example via `on_thread_start`, and from the serve task: attempt to open a path outside staging that must fail with `EACCES`, and attempt a TCP `socket`+`bind` that must fail. Re-check VmLck > 0. Alternatively, have `harden_process` refuse unless it runs on the process's main thread before any other thread exists (thread count from `/proc/self/status` `Threads: 1`).
+- Spec / requirement reference: ADR-052(5); 07 §4.4, BE-003; IMPL-RM2 A14.
+- Status: Open
+
+### AUD-RM2-SEA-21 — Dummy and real accounts separate over time; write adjacency links an account to its initial envelope
+- Severity: Low
+- Location: crates/candor-sealer/src/server/mod.rs `seal_blocking` (`upsert_account` then `commit_envelope_group`), `chaff_event` (same order), `rotate_blocking` (`replaces: Some(..)` only for real accounts); `ChaffConfig::delayed_share_permille` default 500 (commit cbf7c0f)
+- Category: B1.7 (+ CWE-203)
+- Description:
+  - Real and chaff initials both issue `A` immediately followed by `G` from one thread (PoC op trace `AGAG…G…`). A store that persists them as adjacent transactions links account ↔ initial envelope (insertion order or `xmin`) until the next `uniform_rewrite`. That holds for real and chaff alike.
+  - Later account-level behaviour exists only for real accounts: rotations (`replaces` = old tag), login activity that keeps the account out of `purge_inactive_accounts`, and replies addressed to its mailbox.
+  - So an adversary who seizes the store within the rewrite window, and later sees which accounts were rotated or survived, can mark the linked initial envelopes as real.
+  - Separately, the chaff delay share is a fixed default (500 ‰) that operators are told to set to "the observed opt-in share". Observing that share means counting a source choice, and a mismatch shifts the per-row likelihood.
+- Exploit scenario: ADV intake-host seizure with two snapshots in time, or a live store compromise. The result is a probabilistic real-or-chaff split for some initial envelopes; it needs store residue the store audit (STO-01) already tracks.
+- Fix recommendation:
+  - Have the store defer account inserts to the next fixed slot, or batch them with chaff dummies so no envelope adjacency exists. Alternatively, have the sealer queue account upserts and flush them at random times independent of envelope commits.
+  - Give dummy accounts synthetic lifecycle events: occasional rotations and activity marks at the same rates as real accounts.
+  - Set the delay share by policy (for example: always delay chaff by U{0..3} at the published real-choice prior) and document it in 39.
+- Spec / requirement reference: ADR-052(2), (14); ADR-047(3); 09 §5.1.
+- Status: Open
+
+### AUD-RM2-SEA-22 — Draft text that cannot be sealed is accepted, and the refusal comes only after Argon2id and the passphrase are consumed
+- Severity: Low
+- Location: crates/candor-sealer/src/proto/mod.rs `MAX_DRAFT_TEXT` (bytes before NFC); src/server/seal.rs `nfc()` + `inner::length_prefixed_pad` (64 KiB maximum); src/server/mod.rs `seal_finish` (`g.pending = None` after `derive`, before `seal_blocking`) (commit cbf7c0f)
+- Category: B2.10 (+ CWE-20)
+- Description: the 40 KiB cap is checked on raw bytes, but the SUBMISSION carries the NFC form, which can expand up to 3× (for example U+0958, 3 B → 6 B). PoC: 13,653 × U+0958 (40,959 B) is accepted by `DRAFT_SET` and confirmed, then `SEAL_FINISH` returns `LIMIT`. By then the Argon2id derivation has run and the confirmed passphrase has been dropped, so the source must regenerate and re-confirm a passphrase. It fails closed (nothing is committed), but it is a source-facing availability and usability trap and wastes an Argon2 permit.
+- Fix recommendation: enforce the cap on the NFC length at `DRAFT_SET` (or at least before `derive` in `SEAL_FINISH`), and keep the pending passphrase until the commit succeeds. Regression: the PoC input.
+- Spec / requirement reference: 04 §13.4 key 13 (NFC); ADR-052(13); AT-094.
+- Status: Open
+
+### AUD-RM2-SEA-23 — `fuzz_sealer_ipc` reaches little of the server and skips the sealing path
+- Severity: Low
+- Location: crates/candor-sealer/fuzz/fuzz_targets/fuzz_sealer_ipc.rs (commit cbf7c0f)
+- Category: B2.9
+- Description:
+  - The driver needs valid canonical CBOR frames but ships no seed corpus. A 60 s run reached `cov: 154`.
+  - `SEAL_FINISH`, `LOGIN_DERIVE` and `ROTATE_FINISH` are always skipped. Recipient selection, the group builder, chaff, `rotate_blocking` and the prefs and reply parsers behind `LOAD_PREFS`/`OPEN_REPLY` with real data are therefore never fuzzed.
+- Fix recommendation:
+  - Add a seed corpus generated from `encode_request` of valid sequences, or derive `Request` structurally with `arbitrary` and encode it.
+  - Add a `cfg(fuzzing)` hook for cheap Argon2 parameters so the derive-dependent ops run.
+  - Record the coverage reached in SPEC-NOTES.
+- Spec / requirement reference: IMPL-RM2 §2.3; ST-043.
+- Status: Open
+
+### AUD-RM2-SEA-24 — Observations
+- Severity: Info
+- Description:
+  - (a) `InsecureDevMode::acknowledge` emits `sys.health{service=Upload, DEGRADED, READINESS}`, which a monitor cannot tell apart from an ordinary readiness degradation. The token is also obtainable with an in-memory log sink, as the test helper does. Add a dedicated code (the builder already flagged this for the `candor-log` owner) and require the production signer/sink type.
+  - (b) Real groups always carry an IDENTITY with one K13 slot (follow-ups included now), while chaff IDENTITY slots are all dummies. The K13 holder can therefore classify every group as real or chaff by trial decryption. This is consistent with 04 §12.7 (chaff = all dummy slots) but extends what K13 learns to follow-ups. Add it to the §12.7 honest limits.
+  - (c) `cargo clippy --all-targets -D warnings` fails on test-fixture `std::fs`/`Path::join` under the workspace `disallowed-methods` (the `// safefs-lint` comments do not satisfy clippy); add `#[allow(clippy::disallowed_methods)]` in `tests/common`.
+  - (d) `excluded.reserve()` reallocation residue (see SEA-08 row).
+- Status: Open
+
+### Round-2 summary and gate
+
+| Severity | Open after round 2 |
+|---|---|
+| Critical | 0 |
+| High | 1 (SEA-19) |
+| Medium | 1 (SEA-20); SEA-06/SEA-07 partially fixed and tracked through SEA-20/SEA-19 |
+| Low | 3 (SEA-21, SEA-22, SEA-23) |
+| Info | 3 (SEA-16, SEA-17, SEA-24) |
+
+Fixed and re-tested: SEA-01, 02 (sealer side), 03, 04, 05, 08, 09, 10, 11, 12, 13, 14, 15, 18.
+
+**Gate: FAIL 2026-10-01 cbf7c0f** (core/safefs at b38ae65): SEA-19 (High) is open, and SEA-20 (Medium) needs a fix or the lead's written acceptance.

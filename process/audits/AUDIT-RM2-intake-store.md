@@ -400,3 +400,104 @@ Variant hunt (each pattern checked; "none" means no new issue):
 Fixed and verified: STO-02, 03, 04, 05, 06 (diff attack), 07, 08, 09, 10, 12, 13, 15, 16, and STO-01 for heap tuples.
 
 Gate: **FAIL** 2026-10-01 0f053c0. Open: 1 High (STO-18), 2 Medium (STO-19, STO-20). §F.4 is also not met because `cargo deny check bans` aborts and the ADR-052(7) skip is missing.
+
+---
+
+## Re-test (round 3)
+
+| Item | Value |
+|---|---|
+| Re-tested commit | `fc6406987dc9d8d827bb83b02e8ecb3e34418e26` (crate diff vs 0f053c0: 15 files, +1,842 / −301, plus `deny.toml`) |
+| New code reviewed | `recreate_toast` (shuffled `col \|\| ''` re-creation), `toast_tuple_target = 8160`, `STORAGE EXTERNAL`, `vacuum_after_rewrite`; `DeadDropConfig::dummy_bucket_weights`, `reply_ct_len`/`reply_bucket_of_len`, `DummyReplies::dummy_body(bucket)`; `deletion_list_append`, `deletion_chain_hash`, `deletion_head_in_chain` triggers/functions; `SignedDeletionHead` (`candor/v1/intake/deletion-head`, strict Ed25519 under `core_pk`); `MetaSnapshot.deletion_head`; `deny.toml` changes |
+
+### Evidence runs (round 3)
+
+| Run | Result |
+|---|---|
+| `pg-test.sh` with the full crate suite | 28 + 17 + 30 + 6 pass, including `pg_uniform_rewrite_toast`, `pg_dummy_rows_indistinguishable` and `pg_deletion_list_append_guard` |
+| **PG PoC with real store code** (scratch crate outside the repo: 4 × {create_account with 4,000 B prefs, commit_envelope, apply_replies}, then `uniform_rewrite` + `vacuum_after_rewrite`; superuser reads TOAST relations and scans every heap/TOAST page with `pageinspect.get_raw_page` for the 8-byte dead-tuple header signature `[old xmin][xmax = rewrite xid]`) | Before: 13 distinct heap xmins; TOAST xmins 746–756 with ascending chunk_ids. After rewrite + VACUUM: **every live heap and TOAST tuple has one xmin**, and `source_account` and `envelope` have no TOAST rows. **But all 143 pre-rewrite tuple images (old xmin) are still in page free space after the VACUUM** (envelope 2, source_account 4, envelope_part TOAST 118, reply TOAST 19). After the next two slot rewrites + VACUUMs, **3 original images were still present (TOAST)** → STO-23 |
+| MemoryStore PoC, dead-drop sizes (K = 8; slots with reals of bucket 9, then 2 + 16) | Each slot adds 8 entries with independently drawn buckets; dummies no longer copy real lengths, and all lengths are canonical. A real bucket-16 entry appears once among dummies drawn with weight 6/1,000 (statistical residual, STO-25) |
+| clippy deny set; shellcheck | clean |
+| `cargo deny --offline check` | **advisories ok, bans ok, licenses ok, sources ok** (with the `sha2@0.10.9` skip, expires 2026-12-30, and `include-dependencies = false` as the stack-overflow workaround) |
+| cargo-audit (db `9b3a3b73`) | exit 0 |
+
+### Per-finding status (all IDs)
+
+| ID | Sev | Status | Note |
+|---|---|---|---|
+| STO-01 | High | **Fixed** (heap), with residual | Live tuples share one xmin (round 2 + this PoC). Residual: rows written between slots have their own xmin until the next slot (SPEC-NOTES residual 3; ≤ one slot spacing), `ctid` order of `source_account` (one-statement rewrite), and dead images in free space → STO-23 |
+| STO-02 | High | Fixed | (round 2) |
+| STO-03 | Med | Fixed | Round-3 append trigger additionally blocks out-of-sequence inserts |
+| STO-04 | Med | Fixed | Pushes must end at a Z-CORE-signed head chaining to the last verified head |
+| STO-05 | Med | Fixed | (round 2) |
+| STO-06 | Med | **Fixed** (diff attack + sizes), with residual | Persistent generations (round 2) and independent dummy buckets (round 3). Residual statistical leak → STO-25 |
+| STO-07 | Med | Fixed | (round 2) |
+| STO-08 | Low | Fixed | Residual 4 (app can clear `restore_pending`) still needs lead acceptance |
+| STO-09, 10, 12, 13, 15, 16 | — | Fixed | (round 2) |
+| STO-11 | Low | **Residual; lead acceptance required** (non-blocking) | Daily `pg_stat_reset()`. Within-day counters, `pg_class.relpages/reltuples` (updated by VACUUM) and `last_vacuum` stay readable. VACUUM/autovacuum timing now follows the fixed slot schedule, not source actions, so the remaining leak is aggregate within-day volume |
+| STO-14 | Info | **Accepted residual** (to be recorded by the lead) | Early deletion of a real reply is visible at slot granularity (SA-19 requires removal) |
+| STO-17 | Info | **Fixed** (lead) | `bans` runs and passes. `include-dependencies = false` disables dependency file scanning until cargo-deny is fixed (dated in deny.toml); `allow-build-scripts` still gates build.rs |
+| STO-18 | High | **Fixed for live tuples**; remainder → STO-23 | Shuffled re-creation gives one xmin and new chunk_ids for all live out-of-line values (PoC + test with Kendall τ control); in-line accounts/envelopes have no TOAST |
+| STO-19 | Med | **Fixed** (residual → STO-25) | Bucket drawn independently per dummy from configured weights; canonical lengths |
+| STO-20 | Med | **Fixed** | One `reply_bucket_of_len` for every row; RL-05 rejects non-canonical lengths or mismatched buckets (`pg_dummy_rows_indistinguishable`) |
+| STO-21 | Low | **Fixed** | `deletion_list_append` permits only chain-extending inserts (my seq-1000 probe is now in the builder's test and refused). Ack requires an in-chain head hash; maintenance re-verifies the Z-CORE signature before flagging. Chained junk with a junk signature passes the DB but cannot be pruned |
+| STO-22 | Low | **Fixed**, with residual → STO-24(b) | `MetaSnapshot.deletion_head` is restored; pushes must chain to it and end at a signed head |
+
+Variant hunt (round 3):
+- **TOAST `chunk_seq`**: a per-value index (0..n), not an ordering → none.
+- **Visibility map / FSM**: bits and free-space classes only → none.
+- **VACUUM timing**: runs at the fixed slot → none.
+- **`pg_class`/`pg_stat` per-table counters**: aggregate → STO-11 residual.
+- **Dead tuple bytes after VACUUM** → **STO-23**.
+- **Owner credential used every slot** → STO-24(a).
+- **Older signed-head replay after an old-backup restore** → STO-24(b).
+- **Dummy-weight tampering or miscalibration** → STO-25.
+- **Sequences**: none (round 2).
+- **`directory_snapshot` TOAST**: included in the shuffle → none.
+
+### New findings (round 3)
+
+#### AUD-RM2-STO-23 — Plain VACUUM does not erase pre-rewrite tuple images; original xmin (and TOAST chunk_id) survive in page free space, some across later slots
+- Severity: **Medium**. Forensic (needs DB files); a bounded and shrinking fraction; the class is the spec's "row versions may persist until page reuse" residual (09 §10/§13). It is not accepted for the creation-order signal that STO-18 rated High, so lead acceptance or a fix is required.
+- Location: `crates/candor-intake-store/src/pg.rs` (`vacuum_after_rewrite`, `SQL_VACUUM`: plain VACUUM); claim in SPEC-NOTES / `pg_uniform_rewrite_toast` that raw pages after VACUUM hold "only slot-xmin tuples" (true for line-pointed tuples, false for page bytes)
+- Category: B1.2, B6.5 (+ CWE-212, CWE-226)
+- Description: VACUUM removes dead line pointers and compacts the page, but does not zero the vacated bytes between `pd_lower` and `pd_upper`. PoC with the real store code: right after `uniform_rewrite` + `vacuum_after_rewrite`, all 143 original tuple headers (original xmin followed by xmax = rewrite xid) were found in page free space across `source_account`, `envelope` and both TOAST relations. TOAST images also carry the original `va_valueid` (chunk_id) in the chunk data. After two further slot rewrites + VACUUMs, 3 original TOAST images were still present. `pageinspect`'s tuple functions do not show these bytes, so the builder's test cannot see them.
+- Exploit scenario: a disk-seizure adversary carves raw pages and recovers original transaction ids (and TOAST chunk_ids) of some accounts, envelope parts and replies. That gives creation order and xid adjacency (account creation next to an envelope commit) for the surviving fraction, partially restoring the STO-18 linkage.
+- Fix recommendation: run `VACUUM FULL` (or `CLUSTER`) on the intake tables at a fixed maintenance time (for example, daily after the last slot, under a short exclusive lock). It writes fresh relation files; the old files are unlinked (on LUKS, freed blocks hold ciphertext of the old pages, the same as the WAL residual), and run a `CHECKPOINT` afterwards. Alternatively, accept and document "dead tuple images may persist for up to N slots" with measured N. Extend the test with a raw-byte scan for `[old xmin][rewrite xid]` (as in this PoC) after the maintenance step.
+- Spec / requirement reference: ADR-010, ADR-052(2)/(14); 09 §10 Deletion, §13; IMPL-RM2 §4 A1
+- Status: Open
+
+#### AUD-RM2-STO-24 — (a) The table-owner login runs at every slot; (b) an older Z-CORE-signed head can be replayed after an old-backup restore
+- Severity: Low
+- Location: (a) `pg.rs` `vacuum_after_rewrite` (connects as the `candor-migrate` login, `SET ROLE candor_intake_migrator`); (b) `deletion.rs` `SignedDeletionHead` (no freshness field), `validate::merge_pushed`
+- Category: B9.3 least privilege (+ CWE-250); integrity freshness (+ CWE-294)
+- Description:
+  - (a) ADR-052(9) intends the migration identity for `candorctl migrate` only, under admin step-up (09 §11.2). Using it from a scheduled job at every slot puts the schema-owner capability (disable RLS/triggers, alter grants) into a routinely running process.
+  - (b) A head attestation has no time/epoch. After restoring a backup whose verified head is H_b, a relay can push any older-but-≥ H_b signed head H_o < current. It chains and verifies, so deletions after H_o are not applied (the builder lists this as residual). It needs a compromised or faulty relay holding past attestations; otherwise the relay simply sends the latest.
+- Fix recommendation: (a) rely on autovacuum (already aggressive) plus a daily owner VACUUM FULL in the maintenance window (STO-23) run by a separate, minimal unit, or move to PG 17's `pg_maintain` grant when the platform allows. (b) Add a Z-CORE day/slot to the head message and require `head.day ≥ today − 1` (from candor-time) when clearing restore-pending; spec feedback for 08 RL-11/RL-12.
+- Status: Open
+
+#### AUD-RM2-STO-25 — Dummy bucket weights are a deployment parameter; a mismatch with the real reply distribution (or tampering) makes rare-bucket real replies likely identifiable
+- Severity: Info
+- Location: `deaddrop.rs` `DEFAULT_DUMMY_BUCKET_WEIGHTS`, `DeadDropConfig::validate` (only "not all zero")
+- Description: per slot, a real reply in a bucket the dummy distribution rarely produces (PoC: bucket 16, weight 6/1,000) stands out with a high likelihood ratio. Indistinguishability holds only if the weights equal the real long-run distribution. A tampered config (for example, all weight on bucket 1) makes every non-bucket-1 entry real. Validation does not bound the weights.
+- Fix recommendation: ship the weights in the signed config bundle (not local config), bound the minimum weight per bucket, or, for HIGH/GOV profiles, pad every REPLY to one bucket. Document the calibration duty.
+- Status: Open (tracked)
+
+### Round-3 summary
+
+| Severity | Open | IDs |
+|---|---|---|
+| Critical | 0 | — |
+| High | 0 | — |
+| Medium | 1 | STO-23 (fix or lead acceptance with expiry) |
+| Low | 2 | STO-11 (residual, lead acceptance), STO-24 |
+| Info | 2 | STO-14 (accepted residual, lead to record), STO-25 |
+
+All of STO-01 … STO-22 are fixed and verified, except the documented residuals above.
+
+Gate: **FAIL (conditional)** 2026-10-01 fc64069. No Critical or High is open. §F.2 is not met until STO-23 (Medium) is fixed or accepted in writing by the lead auditor (risk statement, ≤ 90-day expiry). With that acceptance, and the STO-08 residual 4, STO-11 and STO-14 recorded, the step meets §F (tools clean, and every attacker goal is refuted or linked to a finding).
+
+## Lead dispositions (2026-10-01)
+- **AUD-RM2-STO-14 — ACCEPTED (lead).** Deleted replies remain in the published fetch-all set until the next import-slot rebuild (≤ 6 h). This is intended: removing them immediately would reveal deletion timing (BE-063). Recorded as residual in the crate SPEC-NOTES. Review again at RM-6.
+- **AUD-RM2-STO-08, STO-11, STO-23, STO-24, STO-25 — NOT accepted; to be fixed** (round-4 fixer): role hardening + live RLS/trigger checks at `open()` + `temp_file_limit` (08); `track_counts = off` and `autovacuum = off` on the intake cluster with slot-scheduled VACUUM, stats not persisted (11, deploy-owned settings); daily `VACUUM FULL` of source-linkable tables in a fixed maintenance window, measured with the TOAST/xmin probe (23); separate maintenance login from schema owner and date/epoch-bound signed deletion heads with monotonic counter (24); startup validation of dummy bucket weights against the canonical reply-size distribution, fail closed (25).

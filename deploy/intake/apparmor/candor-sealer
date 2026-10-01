@@ -2,9 +2,11 @@
 # AppArmor profile for C-07 candor-sealer (17 §5.2; R7 SI-B-04). Enforce mode.
 # Installed as /etc/apparmor.d/candor-sealer; attached by AppArmorProfile=candor-sealer.
 # Allowed: read program, config bundle, Key Directory snapshot and its own systemd
-# credentials; accept on the inherited seal.sock listener; connect to the intake store (chaff).
-# Denied: all IP networking, every write, exec, capabilities (incl. ipc_lock: mlock works via
-# LimitMEMLOCK - stricter than 17 §5.2), any read of blobs or staging (07 §4.2).
+# credentials; read/write the RAM-only Tier W staging tmpfs (ciphertext the sealer writes
+# itself; crates/candor-sealer SPEC-NOTES item 7, AUD-RM2-SEA-16); accept on the inherited
+# seal.sock stream listener; connect to the intake store (chaff).
+# Denied: all IP networking, every other write, exec, capabilities (incl. ipc_lock: mlock works
+# via LimitMEMLOCK - stricter than 17 §5.2), any read of blobs (07 §4.2).
 abi <abi/3.0>,
 include <tunables/global>
 
@@ -20,12 +22,18 @@ profile candor-sealer /usr/lib/candor/sealer/candor-sealer {
   /run/credentials/candor-sealer.service/ r,
   /run/credentials/candor-sealer.service/* r,
 
-  # Inherited stderr stream only (no stream listener).
+  # Tier W staging (tmpfs, 0700 candor-sealer): staged parts and bundles via candor-safefs.
+  # "l": renameat2(RENAME_NOREPLACE) falls back to linkat+unlinkat inside the root. No exec, no
+  # locks.
+  /run/candor/staging/ r,
+  /run/candor/staging/** rwl,
+
+  # Inherited seal.sock stream listener (u32be length-prefixed frames; sealer SPEC-NOTES item 9).
   network unix stream,
-  unix (send, getattr, getopt, shutdown) type=stream,
-  # Inherited seal.sock listener + client connection to istore.sock (chaff COMMIT_ENVELOPE).
+  unix (accept, receive, send, getattr, getopt, setopt, shutdown) type=stream,
+  # Client connection to istore.sock (chaff COMMIT_ENVELOPE).
   network unix seqpacket,
-  unix (create, connect, accept, receive, send, getattr, getopt, setopt, shutdown) type=seqpacket,
+  unix (create, connect, receive, send, getattr, getopt, setopt, shutdown) type=seqpacket,
   /run/candor/istore/istore.sock rw,
 
   # Rust std runtime: available_parallelism() reads the cgroup CPU quota.
@@ -65,7 +73,6 @@ profile candor-sealer /usr/lib/candor/sealer/candor-sealer {
   deny /boot/** rwklx,
   deny network inet,
   deny /var/lib/candor/** rwklx,
-  deny /run/candor/staging/** rwklx,
   deny /run/candor/source-web/** rwklx,
   deny /run/credentials/candor-intake-store.service/** rwklx,
 }

@@ -9,8 +9,8 @@
 # signing key, relay mTLS server key.
 [Unit]
 Description=Candor intake store (C-08, Z-INTAKE)
-Requires=candor-intake-store.socket candor-intake-store-relay.socket candor-intake-pg.service run-candor-staging.mount nftables.service
-After=candor-intake-store.socket candor-intake-store-relay.socket candor-intake-pg.service run-candor-staging.mount nftables.service
+Requires=candor-intake-store.socket candor-intake-store-relay.socket candor-intake-pg.service nftables.service
+After=candor-intake-store.socket candor-intake-store-relay.socket candor-intake-pg.service nftables.service
 RequiresMountsFor=/var/lib/candor/intake
 StartLimitIntervalSec=60s
 StartLimitBurst=5
@@ -26,10 +26,9 @@ AppArmorProfile=candor-intake-store
 LoadCredentialEncrypted=routing_key:/etc/credstore.encrypted/candor-intake.routing_key.cred
 LoadCredentialEncrypted=batch_signing_key:/etc/credstore.encrypted/candor-intake.batch_signing_key.cred
 LoadCredentialEncrypted=relay_tls_key:/etc/credstore.encrypted/candor-intake.relay_tls_key.cred
-# The Tier W staging tmpfs (ADR-034; 07 §5.3) is charged to this cgroup when written, so
-# MemoryMax = staging size + 1 GiB. Profile drop-ins adjust both together
-# (profiles/ce-*/). Never swap (BE-004).
-MemoryMax=5G
+# 1 GiB working set. The Tier W staging tmpfs belongs to the sealer (AUD-RM2-SEA-16) and is
+# charged to the sealer's cgroup. Never swap (BE-004).
+MemoryMax=1G
 MemorySwapMax=0
 TasksMax=256
 PrivateNetwork=yes
@@ -79,11 +78,13 @@ SystemCallFilter=seccomp landlock_create_ruleset landlock_add_rule landlock_rest
 TemporaryFileSystem=/var:ro
 BindPaths=/var/lib/candor/intake
 BindReadOnlyPaths=/var/lib/candor/relay
-ReadWritePaths=/run/candor/staging /run/candor/directory
+ReadWritePaths=/run/candor/directory
 # /var/tmp: PrivateTmp's /var/tmp is disk-backed on the host; nothing may be written there
 # (AUD-RM2-DEP-12).
 InaccessiblePaths=-/var/tmp
-InaccessiblePaths=-/run/tor-instances -/run/candor/source-web -/run/credentials/candor-sealer.service -/etc/tor -/etc/candor/intake/postgresql -/boot
+# Tier W staging is the sealer's (AUD-RM2-SEA-16): staged bundles reach the store as file
+# descriptors passed over istore.sock (SCM_RIGHTS), never by path (deploy/SPEC-NOTES.md D-33).
+InaccessiblePaths=-/run/tor-instances -/run/candor/source-web -/run/candor/staging -/run/credentials/candor-sealer.service -/etc/tor -/etc/candor/intake/postgresql -/boot
 # ---- Logging (ADR-016, LOG-004/005, LOG-007, NET-008; AUD-RM2-DEP-05/06) ----
 # No output of this service reaches any journal: journald stamps every stored line to the
 # microsecond, so a source-triggerable event would record the exact time of a source action

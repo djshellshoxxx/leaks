@@ -6,12 +6,14 @@
 # Implements the subset of `candorctl check` (18-DEPLOYMENT.md §14; rules from
 # 32-OPERATIONS.md §5.2/§7, 16-TOR-I2P.md §7.4 lint, 17-INFRASTRUCTURE.md §4.3/§5,
 # 09-DATABASE.md §10, 20-LOGGING-AUDITING.md §11 and LOG-005/007/008) for deploy/intake:
-# torrc, nftables, PostgreSQL, systemd units, journald, kernel baseline and resolv.conf.
+# torrc, nftables, PostgreSQL, systemd units, journald, kernel baseline, resolv.conf and the
+# AppArmor profiles.
 #
 # Usage:
 #   config-check.sh [--dir DIR] [--profile ce-single|ce-hardened]   static check of a tree
 #   config-check.sh --host [--root DIR]                             installed host (ST-120)
-#   --only LIST   comma list of sections: tor,nft,pg,units,journald,kernel,dns,host
+#   --only LIST   comma list of sections: tor,nft,pg,units,journald,kernel,dns,apparmor,host
+#                 (an unknown name, or a selection that runs no check, is a usage error: exit 2)
 #   --emit-baseline   (maintainers) print the effective units/nft/tor/security values of the
 #                     tree as baseline lines for review; performs no check
 #   -q            print only failures, skips and the summary
@@ -28,25 +30,44 @@
 #             equal the per-unit allow-list in config-check.baseline (unknown or extra
 #             directives fail), `systemd-analyze verify` must be clean and
 #             `systemd-analyze security` must stay within budget. --host adds `systemctl show`.
-#   PostgreSQL the conf file is checked statically; --host also asks the server binary for the
-#             effective values (postgres -C, includes postgresql.auto.conf).
+#   PostgreSQL every key of the conf file must be on the allow-list with its value; pg_hba.conf
+#             and pg_ident.conf must equal the release files line by line; --host also asks the
+#             server binary for the effective values (postgres -C, includes postgresql.auto.conf).
+#   AppArmor  every profile must equal the release profile statement by statement; rule classes
+#             (exec transitions, broad write globs, network, capabilities, change_profile,
+#             complain/other flags) are also rejected individually; --host adds disable/
+#             force-complain links, foreign profiles using the names, the enforce state and a
+#             comparison of the loaded policy with the checked file.
 # --host without --root also reads live state (/proc/sys, loaded nft ruleset, systemctl show,
 # AppArmor). With --root (offline image or tests) live-only checks are reported as SKIP; only
 # `--host` without --root is the ST-120 gate.
 #
 # Requirements (fail closed if missing): root, bash, awk, jq, tor, nft, unshare, setpriv,
-# systemd-analyze; --host additionally the PostgreSQL 16 server binary.
-# Output: "HOST RULE CLASS STATUS DETAIL" table (18 §14). Details never contain secrets, file
-# contents of unrelated files or source-related data; values are reduced to printable ASCII.
-# Exit codes (18 §14): 0 = all OK; 30 = baseline failure (any FAIL); 2 = usage / missing input.
+# systemd-analyze, sha256sum, dd; --host additionally the PostgreSQL 16 server binary and,
+# live, apparmor_parser.
+# Input hygiene (AUD-RM2-DEP-17): an input that is a symlink, or whose path has a symlinked
+# component below the tree / --root, is refused and never read; every input is copied once
+# (dd iflag=nofollow, size-capped) into a private 0700 work directory and only the copy is
+# used. --root paths are resolved inside the root only.
+# Output: "HOST RULE CLASS STATUS DETAIL" table (18 §14). Details never contain file contents:
+# only rule names, counts, line/statement numbers, baseline values and sanitised, length-capped
+# option/key names (AUD-RM2-DEP-17).
+# Policy integrity (AUD-RM2-DEP-21): config-check.manifest (sha256 pinned below) lists the
+# sha256 of config-check.baseline; both are verified before any check runs.
+# Exit codes (18 §14): 0 = all OK; 30 = baseline failure (any FAIL, including a policy digest
+# mismatch); 2 = usage / missing input / no check selected.
 
 set -u
 LC_ALL=C
 export LC_ALL
 umask 077
 
-SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd -P)
 BASE="$SCRIPT_DIR/config-check.baseline"
+MANIFEST="$SCRIPT_DIR/config-check.manifest"
+# sha256 of config-check.manifest (release-pinned; update together with the manifest).
+MANIFEST_SHA256=@@MANIFEST_SHA256@@
+SECTIONS="tor nft pg units journald kernel dns apparmor host"
 MODE=static
 DIR="$SCRIPT_DIR/../intake"
 ROOT=""
@@ -77,11 +98,39 @@ while [ $# -gt 0 ]; do
   esac
 done
 case "$ONLY" in *[!a-z,]*) echo "config-check: invalid --only" >&2; exit 2 ;; esac
-if [ ! -f "$BASE" ] || [ ! -r "$BASE" ]; then echo "config-check: baseline file missing: $BASE" >&2; exit 2; fi
+# AUD-RM2-DEP-21: a mistyped section name must never turn into a green run of zero checks.
+if [ -n "$ONLY" ]; then
+  for _s in $(printf '%s' "$ONLY" | tr ',' ' '); do
+    case " $SECTIONS " in *" $_s "*) ;; *) echo "config-check: unknown --only section (known: $SECTIONS)" >&2; exit 2 ;; esac
+  done
+  [ -n "$(printf '%s' "$ONLY" | tr -d ',')" ] || { echo "config-check: empty --only" >&2; exit 2; }
+fi
+if [ ! -f "$BASE" ] || [ ! -r "$BASE" ]; then echo "config-check: baseline file missing" >&2; exit 2; fi
+is_root() { [ "$(id -u)" -eq 0 ]; }
+
+# Private work directory (AUD-RM2-DEP-17): 0700, below a root-owned 0700 directory when run as
+# root (/run is not world-writable); removed on every exit path.
+if is_root; then
+  WBASE=/run/candor-config-check
+  mkdir -m 0700 "$WBASE" 2>/dev/null
+  if [ -L "$WBASE" ] || [ ! -d "$WBASE" ] || [ "$(stat -c '%u %a' -- "$WBASE")" != "0 700" ]; then
+    echo "config-check: unsafe work directory base $WBASE (must be root 0700, not a symlink)" >&2; exit 2
+  fi
+else WBASE=/tmp; fi
+WORK=$(mktemp -d "$WBASE/run.XXXXXXXX") || exit 2
+chmod 0700 "$WORK" || exit 2
+trap 'rm -rf -- "$WORK"' EXIT
+trap 'exit 2' INT TERM HUP
 
 LIVE=0
 if [ "$MODE" = host ]; then
-  if [ -n "$ROOT" ]; then [ -d "$ROOT" ] || { echo "config-check: --root is not a directory" >&2; exit 2; }; else LIVE=1; fi
+  if [ -n "$ROOT" ]; then
+    [ -d "$ROOT" ] || { echo "config-check: --root is not a directory" >&2; exit 2; }
+    ROOT=$(realpath -e -- "$ROOT") || exit 2
+    [ "$ROOT" = / ] && ROOT=""
+    [ -n "$ROOT" ] || LIVE=1
+  else LIVE=1; fi
+  INPREFIX=$ROOT
   [ -z "$PROFILE" ] || { echo "config-check: --profile is static-mode only (a host has its drop-ins installed)" >&2; exit 2; }
   TORRC="$ROOT/etc/tor/instances/candor-intake/torrc"
   NFT="$ROOT/etc/nftables.conf"
@@ -92,8 +141,11 @@ if [ "$MODE" = host ]; then
   SYSCTL="$ROOT/etc/sysctl.d/90-candor-intake.conf"
   COREDUMP="$ROOT/etc/systemd/coredump.conf.d/50-candor-intake.conf"
   RESOLV="$ROOT/etc/resolv.conf"
+  PGIDENT="$ROOT/etc/candor/intake/postgresql/pg_ident.conf"
 else
-  [ -d "$DIR" ] || { echo "config-check: no such directory: $DIR" >&2; exit 2; }
+  [ -d "$DIR" ] || { echo "config-check: no such directory" >&2; exit 2; }
+  DIR=$(realpath -e -- "$DIR") || exit 2
+  INPREFIX=$DIR
   case "$PROFILE" in ""|ce-single|ce-hardened) ;; *) echo "config-check: unknown profile" >&2; exit 2 ;; esac
   if [ -n "$PROFILE" ] && [ ! -d "$DIR/profiles/$PROFILE" ]; then echo "config-check: profile directory missing" >&2; exit 2; fi
   TORRC="$DIR/torrc"
@@ -105,11 +157,8 @@ else
   SYSCTL="$DIR/sysctl.d/90-candor-intake.conf"
   COREDUMP="$DIR/coredump.conf.d/50-candor-intake.conf"
   RESOLV="$DIR/resolv.conf"
+  PGIDENT="$DIR/postgresql/pg_ident.conf"
 fi
-
-# /tmp (not $TMPDIR): the tor canonicalisation hides /run and /var/lib in its mount namespace.
-WORK=$(mktemp -d /tmp/candor-config-check.XXXXXX) || exit 2
-trap 'rm -rf "$WORK"' EXIT INT TERM
 
 report() { # rule class status detail
   CHECKS=$((CHECKS + 1))
@@ -128,10 +177,46 @@ report_lines() { local st r d; while IFS="$(printf '\t')" read -r st r d; do cas
 
 want() { [ -z "$ONLY" ] || case ",$ONLY," in *",$1,"*) return 0 ;; *) return 1 ;; esac; }
 have() { command -v "$1" >/dev/null 2>&1; }
-is_root() { [ "$(id -u)" -eq 0 ]; }
-need_file() { # rule file
-  if [ ! -f "$2" ] || [ ! -r "$2" ]; then fail "$1" "missing or unreadable: $(basename "$2")"; return 1; fi
+# Names taken from inputs (option, key, directive, user names) are the only input-derived text
+# a report may carry: reduced to a name alphabet, 48 characters each, at most 8 (DEP-17).
+san_names() { # stdin: names separated by blanks/newlines
+  tr -s ' \t\n' '\n\n\n' | awk 'NF { t=$0; gsub(/[^A-Za-z0-9_.@:+\/-]/, "?", t); t=substr(t, 1, 48); n++; if (n <= 8) out=out (n>1 ? " " : "") t }
+    END { if (n > 8) out=out " (+" n-8 " more)"; print out }'
+}
+# First symlinked (or '.'/'..') component of path below prefix; prefix itself was resolved.
+symlinked_component() { # prefix path -> prints the component, returns 0 if there is one
+  local cur=$1 rest comp
+  case "$2" in "$1"/*) rest=${2#"$1"/} ;; *) printf '%s' "(outside the checked tree)"; return 0 ;; esac
+  while [ -n "$rest" ]; do
+    comp=${rest%%/*}
+    if [ "$comp" = "$rest" ]; then rest=""; else rest=${rest#*/}; fi
+    case "$comp" in "") continue ;; .|..) printf '%s' "${cur#"$1"}/$comp"; return 0 ;; esac
+    cur="$cur/$comp"
+    if [ -L "$cur" ]; then printf '%s' "${cur#"$1"}"; return 0; fi
+  done
+  return 1
+}
+# Copy one input into the work directory without following symlinks (AUD-RM2-DEP-17).
+MAXIN=1048576
+SNAP=""
+snap() { # rule path name -> SNAP=copy; FAIL + return 1 when refused
+  local r=$1 p=$2 l sz
+  SNAP="$WORK/in/$3"
+  mkdir -p "$WORK/in" || { fail "$r" "work directory"; return 1; }
+  if l=$(symlinked_component "$INPREFIX" "$p"); then fail "$r" "refused: symlinked path component $l (inputs are never followed)"; return 1; fi
+  if [ ! -f "$p" ]; then fail "$r" "missing or not a regular file: ${p#"$INPREFIX"}"; return 1; fi
+  sz=$(stat -c %s -- "$p" 2>/dev/null) || { fail "$r" "unreadable: ${p#"$INPREFIX"}"; return 1; }
+  if [ "$sz" -gt "$MAXIN" ]; then fail "$r" "larger than $MAXIN bytes: ${p#"$INPREFIX"}"; return 1; fi
+  if ! dd if="$p" of="$SNAP" iflag=nofollow bs=65536 count=17 status=none 2>/dev/null ||
+     [ "$(stat -c %s -- "$SNAP")" -gt "$MAXIN" ]; then fail "$r" "unreadable: ${p#"$INPREFIX"}"; return 1; fi
   return 0
+}
+# Optional input: absent -> empty copy; present -> as snap.
+snap_opt() { # rule path name
+  if [ ! -e "$2" ] && [ ! -L "$2" ] && ! symlinked_component "$INPREFIX" "$2" >/dev/null; then
+    mkdir -p "$WORK/in"; SNAP="$WORK/in/$3"; : > "$SNAP"; return 0
+  fi
+  snap "$@"
 }
 need_tools() { # rule tool... ; FAIL (fail closed) when a tool or root is missing
   local r=$1 t; shift
@@ -146,19 +231,45 @@ run_as() { # user cmd... (unprivileged, no new privileges, no supplementary grou
   setpriv --reuid="$u" --regid="$(id -g "$u")" --clear-groups --no-new-privs -- "$@"
 }
 
+# =============================================================================== policy integrity
+# AUD-RM2-DEP-21: the baseline is the policy. The manifest's digest is pinned in this script
+# (both ship in the same signed release package); the manifest pins the baseline. The verified
+# copy in the private work directory is the only one read afterwards.
+verify_policy() {
+  local got want name extra
+  if [ -L "$MANIFEST" ] || [ ! -f "$MANIFEST" ] || [ -L "$BASE" ]; then fail tool.baseline_integrity "manifest or baseline missing or a symlink"; return 1; fi
+  have sha256sum || { fail tool.baseline_integrity "sha256sum missing"; return 1; }
+  got=$(sha256sum < "$MANIFEST" | cut -c1-64)
+  if [ "$got" != "$MANIFEST_SHA256" ]; then fail tool.baseline_integrity "config-check.manifest digest differs from the release pin"; return 1; fi
+  dd if="$BASE" of="$WORK/baseline" iflag=nofollow bs=65536 count=64 status=none 2>/dev/null || { fail tool.baseline_integrity "baseline unreadable"; return 1; }
+  want=$(awk '$2=="config-check.baseline" && $1 ~ /^[0-9a-f]{64}$/ {print $1}' "$MANIFEST")
+  extra=$(awk '$2!="config-check.baseline" && NF' "$MANIFEST" | wc -l)
+  got=$(sha256sum < "$WORK/baseline" | cut -c1-64)
+  if [ -z "$want" ] || [ "$extra" -ne 0 ] || [ "$got" != "$want" ]; then fail tool.baseline_integrity "config-check.baseline digest differs from the manifest"; return 1; fi
+  BASE="$WORK/baseline"
+  name=$(sha256sum < "$BASE" | cut -c1-12)
+  ok tool.baseline_integrity "baseline sha256 ${name}... matches the pinned manifest"
+}
+
 # =============================================================================== torrc
 TOR_USER=_tor-candor-intake
 
-tor_canon() { # -> $WORK/tor/{verify,short,full}.out ; returns non-zero on any failure
-  local d="$WORK/tor"
-  mkdir -p "$d" && chmod 0755 "$WORK" "$d" && cp "$TORRC" "$d/torrc" && chmod 0644 "$d/torrc" || return 1
+tor_canon() { # snapshot -> $WORK/tor/{verify,short,full}.out ; returns non-zero on any failure
+  local d="$WORK/tor" g
+  g=$(id -g "$TOR_USER") || return 1
+  # The working copy is private (AUD-RM2-DEP-17): directory 0700 and file 0600, owned by the
+  # instance user, inside the root-only work directory. tor reaches it through a bind mount
+  # in its own mount namespace, never through a world-traversable path.
+  mkdir -m 0700 "$d" && cp -- "$1" "$d/torrc" && chown "$TOR_USER:$g" "$d" "$d/torrc" && chmod 0600 "$d/torrc" || return 1
   # Private mount namespace: tmpfs over /var/lib and /run so the canonicalisation never touches
   # the real tor state, keys or sockets; tor itself runs unprivileged as the instance user.
   # shellcheck disable=SC2016 # expanded by the inner shell
   unshare -m --propagation private /bin/sh -c '
     set -e
-    umask 022
+    umask 077
     mount -t tmpfs -o mode=0755,size=16m tmpfs /var/lib
+    mkdir -m 0700 /var/lib/.cc
+    mount --bind "$1" /var/lib/.cc
     mount -t tmpfs -o mode=0755,size=16m tmpfs /run
     mkdir -p /var/lib/tor-instances/candor-intake
     chown "$2:$3" /var/lib/tor-instances/candor-intake
@@ -167,14 +278,15 @@ tor_canon() { # -> $WORK/tor/{verify,short,full}.out ; returns non-zero on any f
       case $m in verify) a=--verify-config ;; short) a="--dump-config short" ;; full) a="--dump-config full" ;; esac
       # shellcheck disable=SC2086
       timeout 60 setpriv --reuid="$2" --regid="$3" --clear-groups --no-new-privs -- \
-        tor --defaults-torrc /dev/null -f "$1/torrc" --hush $a > "$1/$m.raw" 2>/dev/null </dev/null || exit 3
+        tor --defaults-torrc /dev/null -f /var/lib/.cc/torrc --hush $a > "/var/lib/.cc/$m.raw" 2>/dev/null </dev/null || exit 3
       # tor prints log lines on stdout before its own Log option applies; keep option lines only.
-      grep -vE "^[A-Z][a-z]{2} [0-9]{2} [0-9:.]+ \[" "$1/$m.raw" > "$1/$m.out" || true
-    done' sh "$d" "$TOR_USER" "$(id -g "$TOR_USER")"
+      grep -vE "^[A-Z][a-z]{2} [0-9]{2} [0-9:.]+ \[" "/var/lib/.cc/$m.raw" > "/var/lib/.cc/$m.out" || true
+    done' sh "$d" "$TOR_USER" "$g"
 }
 
 check_torrc() {
-  need_file tor.file "$TORRC" || return
+  snap tor.file "$TORRC" torrc || return
+  local TORRC=$SNAP
   # ---- raw text: no continuation, no %include, no '+'/'/' line prefixes, every key a full
   # option name from the template (tor accepts abbreviations and case variants), no repeats.
   if grep -qE '\\[[:space:]]*$' "$TORRC"; then fail tor.raw.no_continuation "line continuation used"; else ok tor.raw.no_continuation; fi
@@ -182,9 +294,9 @@ check_torrc() {
   if grep -qiE '^%' "$WORK/torrc.clean"; then fail tor.raw.no_include "%include or other % directive present"; else ok tor.raw.no_include; fi
   if grep -qE '^[+/]' "$WORK/torrc.clean"; then fail tor.raw.no_prefix "'+Option' (append) or '/Option' (reset) line present"; else ok tor.raw.no_prefix; fi
   local unknown dup
-  unknown=$(awk 'NR==FNR { if ($1=="tor-raw") ok[tolower($2)]=1; next } !(tolower($1) in ok) { print $1 }' FS='|' "$BASE" FS=' ' "$WORK/torrc.clean" | sort -u | tr '\n' ' ')
+  unknown=$(awk 'NR==FNR { if ($1=="tor-raw") ok[tolower($2)]=1; next } !(tolower($1) in ok) { print $1 }' FS='|' "$BASE" FS=' ' "$WORK/torrc.clean" | sort -u | san_names)
   if [ -n "$unknown" ]; then fail tor.raw.allowed_keys "option(s) not in the template (abbreviations are rejected too): $unknown"; else ok tor.raw.allowed_keys; fi
-  dup=$(awk '{ print tolower($1) }' "$WORK/torrc.clean" | sort | uniq -d | tr '\n' ' ')
+  dup=$(awk '{ print tolower($1) }' "$WORK/torrc.clean" | sort | uniq -d | san_names)
   if [ -n "$dup" ]; then fail tor.raw.no_duplicates "repeated option(s): $dup"; else ok tor.raw.no_duplicates; fi
   # Never hand an %include line to tor (it could make tor read an arbitrary file).
   if grep -qiE '^%' "$WORK/torrc.clean"; then fail tor.effective "not canonicalised: % directive present"; return; fi
@@ -192,24 +304,25 @@ check_torrc() {
   # ---- effective configuration, as tor itself parses it
   need_tools tor.effective tor unshare setpriv timeout || return
   getent passwd "$TOR_USER" >/dev/null || { fail tor.effective "user $TOR_USER missing"; return; }
-  if ! tor_canon; then fail tor.effective "tor --verify-config / --dump-config rejected the file (details suppressed)"; return; fi
+  if ! tor_canon "$TORRC"; then fail tor.effective "tor --verify-config / --dump-config rejected the file (details suppressed)"; return; fi
   ok tor.verify_config "tor --verify-config: valid"
   # Short dump = every option that differs from tor's default. Each must be on the allow-list
   # with its required value (or within its tunable range), and each allow-listed option must
   # be present exactly once.
   awk -F'|' '
     FNR==NR { if ($1=="tor") { mode[$2]=$3; val[$2]=$4; order[++n]=$2 } next }
+    function nm(x) { gsub(/[^A-Za-z0-9_]/, "?", x); return substr(x, 1, 48) }
     { k=$1; v=$0; sub(/^[^ ]+ ?/, "", v); cnt[k]++; got[k]=v
-      if (!(k in mode)) { printf "FAIL\ttor.effective.%s\tnot allowed (effective non-default option): %s %s\n", k, k, v; next } }
+      if (!(k in mode)) { printf "FAIL\ttor.effective.%s\tnot allowed (effective non-default option)\n", nm(k); next } }
     END {
       for (i=1; i<=n; i++) { k=order[i]
         if (cnt[k]==0) { printf "FAIL\ttor.effective.%s\tmissing (required: %s)\n", k, val[k]; continue }
         if (cnt[k]>1) { printf "FAIL\ttor.effective.%s\tset %d times\n", k, cnt[k]; continue }
         v=got[k]
-        if (mode[k]=="=") { if (v==val[k]) printf "OK\ttor.effective.%s\t%s\n", k, v; else printf "FAIL\ttor.effective.%s\texpected [%s], found [%s]\n", k, val[k], v }
+        if (mode[k]=="=") { if (v==val[k]) printf "OK\ttor.effective.%s\t%s\n", k, v; else printf "FAIL\ttor.effective.%s\texpected [%s], effective value differs\n", k, val[k] }
         else if (mode[k]=="int") { split(val[k], r, " ")
           if (v ~ /^[0-9]+$/ && length(v) <= 10 && v+0 >= r[1]+0 && v+0 <= r[2]+0) printf "OK\ttor.effective.%s\t%s\n", k, v
-          else printf "FAIL\ttor.effective.%s\texpected an integer in [%s, %s], found [%s]\n", k, r[1], r[2], v }
+          else printf "FAIL\ttor.effective.%s\texpected an integer in [%s, %s]\n", k, r[1], r[2] }
       } }' "$BASE" FS=' ' "$WORK/tor/short.out" > "$WORK/rl"; report_lines < "$WORK/rl"
   # Options whose required value is tor's default (so they never appear in the short dump),
   # plus the path-selection options an attacker would use (checked in the full dump).
@@ -218,7 +331,7 @@ check_torrc() {
     { k=$1; v=$0; sub(/^[^ ]+ ?/, "", v); if (k in want) { cnt[k]++; got[k]=v } }
     END { for (i=1; i<=n; i++) { k=order[i]
       if (cnt[k]!=1) printf "FAIL\ttor.full.%s\texpected exactly one effective value [%s], found %d\n", k, want[k], cnt[k]
-      else if (got[k]!=want[k]) printf "FAIL\ttor.full.%s\texpected [%s], found [%s]\n", k, want[k], got[k]
+      else if (got[k]!=want[k]) printf "FAIL\ttor.full.%s\texpected [%s], effective value differs\n", k, want[k]
       else printf "OK\ttor.full.%s\t%s\n", k, got[k] } }' "$BASE" FS=' ' "$WORK/tor/full.out" > "$WORK/rl"; report_lines < "$WORK/rl"
   # No control interface of any kind (AUD-RM2-DEP-04; NET-009).
   if grep -qE '^(ControlSocket|ControlPort|__ControlPort|__OwningControllerProcess|HashedControlPassword) [^0]' "$WORK/tor/full.out"; then
@@ -254,6 +367,14 @@ def canon($u):
   | tojson;
 def setcanon: {type: .type, flags: (.flags // []), elem: (.elem // [])} | tojson;
 def line($st; $r; $d): "\($st)\t\($r)\t\($d)";
+# Names from the ruleset are reported only as sanitised, capped names (AUD-RM2-DEP-17).
+def nm: tostring | gsub("[^A-Za-z0-9_.-]"; "?") | .[0:32];
+def nms: map(nm) | (.[0:8] | join(" ")) + (if length > 8 then " (+\(length - 8) more)" else "" end);
+# Site address sets: plain unicast host addresses only (AUD-RM2-DEP-22): no 0.0.0.0/8, loopback,
+# link-local, multicast, reserved or broadcast addresses.
+def hostaddr: type=="string" and test("^[0-9]{1,3}(\\.[0-9]{1,3}){3}$")
+  and ((split(".") | map(tonumber)) as $o | ($o | all(. <= 255)) and $o[0] != 0 and $o[0] != 127
+       and $o[0] < 224 and (($o[0] == 169 and $o[1] == 254) | not));
 
 ($base | split("\n") | map(select(length>0) | split("|"))) as $b
 | ($b | map(select(.[0]=="nft-rule") | {chain: .[1], c: (.[2:] | join("|"))})) as $exp
@@ -268,16 +389,16 @@ def line($st; $r; $d): "\($st)\t\($r)\t\($d)";
 | ("nft." + $label) as $p
 | (
   ( if ($types - ["metainfo","table","chain","rule","set","counter"]) == [] then line("OK"; $p+".object_types"; "table/chain/rule/set/counter only")
-    else line("FAIL"; $p+".object_types"; "unexpected object type(s): \($types - ["metainfo","table","chain","rule","set","counter"] | join(" "))") end ),
+    else line("FAIL"; $p+".object_types"; "unexpected object type(s): \($types - ["metainfo","table","chain","rule","set","counter"] | nms)") end ),
   ( if ($tables | map("\(.family) \(.name)")) == ["inet candor_intake"] then line("OK"; $p+".single_table"; "inet candor_intake")
-    else line("FAIL"; $p+".single_table"; "expected only 'table inet candor_intake', found: \($tables | map("\(.family) \(.name)") | join(", "))") end ),
+    else line("FAIL"; $p+".single_table"; "expected only 'table inet candor_intake', found: \($tables | map("\(.family)/\(.name)") | nms)") end ),
   ( ["input","output","forward"][] as $c
     | ($chains | map(select(.name==$c and .table=="candor_intake"))) as $m
     | if ($m|length)==1 and $m[0].type=="filter" and $m[0].hook==$c and $m[0].prio==0 and $m[0].policy=="drop"
       then line("OK"; $p+".policy_drop."+$c; "filter hook \($c) priority 0 policy drop")
       else line("FAIL"; $p+".policy_drop."+$c; "chain \($c) must be the only 'type filter hook \($c) priority filter; policy drop;'") end ),
   ( if ($chains | map(.name) | sort) == ["forward","input","output"] then line("OK"; $p+".only_filter_chains"; "")
-    else line("FAIL"; $p+".only_filter_chains"; "extra or missing chain(s): \($chains | map(.name) | join(" "))") end ),
+    else line("FAIL"; $p+".only_filter_chains"; "extra or missing chain(s): \($chains | map(.name) | nms)") end ),
   ( ([$rules[] | .c | fromjson | .. | objects | keys[]] | unique) as $k
     | ($k - ($k - ["log","queue","dup","fwd","jump","goto","notrack","snat","dnat","masquerade","redirect","tproxy","synproxy","mangle"])) as $badk
     | if $badk == [] then line("OK"; $p+".no_log_queue_jump"; "")
@@ -285,7 +406,7 @@ def line($st; $r; $d): "\($st)\t\($r)\t\($d)";
   ( ($exp | map(select(.c | fromjson | map(has("accept")) | any) | .chain + "|" + .c)) as $okacc
     | ($rules | map(select(.accept) | .chain + "|" + .c) | map(select(. as $x | $okacc | index($x) | not))) as $extra
     | if $extra == [] then line("OK"; $p+".accept_rules"; "only the template accepts (E1-E4, I1-I2)")
-      else line("FAIL"; $p+".accept_rules"; "\($extra|length) non-template accept rule(s): \($extra[0] | .[0:240])") end ),
+      else line("FAIL"; $p+".accept_rules"; "\($extra|length) non-template accept rule(s) (rule text not shown)") end ),
   # Safety drops (metadata, non-public destinations for tor UIDs) precede every UID accept.
   ( ($exp | map(select(.chain=="output")) | map(.c)) as $eo
     | ($eo | to_entries | map(select(.value | test("skuid") and test("accept"))) | .[0].key) as $firstacc
@@ -302,19 +423,19 @@ def line($st; $r; $d): "\($st)\t\($r)\t\($d)";
       else ([range(0; ([$e,$r]|map(length)|max))] | map(select($e[.] != $r[.])) | .[0]) as $i
         | line("FAIL"; $p+".template."+$c; "differs from the release template at rule \($i + 1) (expected \($e|length) rules, found \($r|length))") end ),
   ( if ($sets | map(.name) | sort) == ["admin_jump","core_relay","mon_hosts","non_public4","non_public6"] then line("OK"; $p+".sets"; "")
-    else line("FAIL"; $p+".sets"; "unexpected set list: \($sets | map(.name) | join(" "))") end ),
+    else line("FAIL"; $p+".sets"; "unexpected set list: \($sets | map(.name) | nms)") end ),
   ( ["non_public4","non_public6"][] as $n
     | ($sets | map(select(.name==$n)) | .[0]) as $s
     | if $s != null and ($s | setcanon) == $expsets[$n] then line("OK"; $p+".set."+$n; "elements equal the template")
       else line("FAIL"; $p+".set."+$n; "type, flags or elements differ from the template") end ),
   ( ["mon_hosts","admin_jump","core_relay"][] as $n
     | ($sets | map(select(.name==$n)) | .[0]) as $s
-    | if $s != null and $s.type=="ipv4_addr" and (($s.flags // []) == []) and (($s.elem // []) | all(type=="string" and test("^[0-9]{1,3}(\\.[0-9]{1,3}){3}$")))
+    | if $s != null and $s.type=="ipv4_addr" and (($s.flags // []) == []) and (($s.elem // []) | all(hostaddr))
          and ($n != "core_relay" or (($s.elem // []) | length) <= 1)
-      then line("OK"; $p+".set."+$n; "\(($s.elem // []) | length) plain IPv4 address(es)")
-      else line("FAIL"; $p+".set."+$n; "must be 'type ipv4_addr' with plain addresses only (core_relay: at most one)") end ),
+      then line("OK"; $p+".set."+$n; "\(($s.elem // []) | length) plain unicast IPv4 address(es)")
+      else line("FAIL"; $p+".set."+$n; "must be 'type ipv4_addr' with plain unicast host addresses only (no 0/8, 127/8, 169.254/16, multicast, reserved or broadcast; core_relay: at most one)") end ),
   ( if $counters == ["forward_dropped","input_dropped","output_dropped"] then line("OK"; $p+".counters"; "")
-    else line("FAIL"; $p+".counters"; "unexpected counters: \($counters | join(" "))") end )
+    else line("FAIL"; $p+".counters"; "unexpected counters: \($counters | nms)") end )
 )
 JQ
 
@@ -327,7 +448,8 @@ nft_analyze() { # json-file label
 CORE_RELAY_ELEMS=""
 NFT_LOADED=0
 check_nft() {
-  need_file nft.file "$NFT" || return
+  snap nft.file "$NFT" nftables.conf || return
+  local NFT=$SNAP
   # Text-level: a host loads this file on top of the kernel's ruleset, so it must flush first.
   # include/define/variables are rejected before the file is handed to nft (an include could
   # also make the root-run checker read an arbitrary file).
@@ -383,64 +505,87 @@ pg_norm() { # postgresql.conf -> "key<TAB>value" (comments stripped, quotes remo
 pg_bool() { case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in on|true|yes|1) echo on ;; off|false|no|0) echo off ;; *) echo "$1" ;; esac; }
 
 check_pg() {
-  need_file pg.file "$PGCONF" || return
-  local norm dup
-  norm=$(pg_norm "$PGCONF")
+  snap pg.file "$PGCONF" pg.conf || return
+  local conf=$SNAP norm dup unknown
+  norm=$(pg_norm "$conf")
   if printf '%s\n' "$norm" | cut -f1 | grep -qE '^(include|include_dir|include_if_exists)$'; then
     fail pg.no_include "include directive present (effective config must be this file)"
   else ok pg.no_include; fi
-  dup=$(printf '%s\n' "$norm" | cut -f1 | sort | uniq -d | tr '\n' ' ')
+  dup=$(printf '%s\n' "$norm" | cut -f1 | sort | uniq -d | san_names)
   if [ -n "$dup" ]; then fail pg.no_duplicates "duplicate keys: $dup"; else ok pg.no_duplicates; fi
+  # Allow-list (AUD-RM2-DEP-19): every key in the file must be a pg| key of the baseline.
+  unknown=$(printf '%s\n' "$norm" | cut -f1 | grep -v '^$' | sort -u | comm -23 - <(base pg | cut -d'|' -f2 | sort -u) | san_names)
+  if [ -n "$unknown" ]; then fail pg.allowed_keys "key(s) not in the baseline: $unknown"; else ok pg.allowed_keys "every key is on the allow-list"; fi
 
-  # Static values (pg|key|kind|value; kind b = boolean, s = case-insensitive string).
+  # Values (pg|key|kind|value; kind b = boolean, s = case-insensitive string). Found values
+  # are never echoed (AUD-RM2-DEP-17).
   local key kind want got
   while IFS='|' read -r _ key kind want; do
     if ! printf '%s\n' "$norm" | cut -f1 | grep -qx -- "$key"; then fail "pg.$key" "not set explicitly (expected '$want')"; continue; fi
     got=$(printf '%s\n' "$norm" | awk -F'\t' -v k="$key" '$1==k {print $2}')
     if [ "$kind" = b ]; then got=$(pg_bool "$got"); else got=$(printf '%s' "$got" | tr '[:upper:]' '[:lower:]'); fi
-    if [ "$got" = "$want" ]; then ok "pg.$key" "'$want'"; else fail "pg.$key" "expected '$want', found '$got'"; fi
+    if [ "$got" = "$want" ]; then ok "pg.$key" "'$want'"; else fail "pg.$key" "expected '$want', file value differs"; fi
   done < <(base pg)
 
   got=$(printf '%s\n' "$norm" | awk -F'\t' '$1=="log_line_prefix" {print $2}')
   if ! printf '%s\n' "$norm" | cut -f1 | grep -qx log_line_prefix; then fail pg.log_line_prefix "not set (PG default contains %m and %p)"
-  elif printf '%s' "$got" | sed 's/%%//g; s/%e//g' | grep -q '%'; then fail pg.log_line_prefix "only %e allowed: '$got'"
-  else ok pg.log_line_prefix "'$got'"; fi
+  elif printf '%s' "$got" | sed 's/%%//g; s/%e//g' | grep -q '%'; then fail pg.log_line_prefix "only %e allowed"
+  else ok pg.log_line_prefix "only %e"; fi
   got=$(printf '%s\n' "$norm" | awk -F'\t' '$1=="unix_socket_permissions" {print $2}')
   case "$got" in 0770|0750|0700|770|750|700) ok pg.unix_socket_permissions "$got" ;;
-    *) fail pg.unix_socket_permissions "no world access allowed, found '$got'" ;; esac
+    *) fail pg.unix_socket_permissions "no world access allowed" ;; esac
 
-  # pg_hba: Unix-socket peer only, reject last (09 §10, DB-022, R7 SI-E-01).
-  if need_file pg.hba_file "$PGHBA"; then
+  # pg_hba / pg_ident: Unix-socket peer only, reject last (09 §10, DB-022, R7 SI-E-01), and
+  # exactly the release lines (AUD-RM2-DEP-19; ADR-052(9): the migration user's single line).
+  if snap pg.hba_file "$PGHBA" pg_hba.conf; then
     local hba last
-    hba=$(sed -e 's/#.*$//' "$PGHBA" | trim | tr -s ' \t' '  ' | grep -v '^$')
+    hba=$(sed -e 's/#.*$//' "$SNAP" | trim | tr -s ' \t' '  ' | grep -v '^$')
     if printf '%s\n' "$hba" | awk '$1 != "local" {bad=1} END {exit bad?0:1}'; then fail pg.hba_local_only "non-local (TCP) line present"; else ok pg.hba_local_only; fi
     if printf '%s\n' "$hba" | awk '$1=="include" || $1=="include_dir" || $1=="include_if_exists" || $0 ~ /@/ {bad=1} END {exit bad?0:1}'; then fail pg.hba_no_include "include or @file reference present"; else ok pg.hba_no_include; fi
     if printf '%s\n' "$hba" | awk '{m=$4} m!="peer" && m!="reject" {bad=1} END {exit bad?0:1}'; then fail pg.hba_methods "only peer/reject allowed"; else ok pg.hba_methods; fi
+    if printf '%s\n' "$hba" | awk '$3 ~ /(^|,)\+?(postgres|all)(,|$)/ && $4!="reject" {bad=1} END {exit bad?0:1}'; then fail pg.hba_no_superuser "a postgres/all line other than reject is present (09 §10, D-11)"; else ok pg.hba_no_superuser; fi
     last=$(printf '%s\n' "$hba" | tail -n 1)
     if [ "$last" = "local all all reject" ]; then ok pg.hba_reject_last; else fail pg.hba_reject_last "last line must be 'local all all reject'"; fi
+    pg_exact pg.hba_exact hba "$hba"
+  fi
+  if snap pg.ident_file "$PGIDENT" pg_ident.conf; then
+    pg_exact pg.ident_exact ident "$(sed -e 's/#.*$//' "$SNAP" | trim | tr -s ' \t' '  ' | grep -v '^$')"
   fi
 
   [ "$MODE" = host ] || return
   # ---- effective settings as the server computes them (AUD-RM2-DEP-03(1)): includes
   # postgresql.auto.conf (ALTER SYSTEM). Command-line -c options are pinned by the unit check.
-  local pgbin=/usr/lib/postgresql/16/bin/postgres dd owner auto
+  local pgbin=/usr/lib/postgresql/16/bin/postgres dd owner l
   dd=$(printf '%s\n' "$norm" | awk -F'\t' '$1=="data_directory" {print $2}')
   case "$dd" in /*) ;; *) fail pg.effective "data_directory is not an absolute path"; return ;; esac
+  # Resolved inside --root only: no symlinked component (AUD-RM2-DEP-17).
+  if l=$(symlinked_component "$INPREFIX" "$ROOT$dd"); then fail pg.effective "data directory path has a symlinked component: $l"; return; fi
   if [ ! -d "$ROOT$dd" ]; then fail pg.effective "data directory missing"; return; fi
-  auto="$ROOT$dd/postgresql.auto.conf"
-  if [ -e "$auto" ] && [ -n "$(pg_norm "$auto")" ]; then fail pg.auto_conf_empty "postgresql.auto.conf contains settings (ALTER SYSTEM)"; else ok pg.auto_conf_empty; fi
+  if snap_opt pg.auto_conf_empty "$ROOT$dd/postgresql.auto.conf" pg.auto.conf; then
+    if [ -n "$(pg_norm "$SNAP")" ]; then fail pg.auto_conf_empty "postgresql.auto.conf contains settings (ALTER SYSTEM)"; else ok pg.auto_conf_empty; fi
+  fi
   [ -x "$pgbin" ] || { fail pg.effective "PostgreSQL 16 server binary missing"; return; }
   if ! is_root || ! have setpriv; then fail pg.effective "must run as root with setpriv"; return; fi
-  owner=$(stat -L -c %U -- "$ROOT$dd")
+  owner=$(stat -c %U -- "$ROOT$dd")
   if [ "$owner" = root ]; then fail pg.effective "data directory owned by root"; return; fi
-  if [ "$LIVE" -eq 1 ] && [ "$owner" != postgres ]; then fail pg.datadir_owner "data directory must be owned by postgres, found $owner"; fi
+  if [ "$LIVE" -eq 1 ] && [ "$owner" != postgres ]; then fail pg.datadir_owner "data directory must be owned by postgres, found $(printf '%s' "$owner" | san_names)"; fi
   local -a extra=()
   [ -n "$ROOT" ] && extra=(-c "data_directory=$ROOT$dd")
   local g w v
   while IFS='|' read -r _ g w; do
     if ! v=$(run_as "$owner" "$pgbin" -C "$g" -c "config_file=$PGCONF" "${extra[@]}" 2>/dev/null); then fail "pg.effective.$g" "postgres -C failed"; continue; fi
-    if [ "$v" = "$w" ]; then ok "pg.effective.$g" "'$w'"; else fail "pg.effective.$g" "expected '$w', effective '$v'"; fi
+    if [ "$v" = "$w" ]; then ok "pg.effective.$g" "'$w'"; else fail "pg.effective.$g" "expected '$w', effective value differs"; fi
   done < <(base pgc)
+}
+pg_exact() { # rule kind text: normalised lines must equal the baseline's <kind>| lines, in order
+  local n
+  printf '%s\n' "$3" | grep -v '^$' > "$WORK/$2.got"
+  awk -F'|' -v k="$2" '$1==k {print substr($0, length(k)+2)}' "$BASE" > "$WORK/$2.want"
+  if cmp -s "$WORK/$2.got" "$WORK/$2.want"; then ok "$1" "$(wc -l < "$WORK/$2.want") line(s) equal the release file"
+  else
+    n=$(awk 'NR==FNR { a[FNR]=$0; na=FNR; next } { nb=FNR; if (!(FNR in a) || a[FNR]!=$0) { print FNR; f=1; exit } } END { if (!f) print (nb < na ? nb+1 : na+1) }' "$WORK/$2.want" "$WORK/$2.got")
+    fail "$1" "differs from the release file at line $n (expected $(wc -l < "$WORK/$2.want"), found $(wc -l < "$WORK/$2.got") line(s))"
+  fi
 }
 
 # =============================================================================== systemd units
@@ -453,6 +598,13 @@ SR=""
 units_root() { # static: a scratch root holding the tree (+ profile drop-ins) as /etc/systemd/system
   if [ "$MODE" = host ]; then SR=${ROOT:-/}; return 0; fi
   SR="$WORK/sroot"
+  # No symlink anywhere in the unit tree (AUD-RM2-DEP-17): systemd would follow it, and so
+  # would the merge below.
+  local l
+  if l=$(symlinked_component "$INPREFIX" "$DIR/systemd/x") || [ -n "$(find "$DIR/systemd" -type l -print -quit 2>/dev/null)" ] ||
+     { [ -n "$PROFILE" ] && { l=$(symlinked_component "$INPREFIX" "$DIR/profiles/$PROFILE/x") || [ -n "$(find "$DIR/profiles/$PROFILE" -type l -print -quit 2>/dev/null)" ]; }; }; then
+    fail unit.no_symlinks "symlink in the unit tree (refused, not followed)"; return 1
+  fi
   mkdir -p "$SR/etc/systemd/system" && cp -a "$DIR/systemd/." "$SR/etc/systemd/system/" || return 1
   if [ -n "$PROFILE" ]; then
     local d
@@ -466,9 +618,9 @@ rootopt() { if [ "$SR" != / ]; then printf -- '--root=%s' "$SR"; else printf -- 
 
 # Merge fragment + drop-ins (in systemd's order) into "Section|Key|v1 ;; v2 ;; ..." lines.
 # An empty assignment is kept as an empty element, so a reset is always visible.
-unit_merge() { # files... -> stdout
+unit_merge() { # files... -> stdout (callers checked every path for symlinks)
   local f
-  for f in "$@"; do printf '#@@FILE\n'; cat -- "$f"; printf '\n'; done | awk '
+  for f in "$@"; do printf '#@@FILE\n'; dd if="$f" iflag=nofollow bs=65536 count=17 status=none 2>/dev/null; printf '\n'; done | awk '
     function flush_line(l,   k, v, e, id) {
       sub(/^[ \t]+/, "", l); sub(/[ \t]+$/, "", l)
       if (l == "" || l ~ /^[#;]/) return
@@ -508,17 +660,23 @@ check_units() {
   SYSTEMD_LOG_LEVEL=notice systemd-analyze verify "$ro" --man=no --recursive-errors=no $ALL_UNITS 2>&1 |
     grep -v '^$' > "$WORK/verify.out"
   if [ "$MODE" = static ]; then grep -vE ': Command /[^ ]+ is not executable: No such file or directory$' "$WORK/verify.out" > "$WORK/verify.f"; else cp "$WORK/verify.out" "$WORK/verify.f"; fi
-  if [ -s "$WORK/verify.f" ]; then fail unit.verify "systemd-analyze verify: $(head -n 2 "$WORK/verify.f" | sed "s|$SR||g" | tr '\n' ' ')"; else ok unit.verify "systemd-analyze verify clean"; fi
+  # Diagnostics can quote file content: only their number is reported (AUD-RM2-DEP-17).
+  if [ -s "$WORK/verify.f" ]; then fail unit.verify "systemd-analyze verify: $(wc -l < "$WORK/verify.f") diagnostic line(s) (text suppressed; run systemd-analyze verify)"; else ok unit.verify "systemd-analyze verify clean"; fi
 
   local -a files
+  local f l lnk
   mkdir -p "$WORK/eff"
   for u in $ALL_UNITS; do
     frag=$(awk -F'\t' -v u="$u" '$1==u && $2=="F" {print $3}' "$WORK/unitpaths")
     if [ "$frag" != "${SR%/}/etc/systemd/system/$u" ] || [ -L "$frag" ] || [ ! -f "$frag" ]; then
-      fail "unit.$u.fragment" "unit must load from /etc/systemd/system/$u (found '${frag#"${SR%/}"}')"; continue
+      fail "unit.$u.fragment" "unit must load from /etc/systemd/system/$u (found '$(printf '%s' "${frag#"${SR%/}"}" | san_names)')"; continue
     fi
     files=("$frag")
     while IFS= read -r f; do files+=("$f"); done < <(awk -F'\t' -v u="$u" '$1==u && $2=="D" {print $3}' "$WORK/unitpaths")
+    # Never follow a symlinked fragment, drop-in or drop-in directory (AUD-RM2-DEP-17).
+    lnk=""
+    for f in "${files[@]}"; do if l=$(symlinked_component "${SR%/}" "$f"); then lnk=$l; break; fi; done
+    if [ -n "$lnk" ]; then fail "unit.$u.fragment" "refused: symlinked unit/drop-in path component $(printf '%s' "$lnk" | san_names)"; continue; fi
     ok "unit.$u.fragment" "$(( ${#files[@]} - 1 )) drop-in(s) applied"
     unit_merge "${files[@]}" > "$WORK/eff/$u"
     # Effective, section-aware directives against the per-unit allow-list (exact values).
@@ -528,32 +686,27 @@ check_units() {
                   if (!(k in mode)) { order[++n]=k; mode[k]=a[5]; ex[k]=v }
                   else if (a[5]=="=") ex[k]=ex[k] " ;; " v } next }
       { e=index($0, "|"); s=substr($0, 1, e-1); r=substr($0, e+1); e=index(r, "|"); k=s "|" substr(r, 1, e-1); got[k]=substr(r, e+1); seen[k]=1
-        if (!(k in mode)) { dk=k; sub(/\|/, ".", dk); printf "FAIL\tunit.%s.%s\tdirective not allowed: [%s] %s=%s\n", u, dk, s, substr(r, 1, e-1), got[k] } }
+        if (!(k in mode)) { dk=k; gsub(/[^A-Za-z0-9_|]/, "?", dk); dk=substr(dk, 1, 64); sub(/\|/, ".", dk); printf "FAIL\tunit.%s.%s\tdirective not allowed (value not shown)\n", u, dk } }
       END { for (i=1; i<=n; i++) { k=order[i]; m=mode[k]; dk=k; sub(/\|/, ".", dk)
         if (m=="*") { if (k in seen) printf "OK\tunit.%s.%s\t(semantic check)\n", u, dk; else printf "FAIL\tunit.%s.%s\tmissing\n", u, dk; continue }
         g=(k in seen) ? got[k] : ""
         if (m=="=") { if (!(k in seen)) printf "FAIL\tunit.%s.%s\tmissing (expected %s)\n", u, dk, ex[k]
                       else if (g==ex[k]) printf "OK\tunit.%s.%s\t%s\n", u, dk, (g=="" ? "<empty>" : g)
-                      else printf "FAIL\tunit.%s.%s\texpected [%s], effective [%s]\n", u, dk, ex[k], g }
-        else if (m=="~") { if (g ~ ex[k]) printf "OK\tunit.%s.%s\t%s\n", u, dk, (k in seen ? g : "<absent>")
-                           else printf "FAIL\tunit.%s.%s\teffective [%s] does not match %s\n", u, dk, g, ex[k] } } }' "$BASE" "$WORK/eff/$u" > "$WORK/rl"; report_lines < "$WORK/rl"
+                      else printf "FAIL\tunit.%s.%s\texpected [%s], effective value differs\n", u, dk, ex[k] }
+        else if (m=="~") { if (g ~ ex[k]) printf "OK\tunit.%s.%s\tmatches %s\n", u, dk, ex[k]
+                           else printf "FAIL\tunit.%s.%s\teffective value does not match %s\n", u, dk, ex[k] } } }' "$BASE" "$WORK/eff/$u" > "$WORK/rl"; report_lines < "$WORK/rl"
   done
 
-  # Sealer syscall filter (its lines are owned by the sealer work, AUD-RM2-SEA-06): allow-list
-  # mode, never reset; the deny groups are verified by systemd-analyze security below.
-  if [ -f "$WORK/eff/candor-sealer.service" ]; then
-    local scf
-    scf=$(awk -F'|' '$1=="Service" && $2=="SystemCallFilter" {print substr($0, length($1 $2)+3)}' "$WORK/eff/candor-sealer.service")
-    if [ -z "$scf" ] || printf '%s' "$scf" | grep -qE '^~|^ ;; | ;; $| ;;  ;; '; then
-      fail unit.candor-sealer.syscall_allow_list "SystemCallFilter must start in allow-list mode and never be reset"
-    else ok unit.candor-sealer.syscall_allow_list; fi
-  fi
+  # Sealer syscall filter (AUD-RM2-DEP-16): the assignment lines are pinned exactly above; here
+  # the EFFECTIVE allow-set (systemd's group expansion, allow-list minus '~' lines plus re-adds,
+  # in order) must equal the release set, and the explicitly denied calls must stay denied.
+  [ -f "$WORK/eff/candor-sealer.service" ] && check_sealer_syscalls "$WORK/eff/candor-sealer.service"
   # Relay socket: an IPAddressAllow drop-in must name exactly the single @core_relay address.
   local allow
   allow=$(awk -F'|' '$1=="Socket" && $2=="IPAddressAllow" {print substr($0, length($1 $2)+3)}' "$WORK/eff/candor-intake-store-relay.socket" 2>/dev/null)
   if [ -z "$allow" ]; then ok unit.relay_ip_allow "none (fail closed until the site drop-in exists)"
-  elif [ "$NFT_LOADED" -eq 1 ] && [ "$allow" = "$(printf '%s' "$CORE_RELAY_ELEMS" | trim)/32" ]; then ok unit.relay_ip_allow "$allow = @core_relay"
-  else fail unit.relay_ip_allow "IPAddressAllow must be exactly <@core_relay element>/32, found '$allow'"; fi
+  elif [ "$NFT_LOADED" -eq 1 ] && [ "$allow" = "$(printf '%s' "$CORE_RELAY_ELEMS" | trim)/32" ]; then ok unit.relay_ip_allow "equals @core_relay/32"
+  else fail unit.relay_ip_allow "IPAddressAllow must be exactly <@core_relay element>/32"; fi
 
   # systemd's exposure assessment of the effective unit: within budget, and only the
   # documented residual items may score (17 §5.3, R7 SI-B-01; D-25).
@@ -570,7 +723,7 @@ check_units() {
     local extra
     extra=$(comm -23 "$WORK/sec.bad" "$WORK/sec.ok" | tr '\n' ' ')
     if [ ! -s "$WORK/sec.json" ]; then fail "unit.$name.security_items" "no assessment"
-    elif [ -n "$extra" ]; then fail "unit.$name.security_items" "new exposure item(s): $extra"
+    elif [ -n "$extra" ]; then fail "unit.$name.security_items" "new exposure item(s): $(printf '%s' "$extra" | san_names)"
     else ok "unit.$name.security_items" "only documented residual items"; fi
   done
 
@@ -581,9 +734,103 @@ check_units() {
     [ -d "$d" ] || continue
     bad="$bad$(find "$d" -mindepth 1 -maxdepth 1 \( -name 'candor*' -o -name 'tor@*' -o -name 'tor-*' -o -name 'run-candor*' -o -name 'service.d' -o -name 'socket.d' -o -name 'mount.d' \) -printf '%f ' 2>/dev/null)"
   done
-  if [ -n "$bad" ]; then fail unit.no_transient_or_generated "transient/generated unit configuration present: $bad"; else ok unit.no_transient_or_generated; fi
+  if [ -n "$bad" ]; then fail unit.no_transient_or_generated "transient/generated unit configuration present: $(printf '%s' "$bad" | san_names)"; else ok unit.no_transient_or_generated; fi
   [ "$LIVE" -eq 1 ] || { skip unit.live "offline root: systemctl show not checked"; return; }
   check_units_live
+}
+
+# Effective sealer syscall allow-set (AUD-RM2-DEP-16). systemd semantics: the first non-empty
+# assignment selects the mode (must be allow-list); an empty assignment resets; later plain
+# entries add, '~' entries remove; '@group' names expand recursively; ':errno' suffixes do not
+# change membership. Groups come from this host's systemd (`systemd-analyze syscall-filter`), so
+# a systemd upgrade that grows a group shows up as a FAIL until the release re-pins scf| lines.
+check_sealer_syscalls() { # effective-unit-file
+  local seq
+  seq=$(awk -F'|' '$1=="Service" && $2=="SystemCallFilter" {print substr($0, length($1 $2)+3)}' "$1")
+  if [ -z "$seq" ]; then fail unit.candor-sealer.syscall_set "no SystemCallFilter"; return; fi
+  if ! systemd-analyze syscall-filter --no-pager 2>/dev/null | tr -cd '\11\12\40-\176' | sed 's/\[[0-9;]*m//g' > "$WORK/scf.groups" ||
+     ! grep -q '^@system-service$' "$WORK/scf.groups"; then
+    fail unit.candor-sealer.syscall_set "cannot expand syscall groups (systemd-analyze syscall-filter)"; return
+  fi
+  printf '%s\n' "$seq" | awk '
+    FNR==NR { if ($0 ~ /^@/) { g=$1; next }
+              t=$0; gsub(/^[ \t]+|[ \t]+$/, "", t); if (t == "" || t ~ /^#/) next
+              mem[g]=mem[g] " " t; next }
+    function expand(n, depth,   a, i, k) {
+      if (n !~ /^@/) { out[n]=1; return }
+      if (depth > 16 || !(n in mem)) { unknown=1; return }
+      k=split(mem[n], a, " "); for (i=1; i<=k; i++) expand(a[i], depth+1)
+    }
+    { k=split($0, asg, / ;; /)
+      for (j=1; j<=k; j++) {
+        v=asg[j]; gsub(/^[ \t]+|[ \t]+$/, "", v)
+        if (v == "") { delete set; mode=""; continue }
+        inv=0; if (substr(v, 1, 1) == "~") { inv=1; v=substr(v, 2) }
+        if (mode == "") mode=(inv ? "deny" : "allow")
+        nt=split(v, toks, /[ \t]+/)
+        for (i=1; i<=nt; i++) { t=toks[i]; sub(/:.*$/, "", t); if (t == "") continue
+          delete out; expand(t, 0)
+          for (x in out) { if ((mode == "allow") != (inv == 1)) set[x]=1; else delete set[x] } }
+      } }
+    END { if (mode != "allow") print "!MODE"; if (unknown) print "!UNKNOWN"; for (x in set) print x }' "$WORK/scf.groups" - | sort > "$WORK/scf.eff"
+  if grep -q '^!MODE$' "$WORK/scf.eff"; then fail unit.candor-sealer.syscall_set "SystemCallFilter is not in allow-list mode"; return; fi
+  if grep -q '^!UNKNOWN$' "$WORK/scf.eff"; then fail unit.candor-sealer.syscall_set "unknown syscall group referenced"; return; fi
+  base scf | cut -d'|' -f2 | sort -u > "$WORK/scf.want"
+  local extra missing never
+  extra=$(comm -13 "$WORK/scf.want" "$WORK/scf.eff" | san_names)
+  missing=$(comm -23 "$WORK/scf.want" "$WORK/scf.eff" | san_names)
+  if [ -z "$extra" ] && [ -z "$missing" ]; then ok unit.candor-sealer.syscall_set "$(wc -l < "$WORK/scf.eff") syscalls, equal to the release allow-set"
+  else fail unit.candor-sealer.syscall_set "effective allow-set differs from the release set; extra: [${extra}] missing: [${missing}]"; fi
+  never=$(base scf-never | cut -d'|' -f2 | sort -u | comm -12 - "$WORK/scf.eff" | san_names)
+  if [ -n "$never" ]; then fail unit.candor-sealer.syscall_never "explicitly denied syscall(s) allowed: $never"
+  else ok unit.candor-sealer.syscall_never "$(base scf-never | wc -l) explicitly denied syscalls (io_uring, userfaultfd, ptrace, ...) stay denied"; fi
+}
+
+# Distribution units the intake's protection depends on (AUD-RM2-DEP-18): nftables.service
+# loads the ruleset at boot, systemd-sysctl.service applies the kernel baseline. Fragment from
+# /usr/lib, exactly the listed drop-ins, pinned keys, enabled and not masked.
+check_host_units() {
+  local r=${ROOT:-/} u frag want got l f
+  local -a files
+  SYSTEMD_LOG_LEVEL=debug systemd-analyze verify "--root=$r" --man=no --recursive-errors=no nftables.service systemd-sysctl.service > "$WORK/hverify.dbg" 2>&1
+  awk '
+    /^\t-> Unit [^ ]+:$/ { u=$3; sub(/:$/, "", u); take=((u=="nftables.service" || u=="systemd-sysctl.service") && !(u in done)); if (take) done[u]=1; next }
+    /^\t-> / { take=0 }
+    take && /^\t\tFragment Path: / { print u "\tF\t" substr($0, index($0, ": ")+2) }
+    take && /^\t\tDropIn Path: / { print u "\tD\t" substr($0, index($0, ": ")+2) }' "$WORK/hverify.dbg" > "$WORK/hunitpaths"
+  for u in nftables.service systemd-sysctl.service; do
+    frag=$(awk -F'\t' -v u="$u" '$1==u && $2=="F" {print $3}' "$WORK/hunitpaths")
+    if [ "$frag" != "$ROOT/usr/lib/systemd/system/$u" ] || [ ! -f "$frag" ] || l=$(symlinked_component "$INPREFIX" "$frag"); then
+      fail "host.unit.$u.fragment" "must load from /usr/lib/systemd/system/$u (missing, masked or overridden)"; continue
+    fi
+    got=$(awk -F'\t' -v u="$u" '$1==u && $2=="D" {print $3}' "$WORK/hunitpaths" | sed "s|^$ROOT||" | sort | tr '\n' ' ')
+    want=$(awk -F'|' -v u="$u" '$1=="hdropin" && $2==u {print $3}' "$BASE" | sort | tr '\n' ' ')
+    if [ "$got" != "$want" ]; then fail "host.unit.$u.dropins" "drop-ins differ from the release set (expected: ${want:-none})"; continue; fi
+    ok "host.unit.$u.dropins" "${want:-none}"
+    files=("$frag")
+    while IFS= read -r f; do files+=("$f"); done < <(awk -F'\t' -v u="$u" '$1==u && $2=="D" {print $3}' "$WORK/hunitpaths")
+    for f in "${files[@]}"; do if l=$(symlinked_component "$INPREFIX" "$f"); then fail "host.unit.$u.fragment" "refused: symlinked drop-in path"; continue 2; fi; done
+    unit_merge "${files[@]}" > "$WORK/eff.$u"
+    awk -v u="$u" '
+      FNR==NR { if (split($0, a, "|") >= 5 && a[1]=="hunit" && a[2]==u) { k=a[3] "|" a[4]; order[++n]=k; mode[k]=a[5]; ex[k]=substr($0, length(a[1] a[2] a[3] a[4] a[5])+6) } next }
+      { e=index($0, "|"); s=substr($0, 1, e-1); r=substr($0, e+1); e=index(r, "|"); k=s "|" substr(r, 1, e-1); got[k]=substr(r, e+1); seen[k]=1 }
+      END { for (i=1; i<=n; i++) { k=order[i]; dk=k; sub(/\|/, ".", dk)
+        if (mode[k]=="absent") { if (k in seen) printf "FAIL\thost.unit.%s.%s\tmust not be set\n", u, dk; else printf "OK\thost.unit.%s.%s\tabsent\n", u, dk }
+        else if (!(k in seen)) printf "FAIL\thost.unit.%s.%s\tmissing (expected %s)\n", u, dk, ex[k]
+        else if (got[k]==ex[k]) printf "OK\thost.unit.%s.%s\t%s\n", u, dk, ex[k]
+        else printf "FAIL\thost.unit.%s.%s\texpected [%s], effective value differs\n", u, dk, ex[k] } }' "$BASE" "$WORK/eff.$u" > "$WORK/rl"; report_lines < "$WORK/rl"
+  done
+  # Enabled at boot: nftables via a .wants link of the admin, systemd-sysctl statically (vendor).
+  if [ -n "$(find "$ROOT/etc/systemd/system" -mindepth 2 -maxdepth 2 -path '*.wants/nftables.service' -print -quit 2>/dev/null)" ]; then ok host.unit.nftables.service.enabled
+  else fail host.unit.nftables.service.enabled "nftables.service is not enabled (no .wants link)"; fi
+  if [ -e "$ROOT/usr/lib/systemd/system/sysinit.target.wants/systemd-sysctl.service" ]; then ok host.unit.systemd-sysctl.service.enabled "pulled in by sysinit.target"
+  else fail host.unit.systemd-sysctl.service.enabled "not pulled in by sysinit.target"; fi
+  if [ "$LIVE" -eq 1 ] && have systemctl; then
+    got=$(systemctl is-enabled nftables.service 2>/dev/null)
+    if [ "$got" = enabled ]; then ok host.unit.nftables.service.live_enabled; else fail host.unit.nftables.service.live_enabled "systemctl is-enabled: not 'enabled'"; fi
+    got=$(systemctl is-enabled systemd-sysctl.service 2>/dev/null)
+    if [ "$got" = static ]; then ok host.unit.systemd-sysctl.service.live_enabled; else fail host.unit.systemd-sysctl.service.live_enabled "systemctl is-enabled: not 'static' (masked?)"; fi
+  fi
 }
 
 # Live properties of the loaded units (systemctl show; AUD-RM2-DEP-03(4)).
@@ -600,7 +847,7 @@ check_units_live() {
     while IFS='|' read -r _ kinds p want; do
       case ",$kinds," in *",all,"*|*",$kind,"*) ;; *) continue ;; esac
       got=$(sed -n "s/^$p=//p" "$WORK/show" | head -n 1)
-      if [ "$got" = "$want" ]; then ok "unit.$u.live.$p" "$want"; else fail "unit.$u.live.$p" "expected '$want', loaded '$got'"; fi
+      if [ "$got" = "$want" ]; then ok "unit.$u.live.$p" "$want"; else fail "unit.$u.live.$p" "expected '$want', loaded value differs"; fi
     done < <(base show)
   done
 }
@@ -796,6 +1043,10 @@ emit_baseline() { # maintainers only: print effective values of the tree for rev
 }
 
 if [ "$EMIT" -eq 1 ]; then emit_baseline; exit 0; fi
+if ! verify_policy; then
+  printf 'config-check: policy integrity check FAILED; no check run (exit=30)\n'
+  exit 30
+fi
 
 want tor && check_torrc
 want nft && check_nft

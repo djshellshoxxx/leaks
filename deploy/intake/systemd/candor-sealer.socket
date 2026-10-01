@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# C-07 sealer IPC (07 §5.2: AF_UNIX SOCK_SEQPACKET; peer = candor-web, checked again in the
-# sealer with SO_PEERCRED). Directory 0750 candor-sealer:candor-web (tmpfiles.d).
+# C-07 sealer IPC; peer = candor-web, checked again in the sealer with SO_PEERCRED. Directory
+# 0750 candor-sealer:candor-web (tmpfiles.d). AF_UNIX SOCK_STREAM with u32be length-prefixed
+# frames (<= 128 KiB, strict decoding): the crate's transport (crates/candor-sealer SPEC-NOTES
+# item 9, replacing 07 §5.2's SOCK_SEQPACKET; AUD-RM2-SEA-16).
 [Unit]
 Description=Candor sealer IPC socket (C-07, Z-INTAKE)
 After=systemd-tmpfiles-setup.service
 
 [Socket]
-ListenSequentialPacket=/run/candor/sealer/seal.sock
+ListenStream=/run/candor/sealer/seal.sock
 SocketUser=candor-sealer
 SocketGroup=candor-web
 SocketMode=0660

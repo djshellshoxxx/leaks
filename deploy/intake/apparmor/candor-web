@@ -17,10 +17,11 @@ profile candor-web /usr/lib/candor/source-web/candor-web {
   /run/candor/config/ r,
   /run/candor/config/** r,
 
-  # Inherited AF_UNIX stream listener "http" (from tor) and the inherited stderr stream.
+  # Inherited AF_UNIX stream listener "http" (from tor), and the client stream to the sealer
+  # (seal.sock is SOCK_STREAM with length-prefixed frames; sealer SPEC-NOTES item 9).
   network unix stream,
-  unix (accept, receive, send, getattr, getopt, setopt, shutdown) type=stream,
-  # Client of the sealer (07 §5.2) and intake store (07 §5.3), SOCK_SEQPACKET.
+  unix (create, connect, accept, receive, send, getattr, getopt, setopt, shutdown) type=stream,
+  # Client of the intake store (07 §5.3), SOCK_SEQPACKET.
   network unix seqpacket,
   unix (create, connect, receive, send, getattr, getopt, setopt, shutdown) type=seqpacket,
   /run/candor/sealer/seal.sock rw,

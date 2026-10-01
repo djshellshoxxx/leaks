@@ -2,15 +2,18 @@
 # C-07 sealer (07 §4.1-§4.4, §5.2). Holds K35 (sealer signing key) and the per-deployment
 # Argon2id salt, both delivered as TPM-sealed systemd credentials (ADR-028; R7 SI-B-01:
 # never via Environment=). Tier W drafts and keys live only in mlocked RAM (ADR-034).
-# No network (PrivateNetwork=yes), no writable path at all (07 §4.2: ReadWritePaths none),
-# no capabilities (mlock is allowed by LimitMEMLOCK, so CAP_IPC_LOCK is not needed).
+# No network (PrivateNetwork=yes), no capabilities (mlock is allowed by LimitMEMLOCK, so
+# CAP_IPC_LOCK is not needed). The only writable path is the RAM-only Tier W staging tmpfs
+# (/run/candor/staging, owned 0700 by candor-sealer): the sealer writes the sealed parts and
+# bundles itself through candor-safefs, confined there by Landlock (crates/candor-sealer
+# SPEC-NOTES item 7, amending 07 §4.2 "ReadWritePaths none"; AUD-RM2-SEA-16).
 # Syscalls: an explicit allow-list (07 §4.3 + ADR-052(10), AUD-RM2-SEA-06) expressed as the
 # @system-service baseline minus everything not on the list (see the SystemCallFilter= block).
 [Unit]
 Description=Candor sealer (C-07, Z-INTAKE)
-Requires=candor-sealer.socket nftables.service
+Requires=candor-sealer.socket run-candor-staging.mount nftables.service
 Wants=candor-intake-store.socket
-After=candor-sealer.socket candor-intake-store.socket nftables.service
+After=candor-sealer.socket candor-intake-store.socket run-candor-staging.mount nftables.service
 StartLimitIntervalSec=60s
 StartLimitBurst=5
 
@@ -26,8 +29,10 @@ RestartSec=2s
 AppArmorProfile=candor-sealer
 LoadCredentialEncrypted=sealer_signing_key:/etc/credstore.encrypted/candor-intake.sealer_signing_key.cred
 LoadCredentialEncrypted=argon2_salt:/etc/credstore.encrypted/candor-intake.argon2_salt.cred
-# 07 §4.2 per-unit delta.
-MemoryMax=2560M
+# 07 §4.2 per-unit delta. The staging tmpfs is charged to this cgroup when the sealer writes
+# it, so MemoryMax = 2560M (07 §4.2: mlocked keys/drafts + working set) + staging size; the
+# profile drop-ins (profiles/ce-*/) adjust it together with the mount size. Never swap.
+MemoryMax=6656M
 MemorySwapMax=0
 LimitMEMLOCK=2G
 TasksMax=64
@@ -67,6 +72,8 @@ LimitCORE=0
 # are never executable for this unit (R7 SI-B-01).
 NoExecPaths=/
 ExecPaths=/usr
+# Tier W staging (SPEC-NOTES item 7 of the sealer): the only writable path (noexec tmpfs).
+ReadWritePaths=/run/candor/staging
 # No IP at all (07 §4.2 IPAddressDeny=any); no bind() on AF_INET/AF_INET6.
 IPAddressDeny=any
 SocketBindDeny=any
@@ -94,7 +101,7 @@ TemporaryFileSystem=/var:ro
 # /var/tmp: PrivateTmp's /var/tmp is disk-backed on the host; nothing may be written there
 # (AUD-RM2-DEP-12).
 InaccessiblePaths=-/var/tmp
-InaccessiblePaths=-/run/tor-instances -/run/candor/staging -/run/candor/intake-pg -/run/credentials/candor-intake-store.service -/etc/tor -/etc/candor/intake/postgresql -/boot
+InaccessiblePaths=-/run/tor-instances -/run/candor/intake-pg -/run/credentials/candor-intake-store.service -/etc/tor -/etc/candor/intake/postgresql -/boot
 InaccessiblePaths=-/run/candor/source-web
 # ---- Logging (ADR-016, LOG-004/005, LOG-007, NET-008; AUD-RM2-DEP-05/06) ----
 # No output of this service reaches any journal: journald stamps every stored line to the
