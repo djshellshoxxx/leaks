@@ -35,7 +35,6 @@ macro_rules! code_enum {
         }
     };
 }
-pub(crate) use code_enum;
 
 /// Marker for a numeric code registry (`Code<T>`).
 pub trait CodeSpace: 'static {

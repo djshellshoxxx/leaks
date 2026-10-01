@@ -146,6 +146,7 @@ impl Hash32 {
 }
 
 /// Per-day salt for [`SessionTag`] derivation. Secret; no `Debug`, zeroized.
+#[allow(missing_debug_implementations)] // deliberate: secrets are never printed
 pub struct DaySalt(Zeroizing<[u8; 32]>);
 
 impl DaySalt {

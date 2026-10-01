@@ -111,7 +111,17 @@ fn set_times(f: &File, slot: SlotTime) -> io::Result<()> {
 
 /// Normalizes a directory's atime/mtime to the slot and fsyncs it.
 fn settle_dir(dir: &Dir, slot: SlotTime) -> Result<(), SafeFsError> {
-    let f = dir.open_dir_nofollow(".")?.into_std_file();
+    // cap-std directory handles are O_PATH on Linux; futimens/fsync need a
+    // real descriptor. "." relative to the handle cannot leave it.
+    use rustix::fs::{Mode, OFlags};
+    let fd = rustix::fs::openat(
+        dir,
+        ".",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )
+    .map_err(|e| SafeFsError::from(io::Error::from(e)))?;
+    let f = File::from(fd);
     set_times(&f, slot)?;
     f.sync_all()?;
     Ok(())
