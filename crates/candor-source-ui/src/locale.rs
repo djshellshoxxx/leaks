@@ -159,9 +159,13 @@ fn class_of(comment: Option<&ast::Comment<&str>>) -> StringClass {
 }
 
 fn build_catalog() -> Result<Catalog, CatalogError> {
+    // The runtime parser used by `FluentResource` drops comments, so classes come from the
+    // full parser.
     let mut classes = HashMap::new();
-    for res in parse_resources()? {
-        for entry in res.entries() {
+    for (name, src) in EN_SOURCES {
+        let res = fluent_syntax::parser::parse(src)
+            .map_err(|(_, errs)| CatalogError(format!("{name}: {} parse error(s)", errs.len())))?;
+        for entry in &res.body {
             if let ast::Entry::Message(m) = entry {
                 if classes
                     .insert(m.id.name.to_owned(), class_of(m.comment.as_ref()))
@@ -198,7 +202,12 @@ fn build_catalog() -> Result<Catalog, CatalogError> {
 
 impl Catalog {
     /// Formats a message. Returns `None` if the key or any referenced argument is missing.
-    pub(crate) fn format(&self, locale: Locale, key: &str, args: &[(&str, Arg)]) -> Option<String> {
+    pub(crate) fn format(
+        &self,
+        locale: Locale,
+        key: &str,
+        args: &[(&str, Arg)],
+    ) -> Option<String> {
         let bundle = self.bundles.get(locale.index())?;
         let pattern = bundle.get_message(key)?.value()?;
         let mut fargs = FluentArgs::new();

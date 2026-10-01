@@ -30,6 +30,10 @@ pub(crate) fn escape(s: &str) -> String {
     out
 }
 
+/// Private-use character standing in for `*` in untrusted placeables while bold markup is
+/// applied. The catalog never contains it.
+const SHIELD: &str = "\u{E000}";
+
 /// Escapes, then turns `**x**` pairs into `<strong>x</strong>`. An unpaired marker stays text.
 pub(crate) fn escape_marked(s: &str) -> String {
     let parts: Vec<&str> = s.split("**").collect();
@@ -218,7 +222,23 @@ impl<'a> PageView<'a> {
     }
 
     pub(crate) fn tm1(&self, key: &str, n1: &str, v1: impl Into<Arg>) -> String {
-        escape_marked(&self.t1(key, n1, v1))
+        self.marked(key, &[(n1, v1.into())])
+    }
+
+    /// Formats a marked message whose arguments may be untrusted: `*` in argument text is
+    /// shielded so that only catalog text can produce `<strong>`.
+    pub(crate) fn marked(&self, key: &str, args: &[(&str, Arg)]) -> String {
+        let shielded: Vec<(&str, Arg)> = args
+            .iter()
+            .map(|(n, v)| {
+                let v = match v {
+                    Arg::Text(t) => Arg::Text(t.replace('*', SHIELD)),
+                    Arg::Num(n) => Arg::Num(*n),
+                };
+                (*n, v)
+            })
+            .collect();
+        escape_marked(&self.fmt_args(key, &shielded)).replace(SHIELD, "*")
     }
 
     /// A `Msg` from the view model.
@@ -326,16 +346,20 @@ impl<'a> PageView<'a> {
 
     pub(crate) fn banner_html(&self) -> String {
         let m = self.mode();
-        let s = match m {
-            Mode::Confidential => self.t1(m.banner_key(), "custodian", self.custodian()),
-            Mode::Clearnet => self.t1(
+        match m {
+            Mode::Confidential => self.marked(
                 m.banner_key(),
-                "onion",
-                self.vm.deployment.onion_address.as_str(),
+                &[("custodian", Arg::Text(self.custodian().to_owned()))],
             ),
-            _ => self.t(m.banner_key()),
-        };
-        escape_marked(&s)
+            Mode::Clearnet => self.marked(
+                m.banner_key(),
+                &[(
+                    "onion",
+                    Arg::Text(self.vm.deployment.onion_address.clone()),
+                )],
+            ),
+            _ => self.marked(m.banner_key(), &[]),
+        }
     }
 
     pub(crate) fn minimal(&self) -> bool {
