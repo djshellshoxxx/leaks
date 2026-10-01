@@ -11,7 +11,9 @@ use candor_core::stanza::{HpkeWrapContext, WrapStanza};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    let Ok(s) = WrapStanza::decode(data) else { return };
+    let Ok(s) = WrapStanza::decode(data) else {
+        return;
+    };
     assert_eq!(s.encode().expect("re-encode"), data);
     let sk = &common::member().private;
     let reply = HpkeWrapContext::Reply {

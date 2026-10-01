@@ -46,17 +46,16 @@ Scope: C-07 Intake Sealer. Sources: 04 §9.13, §11, §12.1–12.7, §13.4 (with
 
     | Object | Distribution |
     |---|---|
-    | SUBMISSION | 4/8/12/16 KiB at 50/25/15/10 % |
-    | SOURCE_MESSAGE | 4/8/12 KiB at 70/20/10 % |
-    | ATTACHMENT_BUNDLE | file buckets ≤ 8 MiB, weighted toward the empty-bundle bucket (256 KiB) |
-    | IDENTITY | 4 KiB |
+    | SUBMISSION, SOURCE_MESSAGE | always 64 KiB (maximum bucket, ADR-052(1)) |
+    | IDENTITY | always 16 KiB (maximum bucket, ADR-052(1)) |
+    | ATTACHMENT_BUNDLE | file buckets ≤ 8 MiB, weighted toward the empty-bundle bucket (256 KiB); configurable (`ChaffBuckets::bundle`), must include 256 KiB |
 12. **Epoch numbering is not defined.**
     **Implementation decision:**
     - the snapshot carries `epoch_origin_day`, and `epoch = (today − origin) / 7`;
     - a member's MEK is used only if its `epoch_id` equals the current epoch and `valid_from ≤ today < valid_until`, and it is neither revoked nor ambiguous (two valid entries count as none);
     - BE-032's ±1-day tolerance is *not* applied. Strictness only shrinks the recipient set and can fail closed; it never widens it.
 13. **The IDENTITY inner format is undefined.**
-    **Implementation decision:** `u32be(len) ‖ {1: format=1, 2: text}` padded to the IDENTITY bucket. ANONYMOUS mode seals an empty text, which lands in bucket k = 1.
+    **Implementation decision:** `u32be(len) ‖ {1: format=1, 2: text}` padded to the maximum IDENTITY bucket (16 KiB, ADR-052(1)). ANONYMOUS mode, follow-ups and key rotations seal an empty text.
     The IDENTITY object always goes to K13 (one real slot), so its shape does not reveal the mode. Chaff identities have 16 dummy slots (§12.7).
 14. **Reply verification (§13.5).**
     - REPLY `format` = 1.
@@ -71,18 +70,17 @@ Scope: C-07 Intake Sealer. Sources: 04 §9.13, §11, §12.1–12.7, §13.4 (with
 
 ## Implementation decisions (other)
 
-- **Directory snapshot.** No C-14 verifier crate exists yet. The integrator verifies checkpoints, witnesses, consistency, roster and COI_POLICY signatures, then hands the sealer the typed `DirectorySnapshot`.
+- **Directory snapshot.** The sealer seals only against a `VerifiedSnapshot` (ADR-052(6)); see "Fixes for AUD-RM2-SEA" (SEA-07) for what it verifies itself. Per-entry signatures and §14.4 continuity of roster / COI_POLICY / MEMBER_EPOCH / USER_KEYS entries and their flattening into `DirectorySnapshot` remain the C-14 verifier's job (no such crate yet).
   The sealer itself enforces:
-  - the high-water mark (`install_snapshot` rejects any tree size or issued hour below the mark; `set_high_water_mark` restores the persisted value);
+  - checkpoint signature, witness cosignature policy, RFC 9162 consistency from the persisted high-water mark `(tree_size, root_hash, issued_hour)`, and view invariants;
   - suite equality;
   - freshness;
   - `effective_day` time locks on roster members and COI policies;
   - the Triage Set (`read_intake`) and its ≤ 16 invariant;
   - MEK windows.
 - **Independent time.** This is the integrator's `Clock::today()`: Tor consensus plus Roughtime, 16 §14.3. On any error the sealer fails closed with `UNAVAILABLE`. Timers use the monotonic tokio clock only. No sub-day time is ever written: staging files carry the UTC day start.
-- **`IntakeStore`.** `candor-intake-store`'s trait was not available, so the sealer defines `server::sink::EnvelopeSink` with two methods, `commit` (COMMIT_ENVELOPE) and `rotate_account` (ACCOUNT_ROTATE).
-  **Integration:** implement it over the store client, or replace it with the store's trait.
-  On `Ok`, the sink owns any `Blob::Staged` file. On `Err`, the sealer deletes it.
+- **`IntakeStore`.** The sealer defines `server::sink::EnvelopeSink` with two methods shaped after ADR-052(2): `commit_envelope_group(group, epoch_id, received_day, release_offset_days)` (no account reference) and `upsert_account(AccountUpsert { replaces, account, rewrapped_replies })`.
+  **Integration:** implement it over the store client (the intake-store fixer is changing `IntakeStore` the same way: envelope commit without `AccountLink`, separate account create/replace). On `Ok`, the sink owns the staged bundle file; on `Err`, the sealer deletes it.
 - **Recipient selection order.** Selection runs first and is cheap; Argon2id runs after it.
   - Fail-closed refusals never consume the confirmed passphrase.
   - A store failure after derivation discards the derived keys. Nothing was committed, so the source restarts (§11.1).
@@ -95,11 +93,11 @@ Scope: C-07 Intake Sealer. Sources: 04 §9.13, §11, §12.1–12.7, §13.4 (with
   - Expiry is checked on every access and by a 10 s reaper.
   - Dropping a session zeroizes K36, the draft, the passphrase and the derived keys, and unlinks the staged files.
   - A successful submission replaces K36 and drops the draft and the staged parts.
-- **Hardening.** The crate enforces Landlock in-process: filesystem access only beneath the staging root, and no TCP bind/connect at ABI ≥ 4. `harden_process` must run on the main thread before the tokio runtime starts.
-  seccomp is delegated to systemd `SystemCallFilter=`. In-process seccompiler would need a hand-maintained tokio/safefs allow-list, and 07 §4.3 conflicts with item 7.
+- **Hardening.** The crate enforces Landlock in-process: filesystem access only beneath the staging root, and no TCP bind/connect at ABI ≥ 4. `harden_process` must run on the main thread before the tokio runtime starts. `Sealer::serve` refuses to serve unless `hardening::self_check()` passes (SEA-06).
+  seccomp is delegated to systemd `SystemCallFilter=` (explicit allow-list, see SEA-06). In-process seccompiler would need a hand-maintained tokio/safefs allow-list, and 07 §4.3 conflicts with item 7.
   See the README for the unit file.
 - **K35 (sealer signing key).** It is passed in by the integrator, never read from the environment. The integrator loads it from a `LoadCredentialEncrypted=` credential (R7). `sealer_sig` is added to SUBMISSION (key 19) and SOURCE_MESSAGE (key 12).
-- **Logging.** The sealer emits no logs or audit events. Nothing it handles is loggable, and `candor-log` has no `Service::Sealer` code yet. Lifecycle `sys.*` events belong to the integrating binary.
+- **Logging.** The sealer emits no logs. The only audit event it emits is the `sys.health` record that `InsecureDevMode::acknowledge` writes through the integrator's `candor_log::AuditLog` (SEA-06). Lifecycle `sys.*` events belong to the integrating binary. The listener counts survived `accept()` errors (`Sealer::accept_errors()`) for the integrator's health reporting.
 
 ## Dependencies
 
@@ -111,12 +109,13 @@ Scope: C-07 Intake Sealer. Sources: 04 §9.13, §11, §12.1–12.7, §13.4 (with
 | `tokio` | =1.48.0 (`rt`, `net`, `sync`, `time`, `io-util`) | Unix-socket listener, the per-session async mutex, the Argon2id semaphore, timers and `spawn_blocking`. Same pin as the store. |
 | `rustix` | =1.1.2 (`mm`, `process`) | Safe `mlockall`, `prctl(PR_SET_DUMPABLE)` and `setrlimit(RLIMIT_CORE)`. Same pin as safefs. |
 | `landlock` | =0.4.7 | In-process filesystem and TCP confinement (R7 SI-B-03). Safe API. |
+| `candor-log` | path | Typed audit event for the developer override (ADR-052(5), SEA-06); no free-text logging. |
 | `hkdf`, `sha2` | =0.13.0, =0.11.0 | Chaff CK derivation `HKDF(chaff_seed, u64 counter, "candor/v1/chaff/seed")` (§12.7). candor-core exposes no generic HKDF. Pins match core. |
 | `subtle` | =2.6.1 | Constant-time word-index mapping. |
 | `unicode-normalization` | =0.1.24 | NFC of the message (§13.4 key 13). Pin matches core. |
 | `proptest`, `tempfile`, `tokio[test-util,macros,rt-multi-thread]` | dev | Property tests, temporary roots, paused-time tests. |
 
-## Tests (45) and requirement mapping
+## Tests and requirement mapping
 
 | Test | Covers |
 |---|---|
@@ -149,7 +148,7 @@ Checked:
   - Frames are 1..=128 KiB.
   - `BAD_FRAME` closes the connection.
   - Proptests cover arbitrary and mutated frames.
-- **Fail closed on every privacy path.** Missing, stale, rolled-back or wrong-suite snapshot; clock failure; invalid K13 or K41; no eligible Triage Set member; > 16 members; store failure (staged output deleted); CSPRNG failure (propagated). Chaff skips its write on the same conditions. There is no unsealed fallback.
+- **Fail closed on every privacy path.** Missing, stale, rolled-back, forked, unsigned or wrong-suite snapshot; clock failure; invalid K13 or K41; no eligible Triage Set member; > 16 persons; ambiguous COI_POLICY; store failure (staged output deleted); CSPRNG failure (propagated; never a fixed key). Chaff skips its write on the same conditions (SEA-15). Unhardened processes do not serve (SEA-06). There is no unsealed fallback.
 - **Recipient set.** COI is applied in RAM at Submit only, on the Triage Set only, with time locks, and nothing is wrapped before Submit (RVW-A-07). Follow-ups are limited to the original eligible set. The source's COI ticks are never put into `prefs_ct`. The test asserts that a non-triage member, an excluded member and a later-added member hold no slot.
 - **Secrets.**
   - Zeroize on drop; minimal lifetime (the passphrase is dropped after derivation, and after 5 failed confirmations).
@@ -172,7 +171,38 @@ Residual risks:
 - seccomp and the slab pool are not enforced in-process.
 - `madvise(DONTDUMP)` is not applied (mitigated by non-dumpable and `LimitCORE=0`).
 - The directory snapshot's authenticity rests on the integrator's C-14 verification.
-- The chaff distributions are provisional (item 11). Bundles larger than 8 MiB, and real traffic above the chaff rate, are distinguishable (honest limit, §12.7).
+- The chaff bundle distribution is provisional (item 11). Bundles larger than 8 MiB (or in buckets the configured distribution does not cover), and real traffic above the chaff rate, are distinguishable (honest limit, §12.7, ADR-052(1)). Passphrase rotations update an account row; dummy accounts are never rotated (rare, not linked to an envelope).
 - The tmpfs staging area reveals bucket-sized ciphertext files and their count per day (ADR-034 accepted).
 - **Padding cost.** A part declared large but sent small still costs encrypting zero padding up to its bucket, at most `max_file_bytes`. Staging capacity bounds this (a full tmpfs gives `BUSY`), and so do the C-06 per-circuit rate limits (SW-06: 30/h).
 - **Socket permissions.** The socket's file mode and directory (a 0700 RuntimeDirectory) are set by the systemd unit or the integrator. SO_PEERCRED is checked regardless.
+
+## Fixes for AUD-RM2-SEA (2026-10-01; ADR-052)
+
+| Finding | Change | Test |
+|---|---|---|
+| SEA-01 (High) size/shape distinguishers | ADR-052(1): every group is main + ATTACHMENT_BUNDLE + IDENTITY (`sink::EnvelopeGroup`). SUBMISSION/SOURCE_MESSAGE always 64 KiB, IDENTITY always 16 KiB (`inner::length_prefixed_pad` pads to `max_bucket`; the dry-run sizing pass is gone). Real groups without attachments carry an empty bundle (256 KiB); follow-ups and KEY_ROTATIONs carry an empty IDENTITY sealed to K13 (SOURCE_MESSAGE key 11 = bundle hash, key 1000 = identity hash, Recipient List key 1001 = identity entries). Chaff builds the same three objects; `ChaffBuckets` keeps only the configurable bundle distribution (must include 256 KiB). | `tests/shape.rs` (auditor PoC: 40 KiB message, 4,090-byte identity, follow-ups with/without attachment vs 40 chaff: object count/order, per-object size, total size, bundle in chaff support); `chaff.rs`; `inner.rs::text_objects_use_max_bucket` |
+| SEA-02 (High) account linkage, release offset | ADR-052(2): `EnvelopeSink::commit_envelope_group(group, epoch, day, delay)` has no account field; accounts go through `upsert_account`. Initial-shaped chaff writes a dummy account (random `lookup_tag`/mailbox, real Ed25519 `auth_pk`, `prefs_ct` of the same fixed length under a discarded random key; prefs plaintext is now padded to 2,048 B). Chaff delays: `ChaffConfig::delayed_share_permille` (set to the observed opt-in share) × U{1,2,3}. Op order: real initial and chaff initial `A,G`; follow-ups `G`; rotation `G…,A`. | `shape.rs` (op sequence, account shape), `chaff.rs::chaff_triple_…`, `chaff_delay_follows_real_distribution`, `flow.rs` |
+| SEA-03 (High) COI per roster entry | ADR-052(3): `select` excludes a user if any of their roster entries (any state) carries an excluded label; Triage Set and the ≤ 16 limit count distinct persons. | `select.rs::coi_applies_per_person_not_per_roster_entry`; `fail_closed.rs::coi_excluded_person_listed_under_two_labels_gets_no_slot` (auditor PoC) |
+| SEA-04 (High) listener | ADR-052(4): connection cap (`Limits::max_connections`, 128; over cap → one non-blocking `ERR{BUSY}` + close), handshake / frame / idle / write timeouts (5 s / 5 s / 120 s / 5 s), frames ≤ 256 B before `HELLO` (no 128 KiB buffer for unauthenticated or idle peers), `accept()` errors counted + back-off 10 ms→1 s, loop never returns. | `tests/listener.rs` (cap/BUSY, stalled prefix, handshake and idle timeouts, pre-HELLO size); `tests/listener_emfile.rs` (auditor PoC: EMFILE survived, later connects served) |
+| SEA-05 (Med) zero K36 | No fixed key anywhere: after a commit, CSPRNG failure clears the draft and removes the session (response still `Sealed`; `rekey_after_commit`); `SEAL_ABORT` likewise. | `mod.rs::rng_failure_after_commit_never_installs_a_fixed_key` (failure injected); no `from_bytes([0…` in non-test `src` |
+| SEA-06 (Med) hardening not enforced | `hardening::harden_process` records a `HardeningReport`; `self_check()` re-verifies dumpable/core limit; `Sealer::serve` refuses (`PermissionDenied`) unless it passes with Landlock fully enforced and the peer UID ≠ 0/own UID, or `SealerConfig::insecure_dev` holds an `InsecureDevMode` token, obtainable only via `acknowledge(&mut AuditLog)` which emits `sys.health{service=upload, DEGRADED, READINESS}` (candor-log has no `Service::Sealer` / hardening check code: **spec/log-owner item**). Disabled chaff also needs the token. Unit: explicit syscall allow-list as `@system-service` minus all other calls (config-check.sh requires the `@system-service` first line), `connect`/`socket` AF_UNIX only (ADR-052(10)). | `tests/hardening.rs` (fails when hardening cannot apply; unhardened/uid-0/own-uid refused; hardened serves; override audit-logged, refused without a sink); `config-check.sh` 635/635 OK |
+| SEA-07 (Med) unverified snapshot | ADR-052(6): `directory::VerifiedSnapshot` (private fields, only `verify`): LOG_KEY Ed25519 signature over the §14.3 note body (rebuilt from structured fields; no text/base64 parsing), C2SP cosignatures vs pinned `DirectoryTrust` (`w_total`, `w_external`, distinct witnesses), view bound to checkpoint, RFC 9162 consistency proof from the HWM (`merkle`, SHA-256 from candor-core), equal size ⇒ equal root, invariants (unique channels, ≤ 16 Triage persons, ≤ 1 COI_POLICY per day). `install_snapshot(bundle, persist)` verifies under the HWM lock, persists the new mark first, then swaps the `Arc` (sessions survive). Ambiguous active COI policy fails closed in `select`. | `fail_closed.rs::snapshot_rollback_fork_signature_and_invariants_rejected`, `witness_cosignature_policy_enforced`; `directory.rs` unit tests (proofs for all m ≤ n ≤ 40, tampering, note body, RFC 4648 vectors) |
+| SEA-08 (Med) COI ticks not zeroized | `Value` wipes integers on drop; inner maps are pre-sized (no realloc copies); `concerns`, `excluded`, `excluded_users`, `triage`, `eligible`, `Selection::eligible_user_ids`, `ReportPrefs::{original_eligible, categories}` are `Zeroizing`; `Selection`/`Recipient` lost `Debug`. CORE-03 (normalize realloc) remains with candor-core. | unit tests + review |
+| SEA-09 (Med) no fuzz target | `fuzz/fuzz_targets/fuzz_sealer_ipc.rs` (cargo-fuzz layout as candor-core): decoders + canonical re-encode, then a `Sealer::handle` state-machine driver (Argon2id ops skipped). | built with nightly-2026-09-28, run 600 s at 2 GiB RSS (see final report) |
+| SEA-10 (Low) follow-up COI | Report categories kept in `prefs_ct` (report key 1002); follow-ups and rotations re-apply the active COI_POLICY within the original eligible set. | `fail_closed.rs::follow_up_reapplies_tightened_coi_policy` |
+| SEA-11 (Low) secret wrappers | `SecretBytes/Text/Words`, `Coi`: hand-written constant-time `PartialEq` (Clone kept: copies are `Zeroizing`); `Request` `Debug` prints only the op, `Response` only the variant (+ error code), `DraftSet/DraftView/PendingReply/ReplyView` and sink types redacted. | `proto_props.rs` (round trips still compare) |
+| SEA-12 (Low) NOTE_REAL | Off unless `SealerConfig::enable_note_real` (Tier V, RM-8); returns `BAD_STATE`. Counting against store commits deferred to RM-8. | `chaff.rs::note_real_disabled_by_default` |
+| SEA-13 (Low) orphans, unlink under lock | Staging files are created under a caller-chosen `ObjectId` (`seal::stage_create`), and a failed `commit` removes that id (parts, bundles, chaff bundles). The reaper takes expired sessions out under the lock and drops them after; the background reaper runs it via `spawn_blocking`. | hygiene/fail_closed suites |
+| SEA-14 (Low) rotation blocked | Unopenable pending replies are skipped (they stay unreadable); rotation proceeds. | `flow.rs` (bogus entry + real entry → 1 re-wrapped) |
+| SEA-15 (Info) chaff gating | `chaff_event` refuses on disabled channel and stale snapshot too (same conditions as real); `enabled = false` needs the dev token. | `chaff.rs::chaff_gated_like_real_sealing` |
+| SEA-16 (Info) unit mismatch | **Not changed** (outside the allowed edit scope beyond the syscall list): the shipped unit still provides `ListenSequentialPacket`, hides `/run/candor/staging` and names credentials differently from the README. Integration item for the deploy owner. | — |
+| SEA-17 (Info) supply chain | No new third-party dependency (candor-log is a workspace crate). Vet/deny gates are workspace-level (ADR-052(7)/(8)). | — |
+| SEA-18 (Info) residual metadata | Peer UID 0 / own UID refused at `serve` (self-check). tmpfs ctime/birth time of staged ciphertext: residual, for the 09 list. Session-handle lookup timing: web peer only, accepted. | `hardening.rs` |
+
+Integration notes:
+- **AUD-RM1-CORE-04 (STREAM constructors).** All raw-key STREAM construction is isolated in `seal::{staged_part_encryptor, staged_part_decryptor, payload_encryptor}`; switching to `StreamEncryptor::for_staged_part(k36, part_id)` (and the decryptor / payload counterparts) is a one-line change in each.
+- **Store trait (ADR-052(2)).** Map `commit_envelope_group` to the store's account-free envelope commit and `upsert_account` to its separate create/replace operation; `received_day` is the sealer's `Clock::today()`.
+- **High-water mark.** Persist the `HighWaterMark` passed to the `install_snapshot` hook (tree size, root hash, issued hour) and restore it with `set_high_water_mark` before the first install.
+- **candor-log.** Please add `Service::Sealer` and a hardening/override check code; the sealer then switches the `sys.health` fields.
+
+Check notes (2026-10-01): `cargo clippy -p candor-sealer` was run with `--no-deps` because `candor-log` HEAD fails `clippy::wrong_self_convention` (another fixer's crate); `cargo fmt` was applied to this crate only (`-p candor-sealer`), because `fmt --all` would rewrite other fixers' in-progress files. candor-core was mid-edit (AUD-RM1-CORE) during this work, so tests ran against candor-core/candor-safefs at commit `b38ae65` in a scratch copy of the workspace.

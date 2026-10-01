@@ -12,7 +12,9 @@ mod common;
 
 use candor_core::object::parse;
 use candor_core::secret::ContentKey;
-use candor_core::slots::{RECIPIENT_ENTRY_LEN, RecipientListEntry, RecipientSlotBlock, SLOT_BLOCK_LEN};
+use candor_core::slots::{
+    RECIPIENT_ENTRY_LEN, RecipientListEntry, RecipientSlotBlock, SLOT_BLOCK_LEN,
+};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
@@ -41,11 +43,15 @@ fuzz_target!(|data: &[u8]| {
             assert_eq!(released, pt.len());
         }
     }
-    let (Some(blk), Ok(binding)) = (block, p.slot_binding_from_header()) else { return };
+    let (Some(blk), Ok(binding)) = (block, p.slot_binding_from_header()) else {
+        return;
+    };
     if p.check_slot_block(&blk).is_err() {
         return;
     }
-    let Ok((ck2, _)) = blk.trial_open(&common::member().private, &binding) else { return };
+    let Ok((ck2, _)) = blk.trial_open(&common::member().private, &binding) else {
+        return;
+    };
     let Ok(pt) = p.open(&ck2) else { return };
     let n = usize::from(pt.get(9).copied().unwrap_or(0));
     let entries: Vec<RecipientListEntry> = pt

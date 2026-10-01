@@ -11,7 +11,14 @@ use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     let _ = record_header(data);
-    let aad = RecordAad::Case { tenant_id: [0; 16], case_id: [0; 16], table_id: 0, column_id: 0, record_id: [0; 16], row_version: 0 };
+    let aad = RecordAad::Case {
+        tenant_id: [0; 16],
+        case_id: [0; 16],
+        table_id: 0,
+        column_id: 0,
+        record_id: [0; 16],
+        row_version: 0,
+    };
     if let Ok(pt) = open_record(&AeadKey::from_bytes(common::RECORD_KEY), &aad, data) {
         assert_eq!(pt.as_slice(), b"seed");
     }

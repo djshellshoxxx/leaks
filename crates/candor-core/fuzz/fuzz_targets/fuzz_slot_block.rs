@@ -8,7 +8,9 @@
 mod common;
 
 use candor_core::Suite;
-use candor_core::slots::{RECIPIENT_ENTRY_LEN, RecipientListEntry, RecipientSlotBlock, SLOT_BLOCK_LEN, SlotBinding};
+use candor_core::slots::{
+    RECIPIENT_ENTRY_LEN, RecipientListEntry, RecipientSlotBlock, SLOT_BLOCK_LEN, SlotBinding,
+};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

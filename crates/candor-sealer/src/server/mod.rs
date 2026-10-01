@@ -1692,6 +1692,25 @@ fn prefs_ct(st: &State, keys: &SourceKeys, prefs: &Prefs) -> Result<Vec<u8>, can
     )
 }
 
+/// After a commit: drop the draft and install a fresh K36. If the CSPRNG fails,
+/// the draft is still dropped, K36 is left as it was (never a fixed value) and
+/// `true` asks the caller to remove the whole session (AUD-RM2-SEA-05).
+fn rekey_after_commit(
+    sess: &mut Session,
+    rng: impl FnOnce() -> Result<Secret32, Response>,
+) -> bool {
+    match rng() {
+        Ok(fresh) => {
+            sess.clear_draft(fresh);
+            false
+        }
+        Err(_) => {
+            sess.clear_draft_contents();
+            true
+        }
+    }
+}
+
 /// Returns the response and whether the session must be removed (SEA-05).
 fn seal_blocking(mut g: OwnedMutexGuard<Session>, st: &State, job: SealJob) -> (Response, bool) {
     let ctx = seal_ctx(st, &job);
@@ -1822,16 +1841,7 @@ fn seal_blocking(mut g: OwnedMutexGuard<Session>, st: &State, job: SealJob) -> (
     // Committed and fsynced: zeroize K36, the draft and staged parts (§9.13).
     // On CSPRNG failure the draft is still dropped and the whole session is
     // removed; a fixed key is never installed (AUD-RM2-SEA-05).
-    let drop_session = match random_secret32() {
-        Ok(fresh) => {
-            sess.clear_draft(fresh);
-            false
-        }
-        Err(_) => {
-            sess.clear_draft_contents();
-            true
-        }
-    };
+    let drop_session = rekey_after_commit(sess, random_secret32);
     if job.initial {
         sess.phase = Phase::Authenticated;
     }
@@ -1970,6 +1980,21 @@ mod tests {
         assert_eq!(s.capacity(), input.len() * 3);
         let s = lossy_utf8(b"plain words");
         assert_eq!(s.as_str(), "plain words");
+    }
+
+    /// AUD-RM2-SEA-05 regression: a CSPRNG failure after a commit never installs
+    /// a fixed K36; the draft is dropped and the session is marked for removal.
+    #[test]
+    fn rng_failure_after_commit_never_installs_a_fixed_key() {
+        let mut s = Session::new(Phase::Drafting, Secret32::from_bytes([7; 32]));
+        s.draft.message = SecretText::new("draft");
+        let drop = rekey_after_commit(&mut s, || Err(err(ErrorCode::Internal)));
+        assert!(drop);
+        assert_eq!(s.k36.expose(), &[7; 32]);
+        assert!(s.draft.message.expose().is_empty());
+        let drop = rekey_after_commit(&mut s, || Ok(Secret32::from_bytes([9; 32])));
+        assert!(!drop);
+        assert_eq!(s.k36.expose(), &[9; 32]);
     }
 
     #[test]

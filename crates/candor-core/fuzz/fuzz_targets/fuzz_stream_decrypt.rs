@@ -12,7 +12,9 @@ use candor_core::stream::{StreamDecryptor, decrypt};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    let Some((len_bytes, ct)) = data.split_first_chunk::<2>() else { return };
+    let Some((len_bytes, ct)) = data.split_first_chunk::<2>() else {
+        return;
+    };
     let len = u64::from(u16::from_be_bytes(*len_bytes)) * 4;
     let key = || AeadKey::from_bytes(common::STREAM_KEY);
     let buffered = decrypt(key(), len, ct);

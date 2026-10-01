@@ -780,7 +780,7 @@ mod tests {
         impl<T: ?Sized> AmbiguousIfClone<()> for T {}
         #[allow(dead_code)]
         struct IsClone;
-        impl<T: ?Sized + Clone> AmbiguousIfClone<IsClone> for T {}
+        impl<T: Clone> AmbiguousIfClone<IsClone> for T {}
         <RecipientListEntry as AmbiguousIfClone<_>>::probe();
         <RecipientList as AmbiguousIfClone<_>>::probe();
 

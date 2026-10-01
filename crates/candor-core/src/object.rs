@@ -462,7 +462,7 @@ mod tests {
             ) == *kid)
                 .then(|| m.public.clone())
         };
-        blk.verify_slot_block(&ck2, &p.slot_binding(ctx.clone()), list.as_slice(), &dir)
+        blk.verify_slot_block(&ck2, &p.slot_binding(ctx.clone()), list.as_slice(), dir)
             .unwrap();
         // AUD-RM1-CORE-09(c): the header-derived binding equals the expected one.
         assert_eq!(

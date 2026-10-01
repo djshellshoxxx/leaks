@@ -78,11 +78,11 @@ fn result(t: &Value) -> &str {
     t["result"].as_str().unwrap()
 }
 
-fn aead_suite<const N: usize>(
-    text: &str,
-    seal: fn(&AeadKey, &[u8; N], &[u8], &[u8]) -> crate::Result<Vec<u8>>,
-    open: fn(&AeadKey, &[u8; N], &[u8], &[u8]) -> crate::Result<zeroize::Zeroizing<Vec<u8>>>,
-) -> (usize, usize) {
+type SealFn<const N: usize> = fn(&AeadKey, &[u8; N], &[u8], &[u8]) -> crate::Result<Vec<u8>>;
+type OpenFn<const N: usize> =
+    fn(&AeadKey, &[u8; N], &[u8], &[u8]) -> crate::Result<zeroize::Zeroizing<Vec<u8>>>;
+
+fn aead_suite<const N: usize>(text: &str, seal: SealFn<N>, open: OpenFn<N>) -> (usize, usize) {
     let v = load(text);
     let mut unrepresentable = 0;
     let n = each(&v, |_, t| {

@@ -7,7 +7,9 @@ use candor_core::passphrase::{MAX_PASSPHRASE_INPUT_LEN, Wordlist, normalize};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    let Ok(s) = core::str::from_utf8(data) else { return };
+    let Ok(s) = core::str::from_utf8(data) else {
+        return;
+    };
     match normalize(s) {
         Ok(n) => {
             assert!(s.len() <= MAX_PASSPHRASE_INPUT_LEN);

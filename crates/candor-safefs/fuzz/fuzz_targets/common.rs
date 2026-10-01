@@ -46,6 +46,9 @@ pub fn check_display_name(n: &DisplayName) {
     assert!(!s.is_empty());
     assert!(s.len() <= MAX_DISPLAY_NAME_BYTES);
     assert!(!s.chars().all(|c| c == '.'));
+    // Fullwidth/compatibility dots never yield "." / ".." after NFKC-ish
+    // folding: such names are rendered with U+2024 only.
+    assert!(s != "\u{FF0E}" && s != "\u{FF0E}\u{FF0E}");
     for c in s.chars() {
         assert!(!c.is_control(), "control char survived");
         assert!(!matches!(c, '/' | '\\' | ':' | '\0'));
@@ -54,7 +57,19 @@ pub fn check_display_name(n: &DisplayName) {
             '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}'
                 | '\u{2066}'..='\u{2069}' | '\u{2028}' | '\u{2029}'
         ));
+        // AUD-RM1-SFS-02: no invisible / blank-looking characters, and no
+        // whitespace other than single ASCII spaces.
+        assert!(!matches!(
+            c,
+            '\u{00AD}' | '\u{034F}' | '\u{115F}' | '\u{1160}' | '\u{180B}'..='\u{180F}'
+                | '\u{200B}'..='\u{200D}' | '\u{2060}'..='\u{206F}' | '\u{2800}'
+                | '\u{3164}' | '\u{FE00}'..='\u{FE0F}' | '\u{FEFF}' | '\u{FFA0}'
+                | '\u{FFF9}'..='\u{FFFB}' | '\u{E0000}'..='\u{E0FFF}'
+                | '\u{E000}'..='\u{F8FF}'
+        ), "invisible char survived");
+        assert!(c == ' ' || !c.is_whitespace(), "non-space whitespace survived");
     }
+    assert!(!s.contains("  ") && !s.starts_with(' ') && !s.ends_with(' '));
     let mut comps = Path::new(s).components();
     assert!(matches!(comps.next(), Some(Component::Normal(_))));
     assert!(comps.next().is_none());

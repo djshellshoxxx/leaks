@@ -36,7 +36,11 @@ pub fn member() -> &'static KemKeyPair {
 }
 
 pub fn member_ctx() -> SlotContext {
-    SlotContext::MemberEpoch { tenant_id: TENANT, channel_id: CHANNEL, epoch_id: EPOCH }
+    SlotContext::MemberEpoch {
+        tenant_id: TENANT,
+        channel_id: CHANNEL,
+        epoch_id: EPOCH,
+    }
 }
 
 /// Key Directory stub containing only the fuzz member (MEK kind).

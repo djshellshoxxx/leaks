@@ -336,7 +336,7 @@
 
 ## Re-test (round 2), 2026-10-01
 
-- **Re-test commit:** `7d340f68794c76cff22277641765fb02d84d74fb`. The fixes were committed in `ab3170e`, `132e108`, `d73cff5`, `db1d234` and `3c1717e`. None of those carry `[skip ci]`-free CI runs.
+- **Re-test commit:** `7d340f68794c76cff22277641765fb02d84d74fb`. The fixes were committed in `ab3170e`, `132e108`, `d73cff5`, `db1d234` and `3c1717e`. All of them were pushed with `[skip ci]`, so CI has not run on any of them.
 - **Inputs:** `crates/candor-source-ui/SPEC-NOTES.md` § "Fixes for AUD-RM1-SUI"; `process/audits/FIXES-RM0-INF.md`; DECISIONS ADR-052(8).
 - **Method (§G):**
   1. Read each fix diff (`git diff 55f3356..7d340f6` over the scope).
@@ -467,10 +467,10 @@
 |---|---|---|---|
 | High | 0 | 0 | 1 (SUI-01) |
 | Medium | 2 (INF-01, INF-10) | 0 | 6 (SUI-02, SUI-03, INF-02, INF-03, INF-04, INF-05*) |
-| Low | 3 (INF-06, SUI-11, SUI-12) | 2 (SUI-05, SUI-06) | 4 (SUI-04, SUI-07, SUI-10, INF-07, INF-08)† |
+| Low | 3 (INF-06, SUI-11, SUI-12) | 2 (SUI-05, SUI-06) | 5 (SUI-04, SUI-07, SUI-10, INF-07, INF-08) |
 | Info | 1 (SUI-13) | 1 (SUI-08) | 2 (SUI-09, INF-09) |
 
-\* INF-05: the import approvals are Accepted-pending (Security Lead). † INF-08 is counted with the Low fixes (five Low findings fixed in total).
+\* INF-05: the import approvals are Accepted-pending (Security Lead).
 
 ### Gate verdict (round 2)
 
