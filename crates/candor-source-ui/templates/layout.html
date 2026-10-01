@@ -46,6 +46,7 @@
 </header>
 <main id="main" tabindex="-1">
 {%- block main %}{% endblock %}
+{% include "tips.html" %}
 {%- if p.in_session() %}
 <p class="note">{{ p.t("sui-session-rule") }}</p>
 <div class="warn tw tw-idle" role="status"><p>{{ p.t("sui-session-idle-warn") }}</p>{% include "stay.html" %}</div>

@@ -586,6 +586,29 @@ impl<'a> PageView<'a> {
         ]
     }
 
+    // ---- safety tips (11a) -----------------------------------------------------------
+
+    /// Tips for this screen (11a §4).
+    pub(crate) fn tips(&self) -> &'static [crate::tips::Tip] {
+        self.screen.tips()
+    }
+
+    /// Every tip (S02b page).
+    pub(crate) fn all_tips(&self) -> &'static [crate::tips::Tip] {
+        &crate::tips::Tip::ALL
+    }
+
+    /// Whether this screen renders tip details inline (S02 links to S02b instead).
+    pub(crate) fn tip_details(&self) -> bool {
+        self.screen.inline_tip_details()
+    }
+
+    /// Whether this screen links to the S02b page (not from S02b itself, and not from the
+    /// Leave page, whose only link is "Back to start").
+    pub(crate) fn tip_more_link(&self) -> bool {
+        !matches!(self.screen, Screen::SafetyTips) && !self.minimal()
+    }
+
     // ---- channels, files, cards -------------------------------------------------------
 
     pub(crate) fn channel_selected(

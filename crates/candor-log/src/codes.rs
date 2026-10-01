@@ -38,6 +38,11 @@ macro_rules! code_enum {
                 Self::CODES
             }
         }
+        impl $crate::diag::DiagCode for $name {
+            fn diag_code(&self) -> $crate::diag::DiagCodeValue {
+                $crate::diag::DiagCodeValue::Code(self.code())
+            }
+        }
         impl Sample for $name {
             fn sample() -> Self {
                 Self::ALL.first().copied().unwrap_or_else(|| unreachable_first())
@@ -104,6 +109,14 @@ impl<S: CodeSpace> Sealed for Code<S> {}
 impl<S: CodeSpace> AuditField for Code<S> {
     fn to_value(&self) -> Value {
         Value::Uint(u64::from(self.0))
+    }
+}
+impl<S: CodeSpace> crate::diag::DiagCode for Code<S> {
+    fn diag_code(&self) -> crate::diag::DiagCodeValue {
+        crate::diag::DiagCodeValue::Registry {
+            space: S::NAME,
+            code: self.0,
+        }
     }
 }
 

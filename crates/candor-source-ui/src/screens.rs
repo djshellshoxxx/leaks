@@ -14,6 +14,8 @@ pub enum Screen {
     Landing,
     /// S02 Safety Check.
     Safety,
+    /// S02b Safety tips for each step (11a; ADR-051(2) linked sub-page of S02).
+    SafetyTips,
     /// S03 Anonymity Status.
     Status,
     /// S04 Create Report.
@@ -86,9 +88,10 @@ pub enum Screen {
 
 impl Screen {
     /// All screens.
-    pub const ALL: [Screen; 36] = [
+    pub const ALL: [Screen; 37] = [
         Screen::Landing,
         Screen::Safety,
+        Screen::SafetyTips,
         Screen::Status,
         Screen::NewReport,
         Screen::Concerns,
@@ -130,6 +133,7 @@ impl Screen {
         match self {
             Screen::Landing => "S01",
             Screen::Safety => "S02",
+            Screen::SafetyTips => "S02b",
             Screen::Status => "S03",
             Screen::NewReport => "S04",
             Screen::Concerns => "S04b",
@@ -206,6 +210,7 @@ impl Screen {
             | Screen::Discarded
             | Screen::Closed => Route::Landing,
             Screen::Safety => Route::Safety,
+            Screen::SafetyTips => Route::SafetyTips,
             Screen::Status => Route::Status,
             Screen::NewReport | Screen::NoReader => Route::New,
             Screen::Concerns => Route::Concerns,
@@ -245,6 +250,7 @@ impl Screen {
         match self {
             Screen::Landing => "sui-landing-step",
             Screen::Safety => "sui-safety-step",
+            Screen::SafetyTips => "tip-page-step",
             Screen::Status => "sui-status-step",
             Screen::NoReader => "sui-step-2",
             Screen::Identity | Screen::IdentityConfirm | Screen::ModeChanged => "sui-id-step",
@@ -304,6 +310,7 @@ macro_rules! templates {
 templates! {
     LandingTpl => "s01_landing.html",
     SafetyTpl => "s02_safety.html",
+    SafetyTipsTpl => "s02b_tips.html",
     StatusTpl => "s03_status.html",
     NewReportTpl => "s04_new.html",
     ConcernsTpl => "s04b_concerns.html",
@@ -343,6 +350,7 @@ pub(crate) fn render_template(p: &PageView<'_>) -> Result<String, askama::Error>
     match p.screen {
         Screen::Landing => LandingTpl { p }.render(),
         Screen::Safety => SafetyTpl { p }.render(),
+        Screen::SafetyTips => SafetyTipsTpl { p }.render(),
         Screen::Status => StatusTpl { p }.render(),
         Screen::NewReport => NewReportTpl { p }.render(),
         Screen::Concerns => ConcernsTpl { p }.render(),

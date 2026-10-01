@@ -9,6 +9,8 @@ pub enum Route {
     Landing,
     /// `/safety` (SW-18).
     Safety,
+    /// `/safety/tips` (11a S02b; GET only, no state).
+    SafetyTips,
     /// `/status` (SW-17).
     Status,
     /// `/new` (SW-02/03).
@@ -55,6 +57,7 @@ impl Route {
         match self {
             Route::Landing => "/",
             Route::Safety => "/safety",
+            Route::SafetyTips => "/safety/tips",
             Route::Status => "/status",
             Route::New => "/new",
             Route::Concerns => "/concerns",

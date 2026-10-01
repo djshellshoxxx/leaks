@@ -35,6 +35,7 @@ pub fn sample_view_model(screen: Screen, mode: Mode, with_errors: bool) -> ViewM
         screen,
         Screen::Landing
             | Screen::Safety
+            | Screen::SafetyTips
             | Screen::Status
             | Screen::Login
             | Screen::Leave

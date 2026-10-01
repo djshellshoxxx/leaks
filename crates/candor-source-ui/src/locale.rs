@@ -23,9 +23,10 @@ use unic_langid::LanguageIdentifier;
 use crate::model::Arg;
 
 /// English master catalog sources (one file per namespace).
-const EN_SOURCES: [(&str, &str); 2] = [
+const EN_SOURCES: [(&str, &str); 3] = [
     ("sui.ftl", include_str!("../locales/en/sui.ftl")),
     ("sops.ftl", include_str!("../locales/en/sops.ftl")),
+    ("tips.ftl", include_str!("../locales/en/tips.ftl")),
 ];
 
 /// Text direction of a locale.

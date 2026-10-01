@@ -18,6 +18,7 @@ mod page;
 pub mod preview;
 mod routes;
 mod screens;
+mod tips;
 mod view;
 
 use core::fmt;
@@ -33,6 +34,7 @@ pub use page::{
 };
 pub use routes::Route;
 pub use screens::Screen;
+pub use tips::Tip;
 
 /// Name of the hidden single-use form-token field (11 §5.7 `ft`; 08 SW-* `csrf`).
 pub const FORM_TOKEN_FIELD: &str = "csrf";
