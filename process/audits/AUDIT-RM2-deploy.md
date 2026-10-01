@@ -999,3 +999,24 @@ Method: the script has no `pipefail` (`set -u` only). I injected failures by sha
 DEP-29 and DEP-30 are fixed. The sealer memory rule and ADR-056 are verified.
 
 Gate: **PASS 2026-10-01 e9e6a1a** for `deploy/` and `crates/candor-safe-read`. Live-only checks remain integration items 7–9 (memfd_noexec on `/proc/sys`, AppArmor `raw_data`, `systemctl show`).
+
+---
+
+## Re-test (round 7)
+
+| Field | Value |
+|---|---|
+| Date | 2026-10-01 |
+| Revision | `deploy/` at HEAD `2956e4f`; the working tree equals HEAD for `deploy/` |
+| Scratch | `/var/tmp/aud7.*` and `/run/aud7wb.*`, removed afterwards |
+| Tools | shellcheck clean. `CANDOR_TEST_PG=1 validate.sh` on a scratch snapshot: 416 PASS, 0 FAIL, exit 0 |
+
+| Item | Status | Evidence |
+|---|---|---|
+| DEP-31 (fail-open on failed `comm`/`uniq`) | **Fixed** | `set -u -o pipefail`; a tool self-test runs first (exit 2); the status of every comparison is checked; `grep -q` runs on here-strings. Tool-shadowing sweep: awk, grep, sed, cut, sort, tr, comm, uniq, wc and stat failing → exit 2; jq, head, tail, cmp, sha256sum, systemd-analyze, nft, tor, unshare and setpriv failing → exit 30. A tool that fails **after** passing the self-test: comm, uniq, sort, grep, awk and cut all → exit 30, and the PostgreSQL-key case that was fail-open in round 6 is caught. The shell's exit 144 in my own runs was my shim, not the checker |
+| DEP-32 (fd inheritance) | **Fixed** | No persistent descriptor any more: the reader gets `3<"$WORK"` per call. Shims around nft, tor, jq and systemd-analyze recorded their `/proc/self/fd`: 0 directory fds to the work tree (only their own output-file redirections) |
+| Kernel floor ≥6.3 | **Verified** | Recorded in spec 17 (Distribution row) and README step 1. Host-root results: 6.2.16, 5.15, `garbage` and `6.02.1` → exit 30; 6.3.0, 6.12 and 10.0.1 → OK. A live `/proc/sys/kernel/osrelease` read through `candor-safe-read` → OK |
+
+New findings: none.
+
+Gate: **PASS 2026-10-01 2956e4f**. No Critical, High, Medium or Low findings are open; Info DEP-13 and DEP-28 are tracked.
