@@ -63,7 +63,8 @@ pub(crate) fn permutation(rng: &mut dyn RandomSource, n: usize) -> Result<Vec<us
     let mut i = n;
     while i > 1 {
         i = i.checked_sub(1).ok_or(Error::Internal)?;
-        let bound = u32::try_from(i.checked_add(1).ok_or(Error::Internal)?).map_err(|_| Error::Internal)?;
+        let bound =
+            u32::try_from(i.checked_add(1).ok_or(Error::Internal)?).map_err(|_| Error::Internal)?;
         let j = usize::try_from(uniform_below(rng, bound)?).map_err(|_| Error::Internal)?;
         v.swap(i, j);
     }
@@ -82,7 +83,11 @@ pub(crate) struct ExactBytesRng {
 
 impl ExactBytesRng {
     pub(crate) fn new(buf: [u8; 64]) -> Self {
-        Self { buf, pos: 0, overrun: false }
+        Self {
+            buf,
+            pos: 0,
+            overrun: false,
+        }
     }
 
     /// `Ok` iff exactly all 64 bytes were consumed and nothing more.
@@ -199,7 +204,10 @@ mod tests {
         r.try_fill_bytes(&mut b).ok();
         assert!(r.check().is_err());
         let r2 = ExactBytesRng::new([1; 64]);
-        assert!(r2.check().is_err(), "under-consumption must be detected too");
+        assert!(
+            r2.check().is_err(),
+            "under-consumption must be detected too"
+        );
     }
 
     #[test]

@@ -127,7 +127,10 @@ mod tests {
     #[test]
     fn fips_is_unsupported() {
         assert_eq!(Suite::from_id_supported(2), Err(Error::UnsupportedSuite));
-        assert_eq!(Suite::CandorFips1.require_supported(), Err(Error::UnsupportedSuite));
+        assert_eq!(
+            Suite::CandorFips1.require_supported(),
+            Err(Error::UnsupportedSuite)
+        );
         assert!(Suite::CandorStd1.require_supported().is_ok());
     }
 }

@@ -2,7 +2,7 @@
 {% block main %}
 <h1>{{ p.t("sui-closed-h1") }}</h1>
 <p>{{ p.t("sui-closed-text") }}</p>
-<p>{% if let Some(days) = p.vm.deployment.intake_backup_days %}{{ p.t1("sui-close-backups", "days", *days) }}{% else %}{{ p.t("sui-close-no-backups") }}{% endif %}</p>
+<p>{% if let Some(days) = p.vm.deployment.intake_backup_days %}{{ p.t1("sui-close-backups", "days", days) }}{% else %}{{ p.t("sui-close-no-backups") }}{% endif %}</p>
 <p>{{ p.tm("sui-new-identity")|safe }}</p>
 <div class="actions"><a class="btn" href="{{ p.href(Route::Landing) }}">{{ p.t("sui-leave-back") }}</a></div>
 {% endblock %}

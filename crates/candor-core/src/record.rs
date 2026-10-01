@@ -91,7 +91,14 @@ pub enum RecordAad {
 impl RecordAad {
     fn bytes(&self, key_version: u32) -> Vec<u8> {
         match self {
-            Self::Case { tenant_id, case_id, table_id, column_id, record_id, row_version } => concat(&[
+            Self::Case {
+                tenant_id,
+                case_id,
+                table_id,
+                column_id,
+                record_id,
+                row_version,
+            } => concat(&[
                 labels::RECORD_AAD,
                 tenant_id,
                 case_id,
@@ -101,19 +108,44 @@ impl RecordAad {
                 &key_version.to_be_bytes(),
                 &row_version.to_be_bytes(),
             ]),
-            Self::SourcePrefs { tenant_id, lookup_tag, prefs_version } => {
-                concat(&[labels::SOURCE_PREFS, tenant_id, lookup_tag, &prefs_version.to_be_bytes()])
-            }
-            Self::DeskKeystore { user_id, device_id, key_id } => {
-                concat(&[labels::DESK_KEYSTORE, user_id, device_id, key_id])
-            }
-            Self::DeskKeystoreSlot { user_id, device_id, slot } => {
-                concat(&[labels::DESK_KEYSTORE_SLOT, user_id, device_id, &[*slot]])
-            }
-            Self::DeskCaseKeyCache { user_id, device_id, case_id, version } => {
-                concat(&[labels::DESK_CASE_KEY_CACHE, user_id, device_id, case_id, &version.to_be_bytes()])
-            }
-            Self::EkMeta { tenant_id, case_id, column_id, row_version } => concat(&[
+            Self::SourcePrefs {
+                tenant_id,
+                lookup_tag,
+                prefs_version,
+            } => concat(&[
+                labels::SOURCE_PREFS,
+                tenant_id,
+                lookup_tag,
+                &prefs_version.to_be_bytes(),
+            ]),
+            Self::DeskKeystore {
+                user_id,
+                device_id,
+                key_id,
+            } => concat(&[labels::DESK_KEYSTORE, user_id, device_id, key_id]),
+            Self::DeskKeystoreSlot {
+                user_id,
+                device_id,
+                slot,
+            } => concat(&[labels::DESK_KEYSTORE_SLOT, user_id, device_id, &[*slot]]),
+            Self::DeskCaseKeyCache {
+                user_id,
+                device_id,
+                case_id,
+                version,
+            } => concat(&[
+                labels::DESK_CASE_KEY_CACHE,
+                user_id,
+                device_id,
+                case_id,
+                &version.to_be_bytes(),
+            ]),
+            Self::EkMeta {
+                tenant_id,
+                case_id,
+                column_id,
+                row_version,
+            } => concat(&[
                 labels::EK_META,
                 tenant_id,
                 case_id,
@@ -125,7 +157,12 @@ impl RecordAad {
 }
 
 /// Encrypt a record under `key` (version `key_version`).
-pub fn seal_record(key: &AeadKey, key_version: u32, aad: &RecordAad, plaintext: &[u8]) -> Result<Vec<u8>> {
+pub fn seal_record(
+    key: &AeadKey,
+    key_version: u32,
+    aad: &RecordAad,
+    plaintext: &[u8],
+) -> Result<Vec<u8>> {
     seal_record_with(&mut OsRandom, key, key_version, aad, plaintext)
 }
 
@@ -139,7 +176,13 @@ pub(crate) fn seal_record_with(
     let mut nonce = [0u8; 24];
     rng.fill(&mut nonce)?;
     let ct = xchacha_seal(key, &nonce, &aad.bytes(key_version), plaintext)?;
-    Ok(concat(&[&[RECORD_VERSION], &Suite::CandorStd1.to_be_bytes(), &key_version.to_be_bytes(), &nonce, &ct]))
+    Ok(concat(&[
+        &[RECORD_VERSION],
+        &Suite::CandorStd1.to_be_bytes(),
+        &key_version.to_be_bytes(),
+        &nonce,
+        &ct,
+    ]))
 }
 
 /// Parsed record header.
@@ -187,7 +230,14 @@ mod tests {
     use crate::secret::CaseKey;
 
     fn aad(row_version: u64) -> RecordAad {
-        RecordAad::Case { tenant_id: [1; 16], case_id: [2; 16], table_id: 3, column_id: 4, record_id: [5; 16], row_version }
+        RecordAad::Case {
+            tenant_id: [1; 16],
+            case_id: [2; 16],
+            table_id: 3,
+            column_id: 4,
+            record_id: [5; 16],
+            row_version,
+        }
     }
 
     #[test]
@@ -196,12 +246,25 @@ mod tests {
         let k = derive_case_record_key(&CaseKey::from_bytes([9; 32]), 3).unwrap();
         let rec = seal_record_with(&mut rng, &k, 7, &aad(1), b"title").unwrap();
         assert_eq!(rec.len(), RECORD_HEADER_LEN + 5 + 16);
-        assert_eq!(record_header(&rec).unwrap(), RecordHeader { suite: Suite::CandorStd1, key_version: 7 });
+        assert_eq!(
+            record_header(&rec).unwrap(),
+            RecordHeader {
+                suite: Suite::CandorStd1,
+                key_version: 7
+            }
+        );
         assert_eq!(open_record(&k, &aad(1), &rec).unwrap().as_slice(), b"title");
         // CRYPTO-054: stale row replay (row_version mismatch) fails.
         assert!(open_record(&k, &aad(2), &rec).is_err());
         // CRYPTO-011: row moved to another case/tenant fails.
-        let moved = RecordAad::Case { tenant_id: [1; 16], case_id: [9; 16], table_id: 3, column_id: 4, record_id: [5; 16], row_version: 1 };
+        let moved = RecordAad::Case {
+            tenant_id: [1; 16],
+            case_id: [9; 16],
+            table_id: 3,
+            column_id: 4,
+            record_id: [5; 16],
+            row_version: 1,
+        };
         assert!(open_record(&k, &moved, &rec).is_err());
         // key_version is authenticated for case records.
         let mut b = rec.clone();
@@ -213,7 +276,10 @@ mod tests {
         assert!(open_record(&k, &aad(1), &b).is_err());
         let mut b = rec.clone();
         b[2] = 2;
-        assert_eq!(open_record(&k, &aad(1), &b).err(), Some(Error::UnsupportedSuite));
+        assert_eq!(
+            open_record(&k, &aad(1), &b).err(),
+            Some(Error::UnsupportedSuite)
+        );
         assert!(open_record(&k, &aad(1), &rec[..RECORD_HEADER_LEN + 15]).is_err());
     }
 
@@ -221,12 +287,24 @@ mod tests {
     fn other_aad_forms_are_distinct() {
         let mut rng = TestRng::new(31);
         let k = AeadKey::from_bytes([1; 32]);
-        let a = RecordAad::DeskKeystoreSlot { user_id: [1; 16], device_id: [2; 16], slot: 0 };
-        let b = RecordAad::DeskKeystoreSlot { user_id: [1; 16], device_id: [2; 16], slot: 1 };
+        let a = RecordAad::DeskKeystoreSlot {
+            user_id: [1; 16],
+            device_id: [2; 16],
+            slot: 0,
+        };
+        let b = RecordAad::DeskKeystoreSlot {
+            user_id: [1; 16],
+            device_id: [2; 16],
+            slot: 1,
+        };
         let rec = seal_record_with(&mut rng, &k, 0, &a, b"k11").unwrap();
         assert!(open_record(&k, &a, &rec).is_ok());
         assert!(open_record(&k, &b, &rec).is_err());
-        let p = RecordAad::SourcePrefs { tenant_id: [1; 16], lookup_tag: [2; 32], prefs_version: 1 };
+        let p = RecordAad::SourcePrefs {
+            tenant_id: [1; 16],
+            lookup_tag: [2; 32],
+            prefs_version: 1,
+        };
         let rec = seal_record_with(&mut rng, &k, 0, &p, b"prefs").unwrap();
         assert!(open_record(&k, &p, &rec).is_ok());
     }

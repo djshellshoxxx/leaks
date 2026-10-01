@@ -19,7 +19,7 @@
 <span class="consequence" id="d-channel-{{ loop.index0 }}"><bdi>{{ c.description }}</bdi>{% if !c.languages.is_empty() %} · {{ p.t1("sui-new-channel-langs", "langs", c.languages.as_str()) }}{% endif %} · {{ p.t1("sui-new-channel-first", "roles", p.join(c.triage)) }} {{ p.t("sui-as-listed") }}{% if !c.available %} · {{ p.t("sui-new-channel-unavailable") }}{% endif %}</span></label></div>
 {%- endfor %}
 </fieldset>
-{%- if p.vm.new_report.channels.iter().any(|c| !c.available) %}
+{%- if p.any_unavailable() %}
 <p>{{ p.t("sui-new-channel-independent") }}</p>
 <ul>{% for c in p.vm.new_report.channels %}{% if c.available && c.independent_route %}<li><bdi>{{ c.name }}</bdi>: <bdi>{{ c.description }}</bdi></li>{% endif %}{% endfor %}</ul>
 {%- endif %}
@@ -31,8 +31,8 @@
 {%- endif %}
 {%- let fid = "mode" %}
 {%- let sel = p.vm.new_report.selected_mode %}
-{%- let allow_conf = p.vm.new_report.channels.iter().any(|c| c.allows_confidential) %}
-{%- let allow_ident = p.vm.new_report.channels.iter().any(|c| c.allows_identified) %}
+{%- let allow_conf = p.allow_conf() %}
+{%- let allow_ident = p.allow_ident() %}
 <fieldset{% if p.has_field_error(fid) %} aria-describedby="e-{{ fid }}"{% endif %}>
 <legend>{{ p.t("sui-new-mode-legend") }}</legend>
 {% include "field_error.html" %}

@@ -181,7 +181,11 @@ mod tests {
         let mut values = HashSet::new();
         let mut names = HashSet::new();
         for l in REGISTRY {
-            assert!(values.insert(l.value), "duplicate label value {:?}", String::from_utf8_lossy(l.value));
+            assert!(
+                values.insert(l.value),
+                "duplicate label value {:?}",
+                String::from_utf8_lossy(l.value)
+            );
             assert!(names.insert(l.name), "duplicate label name {}", l.name);
         }
     }

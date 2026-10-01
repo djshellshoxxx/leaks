@@ -71,25 +71,53 @@ pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// `K_pay = HKDF(IKM=CK, salt=payload_nonce, info="candor/v1/payload" ‖ suite)` (§13.3).
-pub fn derive_payload_key(suite: Suite, ck: &ContentKey, payload_nonce: &[u8; 16]) -> Result<AeadKey> {
+pub fn derive_payload_key(
+    suite: Suite,
+    ck: &ContentKey,
+    payload_nonce: &[u8; 16],
+) -> Result<AeadKey> {
     suite.require_supported()?;
-    derive_into!(AeadKey, ck.expose(), payload_nonce, &[labels::PAYLOAD, &suite.to_be_bytes()])
+    derive_into!(
+        AeadKey,
+        ck.expose(),
+        payload_nonce,
+        &[labels::PAYLOAD, &suite.to_be_bytes()]
+    )
 }
 
 /// `K_mac = HKDF(IKM=CK, salt=object_id, info="candor/v1/header-mac" ‖ suite)` (§13.1).
-pub fn derive_header_mac_key(suite: Suite, ck: &ContentKey, object_id: &[u8; 16]) -> Result<MacKey> {
+pub fn derive_header_mac_key(
+    suite: Suite,
+    ck: &ContentKey,
+    object_id: &[u8; 16],
+) -> Result<MacKey> {
     suite.require_supported()?;
-    derive_into!(MacKey, ck.expose(), object_id, &[labels::HEADER_MAC, &suite.to_be_bytes()])
+    derive_into!(
+        MacKey,
+        ck.expose(),
+        object_id,
+        &[labels::HEADER_MAC, &suite.to_be_bytes()]
+    )
 }
 
 /// Record key per table: `HKDF(IKM=CaseKey_v, salt="candor/v1/case", info="candor/v1/case/record/" ‖ u16 table_id)` (§10).
 pub fn derive_case_record_key(case_key: &CaseKey, table_id: u16) -> Result<AeadKey> {
-    derive_into!(AeadKey, case_key.expose(), labels::CASE_SALT, &[labels::CASE_RECORD, &table_id.to_be_bytes()])
+    derive_into!(
+        AeadKey,
+        case_key.expose(),
+        labels::CASE_SALT,
+        &[labels::CASE_RECORD, &table_id.to_be_bytes()]
+    )
 }
 
 /// CASE_AEAD wrap key: `HKDF(CaseKey_v, salt="candor/v1/case", info="candor/v1/wrap/case")` (§13.2).
 pub fn derive_case_wrap_key(case_key: &CaseKey) -> Result<AeadKey> {
-    derive_into!(AeadKey, case_key.expose(), labels::CASE_SALT, &[labels::WRAP_CASE])
+    derive_into!(
+        AeadKey,
+        case_key.expose(),
+        labels::CASE_SALT,
+        &[labels::WRAP_CASE]
+    )
 }
 
 /// Erasure-Key layer key: `HKDF(EK_case, salt=case_id, info="candor/v1/ek-layer")` (§13.2).
@@ -127,7 +155,9 @@ mod tests {
         hkdf(&ikm, &salt, &[&info[..5], &info[5..]], &mut okm).unwrap();
         assert_eq!(
             okm.to_vec(),
-            hex_lit("3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865")
+            hex_lit(
+                "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865"
+            )
         );
         let prk = hkdf_extract(&salt, &ikm);
         assert_eq!(

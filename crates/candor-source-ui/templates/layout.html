@@ -39,7 +39,7 @@
 <p class="steptext">{{ p.step_label() }}</p>
 <nav class="steps" aria-label="{{ p.t("sui-step-nav") }}"><ol>
 {%- for (num, name, href, state) in p.steps() %}
-<li{% if *state == 1 %} aria-current="step"{% endif %}>{% if *state == 0 %}<a href="{{ href }}">{{ name }}</a> <span class="vh">{{ p.t("sui-step-done") }}</span>{% else %}{{ name }}{% endif %}</li>
+<li{% if state == 1 %} aria-current="step"{% endif %}>{% if state == 0 %}<a href="{{ href }}">{{ name }}</a> <span class="vh">{{ p.t("sui-step-done") }}</span>{% else %}{{ name }}{% endif %}</li>
 {%- endfor %}
 </ol></nav>
 {%- endif %}
@@ -59,7 +59,7 @@
 <li><a href="{{ p.href(Route::Status) }}">{{ p.t("sui-footer-protect") }}</a></li>
 <li><details><summary>{{ p.t("sui-footer-language") }}</summary><ul>
 {%- for (tag, name, href, current) in p.languages() %}
-<li><a href="{{ href }}" hreflang="{{ tag }}" lang="{{ tag }}"{% if *current %} aria-current="page"{% endif %}>{{ name }}</a></li>
+<li><a href="{{ href }}" hreflang="{{ tag }}" lang="{{ tag }}"{% if current %} aria-current="page"{% endif %}>{{ name }}</a></li>
 {%- endfor %}
 </ul></details></li>
 <li><form method="post" action="{{ p.href(Route::Leave) }}">{% include "ft.html" %}<button type="submit">{{ p.t("sui-footer-leave") }}</button></form></li>

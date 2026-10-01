@@ -173,7 +173,8 @@ pub fn pad_html(html: &str, class: SizeClass) -> Result<Zeroizing<Vec<u8>>, Over
     let mut out = Zeroizing::new(Vec::with_capacity(class.bytes()));
     out.extend_from_slice(head.as_bytes());
     out.extend_from_slice(PAD_OPEN.as_bytes());
-    out.resize(out.len().saturating_add(fill), b' ');
+    let filled = out.len().saturating_add(fill);
+    out.resize(filled, b' ');
     out.extend_from_slice(PAD_CLOSE.as_bytes());
     out.extend_from_slice(tail.as_bytes());
     if out.len() != class.bytes() {

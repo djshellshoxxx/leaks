@@ -76,7 +76,10 @@ pub struct StreamEncryptor {
 
 impl core::fmt::Debug for StreamEncryptor {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("StreamEncryptor").field("next", &self.next).field("n", &self.n).finish_non_exhaustive()
+        f.debug_struct("StreamEncryptor")
+            .field("next", &self.next)
+            .field("n", &self.n)
+            .finish_non_exhaustive()
     }
 }
 
@@ -84,7 +87,12 @@ impl StreamEncryptor {
     /// New encryptor for `plaintext_len` bytes.
     #[must_use]
     pub fn new(key: AeadKey, plaintext_len: u64) -> Self {
-        Self { key, plaintext_len, n: chunk_count(plaintext_len), next: 0 }
+        Self {
+            key,
+            plaintext_len,
+            n: chunk_count(plaintext_len),
+            next: 0,
+        }
     }
 
     /// Encrypt the next chunk. Every chunk except the last must be exactly 64 KiB;
@@ -104,7 +112,11 @@ impl StreamEncryptor {
 
     /// Require that all chunks were produced.
     pub fn finish(self) -> Result<()> {
-        if self.next == self.n { Ok(()) } else { Err(Error::Stream("incomplete")) }
+        if self.next == self.n {
+            Ok(())
+        } else {
+            Err(Error::Stream("incomplete"))
+        }
     }
 }
 
@@ -150,7 +162,13 @@ impl StreamDecryptor {
     /// authenticated CoreHeader).
     #[must_use]
     pub fn new(key: AeadKey, plaintext_len: u64) -> Self {
-        Self { key, plaintext_len, n: chunk_count(plaintext_len), next: 0, poisoned: false }
+        Self {
+            key,
+            plaintext_len,
+            n: chunk_count(plaintext_len),
+            next: 0,
+            poisoned: false,
+        }
     }
 
     /// Expected ciphertext length of the next chunk, or `None` when complete.
@@ -159,7 +177,9 @@ impl StreamDecryptor {
         if self.poisoned || self.next >= self.n {
             return None;
         }
-        chunk_plain_len(self.plaintext_len, self.next).ok()?.checked_add(AEAD_TAG_LEN)
+        chunk_plain_len(self.plaintext_len, self.next)
+            .ok()?
+            .checked_add(AEAD_TAG_LEN)
     }
 
     /// Decrypt the next chunk. The returned plaintext has passed this chunk's tag
@@ -176,7 +196,9 @@ impl StreamDecryptor {
         if self.poisoned {
             return Err(Error::Stream("poisoned"));
         }
-        let expected = self.next_chunk_ct_len().ok_or(Error::Stream("trailing chunk"))?;
+        let expected = self
+            .next_chunk_ct_len()
+            .ok_or(Error::Stream("trailing chunk"))?;
         if ct.len() != expected {
             return Err(Error::Stream("wrong chunk length"));
         }
@@ -188,14 +210,25 @@ impl StreamDecryptor {
 
     /// Final verification: every chunk including the final-flagged one verified.
     pub fn finish(self) -> Result<()> {
-        if !self.poisoned && self.next == self.n { Ok(()) } else { Err(Error::Stream("truncated")) }
+        if !self.poisoned && self.next == self.n {
+            Ok(())
+        } else {
+            Err(Error::Stream("truncated"))
+        }
     }
 
     /// Random access: decrypt chunk `i` independently (seek = i × 65552). The caller
     /// gains no whole-stream guarantee from this.
-    pub fn decrypt_chunk_at(key: &AeadKey, plaintext_len: u64, i: u64, ct: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+    pub fn decrypt_chunk_at(
+        key: &AeadKey,
+        plaintext_len: u64,
+        i: u64,
+        ct: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>> {
         let n = chunk_count(plaintext_len);
-        let expected = chunk_plain_len(plaintext_len, i)?.checked_add(AEAD_TAG_LEN).ok_or(Error::Internal)?;
+        let expected = chunk_plain_len(plaintext_len, i)?
+            .checked_add(AEAD_TAG_LEN)
+            .ok_or(Error::Internal)?;
         if ct.len() != expected {
             return Err(Error::Stream("wrong chunk length"));
         }
@@ -217,7 +250,9 @@ pub struct ChunkReader<R> {
 
 impl<R> core::fmt::Debug for ChunkReader<R> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("ChunkReader").field("dec", &self.dec).finish_non_exhaustive()
+        f.debug_struct("ChunkReader")
+            .field("dec", &self.dec)
+            .finish_non_exhaustive()
     }
 }
 
@@ -263,7 +298,9 @@ pub fn decrypt(key: AeadKey, plaintext_len: u64, ct: &[u8]) -> Result<Zeroizing<
     let mut dec = StreamDecryptor::new(key, plaintext_len);
     let mut rest = ct;
     while let Some(len) = dec.next_chunk_ct_len() {
-        let (chunk, tail) = rest.split_at_checked(len).ok_or(Error::Stream("truncated"))?;
+        let (chunk, tail) = rest
+            .split_at_checked(len)
+            .ok_or(Error::Stream("truncated"))?;
         out.extend_from_slice(&dec.decrypt_chunk(chunk)?);
         rest = tail;
     }
@@ -276,7 +313,11 @@ pub fn decrypt(key: AeadKey, plaintext_len: u64, ct: &[u8]) -> Result<Zeroizing<
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
     use super::*;
     use proptest::prelude::*;
 
@@ -317,7 +358,10 @@ mod tests {
         // truncated (drop final chunk) — also with the header length adjusted
         let trunc = &ct[..3 * CHUNK_CT_SIZE];
         assert!(decrypt(key(), len, trunc).is_err());
-        assert!(decrypt(key(), 3 * CHUNK_SIZE as u64, trunc).is_err(), "no_final: missing final flag");
+        assert!(
+            decrypt(key(), 3 * CHUNK_SIZE as u64, trunc).is_err(),
+            "no_final: missing final flag"
+        );
         // reordered
         let mut re = ct.clone();
         re[..CHUNK_CT_SIZE].copy_from_slice(&ct[CHUNK_CT_SIZE..2 * CHUNK_CT_SIZE]);
@@ -383,9 +427,14 @@ mod tests {
         let mut d = StreamDecryptor::new(key(), pt.len() as u64);
         assert!(d.decrypt_chunk(&ct[CHUNK_CT_SIZE..]).is_err());
         assert!(d.decrypt_chunk(&ct[..CHUNK_CT_SIZE]).is_err(), "poisoned");
-        let c1 = StreamDecryptor::decrypt_chunk_at(&key(), pt.len() as u64, 1, &ct[CHUNK_CT_SIZE..]).unwrap();
+        let c1 =
+            StreamDecryptor::decrypt_chunk_at(&key(), pt.len() as u64, 1, &ct[CHUNK_CT_SIZE..])
+                .unwrap();
         assert_eq!(c1.len(), CHUNK_SIZE);
-        assert!(StreamDecryptor::decrypt_chunk_at(&key(), pt.len() as u64, 2, &ct[CHUNK_CT_SIZE..]).is_err());
+        assert!(
+            StreamDecryptor::decrypt_chunk_at(&key(), pt.len() as u64, 2, &ct[CHUNK_CT_SIZE..])
+                .is_err()
+        );
     }
 
     #[test]

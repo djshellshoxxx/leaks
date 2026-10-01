@@ -35,7 +35,9 @@ impl KemPublicKey {
         if bytes.len() != XWING_NPK {
             return Err(Error::Length);
         }
-        XPk::from_bytes(bytes).map(Self).map_err(|_| Error::InvalidKey)
+        XPk::from_bytes(bytes)
+            .map(Self)
+            .map_err(|_| Error::InvalidKey)
     }
 
     /// Serialize (1216 bytes).
@@ -61,7 +63,9 @@ impl KemPrivateKey {
         if bytes.len() != XWING_NSK {
             return Err(Error::Length);
         }
-        XSk::from_bytes(bytes).map(Self).map_err(|_| Error::InvalidKey)
+        XSk::from_bytes(bytes)
+            .map(Self)
+            .map_err(|_| Error::InvalidKey)
     }
 
     /// Export the private seed (for sealing into a keystore record only).
@@ -94,7 +98,10 @@ impl KemKeyPair {
             return Err(Error::Length);
         }
         let (sk, pk) = XWing::derive_keypair(ikm);
-        Ok(Self { private: KemPrivateKey(sk), public: KemPublicKey(pk) })
+        Ok(Self {
+            private: KemPrivateKey(sk),
+            public: KemPublicKey(pk),
+        })
     }
 
     /// Generate a fresh key pair from the OS CSPRNG, with a pairwise-consistency test
@@ -116,7 +123,8 @@ impl KemKeyPair {
         rng.fill(&mut r)?;
         let mut erng = ExactBytesRng::new(r);
         r.zeroize();
-        let (ss1, enc) = XWing::encap_with_rng(&self.public.0, None, &mut erng).map_err(|_| Error::InvalidKey)?;
+        let (ss1, enc) = XWing::encap_with_rng(&self.public.0, None, &mut erng)
+            .map_err(|_| Error::InvalidKey)?;
         erng.check()?;
         let ss2 = XWing::decap(&self.private.0, None, &enc).map_err(|_| Error::InvalidKey)?;
         if crate::kdf::ct_eq(ss1.0.as_slice(), ss2.0.as_slice()) {
@@ -130,7 +138,10 @@ impl KemKeyPair {
 /// X-Wing KAT helper for the start-up self-test: keypair from the 32-byte `seed`,
 /// encapsulation with the 64-byte `eseed`, decapsulation; returns
 /// `SHA-256(pk ‖ ct ‖ ss)` after checking both shared secrets agree.
-pub(crate) fn xwing_kat_digest(seed: &[u8; 32], eseed: [u8; ENCAP_RANDOMNESS_LEN]) -> Result<[u8; 32]> {
+pub(crate) fn xwing_kat_digest(
+    seed: &[u8; 32],
+    eseed: [u8; ENCAP_RANDOMNESS_LEN],
+) -> Result<[u8; 32]> {
     let sk = KemPrivateKey::from_bytes(Suite::CandorStd1, seed)?;
     let pk = sk.public_key();
     let mut rng = ExactBytesRng::new(eseed);
@@ -140,7 +151,11 @@ pub(crate) fn xwing_kat_digest(seed: &[u8; 32], eseed: [u8; ENCAP_RANDOMNESS_LEN
     if !crate::kdf::ct_eq(ss.0.as_slice(), ss2.0.as_slice()) {
         return Err(Error::Internal);
     }
-    Ok(crate::hash::sha256(&[&pk.to_bytes(), enc.to_bytes().as_slice(), ss.0.as_slice()]))
+    Ok(crate::hash::sha256(&[
+        &pk.to_bytes(),
+        enc.to_bytes().as_slice(),
+        ss.0.as_slice(),
+    ]))
 }
 
 /// HPKE SealBase with caller-supplied encapsulation randomness. Returns `(enc, ct)`.
@@ -188,19 +203,37 @@ pub(crate) fn seal_base_with(
 }
 
 /// HPKE SealBase (RFC 9180 mode_base) to `pk` with OS randomness. Returns `(enc, ct)`.
-pub fn seal_base(pk: &KemPublicKey, info: &[u8], aad: &[u8], pt: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
+pub fn seal_base(
+    pk: &KemPublicKey,
+    info: &[u8],
+    aad: &[u8],
+    pt: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>)> {
     seal_base_with(&mut OsRandom, pk, info, aad, pt)
 }
 
 /// HPKE OpenBase. Any failure is reported as [`Error::Authentication`].
-pub fn open_base(sk: &KemPrivateKey, enc: &[u8], info: &[u8], aad: &[u8], ct: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+pub fn open_base(
+    sk: &KemPrivateKey,
+    enc: &[u8],
+    info: &[u8],
+    aad: &[u8],
+    ct: &[u8],
+) -> Result<Zeroizing<Vec<u8>>> {
     if enc.len() != XWING_NENC {
         return Err(Error::Length);
     }
     let enc = XEnc::from_bytes(enc).map_err(|_| Error::Authentication)?;
-    hpke::single_shot_open::<ChaCha20Poly1305, HkdfSha256, XWing>(&OpModeR::Base, &sk.0, &enc, info, ct, aad)
-        .map(Zeroizing::new)
-        .map_err(|_| Error::Authentication)
+    hpke::single_shot_open::<ChaCha20Poly1305, HkdfSha256, XWing>(
+        &OpModeR::Base,
+        &sk.0,
+        &enc,
+        info,
+        ct,
+        aad,
+    )
+    .map(Zeroizing::new)
+    .map_err(|_| Error::Authentication)
 }
 
 #[cfg(test)]
@@ -218,11 +251,23 @@ mod tests {
         let pt = open_base(&kp.private, &enc, b"info", b"aad", &ct).unwrap();
         assert_eq!(pt.as_slice(), b"hello");
         // CRYPTO-006: any change of info or aad fails.
-        assert_eq!(open_base(&kp.private, &enc, b"infO", b"aad", &ct).err(), Some(Error::Authentication));
-        assert_eq!(open_base(&kp.private, &enc, b"info", b"aaD", &ct).err(), Some(Error::Authentication));
+        assert_eq!(
+            open_base(&kp.private, &enc, b"infO", b"aad", &ct).err(),
+            Some(Error::Authentication)
+        );
+        assert_eq!(
+            open_base(&kp.private, &enc, b"info", b"aaD", &ct).err(),
+            Some(Error::Authentication)
+        );
         let other = KemKeyPair::generate_with(Suite::CandorStd1, &mut rng).unwrap();
-        assert_eq!(open_base(&other.private, &enc, b"info", b"aad", &ct).err(), Some(Error::Authentication));
-        assert_eq!(open_base(&kp.private, &enc[1..], b"info", b"aad", &ct).err(), Some(Error::Length));
+        assert_eq!(
+            open_base(&other.private, &enc, b"info", b"aad", &ct).err(),
+            Some(Error::Authentication)
+        );
+        assert_eq!(
+            open_base(&kp.private, &enc[1..], b"info", b"aad", &ct).err(),
+            Some(Error::Length)
+        );
     }
 
     #[test]
@@ -230,9 +275,15 @@ mod tests {
         let kp = KemKeyPair::derive(Suite::CandorStd1, &[5u8; 32]).unwrap();
         let pkb = kp.public.to_bytes();
         assert_eq!(pkb.len(), XWING_NPK);
-        assert_eq!(KemPublicKey::from_bytes(Suite::CandorStd1, &pkb).unwrap(), kp.public);
+        assert_eq!(
+            KemPublicKey::from_bytes(Suite::CandorStd1, &pkb).unwrap(),
+            kp.public
+        );
         assert!(KemPublicKey::from_bytes(Suite::CandorStd1, &pkb[1..]).is_err());
-        assert_eq!(KemPublicKey::from_bytes(Suite::CandorFips1, &pkb).err(), Some(Error::UnsupportedSuite));
+        assert_eq!(
+            KemPublicKey::from_bytes(Suite::CandorFips1, &pkb).err(),
+            Some(Error::UnsupportedSuite)
+        );
         let skb = kp.private.to_bytes();
         let sk2 = KemPrivateKey::from_bytes(Suite::CandorStd1, &skb).unwrap();
         assert_eq!(sk2.public_key(), kp.public);

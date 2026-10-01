@@ -5,7 +5,7 @@
 <h1>{{ p.t("sui-close-h1") }}</h1>
 {% include "errors.html" %}
 <p>{{ p.t("sui-close-explain") }}</p>
-<p>{% if let Some(days) = p.vm.deployment.intake_backup_days %}{{ p.t1("sui-close-backups", "days", *days) }}{% else %}{{ p.t("sui-close-no-backups") }}{% endif %}</p>
+<p>{% if let Some(days) = p.vm.deployment.intake_backup_days %}{{ p.t1("sui-close-backups", "days", days) }}{% else %}{{ p.t("sui-close-no-backups") }}{% endif %}</p>
 {%- let c = crate::guidance::GC35 %}
 <details><summary>{{ p.t(c.title) }}</summary>{% for b in c.normal %}{{ p.block_html(b)|safe }}{% endfor %}</details>
 <form method="post" action="{{ p.href(Route::End) }}">

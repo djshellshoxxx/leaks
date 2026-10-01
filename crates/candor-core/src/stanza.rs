@@ -118,11 +118,18 @@ impl HpkeWrapContext {
         let s = suite.to_be_bytes();
         use crate::bytes::concat;
         match self {
-            Self::Reply { tenant_id, channel_id, mailbox_id } => {
-                concat(&[labels::WRAP_REPLY, &s, tenant_id, channel_id, mailbox_id])
-            }
+            Self::Reply {
+                tenant_id,
+                channel_id,
+                mailbox_id,
+            } => concat(&[labels::WRAP_REPLY, &s, tenant_id, channel_id, mailbox_id]),
             Self::ViewerJob { job_id } => concat(&[labels::WRAP_VIEWER_JOB, &s, job_id]),
-            Self::CaseKey { tenant_id, case_id, version, recipient_key_id } => concat(&[
+            Self::CaseKey {
+                tenant_id,
+                case_id,
+                version,
+                recipient_key_id,
+            } => concat(&[
                 labels::WRAP_CASEKEY,
                 &s,
                 tenant_id,
@@ -130,16 +137,33 @@ impl HpkeWrapContext {
                 &version.to_be_bytes(),
                 recipient_key_id,
             ]),
-            Self::Channel { tenant_id, channel_id, wrapped_key_id, recipient_key_id } => {
-                concat(&[labels::WRAP_CHANNEL, &s, tenant_id, channel_id, wrapped_key_id, recipient_key_id])
-            }
-            Self::CustodianGroup { tenant_id, recipient_key_id } => {
-                concat(&[labels::WRAP_CUSTODIAN_GROUP, &s, tenant_id, recipient_key_id])
-            }
+            Self::Channel {
+                tenant_id,
+                channel_id,
+                wrapped_key_id,
+                recipient_key_id,
+            } => concat(&[
+                labels::WRAP_CHANNEL,
+                &s,
+                tenant_id,
+                channel_id,
+                wrapped_key_id,
+                recipient_key_id,
+            ]),
+            Self::CustodianGroup {
+                tenant_id,
+                recipient_key_id,
+            } => concat(&[
+                labels::WRAP_CUSTODIAN_GROUP,
+                &s,
+                tenant_id,
+                recipient_key_id,
+            ]),
             Self::Routing { tenant_id } => concat(&[labels::WRAP_ROUTING, &s, tenant_id]),
-            Self::Connector { tenant_id, connector_id } => {
-                concat(&[labels::WRAP_CONNECTOR, &s, tenant_id, connector_id])
-            }
+            Self::Connector {
+                tenant_id,
+                connector_id,
+            } => concat(&[labels::WRAP_CONNECTOR, &s, tenant_id, connector_id]),
         }
     }
 }
@@ -180,12 +204,34 @@ fn case_recipient_ref(case_id: &[u8; 16], version: u32) -> [u8; 32] {
     r
 }
 
-fn case_aead_aad(tenant_id: &[u8; 16], case_id: &[u8; 16], version: u32, object_hash: &[u8; 32]) -> Vec<u8> {
-    crate::bytes::concat(&[labels::WRAP_CASE, tenant_id, case_id, &version.to_be_bytes(), object_hash])
+fn case_aead_aad(
+    tenant_id: &[u8; 16],
+    case_id: &[u8; 16],
+    version: u32,
+    object_hash: &[u8; 32],
+) -> Vec<u8> {
+    crate::bytes::concat(&[
+        labels::WRAP_CASE,
+        tenant_id,
+        case_id,
+        &version.to_be_bytes(),
+        object_hash,
+    ])
 }
 
-fn ek_layer_aad(tenant_id: &[u8; 16], case_id: &[u8; 16], version: u32, recipient_ref: &[u8; 32]) -> Vec<u8> {
-    crate::bytes::concat(&[labels::EK_LAYER, tenant_id, case_id, &version.to_be_bytes(), recipient_ref])
+fn ek_layer_aad(
+    tenant_id: &[u8; 16],
+    case_id: &[u8; 16],
+    version: u32,
+    recipient_ref: &[u8; 32],
+) -> Vec<u8> {
+    crate::bytes::concat(&[
+        labels::EK_LAYER,
+        tenant_id,
+        case_id,
+        &version.to_be_bytes(),
+        recipient_ref,
+    ])
 }
 
 impl WrapStanza {
@@ -215,7 +261,10 @@ impl WrapStanza {
         let enc_len = u16::try_from(self.enc.len()).map_err(|_| Error::Internal)?;
         let ct_len = u32::try_from(self.ct.len()).map_err(|_| Error::Internal)?;
         let mut v = Vec::with_capacity(
-            STANZA_FIXED_LEN.saturating_add(self.enc.len()).saturating_add(4).saturating_add(self.ct.len()),
+            STANZA_FIXED_LEN
+                .saturating_add(self.enc.len())
+                .saturating_add(4)
+                .saturating_add(self.ct.len()),
         );
         v.push(self.stanza_type as u8);
         v.push(0);
@@ -254,11 +303,21 @@ impl WrapStanza {
             if ct.len() != CK_LEN.saturating_add(AEAD_TAG_LEN) {
                 return Err(Error::Malformed("CASE_AEAD ct_len"));
             }
-            if recipient_ref.get(20..).is_none_or(|z| z.iter().any(|b| *b != 0)) {
+            if recipient_ref
+                .get(20..)
+                .is_none_or(|z| z.iter().any(|b| *b != 0))
+            {
                 return Err(Error::Malformed("CASE_AEAD recipient_ref padding"));
             }
         }
-        Ok(Self { stanza_type, suite, recipient_ref, bound_hash, enc, ct })
+        Ok(Self {
+            stanza_type,
+            suite,
+            recipient_ref,
+            bound_hash,
+            enc,
+            ct,
+        })
     }
 
     // ---- HPKE_BASE ----------------------------------------------------------------
@@ -290,7 +349,14 @@ impl WrapStanza {
             return Err(Error::Malformed("REPLY stanza recipient_ref must be zero"));
         }
         let (enc, ct) = seal_base_with(rng, pk, &ctx.info(suite), &bound_hash, pt)?;
-        Ok(Self { stanza_type: StanzaType::HpkeBase, suite, recipient_ref, bound_hash, enc, ct })
+        Ok(Self {
+            stanza_type: StanzaType::HpkeBase,
+            suite,
+            recipient_ref,
+            bound_hash,
+            enc,
+            ct,
+        })
     }
 
     /// Open an HPKE_BASE stanza. `expected_bound_hash` (e.g. the object_hash of the
@@ -308,7 +374,13 @@ impl WrapStanza {
         if !ct_eq(&self.bound_hash, expected_bound_hash) {
             return Err(Error::Authentication);
         }
-        open_base(sk, &self.enc, &ctx.info(self.suite), &self.bound_hash, &self.ct)
+        open_base(
+            sk,
+            &self.enc,
+            &ctx.info(self.suite),
+            &self.bound_hash,
+            &self.ct,
+        )
     }
 
     /// Wrap a content key with HPKE_BASE.
@@ -324,7 +396,12 @@ impl WrapStanza {
     }
 
     /// Unwrap a content key from an HPKE_BASE stanza.
-    pub fn open_hpke_ck(&self, sk: &KemPrivateKey, ctx: &HpkeWrapContext, object_hash: &[u8; 32]) -> Result<ContentKey> {
+    pub fn open_hpke_ck(
+        &self,
+        sk: &KemPrivateKey,
+        ctx: &HpkeWrapContext,
+        object_hash: &[u8; 32],
+    ) -> Result<ContentKey> {
         let pt = self.open_hpke(sk, ctx, object_hash)?;
         ContentKey::from_slice(&pt).map_err(|_| Error::Authentication)
     }
@@ -339,8 +416,20 @@ impl WrapStanza {
         version: u32,
         case_key: &CaseKey,
     ) -> Result<Self> {
-        let ctx = HpkeWrapContext::CaseKey { tenant_id, case_id, version, recipient_key_id };
-        Self::seal_hpke(suite, pk, recipient_key_id, casekey_bound_hash(&case_id, version), &ctx, case_key.expose())
+        let ctx = HpkeWrapContext::CaseKey {
+            tenant_id,
+            case_id,
+            version,
+            recipient_key_id,
+        };
+        Self::seal_hpke(
+            suite,
+            pk,
+            recipient_key_id,
+            casekey_bound_hash(&case_id, version),
+            &ctx,
+            case_key.expose(),
+        )
     }
 
     /// Unwrap a Case Key from its HPKE_BASE stanza.
@@ -351,7 +440,12 @@ impl WrapStanza {
         case_id: [u8; 16],
         version: u32,
     ) -> Result<CaseKey> {
-        let ctx = HpkeWrapContext::CaseKey { tenant_id, case_id, version, recipient_key_id: self.recipient_ref };
+        let ctx = HpkeWrapContext::CaseKey {
+            tenant_id,
+            case_id,
+            version,
+            recipient_key_id: self.recipient_ref,
+        };
         let pt = self.open_hpke(sk, &ctx, &casekey_bound_hash(&case_id, version))?;
         CaseKey::from_slice(&pt).map_err(|_| Error::Authentication)
     }
@@ -368,7 +462,15 @@ impl WrapStanza {
         object_hash: [u8; 32],
         ck: &ContentKey,
     ) -> Result<Self> {
-        Self::seal_case_aead_with(&mut OsRandom, case_key, tenant_id, case_id, version, object_hash, ck)
+        Self::seal_case_aead_with(
+            &mut OsRandom,
+            case_key,
+            tenant_id,
+            case_id,
+            version,
+            object_hash,
+            ck,
+        )
     }
 
     pub(crate) fn seal_case_aead_with(
@@ -382,7 +484,12 @@ impl WrapStanza {
     ) -> Result<Self> {
         let k = derive_case_wrap_key(case_key)?;
         let nonce = fresh_nonce(rng)?;
-        let ct = xchacha_seal(&k, &nonce, &case_aead_aad(&tenant_id, &case_id, version, &object_hash), ck.expose())?;
+        let ct = xchacha_seal(
+            &k,
+            &nonce,
+            &case_aead_aad(&tenant_id, &case_id, version, &object_hash),
+            ck.expose(),
+        )?;
         Ok(Self {
             stanza_type: StanzaType::CaseAead,
             suite: Suite::CandorStd1,
@@ -405,12 +512,19 @@ impl WrapStanza {
         if self.stanza_type != StanzaType::CaseAead {
             return Err(Error::Malformed("not a CASE_AEAD stanza"));
         }
-        if self.recipient_ref != case_recipient_ref(&case_id, version) || !ct_eq(&self.bound_hash, object_hash) {
+        if self.recipient_ref != case_recipient_ref(&case_id, version)
+            || !ct_eq(&self.bound_hash, object_hash)
+        {
             return Err(Error::Authentication);
         }
         let nonce: [u8; XNONCE_LEN] = self.enc.as_slice().try_into().map_err(|_| Error::Length)?;
         let k = derive_case_wrap_key(case_key)?;
-        let pt = xchacha_open(&k, &nonce, &case_aead_aad(&tenant_id, &case_id, version, object_hash), &self.ct)?;
+        let pt = xchacha_open(
+            &k,
+            &nonce,
+            &case_aead_aad(&tenant_id, &case_id, version, object_hash),
+            &self.ct,
+        )?;
         ContentKey::from_slice(&pt).map_err(|_| Error::Authentication)
     }
 
@@ -439,7 +553,9 @@ impl WrapStanza {
     ) -> Result<Self> {
         let bound = casekey_bound_hash(&case_id, version);
         if inner.stanza_type != StanzaType::HpkeBase || inner.bound_hash != bound {
-            return Err(Error::Malformed("CASEKEY_EK inner must be an HPKE_BASE case-key stanza"));
+            return Err(Error::Malformed(
+                "CASEKEY_EK inner must be an HPKE_BASE case-key stanza",
+            ));
         }
         let k = derive_ek_layer_key(ek, &case_id)?;
         let nonce = fresh_nonce(rng)?;
@@ -458,7 +574,13 @@ impl WrapStanza {
     /// Remove the Erasure-Key layer and return the inner HPKE_BASE stanza. Rejects an
     /// inner plaintext that is not a parseable HPKE_BASE case-key stanza (§22.2
     /// negative vector `ek_direct_wrap`).
-    pub fn open_casekey_ek(&self, ek: &ErasureKey, tenant_id: [u8; 16], case_id: [u8; 16], version: u32) -> Result<WrapStanza> {
+    pub fn open_casekey_ek(
+        &self,
+        ek: &ErasureKey,
+        tenant_id: [u8; 16],
+        case_id: [u8; 16],
+        version: u32,
+    ) -> Result<WrapStanza> {
         if self.stanza_type != StanzaType::CasekeyEk {
             return Err(Error::Malformed("not a CASEKEY_EK stanza"));
         }
@@ -483,8 +605,21 @@ impl WrapStanza {
 
     /// Test-only constructor for negative vectors (e.g. `ek_direct_wrap`).
     #[cfg(test)]
-    pub(crate) fn raw(stanza_type: StanzaType, recipient_ref: [u8; 32], bound_hash: [u8; 32], enc: Vec<u8>, ct: Vec<u8>) -> Self {
-        Self { stanza_type, suite: Suite::CandorStd1, recipient_ref, bound_hash, enc, ct }
+    pub(crate) fn raw(
+        stanza_type: StanzaType,
+        recipient_ref: [u8; 32],
+        bound_hash: [u8; 32],
+        enc: Vec<u8>,
+        ct: Vec<u8>,
+    ) -> Self {
+        Self {
+            stanza_type,
+            suite: Suite::CandorStd1,
+            recipient_ref,
+            bound_hash,
+            enc,
+            ct,
+        }
     }
 }
 
@@ -504,20 +639,51 @@ mod tests {
         let mut rng = TestRng::new(20);
         let kp = KemKeyPair::generate_with(Suite::CandorStd1, &mut rng).unwrap();
         let ck = ContentKey::from_bytes([5; 32]);
-        let ctx = HpkeWrapContext::Reply { tenant_id: T, channel_id: [0; 16], mailbox_id: [7; 32] };
+        let ctx = HpkeWrapContext::Reply {
+            tenant_id: T,
+            channel_id: [0; 16],
+            mailbox_id: [7; 32],
+        };
         let oh = [9u8; 32];
-        let s = WrapStanza::seal_hpke_with(&mut rng, Suite::CandorStd1, &kp.public, [0; 32], oh, &ctx, ck.expose()).unwrap();
+        let s = WrapStanza::seal_hpke_with(
+            &mut rng,
+            Suite::CandorStd1,
+            &kp.public,
+            [0; 32],
+            oh,
+            &ctx,
+            ck.expose(),
+        )
+        .unwrap();
         let bytes = s.encode().unwrap();
         assert_eq!(bytes.len(), 70 + 1120 + 4 + 48);
         let s2 = WrapStanza::decode(&bytes).unwrap();
-        assert_eq!(s2.open_hpke_ck(&kp.private, &ctx, &oh).unwrap().expose(), ck.expose());
+        assert_eq!(
+            s2.open_hpke_ck(&kp.private, &ctx, &oh).unwrap().expose(),
+            ck.expose()
+        );
         // stanza bound to another object
         assert!(s2.open_hpke_ck(&kp.private, &ctx, &[8; 32]).is_err());
         // a mismatching mailbox simply fails to open (§11.5)
-        let other = HpkeWrapContext::Reply { tenant_id: T, channel_id: [0; 16], mailbox_id: [6; 32] };
+        let other = HpkeWrapContext::Reply {
+            tenant_id: T,
+            channel_id: [0; 16],
+            mailbox_id: [6; 32],
+        };
         assert!(s2.open_hpke_ck(&kp.private, &other, &oh).is_err());
         // REPLY recipient_ref must be zero
-        assert!(WrapStanza::seal_hpke_with(&mut rng, Suite::CandorStd1, &kp.public, [1; 32], oh, &ctx, ck.expose()).is_err());
+        assert!(
+            WrapStanza::seal_hpke_with(
+                &mut rng,
+                Suite::CandorStd1,
+                &kp.public,
+                [1; 32],
+                oh,
+                &ctx,
+                ck.expose()
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -528,51 +694,126 @@ mod tests {
         let oh = [5u8; 32];
         let s = WrapStanza::seal_case_aead_with(&mut rng, &case_key, T, C, 7, oh, &ck).unwrap();
         let s = WrapStanza::decode(&s.encode().unwrap()).unwrap();
-        assert_eq!(s.open_case_aead(&case_key, T, C, 7, &oh).unwrap().expose(), ck.expose());
+        assert_eq!(
+            s.open_case_aead(&case_key, T, C, 7, &oh).unwrap().expose(),
+            ck.expose()
+        );
         // CRYPTO-011: moved between cases/tenants/versions/objects fails.
         assert!(s.open_case_aead(&case_key, [9; 16], C, 7, &oh).is_err());
         assert!(s.open_case_aead(&case_key, T, [9; 16], 7, &oh).is_err());
         assert!(s.open_case_aead(&case_key, T, C, 8, &oh).is_err());
         assert!(s.open_case_aead(&case_key, T, C, 7, &[6; 32]).is_err());
-        assert!(s.open_case_aead(&CaseKey::from_bytes([0; 32]), T, C, 7, &oh).is_err());
+        assert!(
+            s.open_case_aead(&CaseKey::from_bytes([0; 32]), T, C, 7, &oh)
+                .is_err()
+        );
     }
 
     #[test]
     fn casekey_ek_roundtrip_and_ek_direct_wrap() {
         let mut rng = TestRng::new(22);
         let member = KemKeyPair::generate_with(Suite::CandorStd1, &mut rng).unwrap();
-        let kid = key_id(Suite::CandorStd1, KeyKind::UserEnc, &member.public.to_bytes());
+        let kid = key_id(
+            Suite::CandorStd1,
+            KeyKind::UserEnc,
+            &member.public.to_bytes(),
+        );
         let case_key = CaseKey::from_bytes([6; 32]);
         let ek = ErasureKey::from_bytes([7; 32]);
         let inner = {
-            let ctx = HpkeWrapContext::CaseKey { tenant_id: T, case_id: C, version: 1, recipient_key_id: kid };
-            WrapStanza::seal_hpke_with(&mut rng, Suite::CandorStd1, &member.public, kid, casekey_bound_hash(&C, 1), &ctx, case_key.expose()).unwrap()
+            let ctx = HpkeWrapContext::CaseKey {
+                tenant_id: T,
+                case_id: C,
+                version: 1,
+                recipient_key_id: kid,
+            };
+            WrapStanza::seal_hpke_with(
+                &mut rng,
+                Suite::CandorStd1,
+                &member.public,
+                kid,
+                casekey_bound_hash(&C, 1),
+                &ctx,
+                case_key.expose(),
+            )
+            .unwrap()
         };
         let outer = WrapStanza::seal_casekey_ek_with(&mut rng, &ek, T, C, 1, &inner).unwrap();
         let outer = WrapStanza::decode(&outer.encode().unwrap()).unwrap();
         let got_inner = outer.open_casekey_ek(&ek, T, C, 1).unwrap();
         assert_eq!(got_inner, inner);
-        assert_eq!(got_inner.unwrap_case_key(&member.private, T, C, 1).unwrap().expose(), case_key.expose());
-        assert!(outer.open_casekey_ek(&ErasureKey::from_bytes([8; 32]), T, C, 1).is_err());
+        assert_eq!(
+            got_inner
+                .unwrap_case_key(&member.private, T, C, 1)
+                .unwrap()
+                .expose(),
+            case_key.expose()
+        );
+        assert!(
+            outer
+                .open_casekey_ek(&ErasureKey::from_bytes([8; 32]), T, C, 1)
+                .is_err()
+        );
         assert!(outer.open_casekey_ek(&ek, T, C, 2).is_err());
 
         // ek_direct_wrap: an EK-layer whose plaintext is a raw case key is rejected.
         let k = derive_ek_layer_key(&ek, &C).unwrap();
         let nonce = [1u8; 24];
-        let ct = xchacha_seal(&k, &nonce, &ek_layer_aad(&T, &C, 1, &kid), case_key.expose()).unwrap();
-        let direct = WrapStanza::raw(StanzaType::CasekeyEk, kid, casekey_bound_hash(&C, 1), nonce.to_vec(), ct);
-        assert_eq!(direct.open_casekey_ek(&ek, T, C, 1).err(), Some(Error::Malformed("ek_direct_wrap")));
+        let ct = xchacha_seal(
+            &k,
+            &nonce,
+            &ek_layer_aad(&T, &C, 1, &kid),
+            case_key.expose(),
+        )
+        .unwrap();
+        let direct = WrapStanza::raw(
+            StanzaType::CasekeyEk,
+            kid,
+            casekey_bound_hash(&C, 1),
+            nonce.to_vec(),
+            ct,
+        );
+        assert_eq!(
+            direct.open_casekey_ek(&ek, T, C, 1).err(),
+            Some(Error::Malformed("ek_direct_wrap"))
+        );
         // Sealing API refuses a non-HPKE inner stanza.
-        let case_aead = WrapStanza::seal_case_aead_with(&mut rng, &case_key, T, C, 1, [0; 32], &ContentKey::from_bytes([0; 32])).unwrap();
+        let case_aead = WrapStanza::seal_case_aead_with(
+            &mut rng,
+            &case_key,
+            T,
+            C,
+            1,
+            [0; 32],
+            &ContentKey::from_bytes([0; 32]),
+        )
+        .unwrap();
         assert!(WrapStanza::seal_casekey_ek_with(&mut rng, &ek, T, C, 1, &case_aead).is_err());
     }
 
     #[test]
     fn decode_rejects() {
         let mut rng = TestRng::new(23);
-        let s = WrapStanza::seal_case_aead_with(&mut rng, &CaseKey::from_bytes([3; 32]), T, C, 7, [5; 32], &ContentKey::from_bytes([4; 32])).unwrap();
+        let s = WrapStanza::seal_case_aead_with(
+            &mut rng,
+            &CaseKey::from_bytes([3; 32]),
+            T,
+            C,
+            7,
+            [5; 32],
+            &ContentKey::from_bytes([4; 32]),
+        )
+        .unwrap();
         let e = s.encode().unwrap();
-        for (off, val) in [(0usize, 0u8), (0, 4), (1, 1), (3, 2), (3, 3), (69, 23), (68, 1)] {
+        for (off, val) in [
+            (0usize, 0u8),
+            (0, 4),
+            (1, 1),
+            (3, 2),
+            (3, 3),
+            (69, 23),
+            (68, 1),
+        ] {
             let mut b = e.clone();
             b[off] = val;
             assert!(WrapStanza::decode(&b).is_err(), "offset {off}");

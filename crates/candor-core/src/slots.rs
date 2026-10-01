@@ -21,7 +21,10 @@ use crate::bytes::Reader;
 use crate::error::{Error, Result};
 use crate::hash::sha256;
 use crate::kdf::{ct_eq, hkdf};
-use crate::kem::{ENCAP_RANDOMNESS_LEN, KemKeyPair, KemPrivateKey, KemPublicKey, open_base, seal_base_with, seal_base_with_randomness};
+use crate::kem::{
+    ENCAP_RANDOMNESS_LEN, KemKeyPair, KemPrivateKey, KemPublicKey, open_base, seal_base_with,
+    seal_base_with_randomness,
+};
 use crate::labels;
 use crate::rand::{OsRandom, RandomSource, permutation};
 use crate::secret::ContentKey;
@@ -62,7 +65,11 @@ pub enum SlotContext {
 impl SlotContext {
     fn info(&self, suite: Suite) -> Vec<u8> {
         match self {
-            SlotContext::MemberEpoch { tenant_id, channel_id, epoch_id } => crate::bytes::concat(&[
+            SlotContext::MemberEpoch {
+                tenant_id,
+                channel_id,
+                epoch_id,
+            } => crate::bytes::concat(&[
                 labels::WRAP_MEMBER_EPOCH,
                 &suite.to_be_bytes(),
                 tenant_id,
@@ -141,7 +148,12 @@ pub struct RecipientSlotBlock {
 /// Derive dummy slot `i` (crate-internal derandomized encapsulation, §13.2; KAT-covered).
 pub(crate) fn dummy_slot(ck: &ContentKey, b: &SlotBinding, i: u8) -> Result<Slot> {
     let mut seed = Zeroizing::new([0u8; 64]);
-    hkdf(ck.expose(), &b.object_id, &[labels::DUMMY_SLOT, &[i]], seed.as_mut())?;
+    hkdf(
+        ck.expose(),
+        &b.object_id,
+        &[labels::DUMMY_SLOT, &[i]],
+        seed.as_mut(),
+    )?;
     let (kp_seed, r) = seed.split_at(32);
     let kp = KemKeyPair::derive(b.suite, kp_seed)?;
     let mut r32: [u8; 32] = r.try_into().map_err(|_| Error::Internal)?;
@@ -150,7 +162,12 @@ pub(crate) fn dummy_slot(ck: &ContentKey, b: &SlotBinding, i: u8) -> Result<Slot
     chacha.fill_bytes(&mut eseed);
     r32.zeroize();
     let mut pt = Zeroizing::new([0u8; 32]);
-    hkdf(ck.expose(), &b.object_id, &[labels::DUMMY_SLOT_PT, &[i]], pt.as_mut())?;
+    hkdf(
+        ck.expose(),
+        &b.object_id,
+        &[labels::DUMMY_SLOT_PT, &[i]],
+        pt.as_mut(),
+    )?;
     let info = b.context.info(b.suite);
     let aad = slot_aad(&b.object_id, &b.payload_nonce);
     let (enc, ct) = seal_base_with_randomness(&kp.public, &info, &aad, pt.as_ref(), eseed)?;
@@ -161,7 +178,11 @@ pub(crate) fn dummy_slot(ck: &ContentKey, b: &SlotBinding, i: u8) -> Result<Slot
 impl RecipientSlotBlock {
     /// Build a block: one real slot per recipient public key, the rest verifiable
     /// dummies, real slots at uniformly random positions (CRYPTO-058).
-    pub fn build(ck: &ContentKey, binding: &SlotBinding, recipients: &[KemPublicKey]) -> Result<Self> {
+    pub fn build(
+        ck: &ContentKey,
+        binding: &SlotBinding,
+        recipients: &[KemPublicKey],
+    ) -> Result<Self> {
         Self::build_with(&mut OsRandom, ck, binding, recipients)
     }
 
@@ -190,7 +211,10 @@ impl RecipientSlotBlock {
             };
             slots.push(slot);
         }
-        Ok(Self { suite: b.suite, slots })
+        Ok(Self {
+            suite: b.suite,
+            slots,
+        })
     }
 
     /// Suite.
@@ -299,7 +323,11 @@ impl RecipientSlotBlock {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
     use super::*;
     use crate::rand::TestRng;
 
@@ -308,7 +336,11 @@ mod tests {
             suite: Suite::CandorStd1,
             object_id: [1; 16],
             payload_nonce: [2; 16],
-            context: SlotContext::MemberEpoch { tenant_id: [3; 16], channel_id: [4; 16], epoch_id: 5 },
+            context: SlotContext::MemberEpoch {
+                tenant_id: [3; 16],
+                channel_id: [4; 16],
+                epoch_id: 5,
+            },
         }
     }
 
@@ -316,8 +348,9 @@ mod tests {
     fn build_open_verify() {
         let mut rng = TestRng::new(10);
         let ck = ContentKey::from_bytes([0x11; 32]);
-        let members: Vec<KemKeyPair> =
-            (0..3).map(|_| KemKeyPair::generate_with(Suite::CandorStd1, &mut rng).unwrap()).collect();
+        let members: Vec<KemKeyPair> = (0..3)
+            .map(|_| KemKeyPair::generate_with(Suite::CandorStd1, &mut rng).unwrap())
+            .collect();
         let pks: Vec<KemPublicKey> = members.iter().map(|m| m.public.clone()).collect();
         let b = binding();
         let blk = RecipientSlotBlock::build_with(&mut rng, &ck, &b, &pks).unwrap();
@@ -334,10 +367,17 @@ mod tests {
         }
         // Outsider cannot open.
         let outsider = KemKeyPair::generate_with(Suite::CandorStd1, &mut rng).unwrap();
-        assert_eq!(blk2.trial_open(&outsider.private, &b).err(), Some(Error::Authentication));
+        assert_eq!(
+            blk2.trial_open(&outsider.private, &b).err(),
+            Some(Error::Authentication)
+        );
         // CRYPTO-006: wrong epoch / channel / object binding fails to open.
         let mut wrong = b.clone();
-        wrong.context = SlotContext::MemberEpoch { tenant_id: [3; 16], channel_id: [4; 16], epoch_id: 6 };
+        wrong.context = SlotContext::MemberEpoch {
+            tenant_id: [3; 16],
+            channel_id: [4; 16],
+            epoch_id: 6,
+        };
         assert!(blk2.trial_open(&members[0].private, &wrong).is_err());
         let mut wrong = b.clone();
         wrong.payload_nonce[0] ^= 1;
@@ -352,9 +392,18 @@ mod tests {
         let a = KemKeyPair::generate_with(Suite::CandorStd1, &mut rng).unwrap();
         let hidden = KemKeyPair::generate_with(Suite::CandorStd1, &mut rng).unwrap();
         let b = binding();
-        let blk = RecipientSlotBlock::build_with(&mut rng, &ck, &b, &[a.public.clone(), hidden.public.clone()]).unwrap();
+        let blk = RecipientSlotBlock::build_with(
+            &mut rng,
+            &ck,
+            &b,
+            &[a.public.clone(), hidden.public.clone()],
+        )
+        .unwrap();
         // Recipient List claims only one recipient.
-        assert_eq!(blk.verify(&ck, &b, 1, None).err(), Some(Error::SlotVerification));
+        assert_eq!(
+            blk.verify(&ck, &b, 1, None).err(),
+            Some(Error::SlotVerification)
+        );
         assert!(blk.verify(&ck, &b, 2, None).is_ok());
         // Wrong CK: no slot verifies as dummy.
         let ck2 = ContentKey::from_bytes([0x23; 32]);
@@ -373,10 +422,21 @@ mod tests {
         let mut b = binding();
         b.context = SlotContext::Custodian { tenant_id: [3; 16] };
         let blk = RecipientSlotBlock::build_with(&mut rng, &ck, &b, &[]).unwrap();
-        assert!(blk.verify(&ck, &b, 0, None).unwrap().real_positions.is_empty());
+        assert!(
+            blk.verify(&ck, &b, 0, None)
+                .unwrap()
+                .real_positions
+                .is_empty()
+        );
         // Dummy derivation is deterministic.
-        assert_eq!(dummy_slot(&ck, &b, 3).unwrap(), dummy_slot(&ck, &b, 3).unwrap());
-        assert_ne!(dummy_slot(&ck, &b, 3).unwrap(), dummy_slot(&ck, &b, 4).unwrap());
+        assert_eq!(
+            dummy_slot(&ck, &b, 3).unwrap(),
+            dummy_slot(&ck, &b, 3).unwrap()
+        );
+        assert_ne!(
+            dummy_slot(&ck, &b, 3).unwrap(),
+            dummy_slot(&ck, &b, 4).unwrap()
+        );
     }
 
     #[test]
@@ -384,14 +444,25 @@ mod tests {
         let mut rng = TestRng::new(13);
         let kp = KemKeyPair::generate_with(Suite::CandorStd1, &mut rng).unwrap();
         let pks = vec![kp.public.clone(); 17];
-        let r = RecipientSlotBlock::build_with(&mut rng, &ContentKey::from_bytes([0; 32]), &binding(), &pks);
+        let r = RecipientSlotBlock::build_with(
+            &mut rng,
+            &ContentKey::from_bytes([0; 32]),
+            &binding(),
+            &pks,
+        );
         assert_eq!(r.err(), Some(Error::TooManyRecipients));
     }
 
     #[test]
     fn decode_rejects() {
         let mut rng = TestRng::new(14);
-        let blk = RecipientSlotBlock::build_with(&mut rng, &ContentKey::from_bytes([0; 32]), &binding(), &[]).unwrap();
+        let blk = RecipientSlotBlock::build_with(
+            &mut rng,
+            &ContentKey::from_bytes([0; 32]),
+            &binding(),
+            &[],
+        )
+        .unwrap();
         let e = blk.encode();
         let mut b = e.clone();
         b[0] = 2;
@@ -401,7 +472,10 @@ mod tests {
         assert!(RecipientSlotBlock::decode(&b).is_err());
         let mut b = e.clone();
         b[3] = 2;
-        assert_eq!(RecipientSlotBlock::decode(&b).err(), Some(Error::UnsupportedSuite));
+        assert_eq!(
+            RecipientSlotBlock::decode(&b).err(),
+            Some(Error::UnsupportedSuite)
+        );
         assert!(RecipientSlotBlock::decode(&e[..e.len() - 1]).is_err());
         let mut b = e.clone();
         b.push(0);

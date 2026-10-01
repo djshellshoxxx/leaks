@@ -79,6 +79,26 @@ pub(crate) fn size_parts(bytes: u64) -> (&'static str, u64) {
     }
 }
 
+/// Accepts a route by value or by reference (askama binds loop/`if let` values by reference).
+pub(crate) trait AsRoute {
+    fn route(&self) -> Route;
+}
+impl AsRoute for Route {
+    fn route(&self) -> Route {
+        *self
+    }
+}
+impl AsRoute for &Route {
+    fn route(&self) -> Route {
+        **self
+    }
+}
+impl AsRoute for &&Route {
+    fn route(&self) -> Route {
+        ***self
+    }
+}
+
 pub(crate) struct PageView<'a> {
     pub(crate) locale: Locale,
     pub(crate) vm: &'a ViewModel,
@@ -253,8 +273,20 @@ impl<'a> PageView<'a> {
     // ---- URLs -------------------------------------------------------------------------
 
     /// `/{lang}{path}` for an allow-listed route.
-    pub(crate) fn href(&self, r: Route) -> String {
-        format!("/{}{}", self.locale.tag(), r.path())
+    pub(crate) fn href(&self, r: impl AsRoute) -> String {
+        format!("/{}{}", self.locale.tag(), r.route().path())
+    }
+
+    pub(crate) fn any_unavailable(&self) -> bool {
+        self.vm.new_report.channels.iter().any(|c| !c.available)
+    }
+
+    pub(crate) fn allow_conf(&self) -> bool {
+        self.vm.new_report.channels.iter().any(|c| c.allows_confidential)
+    }
+
+    pub(crate) fn allow_ident(&self) -> bool {
+        self.vm.new_report.channels.iter().any(|c| c.allows_identified)
     }
 
     pub(crate) fn lang(&self) -> &'static str {
@@ -515,7 +547,12 @@ impl<'a> PageView<'a> {
 
     // ---- channels, files, cards -------------------------------------------------------
 
-    pub(crate) fn channel_selected(&self, c: &ChannelOption, index: usize) -> bool {
+    pub(crate) fn channel_selected(
+        &self,
+        c: &ChannelOption,
+        index: impl core::borrow::Borrow<usize>,
+    ) -> bool {
+        let index = *index.borrow();
         match &self.vm.new_report.selected_channel {
             Some(sel) => sel == &c.id,
             None => index == 0 && c.available,
@@ -526,8 +563,8 @@ impl<'a> PageView<'a> {
         self.size(f.size_bytes)
     }
 
-    pub(crate) fn size(&self, bytes: u64) -> String {
-        let (key, n) = size_parts(bytes);
+    pub(crate) fn size(&self, bytes: impl core::borrow::Borrow<u64>) -> String {
+        let (key, n) = size_parts(*bytes.borrow());
         self.t1(key, "n", n)
     }
 

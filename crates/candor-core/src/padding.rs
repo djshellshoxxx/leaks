@@ -52,7 +52,9 @@ pub fn is_legal_bucket(t: ObjectType, len: u64) -> bool {
         ObjectType::Submission | ObjectType::SourceMessage | ObjectType::Reply => {
             len != 0 && len.is_multiple_of(MESSAGE_BUCKET_UNIT) && len <= MESSAGE_MAX
         }
-        ObjectType::Identity => len != 0 && len.is_multiple_of(MESSAGE_BUCKET_UNIT) && len <= IDENTITY_MAX,
+        ObjectType::Identity => {
+            len != 0 && len.is_multiple_of(MESSAGE_BUCKET_UNIT) && len <= IDENTITY_MAX
+        }
         ObjectType::AttachmentBundle
         | ObjectType::CaseAttachment
         | ObjectType::CaseDocument
@@ -63,8 +65,15 @@ pub fn is_legal_bucket(t: ObjectType, len: u64) -> bool {
 /// Smallest legal bucket that holds `content_len` bytes.
 pub fn bucket_for(t: ObjectType, content_len: u64) -> Result<u64> {
     match t {
-        ObjectType::Submission | ObjectType::SourceMessage | ObjectType::Reply | ObjectType::Identity => {
-            let max = if t == ObjectType::Identity { IDENTITY_MAX } else { MESSAGE_MAX };
+        ObjectType::Submission
+        | ObjectType::SourceMessage
+        | ObjectType::Reply
+        | ObjectType::Identity => {
+            let max = if t == ObjectType::Identity {
+                IDENTITY_MAX
+            } else {
+                MESSAGE_MAX
+            };
             let b = content_len
                 .max(1)
                 .div_ceil(MESSAGE_BUCKET_UNIT)
@@ -72,7 +81,9 @@ pub fn bucket_for(t: ObjectType, content_len: u64) -> Result<u64> {
                 .ok_or(Error::TooLarge)?;
             if b > max { Err(Error::TooLarge) } else { Ok(b) }
         }
-        _ => file_buckets().find(|b| *b >= content_len).ok_or(Error::TooLarge),
+        _ => file_buckets()
+            .find(|b| *b >= content_len)
+            .ok_or(Error::TooLarge),
     }
 }
 
@@ -100,7 +111,10 @@ mod tests {
         // 262144; 65536*ceil(327680/65536)=327680; 65536*ceil(409600/65536)=7*65536=458752;
         // 65536*ceil(573440/65536)=9*65536=589824; 65536*ceil(737280/65536)=12*65536=786432;
         // 65536*ceil(983040/65536)=15*65536=983040
-        assert_eq!(v, vec![262_144, 327_680, 458_752, 589_824, 786_432, 983_040]);
+        assert_eq!(
+            v,
+            vec![262_144, 327_680, 458_752, 589_824, 786_432, 983_040]
+        );
         let all: Vec<u64> = file_buckets().collect();
         assert!(all.windows(2).all(|w| w[0] < w[1]));
         assert!(all.iter().all(|b| b % 65536 == 0));
@@ -124,12 +138,24 @@ mod tests {
         assert!(!is_legal_bucket(ObjectType::Identity, 20480));
         assert_eq!(bucket_for(ObjectType::Submission, 0).unwrap(), 4096);
         assert_eq!(bucket_for(ObjectType::Submission, 4097).unwrap(), 8192);
-        assert_eq!(bucket_for(ObjectType::Submission, 65537), Err(Error::TooLarge));
-        assert_eq!(bucket_for(ObjectType::AttachmentBundle, 0).unwrap(), 262_144);
-        assert_eq!(bucket_for(ObjectType::AttachmentBundle, 262_145).unwrap(), 327_680);
+        assert_eq!(
+            bucket_for(ObjectType::Submission, 65537),
+            Err(Error::TooLarge)
+        );
+        assert_eq!(
+            bucket_for(ObjectType::AttachmentBundle, 0).unwrap(),
+            262_144
+        );
+        assert_eq!(
+            bucket_for(ObjectType::AttachmentBundle, 262_145).unwrap(),
+            327_680
+        );
         assert!(is_legal_bucket(ObjectType::CaseDocument, 327_680));
         assert!(!is_legal_bucket(ObjectType::CaseDocument, 393_216));
-        assert_eq!(bucket_for(ObjectType::ExportPackage, u64::MAX), Err(Error::TooLarge));
+        assert_eq!(
+            bucket_for(ObjectType::ExportPackage, u64::MAX),
+            Err(Error::TooLarge)
+        );
     }
 
     #[test]

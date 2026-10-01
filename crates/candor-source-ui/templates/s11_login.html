@@ -24,7 +24,7 @@
 {% include "field_error.html" %}
 <div class="inline-fields">
 {%- for i in p.login_boxes() %}
-<div><label for="f-passphrase{% if !loop.first %}-{{ i }}{% endif %}">{{ p.t1("sui-login-word", "i", *i) }}</label>
+<div><label for="f-passphrase{% if !loop.first %}-{{ i }}{% endif %}">{{ p.t1("sui-login-word", "i", i) }}</label>
 <input type="text" id="f-passphrase{% if !loop.first %}-{{ i }}{% endif %}" name="passphrase" autocomplete="off" autocapitalize="none" spellcheck="false" dir="ltr" maxlength="64"{% if p.has_field_error(fid) %} aria-invalid="true"{% endif %}></div>
 {%- endfor %}
 </div>

@@ -28,6 +28,12 @@ pub enum Mode {
     Clearnet,
 }
 
+impl PartialEq<Mode> for &Mode {
+    fn eq(&self, other: &Mode) -> bool {
+        **self == *other
+    }
+}
+
 impl Mode {
     /// All modes, for tests and previews.
     pub const ALL: [Mode; 5] = [
@@ -117,6 +123,13 @@ pub struct Day {
 }
 
 impl Day {
+    /// 1970-01-01.
+    pub const EPOCH: Day = Day {
+        year: 1970,
+        month: 1,
+        day: 1,
+    };
+
     /// Builds a day; returns `None` for impossible dates.
     pub fn new(year: u16, month: u8, day: u8) -> Option<Day> {
         let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
@@ -267,6 +280,31 @@ impl From<String> for Arg {
 impl From<u64> for Arg {
     fn from(v: u64) -> Arg {
         Arg::Num(v)
+    }
+}
+impl From<&String> for Arg {
+    fn from(v: &String) -> Arg {
+        Arg::Text(v.clone())
+    }
+}
+impl From<&&str> for Arg {
+    fn from(v: &&str) -> Arg {
+        Arg::Text((*v).to_owned())
+    }
+}
+impl From<&u64> for Arg {
+    fn from(v: &u64) -> Arg {
+        Arg::Num(*v)
+    }
+}
+impl From<&u32> for Arg {
+    fn from(v: &u32) -> Arg {
+        Arg::Num(u64::from(*v))
+    }
+}
+impl From<&&u32> for Arg {
+    fn from(v: &&u32) -> Arg {
+        Arg::Num(u64::from(**v))
     }
 }
 impl From<u32> for Arg {
@@ -788,4 +826,115 @@ pub struct ViewModel {
     pub conversation: ConversationData,
     /// S90.
     pub busy: BusyData,
+}
+
+/// The default questionnaire template (11 §7 S05) for `step` 3..=6.
+///
+/// `categories` are the channel's categories (an "Other" option is appended); `years` are the
+/// selectable years, newest first, supplied by C-06 so that no future year is offered.
+pub fn default_questionnaire_step(
+    step: u8,
+    categories: &[ChoiceOption],
+    years: &[u16],
+) -> Vec<Question> {
+    let opt = |value: &str, key: &'static str| ChoiceOption {
+        value: value.to_owned(),
+        label: Text::Key(key),
+    };
+    let q = |id: &str, label: &'static str, hint: Option<&'static str>, kind, required| Question {
+        id: id.to_owned(),
+        label: Text::Key(label),
+        hint: hint.map(Text::Key),
+        kind,
+        required,
+        value: Vec::new(),
+    };
+    match step {
+        3 => {
+            let mut cats = categories.to_vec();
+            cats.push(opt("other", "sui-q-category-other"));
+            vec![q(
+                "category",
+                "sui-q-category",
+                None,
+                QuestionKind::SingleChoice(cats),
+                true,
+            )]
+        }
+        4 => vec![
+            q(
+                "what",
+                "sui-q-what",
+                Some("sui-q-what-hint"),
+                QuestionKind::LongText,
+                true,
+            ),
+            q(
+                "when",
+                "sui-q-when",
+                None,
+                QuestionKind::MonthYear {
+                    years: years.to_vec(),
+                },
+                false,
+            ),
+            q(
+                "where",
+                "sui-q-where",
+                Some("sui-q-where-hint"),
+                QuestionKind::ShortText,
+                false,
+            ),
+        ],
+        5 => vec![
+            q(
+                "who",
+                "sui-q-who",
+                Some("sui-q-who-hint"),
+                QuestionKind::LongText,
+                false,
+            ),
+            q(
+                "how_know",
+                "sui-q-how",
+                None,
+                QuestionKind::MultiChoice(vec![
+                    opt("saw", "sui-q-how-saw"),
+                    opt("told", "sui-q-how-told"),
+                    opt("documents", "sui-q-how-documents"),
+                    opt("other", "sui-q-how-other"),
+                ]),
+                false,
+            ),
+        ],
+        6 => vec![
+            q(
+                "people_know",
+                "sui-q-people",
+                Some("sui-q-people-hint"),
+                QuestionKind::SingleChoice(vec![
+                    opt("1-5", "sui-q-people-few"),
+                    opt("6-20", "sui-q-people-some"),
+                    opt("more-20", "sui-q-people-many"),
+                    opt("unsure", "sui-q-people-unsure"),
+                ]),
+                false,
+            ),
+            q(
+                "reported_before",
+                "sui-q-before",
+                None,
+                QuestionKind::YesNoNotSure,
+                false,
+            ),
+            q(
+                "anything_else",
+                "sui-q-else",
+                None,
+                QuestionKind::LongText,
+                false,
+            ),
+        ],
+        _ => Vec::new(),
+    }
 }

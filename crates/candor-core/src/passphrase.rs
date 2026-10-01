@@ -20,7 +20,8 @@ const EFF_LARGE_TXT: &str = include_str!("../data/eff_large_wordlist.txt");
 /// SHA-256 of `data/eff_large_wordlist.txt` (the official file
 /// <https://www.eff.org/files/2016/07/18/eff_large_wordlist.txt>; see SPEC-NOTES for
 /// provenance).
-pub const EFF_LARGE_WORDLIST_SHA256: &str = "addd35536511597a02fa0a9ff1e5284677b8883b83e986e43f15a3db996b903e";
+pub const EFF_LARGE_WORDLIST_SHA256: &str =
+    "addd35536511597a02fa0a9ff1e5284677b8883b83e986e43f15a3db996b903e";
 
 /// The four entries of the official EFF large list that contain a hyphen and are
 /// therefore excluded under §11.1(b) (a hyphen is a separator after normalization).
@@ -79,7 +80,10 @@ impl Wordlist {
             out.push(n.to_string());
         }
         let word_count = words_for_128_bits(out.len())?;
-        Ok(Self { words: out, word_count })
+        Ok(Self {
+            words: out,
+            word_count,
+        })
     }
 
     /// The EFF large wordlist (English default; 7,776 words → 10 words, 129.25 bits).
@@ -90,13 +94,19 @@ impl Wordlist {
                 hex_lower(&sha256(&[EFF_LARGE_TXT.as_bytes()])).as_bytes(),
                 EFF_LARGE_WORDLIST_SHA256.as_bytes(),
             ) {
-                let all: Vec<&str> = EFF_LARGE_TXT.lines().filter_map(|l| l.split('\t').nth(1)).collect();
+                let all: Vec<&str> = EFF_LARGE_TXT
+                    .lines()
+                    .filter_map(|l| l.split('\t').nth(1))
+                    .collect();
                 if all.len() != 7776 {
                     return Err(Error::InvalidWordlist);
                 }
                 // §11.1(b): entries containing a separator after normalization are
                 // excluded (Implementation decision, SPEC-NOTES).
-                let words: Vec<&str> = all.into_iter().filter(|w| !EFF_LARGE_EXCLUDED.contains(w)).collect();
+                let words: Vec<&str> = all
+                    .into_iter()
+                    .filter(|w| !EFF_LARGE_EXCLUDED.contains(w))
+                    .collect();
                 if words.len() != EFF_LARGE_USED_LEN {
                     return Err(Error::InvalidWordlist);
                 }
@@ -147,8 +157,12 @@ fn hex_lower(b: &[u8]) -> String {
     const H: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(b.len().saturating_mul(2));
     for x in b {
-        s.push(char::from(H.get(usize::from(x >> 4)).copied().unwrap_or(b'0')));
-        s.push(char::from(H.get(usize::from(x & 0x0f)).copied().unwrap_or(b'0')));
+        s.push(char::from(
+            H.get(usize::from(x >> 4)).copied().unwrap_or(b'0'),
+        ));
+        s.push(char::from(
+            H.get(usize::from(x & 0x0f)).copied().unwrap_or(b'0'),
+        ));
     }
     s
 }
@@ -226,7 +240,8 @@ fn argon2id(password: &[u8], salt: &[u8; 32], m_kib: u32, t: u32, p: u32) -> Res
     let params = argon2::Params::new(m_kib, t, p, Some(32)).map_err(|_| Error::PasswordHash)?;
     let a = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
     let mut out = [0u8; 32];
-    a.hash_password_into(password, salt, &mut out).map_err(|_| Error::PasswordHash)?;
+    a.hash_password_into(password, salt, &mut out)
+        .map_err(|_| Error::PasswordHash)?;
     let s = Secret32::from_bytes(out);
     out.zeroize();
     Ok(s)
@@ -251,8 +266,21 @@ impl core::fmt::Debug for SourceKeys {
 impl SourceKeys {
     /// Derive from a passphrase (normalized internally) for a tenant (§11.3):
     /// Argon2id(m = 65536 KiB, t = 3, p = 1, 32 B, v0x13) → seed → HKDF tree.
-    pub fn derive(suite: Suite, passphrase: &str, deployment_salt: &[u8; 32], tenant_id: &[u8; 16]) -> Result<Self> {
-        Self::derive_with_params(suite, passphrase, deployment_salt, tenant_id, ARGON2_M_KIB, ARGON2_T, ARGON2_P)
+    pub fn derive(
+        suite: Suite,
+        passphrase: &str,
+        deployment_salt: &[u8; 32],
+        tenant_id: &[u8; 16],
+    ) -> Result<Self> {
+        Self::derive_with_params(
+            suite,
+            passphrase,
+            deployment_salt,
+            tenant_id,
+            ARGON2_M_KIB,
+            ARGON2_T,
+            ARGON2_P,
+        )
     }
 
     /// Derivation with explicit Argon2id parameters — crate-internal so the spec
@@ -282,11 +310,22 @@ impl SourceKeys {
         let auth = SigningKey::from_seed(&buf);
         hkdf_expand(&prk, &[labels::SOURCE_SIGN_ED25519], buf.as_mut())?;
         let sign = SigningKey::from_seed(&buf);
-        hkdf_expand(&prk, &[labels::SOURCE_KEM_SEED, &suite.to_be_bytes()], buf.as_mut())?;
+        hkdf_expand(
+            &prk,
+            &[labels::SOURCE_KEM_SEED, &suite.to_be_bytes()],
+            buf.as_mut(),
+        )?;
         let kem = KemKeyPair::derive(suite, buf.as_ref())?;
         hkdf_expand(&prk, &[labels::SOURCE_PREFS], buf.as_mut())?;
         let k_prefs = AeadKey::from_bytes(*buf);
-        Ok(Self { lookup_id, auth, sign, kem, prk, k_prefs })
+        Ok(Self {
+            lookup_id,
+            auth,
+            sign,
+            kem,
+            prk,
+            k_prefs,
+        })
     }
 
     /// `lookup_id` (secret; never stored server-side).
@@ -328,7 +367,11 @@ impl SourceKeys {
     /// `mailbox_id[i] = HKDF-Expand(PRK, "candor/v1/source/mailbox/" ‖ u32be(i), 32)`.
     pub fn mailbox_id(&self, report_index: u32) -> Result<[u8; 32]> {
         let mut out = [0u8; 32];
-        hkdf_expand(&self.prk, &[labels::SOURCE_MAILBOX, &report_index.to_be_bytes()], &mut out)?;
+        hkdf_expand(
+            &self.prk,
+            &[labels::SOURCE_MAILBOX, &report_index.to_be_bytes()],
+            &mut out,
+        )?;
         Ok(out)
     }
 
@@ -341,14 +384,27 @@ impl SourceKeys {
     /// Source authentication signature (§11.5):
     /// `Ed25519.Sign(auth_sk, "candor/v1/source-auth" ‖ challenge ‖ tenant_id ‖ audience)`.
     #[must_use]
-    pub fn sign_auth_challenge(&self, challenge: &[u8; 32], tenant_id: &[u8; 16], audience: &[u8]) -> [u8; 64] {
-        sign_with_context(&self.auth, labels::SIG_SOURCE_AUTH, &[challenge, tenant_id, audience])
+    pub fn sign_auth_challenge(
+        &self,
+        challenge: &[u8; 32],
+        tenant_id: &[u8; 16],
+        audience: &[u8],
+    ) -> [u8; 64] {
+        sign_with_context(
+            &self.auth,
+            labels::SIG_SOURCE_AUTH,
+            &[challenge, tenant_id, audience],
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
     use super::*;
     use crate::rand::TestRng;
 
@@ -363,7 +419,10 @@ mod tests {
         assert_eq!(l.word_count(), 10);
         assert_eq!(l.get(0), Some("abacus"));
         assert_eq!(l.get(7771), Some("zoom"));
-        assert_eq!(hex_lower(&sha256(&[EFF_LARGE_TXT.as_bytes()])), EFF_LARGE_WORDLIST_SHA256);
+        assert_eq!(
+            hex_lower(&sha256(&[EFF_LARGE_TXT.as_bytes()])),
+            EFF_LARGE_WORDLIST_SHA256
+        );
     }
 
     #[test]
@@ -380,7 +439,10 @@ mod tests {
     fn wordlist_validation() {
         let mut w: Vec<String> = (0..2048).map(|i| format!("w{i}")).collect();
         assert!(Wordlist::from_words(&w).is_ok());
-        assert_eq!(Wordlist::from_words(&w[..2047]).err(), Some(Error::InvalidWordlist));
+        assert_eq!(
+            Wordlist::from_words(&w[..2047]).err(),
+            Some(Error::InvalidWordlist)
+        );
         w[5] = "W1".into(); // duplicate of "w1" after normalization
         assert!(Wordlist::from_words(&w).is_err());
         w[5] = "a-b".into(); // separator after normalization
@@ -404,12 +466,21 @@ mod tests {
 
     #[test]
     fn normalization_rules() {
-        assert_eq!(normalize("  Abacus\t\u{2014}ZOOM,, ,kiwi- ").as_str(), "abacus zoom kiwi");
+        assert_eq!(
+            normalize("  Abacus\t\u{2014}ZOOM,, ,kiwi- ").as_str(),
+            "abacus zoom kiwi"
+        );
         // NFKC: fullwidth letters and ligatures fold.
-        assert_eq!(normalize("\u{FF21}bacus \u{FB01}ve").as_str(), "abacus five");
+        assert_eq!(
+            normalize("\u{FF21}bacus \u{FB01}ve").as_str(),
+            "abacus five"
+        );
         // Unicode lowercase is locale-independent (Turkish dotted I → "i̇").
         assert_eq!(normalize("\u{0130}").as_str(), "i\u{0307}");
-        assert_eq!(normalize("a\u{00A0}b\u{2003}c\u{2010}d\u{2015}e").as_str(), "a b c d e");
+        assert_eq!(
+            normalize("a\u{00A0}b\u{2003}c\u{2010}d\u{2015}e").as_str(),
+            "a b c d e"
+        );
         assert_eq!(normalize("").as_str(), "");
         assert_eq!(normalize(" - , ").as_str(), "");
     }
@@ -429,15 +500,49 @@ mod tests {
     fn derivation_tree_small_params() {
         // Small Argon2 parameters keep unit tests fast; the full parameters are
         // exercised by `derivation_full_params` and the published vectors.
-        let k = SourceKeys::derive_with_params(Suite::CandorStd1, "Abacus  ZOOM", &[1; 32], &[2; 16], 64, 1, 1).unwrap();
-        let k2 = SourceKeys::derive_with_params(Suite::CandorStd1, "abacus zoom", &[1; 32], &[2; 16], 64, 1, 1).unwrap();
-        assert_eq!(k.lookup_tag(), k2.lookup_tag(), "normalization applied before derivation");
+        let k = SourceKeys::derive_with_params(
+            Suite::CandorStd1,
+            "Abacus  ZOOM",
+            &[1; 32],
+            &[2; 16],
+            64,
+            1,
+            1,
+        )
+        .unwrap();
+        let k2 = SourceKeys::derive_with_params(
+            Suite::CandorStd1,
+            "abacus zoom",
+            &[1; 32],
+            &[2; 16],
+            64,
+            1,
+            1,
+        )
+        .unwrap();
+        assert_eq!(
+            k.lookup_tag(),
+            k2.lookup_tag(),
+            "normalization applied before derivation"
+        );
         assert_eq!(k.kem_public_key(), k2.kem_public_key());
         assert_ne!(k.mailbox_id(0).unwrap(), k.mailbox_id(1).unwrap());
         // Tenant-bound salt: a passphrase is not portable across tenants.
-        let k3 = SourceKeys::derive_with_params(Suite::CandorStd1, "abacus zoom", &[1; 32], &[3; 16], 64, 1, 1).unwrap();
+        let k3 = SourceKeys::derive_with_params(
+            Suite::CandorStd1,
+            "abacus zoom",
+            &[1; 32],
+            &[3; 16],
+            64,
+            1,
+            1,
+        )
+        .unwrap();
         assert_ne!(k.lookup_tag(), k3.lookup_tag());
-        assert_ne!(k.auth_key().verifying_key_bytes(), k.sign_key().verifying_key_bytes());
+        assert_ne!(
+            k.auth_key().verifying_key_bytes(),
+            k.sign_key().verifying_key_bytes()
+        );
         let sig = k.sign_auth_challenge(&[7; 32], &[2; 16], b"source-app");
         let mut msg = labels::SIG_SOURCE_AUTH.to_vec();
         msg.extend_from_slice(&[7; 32]);
@@ -445,7 +550,8 @@ mod tests {
         msg.extend_from_slice(b"source-app");
         assert!(crate::sig::verify_strict(&k.auth_key().verifying_key_bytes(), &msg, &sig).is_ok());
         assert_eq!(
-            SourceKeys::derive_with_params(Suite::CandorFips1, "x", &[1; 32], &[2; 16], 64, 1, 1).err(),
+            SourceKeys::derive_with_params(Suite::CandorFips1, "x", &[1; 32], &[2; 16], 64, 1, 1)
+                .err(),
             Some(Error::UnsupportedSuite)
         );
         assert_eq!(format!("{k:?}"), "SourceKeys(<redacted>)");
@@ -455,7 +561,16 @@ mod tests {
     fn derivation_full_params() {
         // ADR-046(7) parameters (m = 64 MiB, t = 3, p = 1).
         let a = SourceKeys::derive(Suite::CandorStd1, "abacus zoom", &[1; 32], &[2; 16]).unwrap();
-        let b = SourceKeys::derive_with_params(Suite::CandorStd1, "abacus zoom", &[1; 32], &[2; 16], 64, 1, 1).unwrap();
+        let b = SourceKeys::derive_with_params(
+            Suite::CandorStd1,
+            "abacus zoom",
+            &[1; 32],
+            &[2; 16],
+            64,
+            1,
+            1,
+        )
+        .unwrap();
         assert_ne!(a.lookup_tag(), b.lookup_tag());
     }
 
@@ -470,9 +585,19 @@ mod tests {
             .output_len(32)
             .build()
             .unwrap();
-        let a = argon2::Argon2::new_with_secret(&[3u8; 8], argon2::Algorithm::Argon2id, argon2::Version::V0x13, params).unwrap();
+        let a = argon2::Argon2::new_with_secret(
+            &[3u8; 8],
+            argon2::Algorithm::Argon2id,
+            argon2::Version::V0x13,
+            params,
+        )
+        .unwrap();
         let mut out = [0u8; 32];
-        a.hash_password_into(&[1u8; 32], &[2u8; 16], &mut out).unwrap();
-        assert_eq!(hex::encode(out), "0d640df58d78766c08c037a34a8b53c9d01ef0452d75b65eb52520e96b01e659");
+        a.hash_password_into(&[1u8; 32], &[2u8; 16], &mut out)
+            .unwrap();
+        assert_eq!(
+            hex::encode(out),
+            "0d640df58d78766c08c037a34a8b53c9d01ef0452d75b65eb52520e96b01e659"
+        );
     }
 }

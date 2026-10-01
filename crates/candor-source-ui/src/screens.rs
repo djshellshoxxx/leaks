@@ -276,7 +276,7 @@ impl Screen {
     }
 
     /// Whether the screen shows the CSS-only JavaScript warning (SUI-051).
-    pub(crate) fn js_warning(self) -> bool {
+    pub fn shows_js_warning(self) -> bool {
         matches!(
             self,
             Screen::Landing

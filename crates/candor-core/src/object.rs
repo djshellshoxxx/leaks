@@ -65,7 +65,11 @@ pub fn seal_with_ck(ck: &ContentKey, req: &SealRequest<'_>) -> Result<SealedObje
     seal_with_ck_rng(&mut OsRandom, ck, req)
 }
 
-pub(crate) fn seal_with_ck_rng(rng: &mut dyn RandomSource, ck: &ContentKey, req: &SealRequest<'_>) -> Result<SealedObject> {
+pub(crate) fn seal_with_ck_rng(
+    rng: &mut dyn RandomSource,
+    ck: &ContentKey,
+    req: &SealRequest<'_>,
+) -> Result<SealedObject> {
     req.suite.require_supported()?;
     let mut object_id = [0u8; 16];
     rng.fill(&mut object_id)?;
@@ -73,11 +77,20 @@ pub(crate) fn seal_with_ck_rng(rng: &mut dyn RandomSource, ck: &ContentKey, req:
     rng.fill(&mut payload_nonce)?;
     let slot_block = match (req.object_type.is_intake_sealed(), &req.recipients) {
         (true, Some((ctx, pks))) => {
-            let b = SlotBinding { suite: req.suite, object_id, payload_nonce, context: ctx.clone() };
+            let b = SlotBinding {
+                suite: req.suite,
+                object_id,
+                payload_nonce,
+                context: ctx.clone(),
+            };
             Some(RecipientSlotBlock::build_with(rng, ck, &b, pks)?)
         }
         (false, None) => None,
-        _ => return Err(Error::Malformed("recipients required exactly for intake-sealed objects")),
+        _ => {
+            return Err(Error::Malformed(
+                "recipients required exactly for intake-sealed objects",
+            ));
+        }
     };
     let header = CoreHeader {
         object_type: req.object_type,
@@ -85,21 +98,34 @@ pub(crate) fn seal_with_ck_rng(rng: &mut dyn RandomSource, ck: &ContentKey, req:
         tenant_id: req.tenant_id,
         channel_id: req.channel_id,
         epoch_id: req.epoch_id,
-        slot_block_hash: slot_block.as_ref().map_or([0u8; 32], RecipientSlotBlock::hash),
+        slot_block_hash: slot_block
+            .as_ref()
+            .map_or([0u8; 32], RecipientSlotBlock::hash),
         object_id,
         day_stamp: req.day_stamp,
-        padded_plaintext_len: u64::try_from(req.padded_plaintext.len()).map_err(|_| Error::TooLarge)?,
+        padded_plaintext_len: u64::try_from(req.padded_plaintext.len())
+            .map_err(|_| Error::TooLarge)?,
         payload_nonce,
     };
     let header_bytes = header.encode()?;
     let header_mac = header.header_mac(ck)?;
     let k_pay = derive_payload_key(req.suite, ck, &payload_nonce)?;
     let payload = stream::encrypt(k_pay, req.padded_plaintext)?;
-    let mut bytes = Vec::with_capacity(HEADER_LEN.saturating_add(HEADER_MAC_LEN).saturating_add(payload.len()));
+    let mut bytes = Vec::with_capacity(
+        HEADER_LEN
+            .saturating_add(HEADER_MAC_LEN)
+            .saturating_add(payload.len()),
+    );
     bytes.extend_from_slice(&header_bytes);
     bytes.extend_from_slice(&header_mac);
     bytes.extend_from_slice(&payload);
-    Ok(SealedObject { object_hash: object_hash(&header_bytes, &header_mac), header, header_mac, slot_block, bytes })
+    Ok(SealedObject {
+        object_hash: object_hash(&header_bytes, &header_mac),
+        header,
+        header_mac,
+        slot_block,
+        bytes,
+    })
 }
 
 /// A structurally validated (not yet authenticated) sealed object.
@@ -149,7 +175,9 @@ impl ParsedObject<'_> {
 
     /// Check that a slot block is the one committed in the header.
     pub fn check_slot_block(&self, block: &RecipientSlotBlock) -> Result<()> {
-        if self.header.object_type.is_intake_sealed() && crate::kdf::ct_eq(&block.hash(), &self.header.slot_block_hash) {
+        if self.header.object_type.is_intake_sealed()
+            && crate::kdf::ct_eq(&block.hash(), &self.header.slot_block_hash)
+        {
             Ok(())
         } else {
             Err(Error::SlotVerification)
@@ -173,13 +201,20 @@ impl ParsedObject<'_> {
     pub fn open_stream(&self, ck: &ContentKey) -> Result<(StreamDecryptor, &[u8])> {
         self.verify(ck)?;
         let k = derive_payload_key(self.header.suite, ck, &self.header.payload_nonce)?;
-        Ok((StreamDecryptor::new(k, self.header.padded_plaintext_len), self.payload))
+        Ok((
+            StreamDecryptor::new(k, self.header.padded_plaintext_len),
+            self.payload,
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
     use super::*;
     use crate::kem::KemKeyPair;
     use crate::padding::pad;
@@ -189,7 +224,11 @@ mod tests {
     fn submission_end_to_end() {
         let mut rng = TestRng::new(50);
         let m = KemKeyPair::generate_with(Suite::CandorStd1, &mut rng).unwrap();
-        let ctx = SlotContext::MemberEpoch { tenant_id: [1; 16], channel_id: [2; 16], epoch_id: 3 };
+        let ctx = SlotContext::MemberEpoch {
+            tenant_id: [1; 16],
+            channel_id: [2; 16],
+            epoch_id: 3,
+        };
         let pt = pad(ObjectType::Submission, b"hello").unwrap();
         let ck = ContentKey::generate_with(&mut rng).unwrap();
         let req = SealRequest {
@@ -207,22 +246,31 @@ mod tests {
         assert_eq!(p.object_hash(), obj.object_hash);
         let blk = obj.slot_block.as_ref().unwrap();
         p.check_slot_block(blk).unwrap();
-        let (ck2, pos) = blk.trial_open(&m.private, &p.slot_binding(ctx.clone())).unwrap();
-        blk.verify(&ck2, &p.slot_binding(ctx), 1, Some(pos)).unwrap();
+        let (ck2, pos) = blk
+            .trial_open(&m.private, &p.slot_binding(ctx.clone()))
+            .unwrap();
+        blk.verify(&ck2, &p.slot_binding(ctx), 1, Some(pos))
+            .unwrap();
         assert_eq!(p.open(&ck2).unwrap().as_slice(), pt.as_slice());
 
         // Salamander / wrong key: header commitment rejects before payload decryption.
         let other = ContentKey::from_bytes([0xEE; 32]);
         assert_eq!(p.open(&other).err(), Some(Error::Authentication));
         // Exact length enforced before decryption.
-        assert_eq!(parse(&obj.bytes[..obj.bytes.len() - 1]).err(), Some(Error::Length));
+        assert_eq!(
+            parse(&obj.bytes[..obj.bytes.len() - 1]).err(),
+            Some(Error::Length)
+        );
         let mut long = obj.bytes.clone();
         long.push(0);
         assert_eq!(parse(&long).err(), Some(Error::Length));
         // Header tamper ⇒ MAC failure (e.g. epoch changed).
         let mut t = obj.bytes.clone();
         t[47] ^= 1;
-        assert_eq!(parse(&t).unwrap().open(&ck).err(), Some(Error::Authentication));
+        assert_eq!(
+            parse(&t).unwrap().open(&ck).err(),
+            Some(Error::Authentication)
+        );
         // Tampered slot_block_hash detected against the stored block.
         let mut t = obj.bytes.clone();
         t[48] ^= 1;
@@ -251,7 +299,10 @@ mod tests {
         assert!(obj.slot_block.is_none());
         assert_eq!(obj.bytes.len(), 128 + 32 + 4096 + 16);
         assert_eq!(parse(&obj.bytes).unwrap().open(&ck).unwrap().len(), 4096);
-        let bad = SealRequest { padded_plaintext: &pt[..100], ..req };
+        let bad = SealRequest {
+            padded_plaintext: &pt[..100],
+            ..req
+        };
         assert_eq!(seal(&bad).err(), Some(Error::IllegalBucket));
     }
 

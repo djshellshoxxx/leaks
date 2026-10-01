@@ -1,0 +1,60 @@
+{
+  "cases": [
+    {
+      "argon2id": {
+        "len": 32,
+        "m_kib": 65536,
+        "p": 1,
+        "t": 3,
+        "version": 19
+      },
+      "auth_pk": "a1149dc8e06b0a4ba8d0ebc53ee28f584a65e3c4b184c96c3e3cf4ec00a5b53f",
+      "deployment_salt": "7456fae330eb5c29480a27a61e98baa12df38a88302bedfcd52427376240fe6c",
+      "input_as_typed": "  PORCUPINE -—\tSPUR -—\tSTINGRAY -—\tDULLER -—\tSHARPENER -—\tCLOCK -—\tENRAGE -—\tUNROLL -—\tAMUSEMENT -—\tOVERPLANT  ",
+      "k_prefs": "d68d90821d311abb65d364fe6c3a699f7d6d05c8aeb54c118568bbf2119f546c",
+      "lookup_id": "38dc27df9bbdbf0539643575699f75de37915719785b276eaafe81a4f0140f34",
+      "lookup_tag": "eabfd2ed23d96d7a2a31ed49ed06800128426d09708f1d45886bdad82e89ba9b",
+      "mailbox_id": [
+        "981375c8c815104cf978c13042d6db51e1046d4ad66f92cf3d808391765ddf96",
+        "01d4857dd4d5f1da709c711ecc663682952a33c6b2dde2960b889d4509139447"
+      ],
+      "normalized": "porcupine spur stingray duller sharpener clock enrage unroll amusement overplant",
+      "passphrase": "porcupine spur stingray duller sharpener clock enrage unroll amusement overplant",
+      "salt": "8f6f5d7050a51bfd380917c9bdb4c25cfec375e81d290f9aba4568cd2cecf6d4",
+      "sign_pk": "e266ba809fc35dd9937bd5bb2837de317b2aee0e3ea32570042681ab15afb672",
+      "src_pk_sha256": "dfe068bff6fb80a1a00499ec81b3d0c90974370cba4b92d7f38434742ed40ad8",
+      "src_sk": "39fb41e2f74e14c0774470be06318380fa1e9247168efae4f63218d20529f146",
+      "suite": 1,
+      "tenant_id": "319966300a3cec4bf7dab0892ddc9c9a"
+    },
+    {
+      "argon2id": {
+        "len": 32,
+        "m_kib": 65536,
+        "p": 1,
+        "t": 3,
+        "version": 19
+      },
+      "auth_pk": "6e3e994183d79bb2d046a8935f0e10d15387846d6379cc03d31b68be13503914",
+      "deployment_salt": "9c813691ac55fb3bfc3489d87a025a3cf207d794bfba977acc8259dfd0e2714a",
+      "input_as_typed": "  FROSTILY -—\tSTARTING -—\tFRUGALLY -—\tREBURIAL -—\tUNCLIP -—\tSTRATUS -—\tCHAFE -—\tMULLED -—\tRETAINING -—\tSHORTCAKE  ",
+      "k_prefs": "9db6bfb3d6ac6a3dd1e11ef8bff245eaf206fa658e87c7263a3ab75a98f7fa67",
+      "lookup_id": "f0fecd760e9487c3941049b8e70e31e6c2bf175e27424539db1064ccbb48f53d",
+      "lookup_tag": "99d5da0576d7d7eb44a841dcaf660b68c7081d7b97364e7b608f6e4bbd7b32c7",
+      "mailbox_id": [
+        "80d1f6b29a7f2d390e098530a9ed77d157873b1c1c300abe39d0655a4afd22d7",
+        "2c6dfe557e8b47ceaa87e109dfcc503bddb59a58dc1885d476135394c903b7e9"
+      ],
+      "normalized": "frostily starting frugally reburial unclip stratus chafe mulled retaining shortcake",
+      "passphrase": "frostily starting frugally reburial unclip stratus chafe mulled retaining shortcake",
+      "salt": "80009530b791ca4a44d2d904c101656eed9a73057ef85b37569961a23769c479",
+      "sign_pk": "3892afbb3585e18167f2ffc8db14ab0616589239f7896ffb172b9cfde3b870a2",
+      "src_pk_sha256": "2b1f35480e9bffb449d2ee6cb1db90abf59a86549ef1b74edbcab2ab9259b2cf",
+      "src_sk": "ffd8e820170c419b5c003b75513548042124ae814d048bf05a1619b360c4a568",
+      "suite": 1,
+      "tenant_id": "e218aee54c31763a840a1f25761cc8cf"
+    }
+  ],
+  "description": "Source passphrase derivation (§11.3). Wordlist: EFF large minus 4 hyphenated entries (SPEC-NOTES). src_pk = X-Wing DeriveKeyPair(kem_seed).",
+  "wordlist_sha256": "addd35536511597a02fa0a9ff1e5284677b8883b83e986e43f15a3db996b903e"
+}

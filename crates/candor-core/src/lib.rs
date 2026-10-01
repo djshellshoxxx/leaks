@@ -17,22 +17,22 @@
 //! are constant-time; parsers never panic on hostile input.
 
 pub mod error;
-pub mod suite;
-pub mod labels;
-pub mod secret;
 pub mod hash;
+pub mod header;
 pub mod kdf;
 pub mod kem;
-pub mod sig;
-pub mod header;
+pub mod labels;
+pub mod object;
 pub mod padding;
-pub mod stream;
+pub mod passphrase;
+pub mod record;
+pub mod secret;
+pub mod selftest;
+pub mod sig;
 pub mod slots;
 pub mod stanza;
-pub mod record;
-pub mod passphrase;
-pub mod object;
-pub mod selftest;
+pub mod stream;
+pub mod suite;
 
 mod aead;
 mod bytes;
@@ -42,6 +42,6 @@ mod rand;
 mod vectors;
 
 pub use error::{Error, Result};
-pub use suite::Suite;
 /// Fill a buffer from the OS CSPRNG (the only randomness source, CRYPTO-033).
 pub use rand::fill as fill_random;
+pub use suite::Suite;

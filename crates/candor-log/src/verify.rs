@@ -99,6 +99,7 @@ struct Parsed {
     hash: [u8; 32],
     leaf: [u8; 32],
     redacted: bool,
+    claimed: Option<[u8; 32]>,
 }
 
 fn record_seq(r: &ChainRecord) -> Result<u64, VerifyError> {
@@ -129,6 +130,7 @@ fn parse(
             hash: *hash,
             leaf: *leaf,
             redacted: true,
+            claimed: None,
         }),
         ChainRecord::Full {
             bytes,
@@ -148,15 +150,13 @@ fn parse(
                 .and_then(cbor::Value::as_bytes32)
                 .ok_or(err(VerifyFailureCode::EnvelopeMismatch, seq))?;
             let hash = chain_hash(head, bytes);
-            if claimed_hash.is_some_and(|c| c != hash) {
-                return Err(err(VerifyFailureCode::ChainMismatch, seq));
-            }
             Ok(Parsed {
                 seq,
                 prev,
                 hash,
                 leaf: leaf_hash(bytes),
                 redacted: false,
+                claimed: *claimed_hash,
             })
         }
     }
@@ -228,15 +228,26 @@ pub fn verify_stream(
     let mut heads: Vec<[u8; 32]> = Vec::with_capacity(records.len());
     let mut expected = start;
     let mut redacted: u64 = 0;
-    for r in records {
+    for (pos, r) in records.iter().enumerate() {
         let rec = parse(r, &head, p, expected)?;
         if rec.seq > expected {
-            return Err(err(VerifyFailureCode::SequenceGap, expected));
+            // Reordered if the expected record appears later; deleted otherwise.
+            let later = records
+                .get(pos.saturating_add(1)..)
+                .unwrap_or_default()
+                .iter()
+                .any(|x| record_seq(x).ok() == Some(expected));
+            let code = if later {
+                VerifyFailureCode::SequenceOrder
+            } else {
+                VerifyFailureCode::SequenceGap
+            };
+            return Err(err(code, expected));
         }
         if rec.seq < expected {
             return Err(err(VerifyFailureCode::SequenceOrder, rec.seq));
         }
-        if rec.prev != head {
+        if rec.prev != head || rec.claimed.is_some_and(|c| c != rec.hash) {
             return Err(err(VerifyFailureCode::ChainMismatch, rec.seq));
         }
         if rec.redacted {

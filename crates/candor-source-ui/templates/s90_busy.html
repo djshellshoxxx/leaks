@@ -7,6 +7,6 @@
 <p>{{ p.t("sui-busy-submit") }}</p>
 {%- endif %}
 {%- if let Some(r) = p.vm.busy.retry %}
-<form method="post" action="{{ p.href(*r) }}">{% include "ft.html" %}<input type="hidden" name="nav" value="retry"><div class="actions"><button type="submit" class="btn-primary">{{ p.t("sui-busy-retry") }}</button></div></form>
+<form method="post" action="{{ p.href(r) }}">{% include "ft.html" %}<input type="hidden" name="nav" value="retry"><div class="actions"><button type="submit" class="btn-primary">{{ p.t("sui-busy-retry") }}</button></div></form>
 {%- endif %}
 {% endblock %}

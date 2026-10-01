@@ -14,9 +14,9 @@
 <form method="post" action="{% if rotation %}{{ p.href(Route::RotateConfirm) }}{% else %}{{ p.href(Route::Submit) }}{% endif %}">
 {% include "ft.html" %}
 {%- for (name, pos) in p.confirm_fields() %}
-{%- let fid = *name %}
+{%- let fid = name %}
 <div class="field">
-<label for="f-{{ name }}">{{ p.t1("sui-confirm-word", "p", *pos) }}</label>
+<label for="f-{{ name }}">{{ p.t1("sui-confirm-word", "p", pos) }}</label>
 {% include "field_error.html" %}
 <input type="text" id="f-{{ name }}" name="{{ name }}" autocomplete="off" autocapitalize="none" spellcheck="false" dir="ltr" lang="{{ p.wordlist_lang() }}" maxlength="64"{% if p.has_field_error(fid) %} aria-invalid="true" aria-describedby="e-{{ name }}"{% endif %}>
 </div>

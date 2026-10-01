@@ -15,6 +15,7 @@ mod guidance;
 mod locale;
 mod model;
 mod page;
+pub mod preview;
 mod routes;
 mod screens;
 mod view;

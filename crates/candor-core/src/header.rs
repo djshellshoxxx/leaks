@@ -64,13 +64,19 @@ impl ObjectType {
     /// the source-originated objects (day_stamp = 0, ADR-010).
     #[must_use]
     pub fn is_intake_sealed(self) -> bool {
-        matches!(self, Self::Submission | Self::AttachmentBundle | Self::Identity | Self::SourceMessage)
+        matches!(
+            self,
+            Self::Submission | Self::AttachmentBundle | Self::Identity | Self::SourceMessage
+        )
     }
 
     /// Types whose `channel_id` must be all-zero (§13.1, §13.5).
     #[must_use]
     pub fn requires_zero_channel(self) -> bool {
-        matches!(self, Self::CaseAttachment | Self::CaseDocument | Self::ExportPackage | Self::Reply)
+        matches!(
+            self,
+            Self::CaseAttachment | Self::CaseDocument | Self::ExportPackage | Self::Reply
+        )
     }
 }
 
@@ -121,7 +127,10 @@ impl CoreHeader {
         if (t.is_intake_sealed() || t == ObjectType::Reply) && self.day_stamp != 0 {
             return Err(Error::Malformed("day_stamp must be zero"));
         }
-        let mek_sealed = matches!(t, ObjectType::Submission | ObjectType::AttachmentBundle | ObjectType::SourceMessage);
+        let mek_sealed = matches!(
+            t,
+            ObjectType::Submission | ObjectType::AttachmentBundle | ObjectType::SourceMessage
+        );
         if !mek_sealed && self.epoch_id != 0 {
             return Err(Error::Malformed("epoch_id must be zero"));
         }
@@ -217,7 +226,11 @@ impl CoreHeader {
     /// Verify `header_mac` in constant time (CRYPTO-008).
     pub fn verify_header_mac(&self, ck: &ContentKey, mac: &[u8]) -> Result<()> {
         let expected = self.header_mac(ck)?;
-        if ct_eq(&expected, mac) { Ok(()) } else { Err(Error::Authentication) }
+        if ct_eq(&expected, mac) {
+            Ok(())
+        } else {
+            Err(Error::Authentication)
+        }
     }
 }
 
@@ -260,7 +273,21 @@ mod tests {
     #[test]
     fn rejects_bad_fields() {
         let e = sample().encode().unwrap();
-        let cases: &[(usize, u8)] = &[(0, b'X'), (4, 2), (4, 0), (5, 0), (5, 9), (7, 3), (8, 1), (9, 1), (10, 1), (11, 1), (100, 15), (101, 1), (103, 1)];
+        let cases: &[(usize, u8)] = &[
+            (0, b'X'),
+            (4, 2),
+            (4, 0),
+            (5, 0),
+            (5, 9),
+            (7, 3),
+            (8, 1),
+            (9, 1),
+            (10, 1),
+            (11, 1),
+            (100, 15),
+            (101, 1),
+            (103, 1),
+        ];
         for (off, val) in cases {
             let mut b = e;
             b[*off] = *val;
@@ -313,10 +340,16 @@ mod tests {
         let mac = h.header_mac(&ck).unwrap();
         assert!(h.verify_header_mac(&ck, &mac).is_ok());
         let ck2 = ContentKey::from_bytes([8; 32]);
-        assert_eq!(h.verify_header_mac(&ck2, &mac).err(), Some(Error::Authentication));
+        assert_eq!(
+            h.verify_header_mac(&ck2, &mac).err(),
+            Some(Error::Authentication)
+        );
         let mut h2 = h.clone();
         h2.slot_block_hash[0] ^= 1;
-        assert_eq!(h2.verify_header_mac(&ck, &mac).err(), Some(Error::Authentication));
+        assert_eq!(
+            h2.verify_header_mac(&ck, &mac).err(),
+            Some(Error::Authentication)
+        );
         assert!(h.verify_header_mac(&ck, &mac[..31]).is_err());
     }
 

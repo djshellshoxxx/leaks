@@ -42,7 +42,7 @@
 {% include "field_error.html" %}
 <div class="inline-fields">
 <div><label for="f-{{ fid }}">{{ p.t("sui-q-month") }}</label>
-<select id="f-{{ fid }}" name="{{ fid }}_month"{% if p.has_field_error(fid) %} aria-invalid="true"{% endif %}><option value="">{{ p.t("sui-q-month-none") }}</option>{% for (v, name) in p.months() %}<option value="{{ v }}"{% if p.q_month(q) == *v %} selected{% endif %}>{{ name }}</option>{% endfor %}</select></div>
+<select id="f-{{ fid }}" name="{{ fid }}_month"{% if p.has_field_error(fid) %} aria-invalid="true"{% endif %}><option value="">{{ p.t("sui-q-month-none") }}</option>{% for (v, name) in p.months() %}<option value="{{ v }}"{% if p.q_month(q) == v %} selected{% endif %}>{{ name }}</option>{% endfor %}</select></div>
 <div><label for="f-{{ fid }}-year">{{ p.t("sui-q-year") }}</label>
 <select id="f-{{ fid }}-year" name="{{ fid }}_year"><option value="">{{ p.t("sui-q-year-none") }}</option>{% for y in years %}<option value="{{ y }}"{% if p.q_year(q) == y.to_string() %} selected{% endif %}>{{ y }}</option>{% endfor %}</select></div>
 </div>

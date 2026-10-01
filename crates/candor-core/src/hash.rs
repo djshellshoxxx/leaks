@@ -99,7 +99,10 @@ impl EvidenceHasher {
     pub fn finalize(self) -> EvidenceHashes {
         let mut sha256 = [0u8; 32];
         sha256.copy_from_slice(self.sha.finalize().as_slice());
-        EvidenceHashes { sha256, blake3: *self.b3.finalize().as_bytes() }
+        EvidenceHashes {
+            sha256,
+            blake3: *self.b3.finalize().as_bytes(),
+        }
     }
 
     /// One-shot.

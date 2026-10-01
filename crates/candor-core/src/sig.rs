@@ -68,16 +68,26 @@ mod tests {
     /// ST-021: RFC 8032 §7.1 TEST 1 (empty message).
     #[test]
     fn rfc8032_test1() {
-        let seed: [u8; 32] = hex::decode("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60").unwrap().try_into().unwrap();
+        let seed: [u8; 32] =
+            hex::decode("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60")
+                .unwrap()
+                .try_into()
+                .unwrap();
         let k = SigningKey::from_seed(&seed);
-        assert_eq!(hex::encode(k.verifying_key_bytes()), "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a");
+        assert_eq!(
+            hex::encode(k.verifying_key_bytes()),
+            "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+        );
         let sig = k.sign(b"");
         assert_eq!(
             hex::encode(sig),
             "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"
         );
         assert!(verify_strict(&k.verifying_key_bytes(), b"", &sig).is_ok());
-        assert_eq!(verify_strict(&k.verifying_key_bytes(), b"x", &sig).err(), Some(Error::Signature));
+        assert_eq!(
+            verify_strict(&k.verifying_key_bytes(), b"x", &sig).err(),
+            Some(Error::Signature)
+        );
     }
 
     /// Strictness: small-order public key (identity point) is rejected.

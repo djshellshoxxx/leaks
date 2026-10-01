@@ -83,7 +83,9 @@ impl ContentKey {
         Ok(out)
     }
 
-    pub(crate) fn generate_with(rng: &mut dyn crate::rand::RandomSource) -> crate::error::Result<Self> {
+    pub(crate) fn generate_with(
+        rng: &mut dyn crate::rand::RandomSource,
+    ) -> crate::error::Result<Self> {
         let mut k = [0u8; 32];
         rng.fill(&mut k)?;
         let out = Self(k);
