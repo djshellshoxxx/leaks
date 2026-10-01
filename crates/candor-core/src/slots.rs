@@ -566,7 +566,11 @@ mod tests {
                 *e.key_id(),
                 key_id(Suite::CandorStd1, KeyKind::Mek, &pk.to_bytes())
             );
-            assert!(RecipientListEntry::from_bytes(e.to_bytes().as_ref()).unwrap().ct_eq(e));
+            assert!(
+                RecipientListEntry::from_bytes(e.to_bytes().as_ref())
+                    .unwrap()
+                    .ct_eq(e)
+            );
         }
         let enc = blk.encode();
         assert_eq!(enc.len(), SLOT_BLOCK_LEN);
@@ -638,7 +642,8 @@ mod tests {
         let mut twice = copy(&list[1]);
         twice.key_id = list[0].key_id;
         assert_eq!(
-            blk.verify_slot_block(&ck, &b, &[copy(&list[0]), twice], &dir).err(),
+            blk.verify_slot_block(&ck, &b, &[copy(&list[0]), twice], &dir)
+                .err(),
             Some(Error::SlotVerification)
         );
         // Unresolvable key id.
@@ -676,7 +681,10 @@ mod tests {
         );
         // A directory that maps the listed id to a different key is also rejected.
         let lying = |_: &[u8; 32]| Some(attacker.public.clone());
-        assert!(blk.verify_slot_block(&ck, &b, list.as_slice(), lying).is_err());
+        assert!(
+            blk.verify_slot_block(&ck, &b, list.as_slice(), lying)
+                .is_err()
+        );
         // Tampered enc_rand is detected.
         let (blk2, mut list2) = RecipientSlotBlock::build_with(
             &mut rng,
@@ -685,9 +693,15 @@ mod tests {
             core::slice::from_ref(&member.public),
         )
         .unwrap();
-        assert!(blk2.verify_slot_block(&ck, &b, list2.as_slice(), &dir).is_ok());
+        assert!(
+            blk2.verify_slot_block(&ck, &b, list2.as_slice(), &dir)
+                .is_ok()
+        );
         list2.0[0].enc_rand[0] ^= 1;
-        assert!(blk2.verify_slot_block(&ck, &b, list2.as_slice(), &dir).is_err());
+        assert!(
+            blk2.verify_slot_block(&ck, &b, list2.as_slice(), &dir)
+                .is_err()
+        );
     }
 
     #[test]
@@ -704,8 +718,13 @@ mod tests {
         let pks = [k13.public.clone()];
         let (blk, list) = RecipientSlotBlock::build_with(&mut rng, &ck, &b, &pks).unwrap();
         assert!(
-            blk.verify_slot_block(&ck, &b, list.as_slice(), directory(&pks, KeyKind::Custodian))
-                .is_ok()
+            blk.verify_slot_block(
+                &ck,
+                &b,
+                list.as_slice(),
+                directory(&pks, KeyKind::Custodian)
+            )
+            .is_ok()
         );
         assert!(
             blk.verify_slot_block(&ck, &b, list.as_slice(), directory(&pks, KeyKind::Mek))
@@ -722,8 +741,13 @@ mod tests {
         let (blk2, list2) = RecipientSlotBlock::build_with(&mut rng, &ck, &me, &two).unwrap();
         me.context = b.context.clone();
         assert_eq!(
-            blk2.verify_slot_block(&ck, &me, list2.as_slice(), directory(&two, KeyKind::Custodian))
-                .err(),
+            blk2.verify_slot_block(
+                &ck,
+                &me,
+                list2.as_slice(),
+                directory(&two, KeyKind::Custodian)
+            )
+            .err(),
             Some(Error::SlotVerification)
         );
         // Dummy derivation is deterministic.
@@ -763,9 +787,13 @@ mod tests {
         let mut rng = TestRng::new(16);
         let ck = ContentKey::from_bytes([0x55; 32]);
         let m = KemKeyPair::generate_with(Suite::CandorStd1, &mut rng).unwrap();
-        let (_, list) =
-            RecipientSlotBlock::build_with(&mut rng, &ck, &binding(), core::slice::from_ref(&m.public))
-                .unwrap();
+        let (_, list) = RecipientSlotBlock::build_with(
+            &mut rng,
+            &ck,
+            &binding(),
+            core::slice::from_ref(&m.public),
+        )
+        .unwrap();
         assert_eq!(format!("{list:?}"), "RecipientList(<1 redacted entries>)");
         assert_eq!(
             format!("{:?}", list.as_slice()[0]),
@@ -792,10 +820,15 @@ mod tests {
         let b = binding();
         let dir = directory(&pks, KeyKind::Mek);
         let (blk, list) = RecipientSlotBlock::build_with(&mut rng, &ck, &b, &pks).unwrap();
-        blk.verify_slot_block(&ck, &b, list.as_slice(), &dir).unwrap();
+        blk.verify_slot_block(&ck, &b, list.as_slice(), &dir)
+            .unwrap();
         let other_ck = ContentKey::from_bytes([0x67; 32]);
         let (other, _) = RecipientSlotBlock::build_with(&mut rng, &other_ck, &b, &pks).unwrap();
-        let real: Vec<usize> = list.as_slice().iter().map(|e| usize::from(e.slot_index)).collect();
+        let real: Vec<usize> = list
+            .as_slice()
+            .iter()
+            .map(|e| usize::from(e.slot_index))
+            .collect();
         let (mut saw_real, mut saw_dummy) = (0, 0);
         for k in 0..SLOT_COUNT {
             if real.contains(&k) {

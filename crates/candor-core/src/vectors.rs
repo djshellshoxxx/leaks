@@ -18,6 +18,7 @@ use crate::hash::{EvidenceHasher, KeyKind, casekey_bound_hash, key_id, lookup_ta
 use crate::header::ObjectType;
 use crate::kdf::{derive_case_record_key, derive_payload_key};
 use crate::kem::KemKeyPair;
+use crate::kem::seal_base_with;
 use crate::object::{SealRequest, seal_with_ck_rng};
 use crate::padding::{file_buckets, pad};
 use crate::passphrase::{SourceKeys, Wordlist, generate_with, normalize, source_salt};
@@ -28,7 +29,6 @@ use crate::slots::{RecipientSlotBlock, SlotBinding, SlotContext};
 use crate::stanza::{HpkeWrapContext, StanzaType, WrapStanza};
 use crate::stream;
 use crate::suite::Suite;
-use crate::kem::seal_base_with;
 use serde_json::{Value, json};
 
 const STD: Suite = Suite::CandorStd1;
@@ -165,7 +165,9 @@ fn sealed_object_vectors() -> Value {
     let (list, obj) = seal_with_ck_rng(&mut rng, &ck, &req, build).unwrap();
     let blk = obj.slot_block.clone().unwrap();
     let list_hex = |l: &[crate::slots::RecipientListEntry]| {
-        l.iter().map(|e| h(e.to_bytes().as_slice())).collect::<Vec<_>>()
+        l.iter()
+            .map(|e| h(e.to_bytes().as_slice()))
+            .collect::<Vec<_>>()
     };
 
     // Hidden-recipient negative: three real slots, Recipient List names only two.
@@ -433,14 +435,22 @@ fn fuzz_seeds() -> Vec<(&'static str, String, Vec<u8>)> {
     // Envelope: slot block ‖ sealed object; inner = u32be(5) ‖ "hello" ‖ u8 n ‖ n × entry.
     let pks = [member.public.clone()];
     for (name, ty, recips) in [
-        ("submission", ObjectType::Submission, Some((ctx.clone(), &pks[..]))),
+        (
+            "submission",
+            ObjectType::Submission,
+            Some((ctx.clone(), &pks[..])),
+        ),
         ("reply", ObjectType::Reply, None),
     ] {
         let req = SealRequest {
             suite: STD,
             object_type: ty,
             tenant_id: fk::TENANT,
-            channel_id: if recips.is_some() { fk::CHANNEL } else { [0; 16] },
+            channel_id: if recips.is_some() {
+                fk::CHANNEL
+            } else {
+                [0; 16]
+            },
             epoch_id: if recips.is_some() { fk::EPOCH } else { 0 },
             day_stamp: 0,
             recipients: recips,
@@ -491,8 +501,8 @@ fn fuzz_seeds() -> Vec<(&'static str, String, Vec<u8>)> {
     ));
     // HPKE open: enc (1120) ‖ ct, sealed to the fuzz member with the fixed info/aad.
     for (name, pt) in [("ck", &[0x11u8; 32][..]), ("empty", &[][..])] {
-        let (enc, ct) = seal_base_with(&mut rng, &member.public, fk::HPKE_INFO, fk::HPKE_AAD, pt)
-            .unwrap();
+        let (enc, ct) =
+            seal_base_with(&mut rng, &member.public, fk::HPKE_INFO, fk::HPKE_AAD, pt).unwrap();
         let mut v = enc;
         v.extend_from_slice(&ct);
         out.push(("fuzz_hpke_open", name.into(), v));
@@ -548,7 +558,11 @@ fn fuzz_seeds() -> Vec<(&'static str, String, Vec<u8>)> {
         &inner,
     )
     .unwrap();
-    for (name, st) in [("hpke_reply", &hpke), ("case_aead", &aead), ("casekey_ek", &ek)] {
+    for (name, st) in [
+        ("hpke_reply", &hpke),
+        ("case_aead", &aead),
+        ("casekey_ek", &ek),
+    ] {
         out.push(("fuzz_stanza", name.into(), st.encode().unwrap()));
     }
     // Records under the fixed key and the zero Case AAD used by the target.
@@ -560,8 +574,14 @@ fn fuzz_seeds() -> Vec<(&'static str, String, Vec<u8>)> {
         record_id: [0; 16],
         row_version: 0,
     };
-    let rec = seal_record_with(&mut rng, &AeadKey::from_bytes(fk::RECORD_KEY), 0, &aad, b"seed")
-        .unwrap();
+    let rec = seal_record_with(
+        &mut rng,
+        &AeadKey::from_bytes(fk::RECORD_KEY),
+        0,
+        &aad,
+        b"seed",
+    )
+    .unwrap();
     out.push(("fuzz_record", "case".into(), rec));
     // STREAM: u16be(L) ‖ ciphertext of pattern(4·L) under the fixed key.
     for l in [0u16, 1, 16_384, 16_385] {
@@ -573,7 +593,10 @@ fn fuzz_seeds() -> Vec<(&'static str, String, Vec<u8>)> {
     }
     // Passphrase normalization / membership.
     for (name, p) in [
-        ("plain", "abacus zoom abacus zoom abacus zoom abacus zoom abacus zoom"),
+        (
+            "plain",
+            "abacus zoom abacus zoom abacus zoom abacus zoom abacus zoom",
+        ),
         ("messy", "  ABACUS -\u{2014}\tzoom,, kiwi  "),
         ("unicode", "\u{FF21}bacus \u{FB01}ve \u{0130}ΟΔΟΣ \u{FDFA}"),
     ] {

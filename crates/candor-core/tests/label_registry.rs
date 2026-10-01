@@ -86,7 +86,10 @@ fn prefix_pairs_are_injective() {
         }
     };
     // Suite ids are < 0x0100, so the suite's first byte is 0x00.
-    for s in [candor_core::Suite::CandorStd1, candor_core::Suite::CandorFips1] {
+    for s in [
+        candor_core::Suite::CandorStd1,
+        candor_core::Suite::CandorFips1,
+    ] {
         assert_eq!(s.to_be_bytes()[0], 0x00);
     }
     let mut pairs = 0;
@@ -98,10 +101,16 @@ fn prefix_pairs_are_injective() {
             for u in a.uses.iter().filter(|u| b.uses.contains(u)) {
                 pairs += 1;
                 let (la, (lo, hi)) = suffix(a.name, *u).unwrap_or_else(|| {
-                    panic!("prefix pair {} < {} ({u:?}) needs an injectivity argument", a.name, b.name)
+                    panic!(
+                        "prefix pair {} < {} ({u:?}) needs an injectivity argument",
+                        a.name, b.name
+                    )
                 });
                 let (lb, _) = suffix(b.name, *u).unwrap_or_else(|| {
-                    panic!("prefix pair {} < {} ({u:?}) needs an injectivity argument", a.name, b.name)
+                    panic!(
+                        "prefix pair {} < {} ({u:?}) needs an injectivity argument",
+                        a.name, b.name
+                    )
                 });
                 assert_ne!(
                     a.value.len() + la,
@@ -124,5 +133,8 @@ fn prefix_pairs_are_injective() {
             }
         }
     }
-    assert_eq!(pairs, 4, "shared-use prefix pairs changed; update the argument");
+    assert_eq!(
+        pairs, 4,
+        "shared-use prefix pairs changed; update the argument"
+    );
 }

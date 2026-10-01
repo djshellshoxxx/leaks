@@ -331,3 +331,157 @@
 ## Variant notes (G3)
 - **SUI-01:** checked other sinks with unbounded custom text: `p.vm.landing.purpose`, `jurisdiction_*`, `inc.text`, the S04 channel descriptions and the S04b role labels. These are deployment-controlled and short, covered by `max_content_fits_size_classes`. The source- and team-controlled sinks are S05, S06 (descriptions ≤ 500), S08, S11, S12 and the S05b identity fields (≤ 200/500).
 - **SUI-02:** the same derive pattern should be checked in `candor-intake-store` and `candor-sealer::proto` during their audits.
+
+---
+
+## Re-test (round 2), 2026-10-01
+
+- **Re-test commit:** `7d340f68794c76cff22277641765fb02d84d74fb`. The fixes were committed in `ab3170e`, `132e108`, `d73cff5`, `db1d234` and `3c1717e`. None of those carry `[skip ci]`-free CI runs.
+- **Inputs:** `crates/candor-source-ui/SPEC-NOTES.md` § "Fixes for AUD-RM1-SUI"; `process/audits/FIXES-RM0-INF.md`; DECISIONS ADR-052(8).
+- **Method (§G):**
+  1. Read each fix diff (`git diff 55f3356..7d340f6` over the scope).
+  2. Ran the new regression tests on the fix commit.
+  3. Ran them on the audited commit `55f3356`, using a scratch worktree and the old scripts extracted with `git show`.
+  4. Hunted for variants.
+  5. Did a manual delta review of the new `paging`/`items` code and templates as new attack surface.
+  6. Re-ran the §C tools.
+
+  No repository code was changed by the auditor.
+
+### Tool re-runs (round 2)
+
+| Tool | Result |
+|---|---|
+| `cargo test -p candor-source-ui --locked` | 21 + 9 (content_limits) + 2 (debug_redaction) + 35 (render) + 11 (tips): all pass |
+| `cargo clippy -p candor-source-ui --all-targets -- -D warnings` | clean. The audit extras show 9× `integer_division`, all intentional (adds `paging::split_escaped` `budget / 2`) |
+| Auditor harness (scratch crate, `features=["preview"]`) | Every round-1 failing case now renders in every part, at exactly the class size: S08 at 98,304 B of `"`/`&`/`'`/10 % `"` gives 2–7 parts; S12 64 KiB hostile message, 4 parts; S11 inbox with all messages hostile, 6 parts. An out-of-range `part` is clamped. A 74 KB draft with CR LF, `&`, `"`, `<`, `é`, 😀 gives 3 pieces; the reassembled textarea contents equal the input, and every `piece` range is a valid char boundary |
+| `tests/debug_redaction.rs` on `55f3356` | **fails** (2/2; the old `{:?}` prints identity, answers, draft and the form token). Passes on the fix commit |
+| `tests/content_limits.rs` on `55f3356` | does not compile (it uses the new `part`/`escaped_len` API). The failing evidence on the old code is the round-1 harness (`OverBudget`) |
+| `scripts/tests/test-check-dco.sh` | 13/13 on the fix. Against the audited `check-dco.sh`: **7 fail** (epoch→head, epoch=`HEAD`, unsigned merge, 3 epoch fail-closed cases, invalid revision) |
+| `scripts/tests/test-repro-check.sh` | 6/6 on the fix; **0/6** on the audited script |
+| `scripts/tests/test-check-actions-pinned.sh` | 20/20 on the fix; **3/20** on the audited script |
+| `check-codeowners.py --self-test` / run | OK (23 paths) |
+| `check-secrets.py` / `--history` | OK (441 files / 1,160 blobs) |
+| `check-vet-policy.py` | FAIL (12): the four import approvals are `TODO`. Expected; Security Lead action |
+| `cargo vet --locked` | FAIL: 169 crates (101 `safe-to-deploy` from the INF-01 graph; 68 `candor-crypto-reviewed`) |
+| `cargo deny --offline --locked check advisories bans licenses sources` | **aborts: stack overflow (rc 134)**, deterministic, also with `RUST_MIN_STACK=64M` and `ulimit -s unlimited` → new **INF-10**. advisories/licenses/sources run alone: rc 0. bans with the audited `deny.toml`: rc 2 (`sha2` duplicate only) |
+| `cargo audit` (advisory-db 9b3a3b7) | no findings |
+| `zizmor --offline --persona=auditor .github` | no findings |
+| `shellcheck -S style scripts/*.sh scripts/tests/*.sh` | clean |
+
+### Status of round-1 findings
+
+| ID | Sev | Round-2 status | Evidence / notes |
+|---|---|---|---|
+| SUI-01 | High | **Fixed** (7d340f6; `tests/content_limits.rs`, `paging::tests::split_covers_and_fits`) | Paging is by escaped length. Chrome is measured with every container and the widest navigation. Pieces go one per part. Final `pad_html` still fails closed. My cases pass; delta review below. Old code fails (round-1 harness). |
+| SUI-02 | Medium | **Fixed** (`tests/debug_redaction.rs`, fails on 55f3356) | Remaining `derive(Debug)`s are deployment/config types, `Text`, enums, `ConfirmData` positions and `CredentialData` (whose `Passphrase` is redacted). `PieceRef` Debug prints only the field id and offsets. |
+| SUI-03 | Medium | **Fixed** | `CappedWriter` is allocated once at the class budget and errors instead of growing. `Zeroizing<String>` zeroizes the full capacity. Item copies are exactly sized. `escape_z`, `spell` and `passphrase_line` each use one zeroizing allocation, and `q_value` clone was removed. The documented residual (Fluent temporaries for label/number arguments only) is accepted as Low residual. |
+| SUI-04 | Low | **Fixed** | `from_tag` accepts only `PRODUCTION`; the default language list is `PRODUCTION`; the pseudo parser is behind `preview`. |
+| SUI-05 | Low | **Accepted-pending** (spec decision 11 §5.3) | Guard test `header_block_spread_is_bounded` (spread ≤ 64 B; same cell count with a 200-B cookie allowance). Needs lead sign-off and a spec owner decision on a padding header. |
+| SUI-06 | Low | **Accepted-pending** | It depends on a C-07 negative test: missing/foreign/`null` `Origin` on POST `/login` → reject. Check this in the RM-2 C-07 audit. |
+| SUI-07 | Low | **Fixed** | `sui-cred-copy-warning` is linked by `aria-describedby`; test `passphrase_copy_warning`. |
+| SUI-08 | Info | **Accepted-pending** (spec feedback) | No change, by design (spec-verbatim). |
+| SUI-09 | Info | **Fixed** | Note: CI and `repro-check.sh` build with `--all-features`, so `preview` is compiled into those artefacts. The release build must not use `--all-features` (see SUI-13). |
+| SUI-10 | Low | **Fixed** | Bidi controls are replaced by U+FFFD in messages and labels; messages are framed; the tip wording is changed. Variant: LRM/RLM/ALM (U+200E/F, U+061C) are not neutralised. They are weak marks, not overrides, and are acceptable. |
+| INF-01 | Medium | **Open** (deferred to lead) | vet fails on 169 crates, and deny bans fails on `sha2`. ADR-052(8) says PR CI requires only `safe-to-deploy`, but the PR `cargo-vet` job uses the same policy that demands `candor-crypto-reviewed`. So the staging that ADR-052(8) decided is **not implemented**, and PR CI is red by construction. Fixes are still landing via `[skip ci]` commits. |
+| INF-02 | Medium | **Fixed** | Order corrected (T0 after `/crates/`). Owners added for `.dco-epoch`, the checkers, the lint configs, `deploy/` and `CONTRIBUTING.md`. Resolver self-test in CI. |
+| INF-03 | Medium | **Fixed** (old script fails 7/13 fixtures) | The epoch comes from BASE (40-hex, exists, ancestor of BASE). Merges are checked. CI runs the BASE copy of the checker. Residual, acknowledged by the builder: a PR can still edit `ci.yml`, so this needs required status checks plus CODEOWNERS on `/.github/`. |
+| INF-04 | Medium | **Fixed** (old script fails 6/6) | No SKIP path; expected artefacts come from `cargo metadata`; explicit `--target`; ambient overrides cleared; no empty sums file. Info: in library mode the per-crate "source-set" hashes are equal by construction (both copies come from the same tree), so the real signal is the rlib comparison. |
+| INF-05 | Medium | **Fixed** (policy and lint) / **Accepted-pending** (import approvals: Security Lead) | No exemption grants `candor-crypto-reviewed`; policies were added for sealer and intake-store; `check-vet-policy.py` is in CI. Gate state is tracked under INF-01 and ADR-052(8). |
+| INF-06 | Low | **Open** | The `allow-build-scripts` list (42 entries) makes cargo-deny crash (INF-10), so the claimed rejection of an unlisted build script could not be reproduced. `external-default-features` stays `allow` (acceptable with the stated reason). Scheduled `cargo audit` was added. |
+| INF-07 | Low | **Fixed** (old checker fails 17/20) | Online zizmor runs in the scheduled job with a read-only token, never on PR code. |
+| INF-08 | Low | **Fixed** | `secret-scan` job; per-path + line-hash allow-list; history clean. |
+| INF-09 | Info | **Fixed** (residual 2); residuals 1 and 3 accepted | `if: always()` `pkill -KILL -u candor-test`. |
+
+### Delta review of the new paging and piece code (fresh attack surface)
+
+1. **Escaping.**
+   - All item text goes through `escape_z` (same five-character set as askama, `&#34;`/`&#39;`), and `escaped_len` matches it (unit test).
+   - `|safe` is used only on crate-escaped item HTML.
+   - The `piece` value is built from a validated id plus digits.
+   - Textarea/input values are pre-escaped, so `</textarea>` and quote breakout are impossible.
+   - The newline after `<textarea>` keeps a leading newline.
+   - Refuted: injection through the piece or `shown` fields.
+2. **Piece-range tampering.**
+   - `parse_piece` is strict: ≤ 64 chars, `[a-z0-9_]` id, ≤ 9-digit numbers, `start ≤ end ≤ total`, no extra fields.
+   - `splice_piece` checks `stored.len()==total` and char boundaries via `get`, and does not panic.
+   - A forged range only affects the source's own draft and needs a valid CSRF token.
+   - Weakness: staleness is detected by **length only** → **SUI-11**.
+3. **Part navigation and leakage.**
+   - Every part is exactly the class size. `part` is clamped. The part count is visible only inside the encrypted page.
+   - Navigation adds requests the same way the existing S12 older/newer pagination does.
+   - Request bodies of navigation POSTs carry the form's fields. This is not new: no-JS form posts were already unpadded (11 §15).
+   - End-of-flow controls (S07 continue, S08 send) are only on the last part. This is good: the source sees all content before sending.
+   - Issue in S12 → **SUI-12**.
+4. **Size invariant.** The chrome is measured with the maximum navigation and all containers. Items are packed with 128-B slack plus 512-B page slack. `pad_html` is still the final fail-closed check. The tests cover every screen × locale × `& " ' <`. No input within the spec limits produced `OverBudget` in my runs.
+5. **DoS.** Every request rebuilds and escapes every item of the screen (O(total content) per part view), bounded by the C-07 mailbox and report limits. `MAX_PARTS` = 9,999, and `pack` fails closed above it. No recursion, no panics (clippy deny set clean).
+
+### New findings (round 2)
+
+#### AUD-RM1-SUI-11: `splice_piece` detects stale pieces by length only; a same-length change is silently overwritten
+- **Severity:** Low
+- **Location:** `crates/candor-source-ui/src/paging.rs:180-202` (`if stored.len() != piece.total { Stale }`)
+- **Category:** B5 / data integrity (CWE-367 analogue: check on length, use on content)
+- **Description:** A `piece` value names a byte range and the *length* of the stored value at render time. The stored value can change with its length unchanged: a second tab, the browser Back button re-posting an older part (Tor Browser re-POSTs `no-store` pages), or a same-length edit of an earlier piece. The stale page's text is then spliced over content the source never saw on that page. Harness: `splice_piece("XYZdef", "text-0-3-6", "123")` → `Ok("123def")`.
+- **Exploit scenario:** No adversary is involved. The source's own report silently loses or duplicates text before sending, which undermines the "nothing is left out" promise (`sui-part-status`).
+- **Fix recommendation:** Bind each piece to a revision of the stored value. Options: a per-field RAM-only counter in the sealer session record, incremented on every write and carried as a fifth `piece` component; or a keyed MAC (session key) over the stored value, compared in constant time. Never put an unkeyed hash of plaintext in the page. Return `Stale` on mismatch (C-07 re-renders, keeping the posted text). Add a test: same-length change → `Stale`.
+- **Status:** Open
+
+#### AUD-RM1-SUI-12: S12 multi-part reply form: navigation re-posts a chosen file, and the send-with-piece contract is implicit
+- **Severity:** Low
+- **Location:** `templates/s12_conversation.html` (the `parts_nav.html` buttons sit inside `reply-form`, which is `multipart/form-data` and holds the file input on the last part); SPEC-NOTES "Contract for C-06/C-07" item 3
+- **Description:**
+  1. **File re-posted on navigation.** On the last part, a source who has chosen a file and then presses "Previous part" submits the reply form, so the browser uploads the whole file. The contract says navigation never uploads, but the bytes still cross Tor: a large, network-visible upload (11 §15; the `sui-files-size-visible` warning). The server then discards the file and the source silently loses the selection.
+  2. **Send-with-piece is implicit.** When the restored draft is split, `action=send` on the last part carries only the last piece plus `piece`. If C-07 sends `text` without first applying `splice_piece`, only the final piece is sent. That is a partial message the source believes was sent whole. Contract item 3 covers splicing generally but does not say "before send".
+- **Fix recommendation:** Put the part-navigation buttons on S12 in a separate, non-multipart form (`navform`) that carries only `csrf`, `part`, `page` and the composer piece (`form=` attribute), so the file input is never in it. State in the contract (and test in C-07) that every action, including `send`, applies `splice_piece` first and sends the spliced value; a send with a `Stale` piece is refused and re-rendered.
+- **Status:** Open
+
+#### AUD-RM1-SUI-13: `preview` is compiled into `--all-features` builds, including the reproducibility artefacts
+- **Severity:** Info
+- **Location:** `crates/candor-source-ui/Cargo.toml` (feature `preview`); `scripts/repro-check.sh` and the CI build with `--all-features`
+- **Description:** Sample view models (fixed sample passphrase words) and `from_tag_including_pseudo` are part of every `--all-features` artefact. The current `SHA256SUMS` therefore describe a build that contains preview code. Nothing ships yet.
+- **Fix recommendation:** Build release and repro artefacts with an explicit feature list (from the same file the release pipeline uses), not `--all-features`. Alternatively, have `deny.toml` or a test assert that no release target enables `preview`.
+- **Status:** Open
+
+#### AUD-RM0-INF-10: cargo-deny 0.20.2 aborts with a stack overflow on the new `deny.toml`; the bans gate never completes
+- **Severity:** Medium
+- **Location:** `deny.toml` `[bans.build] allow-build-scripts` (42 entries) with `include-dependencies`/`include-archives`; `.github/workflows/ci.yml` cargo-deny job (one invocation for all four checks)
+- **Category:** B11.1 / gate integrity
+- **Description:**
+  - `cargo deny --offline --locked check … bans …` terminates with `fatal runtime error: stack overflow` (rc 134). It does so on every run, with a 64 MiB `RUST_MIN_STACK` and with `ulimit -s unlimited`.
+  - Removing only `allow-build-scripts` restores normal behaviour (rc 2, `sha2` duplicate).
+  - The build-script allow-list, the "unlisted crate is rejected" claim (INF-06) and every other bans rule (OpenSSL denies, crypto-set duplicates, wildcards) are therefore **not evaluated**.
+  - Because one command runs all four checks, the `licenses` and `sources` results after the crash are not reported either.
+  - The job fails closed (red), but it cannot tell a crash from a real violation, so any later violation is masked.
+- **Fix recommendation:**
+  - Reproduce minimally and report upstream.
+  - Until fixed: bump cargo-deny through the 14-day cooling process if a fixed release exists; otherwise move the allow-list to a form that does not crash (bisect: `include-archives`, `include-dependencies`, entry count).
+  - Run each check as a separate step so one crash does not hide the others.
+  - Treat rc ≥ 128 as "gate broken", not as a policy result.
+  - Add a fixture test: an unlisted crate with `build.rs` must give a `build-script-not-allowed` error.
+- **Status:** Open
+
+### Round-2 summary
+
+| Severity | Open | Accepted-pending | Fixed |
+|---|---|---|---|
+| High | 0 | 0 | 1 (SUI-01) |
+| Medium | 2 (INF-01, INF-10) | 0 | 6 (SUI-02, SUI-03, INF-02, INF-03, INF-04, INF-05*) |
+| Low | 3 (INF-06, SUI-11, SUI-12) | 2 (SUI-05, SUI-06) | 4 (SUI-04, SUI-07, SUI-10, INF-07, INF-08)† |
+| Info | 1 (SUI-13) | 1 (SUI-08) | 2 (SUI-09, INF-09) |
+
+\* INF-05: the import approvals are Accepted-pending (Security Lead). † INF-08 is counted with the Low fixes (five Low findings fixed in total).
+
+### Gate verdict (round 2)
+
+- **Scope A, `candor-source-ui`: PASS-conditional.** There are no open Critical, High or Medium findings.
+  - SUI-05, SUI-06 and SUI-08 need the lead's written acceptance, as recorded above.
+  - SUI-11, SUI-12 and SUI-13 are Low/Info: they are tracked and do not block.
+  - Integration also requires the C-07 obligations to be tested in the RM-2 C-07 audit: Origin check (SUI-06), splice-before-send (SUI-12), and absent-field semantics.
+- **Scope B, infrastructure: FAIL.**
+  - **INF-01 (Medium, Open):** vet/deny are red, and the ADR-052(8) PR/release staging is not implemented in CI.
+  - **INF-10 (Medium, new, Open):** cargo-deny crashes, so the bans policy is unevaluated.
+
+  Both need a fix or the lead's written acceptance, and the §C tools must complete without untriaged output.
+
+`Gate: FAIL 2026-10-01 7d340f6` (infra). Scope A may be integrated once the lead records the acceptances for SUI-05, SUI-06 and SUI-08.

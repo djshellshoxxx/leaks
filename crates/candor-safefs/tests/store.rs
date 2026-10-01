@@ -338,7 +338,10 @@ fn debug_output_has_no_path_or_size() {
     let id = r.put_random(&[1u8; 4321], slot()).unwrap();
     let rd = r.open_read(&id).unwrap();
     let d = format!("{rd:?}");
-    assert!(!d.contains("4321") && !d.contains('/') && !d.contains("path"), "{d}");
+    assert!(
+        !d.contains("4321") && !d.contains('/') && !d.contains("path"),
+        "{d}"
+    );
     let mut w = r.create_random().unwrap();
     w.write_all(&[0u8; 4321]).unwrap();
     let d = format!("{w:?}");

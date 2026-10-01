@@ -875,7 +875,12 @@ fn protected_of(table: &Table, plan: &Plan, ln: &Lines, k: u64) -> Vec<BTreeSet<
     // Sums of suppressed cells along a line (or the whole table) when that
     // sum is below k.
     let all: Vec<usize> = (0..table.cells.len()).collect();
-    for line in ln.rows.iter().chain(ln.cols.iter()).chain(core::iter::once(&all)) {
+    for line in ln
+        .rows
+        .iter()
+        .chain(ln.cols.iter())
+        .chain(core::iter::once(&all))
+    {
         let sup: Vec<&TableCell> = line
             .iter()
             .filter(|&&i| plan.sup.get(i).copied().unwrap_or(false))

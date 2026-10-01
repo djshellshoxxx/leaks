@@ -289,8 +289,15 @@ impl StreamDecryptor {
     }
 
     /// Decryptor for a Tier W staged part (§9.13) identified by its stored id bytes.
-    pub fn for_staged_part(k36: &SessionKey, part_id: &[u8; 16], plaintext_len: u64) -> Result<Self> {
-        Ok(Self::new(derive_stage_part_key(k36, part_id)?, plaintext_len))
+    pub fn for_staged_part(
+        k36: &SessionKey,
+        part_id: &[u8; 16],
+        plaintext_len: u64,
+    ) -> Result<Self> {
+        Ok(Self::new(
+            derive_stage_part_key(k36, part_id)?,
+            plaintext_len,
+        ))
     }
 
     /// Expected ciphertext length of the next chunk, or `None` when complete.

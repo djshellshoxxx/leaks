@@ -88,8 +88,10 @@ fn aead_suite<const N: usize>(
     let n = each(&v, |_, t| {
         let key = hx(&t["key"]);
         let iv = hx(&t["iv"]);
-        let (Ok(key), Ok(iv)) = (AeadKey::from_slice(&key), <[u8; N]>::try_from(iv.as_slice()))
-        else {
+        let (Ok(key), Ok(iv)) = (
+            AeadKey::from_slice(&key),
+            <[u8; N]>::try_from(iv.as_slice()),
+        ) else {
             // Wrong key/nonce sizes cannot be expressed through the typed API.
             assert_eq!(result(t), "invalid", "tc {}", t["tcId"]);
             unrepresentable += 1;
@@ -104,7 +106,12 @@ fn aead_suite<const N: usize>(
                 assert_eq!(seal(&key, &iv, &aad, &msg).unwrap(), ct, "tc {}", t["tcId"]);
                 assert_eq!(opened.unwrap().as_slice(), msg.as_slice());
             }
-            _ => assert_eq!(opened.err(), Some(Error::Authentication), "tc {}", t["tcId"]),
+            _ => assert_eq!(
+                opened.err(),
+                Some(Error::Authentication),
+                "tc {}",
+                t["tcId"]
+            ),
         }
     });
     (n, unrepresentable)
@@ -132,7 +139,12 @@ fn wycheproof_hkdf_sha256() {
     each(&v, |_, t| {
         let size = usize::try_from(t["size"].as_u64().unwrap()).unwrap();
         let mut out = vec![0u8; size];
-        let r = hkdf(&hx(&t["ikm"]), &hx(&t["salt"]), &[&hx(&t["info"])], &mut out);
+        let r = hkdf(
+            &hx(&t["ikm"]),
+            &hx(&t["salt"]),
+            &[&hx(&t["info"])],
+            &mut out,
+        );
         match result(t) {
             "valid" => {
                 r.unwrap();
@@ -194,10 +206,12 @@ fn wycheproof_x25519_and_xwing_pk_validation() {
             .map(|f| f.as_str().unwrap())
             .collect();
         let accepted_now = KemPublicKey::from_bytes(Suite::CandorStd1, &pk).is_ok();
-        if flags
-            .iter()
-            .any(|f| matches!(*f, "ZeroSharedSecret" | "LowOrderPublic" | "NonCanonicalPublic"))
-        {
+        if flags.iter().any(|f| {
+            matches!(
+                *f,
+                "ZeroSharedSecret" | "LowOrderPublic" | "NonCanonicalPublic"
+            )
+        }) {
             assert!(!accepted_now, "tc {} must be rejected", t["tcId"]);
         }
         if accepted_now {

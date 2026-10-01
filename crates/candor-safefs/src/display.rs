@@ -250,14 +250,42 @@ mod tests {
         );
         assert_eq!(d.as_str(), "invoice.pdf.exe");
         for c in [
-            '\u{200B}', '\u{200C}', '\u{200D}', '\u{2060}', '\u{2064}', '\u{206A}', '\u{206F}',
-            '\u{FEFF}', '\u{00AD}', '\u{034F}', '\u{115F}', '\u{1160}', '\u{3164}', '\u{FFA0}',
-            '\u{2800}', '\u{E0001}', '\u{E0041}', '\u{E007F}', '\u{FE0F}', '\u{E0100}',
-            '\u{180E}', '\u{FFF9}', '\u{FFFB}', '\u{E000}', '\u{FDD0}', '\u{FFFF}',
-            '\u{1D173}', '\u{17B4}',
+            '\u{200B}',
+            '\u{200C}',
+            '\u{200D}',
+            '\u{2060}',
+            '\u{2064}',
+            '\u{206A}',
+            '\u{206F}',
+            '\u{FEFF}',
+            '\u{00AD}',
+            '\u{034F}',
+            '\u{115F}',
+            '\u{1160}',
+            '\u{3164}',
+            '\u{FFA0}',
+            '\u{2800}',
+            '\u{E0001}',
+            '\u{E0041}',
+            '\u{E007F}',
+            '\u{FE0F}',
+            '\u{E0100}',
+            '\u{180E}',
+            '\u{FFF9}',
+            '\u{FFFB}',
+            '\u{E000}',
+            '\u{FDD0}',
+            '\u{FFFF}',
+            '\u{1D173}',
+            '\u{17B4}',
         ] {
             let raw = format!("a{c}b");
-            assert_eq!(DisplayName::sanitize(&raw).as_str(), "ab", "U+{:04X}", u32::from(c));
+            assert_eq!(
+                DisplayName::sanitize(&raw).as_str(),
+                "ab",
+                "U+{:04X}",
+                u32::from(c)
+            );
         }
         // Whitespace runs (incl. NBSP, ideographic, line separators) collapse.
         assert_eq!(
@@ -265,7 +293,10 @@ mod tests {
             "a b"
         );
         // Fullwidth dots (NFKC "..") are not a usable path component.
-        assert_eq!(DisplayName::sanitize("\u{FF0E}\u{FF0E}").as_str(), "\u{2024}\u{2024}");
+        assert_eq!(
+            DisplayName::sanitize("\u{FF0E}\u{FF0E}").as_str(),
+            "\u{2024}\u{2024}"
+        );
     }
 
     #[test]

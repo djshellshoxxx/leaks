@@ -105,8 +105,15 @@ fn max_t(a: &[f64], b: &[f64]) -> f64 {
 fn check_ct(name: &str, samples: usize, reps: usize, f: impl FnMut(bool)) {
     let (a, b) = measure(samples, reps, f);
     let t = max_t(&a, &b);
-    println!("ct_timing {name}: max |t| = {t:.2} ({} + {} samples)", a.len(), b.len());
-    assert!(t < T_FAIL, "{name}: timing depends on secret data (|t| = {t:.2})");
+    println!(
+        "ct_timing {name}: max |t| = {t:.2} ({} + {} samples)",
+        a.len(),
+        b.len()
+    );
+    assert!(
+        t < T_FAIL,
+        "{name}: timing depends on secret data (|t| = {t:.2})"
+    );
 }
 
 #[test]
@@ -129,7 +136,10 @@ fn constant_time_comparisons() {
     });
     let t = max_t(&a, &b);
     println!("ct_timing positive control (==): max |t| = {t:.2}");
-    assert!(t > T_CONTROL, "harness failed to detect a leaky comparison (|t| = {t:.2})");
+    assert!(
+        t > T_CONTROL,
+        "harness failed to detect a leaky comparison (|t| = {t:.2})"
+    );
 
     // kdf::ct_eq (MACs, tags, bound hashes, slots): mismatch at the first vs last byte.
     check_ct("kdf::ct_eq", 2000, 16, |c| {

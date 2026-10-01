@@ -220,7 +220,9 @@ fn run<R: Read + Seek>(reader: &mut R, s: &mut Session<'_>) -> Result<(), Archiv
             let sizes_ok = (csize == u32::MAX || u64::from(csize) == inf.csize)
                 && (usize_ == u32::MAX || u64::from(usize_) == inf.usize);
             if crc != inf.crc || !sizes_ok {
-                return Err(ArchiveError::Malformed("local/central size or crc mismatch"));
+                return Err(ArchiveError::Malformed(
+                    "local/central size or crc mismatch",
+                ));
             }
         }
     }

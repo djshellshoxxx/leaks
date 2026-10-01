@@ -476,12 +476,8 @@ fn argon2id(
     let params = argon2::Params::new(m_kib, t, p, Some(32)).map_err(|_| Error::PasswordHash)?;
     let a = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
     let mut out = Zeroizing::new([0u8; 32]);
-    let r = a.hash_password_into_with_memory(
-        password,
-        salt,
-        out.as_mut(),
-        arena.blocks.as_mut_slice(),
-    );
+    let r =
+        a.hash_password_into_with_memory(password, salt, out.as_mut(), arena.blocks.as_mut_slice());
     arena.wipe();
     r.map_err(|_| Error::PasswordHash)?;
     Ok(Secret32::from_bytes(*out))
@@ -731,7 +727,9 @@ mod tests {
     #[test]
     fn normalization_rules() {
         assert_eq!(
-            normalize("  Abacus\t\u{2014}ZOOM,, ,kiwi- ").unwrap().as_str(),
+            normalize("  Abacus\t\u{2014}ZOOM,, ,kiwi- ")
+                .unwrap()
+                .as_str(),
             "abacus zoom kiwi"
         );
         // NFKC: fullwidth letters and ligatures fold.
@@ -742,7 +740,9 @@ mod tests {
         // Unicode lowercase is locale-independent (Turkish dotted I → "i̇").
         assert_eq!(normalize("\u{0130}").unwrap().as_str(), "i\u{0307}");
         assert_eq!(
-            normalize("a\u{00A0}b\u{2003}c\u{2010}d\u{2015}e").unwrap().as_str(),
+            normalize("a\u{00A0}b\u{2003}c\u{2010}d\u{2015}e")
+                .unwrap()
+                .as_str(),
             "a b c d e"
         );
         assert_eq!(normalize("").unwrap().as_str(), "");
@@ -817,8 +817,17 @@ mod tests {
         msg.extend_from_slice(b"source-app");
         assert!(crate::sig::verify_strict(&k.auth_key().verifying_key_bytes(), &msg, &sig).is_ok());
         assert_eq!(
-            SourceKeys::derive_with_params(&mut Argon2Arena::with_kib(64).unwrap(), Suite::CandorFips1, "x", &[1; 32], &[2; 16], 64, 1, 1)
-                .err(),
+            SourceKeys::derive_with_params(
+                &mut Argon2Arena::with_kib(64).unwrap(),
+                Suite::CandorFips1,
+                "x",
+                &[1; 32],
+                &[2; 16],
+                64,
+                1,
+                1
+            )
+            .err(),
             Some(Error::UnsupportedSuite)
         );
         assert_eq!(format!("{k:?}"), "SourceKeys(<redacted>)");
@@ -919,7 +928,10 @@ mod tests {
         assert!(!Wordlist::eff_large().unwrap().check(&long));
         // Worst-case NFKC expansion (U+FDFA → 18 code points) fits the fixed buffer.
         let fdfa = "\u{FDFA}".repeat(MAX_PASSPHRASE_INPUT_LEN / 3);
-        assert_eq!(normalize(&fdfa).unwrap().as_str(), normalize_reference(&fdfa));
+        assert_eq!(
+            normalize(&fdfa).unwrap().as_str(),
+            normalize_reference(&fdfa)
+        );
     }
 
     proptest::proptest! {
@@ -993,7 +1005,10 @@ mod tests {
         assert!(!l.check("abacus zoom abacus zoom abacus zoom abacus zoom abacus"));
         assert!(!l.check(&format!("{good} zoom")));
         assert!(!l.check("abacus zoom abacus zoom abacus zoom abacus zoom abacus zoomx"));
-        assert!(!l.check(&format!("{} zoom abacus zoom abacus zoom abacus zoom abacus zoom", "a".repeat(40))));
+        assert!(!l.check(&format!(
+            "{} zoom abacus zoom abacus zoom abacus zoom abacus zoom",
+            "a".repeat(40)
+        )));
         assert!(!l.check(""));
     }
 

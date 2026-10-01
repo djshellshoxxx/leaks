@@ -680,7 +680,10 @@ fn report_debug_has_no_sizes() {
     let r = extract_tar(Cursor::new(t.finish()), &root, &opts()).unwrap();
     assert_eq!(r.total_bytes, 12345);
     let d = format!("{r:?}");
-    assert!(!d.contains("12345") && !d.contains("size") && !d.contains("total_bytes"), "{d}");
+    assert!(
+        !d.contains("12345") && !d.contains("size") && !d.contains("total_bytes"),
+        "{d}"
+    );
 }
 
 // AUD-RM1-SFS-09: local headers must agree with the central directory on

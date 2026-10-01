@@ -53,7 +53,12 @@ fn passphrase_vectors() {
     for c in v["cases"].as_array().unwrap() {
         let p = c["passphrase"].as_str().unwrap();
         assert!(list.check(p));
-        assert_eq!(normalize(c["input_as_typed"].as_str().unwrap()).unwrap().as_str(), p);
+        assert_eq!(
+            normalize(c["input_as_typed"].as_str().unwrap())
+                .unwrap()
+                .as_str(),
+            p
+        );
         assert_eq!(c["normalized"].as_str().unwrap(), p);
         let ds: [u8; 32] = a(&c["deployment_salt"]);
         let t: [u8; 16] = a(&c["tenant_id"]);

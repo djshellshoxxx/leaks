@@ -10,7 +10,9 @@ use crate::header::{CoreHeader, HEADER_LEN, HEADER_MAC_LEN, ObjectType, object_h
 use crate::kem::KemPublicKey;
 use crate::rand::{OsRandom, RandomSource};
 use crate::secret::ContentKey;
-use crate::slots::{RecipientList, RecipientListEntry, RecipientSlotBlock, SlotBinding, SlotContext};
+use crate::slots::{
+    RecipientList, RecipientListEntry, RecipientSlotBlock, SlotBinding, SlotContext,
+};
 use crate::stream::{self, StreamDecryptor, StreamEncryptor};
 use crate::suite::Suite;
 use zeroize::Zeroizing;
@@ -463,7 +465,10 @@ mod tests {
         blk.verify_slot_block(&ck2, &p.slot_binding(ctx.clone()), list.as_slice(), &dir)
             .unwrap();
         // AUD-RM1-CORE-09(c): the header-derived binding equals the expected one.
-        assert_eq!(p.slot_binding_from_header().unwrap(), p.slot_binding(ctx.clone()));
+        assert_eq!(
+            p.slot_binding_from_header().unwrap(),
+            p.slot_binding(ctx.clone())
+        );
         let pd = format!("{p:?}");
         assert!(pd.starts_with("ParsedObject") && !pd.contains("payload:"));
         assert_eq!(
