@@ -1441,7 +1441,9 @@ impl Sealer {
         let r = blocking(move || {
             let mut g = g;
             let opened = match (g.keys.as_ref(), g.prefs.as_ref()) {
-                (Some(k), Some(p)) => seal::open_reply(&snap, tenant, k, p, &entry, today, &pending),
+                (Some(k), Some(p)) => {
+                    seal::open_reply(&snap, tenant, k, p, &entry, today, &pending)
+                }
                 _ => None,
             };
             let Some((mailbox, inner)) = opened else {
@@ -1954,7 +1956,11 @@ fn enqueue_account(st: &State, a: AccountUpsert) {
         // (to the newest key) wins, a wrap that was not redone is kept.
         prev.account = a.account;
         for (h, stanza) in a.rewrapped_replies {
-            match prev.rewrapped_replies.iter_mut().find(|(ph, _)| ct_eq(ph, &h)) {
+            match prev
+                .rewrapped_replies
+                .iter_mut()
+                .find(|(ph, _)| ct_eq(ph, &h))
+            {
                 Some(slot) => slot.1 = stanza,
                 None => prev.rewrapped_replies.push((h, stanza)),
             }

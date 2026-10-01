@@ -179,6 +179,22 @@ async fn hand_over_fails_closed_without_a_commit_ack() {
     });
     assert_eq!(handover::hand_over(&s, &b), Err(SinkError));
     t.join().unwrap();
+    // A store that never answers: bounded wait, then failure.
+    let (s, st) = pair();
+    let t = std::thread::spawn(move || {
+        let r = receive(&st);
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        drop(r);
+        drop(st);
+    });
+    handover::send(&s, &b).unwrap();
+    let start = std::time::Instant::now();
+    assert_eq!(
+        handover::await_ack_within(&s, std::time::Duration::from_millis(200)),
+        Err(SinkError)
+    );
+    assert!(start.elapsed() < std::time::Duration::from_millis(550));
+    t.join().unwrap();
     // Peer already closed: the send itself fails (no SIGPIPE).
     let (s, st) = pair();
     drop(st);

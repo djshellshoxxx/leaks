@@ -597,3 +597,57 @@ Gate: **PASS** 2026-10-01 422fbbb, **conditional** on the lead auditor recording
   4. Old relation files in filesystem free space after VACUUM FULL — accepted with the mitigations of full-disk encryption (17) and SSD discard/TRIM enabled on the intake volume.
   5. Anti-wraparound VACUUM timing — accepted: wraparound vacuums are triggered by transaction counts, not source actions; monitored by the health agent.
 - **Gate: PASS (candor-intake-store), subject to STO-27 at wave-2 integration.**
+
+---
+
+## Re-test (round 5) — delta for STO-26/27
+
+Commit `f2f33a37` (on 501b63b); `staged.rs` (900 lines), `pg.rs`/`memory.rs`/`store.rs` (`blob_referenced`), `tests/{pg,staged}.rs`, sealer `server/handover.rs`; SPEC-NOTES decisions 31/32, self-review 14; ADR-054, ADR-055(1).
+
+**Runs:**
+- `pg-test.sh` full crate suite: 32 + 18 + 36 + 6 + 19 pass, including `pg_staged_crash_between_copy_and_commit`, `pg_staged_ack_after_commit`, `staged_wrong_peer_uid_refused`, `staged_stream_socket_refused`, `staged_stalled_peer_times_out`, `staged_sweep_fails_closed`, `staged_unknown_outcome_keeps_blob`, `staged_cancelled_commit_keeps_blob`.
+- clippy (`-p candor-intake-store -p candor-sealer`, deny set) clean; cargo-deny all ok.
+- PG PoC (wrong-tenant `blob_referenced`): see STO-28.
+- Scratch build directories were deleted afterwards (disk 8.4 G free).
+
+**Claims verified by code read and tests:**
+- **Peer check before any data:** `SO_PEERCRED` uid = `sealer_uid` (no default) is checked before `recvmsg`, followed by a `SOCK_SEQPACKET` check.
+- **Socket deadlines:** `SO_RCVTIMEO` before receiving, `SO_SNDTIMEO` before each answer, clamped 10 ms..60 s.
+- **Descriptor rules:**
+  - exactly one control message, `SCM_RIGHTS` only, exactly one fd; surplus fds are closed;
+  - `TRUNC`/`CTRUNC` refused; exactly 41 bytes;
+  - `1 ≤ len ≤ min(max_len, 16 GiB)`;
+  - `S_IFREG`, and `F_GET_SEALS ⊇ WRITE|GROW|SHRINK|SEAL`, which only sealable memfds pass, so FUSE/NFS/disk files are refused;
+  - `st_size = len`;
+  - `pread` copy, then an EOF probe and a constant-time SHA-256 check before the safefs commit.
+- **Ack token:** `0x01` only via `acknowledge(CommittedStaged)`. The token has private fields, is not `Clone`, and is minted only after `commit_envelope` returns `Ok` for an envelope whose bundle object (index 1), and only it, names the blob with `padded_size = len`. A `Backend` error is retried once; if that also fails, or the future is dropped, the blob is marked uncertain and protected for one sweep.
+- **Sweep:**
+  - runs at startup (after `purge_incomplete`) and per slot;
+  - lists the directory first, then snapshots the registry;
+  - removes only blobs that are not in flight and that `blob_referenced` reports `false`;
+  - any lookup error aborts with nothing removed;
+  - candidates and removals are CSPRNG-shuffled, at most 1,024 checks and 64 removals per slot;
+  - safefs sets directory times to the slot; nothing is logged.
+
+  `PgIntakeMaintenance::blob_referenced` fails closed, and the app role reads `envelope_part` with no new grant.
+
+**ADR-055(1) interop:** the sealer's `BundleWriter` makes a `memfd_create(CLOEXEC|ALLOW_SEALING)` and adds all four seals. `send` uses the same 41-byte header and one `SCM_RIGHTS` fd; `await_ack` accepts exactly one byte `0x01` and refuses any fd. The two sides are compatible. Note (Info): the sealer's `ACK_TIMEOUT` (60 s) can be shorter than the store's worst case (two commit attempts × 30 s `statement_timeout` + fsync). The sealer may then fail a seal whose envelope did commit, which is fail-safe for the source (it retries; a duplicate group is refused) but leaves one extra committed envelope. Also, `hand_over` is not yet called from the sealer's seal path (integration pending; re-check in the C-07/C-08 daemon audit).
+
+**ADR-054 (STO-26):** `deploy/intake/postgresql/pg_hba.conf` now pins each role to the exact `candor_intake_TENANT` database, and every other connection is rejected. The maintenance login therefore cannot reach a second database to `DROP` the intake DB, and with one cluster per tenant there is no cross-tenant reach. Database-level settings and `CONNECTION LIMIT` set by the owner are detected by `config-check` (`deploy/tests/validate.sh`). Residual: the owner can still lock out connections or set DB defaults (detected, fail closed; DoS only). **STO-26 Closed.**
+
+**STO-27: Fixed**, apart from the variant below.
+
+#### AUD-RM2-STO-28 — `blob_referenced` fails open when the tenant context does not match; the orphan sweep would then delete bundles of committed envelopes
+- Severity: **Medium** (silent loss of committed submission attachments on a configuration error; violates "fail closed")
+- Location: `crates/candor-intake-store/src/pg.rs` `IntakeStore::blob_referenced` (uses `begin_raw()`, which only sets `candor.tenant_id`, with no `intake_meta` visibility check); called by `StagedReceiver::sweep` / `startup`
+- Description: RLS hides every `envelope_part` row unless `intake_meta` is visible for the configured tenant. With a wrong tenant id, or an uninitialised or re-initialised database next to an existing blob directory, `SELECT EXISTS(…)` returns `false` rather than an error. PoC on a live PG 16 cluster: after a commit as tenant A, `blob_referenced(bundle)` = `Ok(true)` as tenant A. A store opened with tenant B opens successfully (`serving_allowed` = `NotInitialized`), but `blob_referenced(bundle)` = `Ok(false)`. `startup()` runs the sweep before any operation that would surface `NotInitialized`, so up to 64 referenced bundles per slot would be removed. Their envelopes are later relayed with a missing ATTACHMENT_BUNDLE blob.
+- Fix recommendation: run the check inside `self.begin(false)` (which requires the tenant's `intake_meta` row, `NotInitialized` otherwise), so the sweep aborts. Optionally, the sweep should also refuse while `restore_pending` is unresolved. Add a regression test: wrong-tenant and uninitialised stores make `sweep` return an error with the file kept. `MemoryStore` should likewise error when not initialised.
+- Status: Open
+
+| Severity | Open after round 5 |
+|---|---|
+| Critical / High | 0 |
+| Medium | 1 (STO-28) |
+| Low / Info | residuals listed in round 4 (lead to record) |
+
+Gate: **FAIL** 2026-10-01 f2f33a37, on STO-28 only (one-line fix + test). STO-26 and STO-27 are closed. The earlier residual acceptances are still pending with the lead.

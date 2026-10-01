@@ -672,7 +672,11 @@ async fn full_tier_w_flow() {
 
 /// Rotate the passphrase of the authenticated session `l`, re-sending the
 /// given pending replies; returns the new words and lookup tag.
-async fn rotate(f: &Fixture, l: SessionHandle, replies: Vec<PendingReply>) -> (SecretWords, [u8; 32]) {
+async fn rotate(
+    f: &Fixture,
+    l: SessionHandle,
+    replies: Vec<PendingReply>,
+) -> (SecretWords, [u8; 32]) {
     let Response::Words {
         words,
         confirm_positions,

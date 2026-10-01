@@ -216,8 +216,12 @@ pub fn await_ack_within(sock: impl AsFd, timeout: std::time::Duration) -> Result
     if timeout.is_zero() {
         return Err(SinkError);
     }
-    rustix::net::sockopt::set_socket_timeout(&sock, rustix::net::sockopt::Timeout::Recv, Some(timeout))
-        .map_err(|_| SinkError)?;
+    rustix::net::sockopt::set_socket_timeout(
+        &sock,
+        rustix::net::sockopt::Timeout::Recv,
+        Some(timeout),
+    )
+    .map_err(|_| SinkError)?;
     let mut data = [0u8; 2];
     let mut space = [MaybeUninit::<u8>::uninit(); rustix::cmsg_space!(ScmRights(1))];
     let mut control = RecvAncillaryBuffer::new(&mut space);
