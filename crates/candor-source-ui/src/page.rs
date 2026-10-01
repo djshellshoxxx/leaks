@@ -128,7 +128,10 @@ impl fmt::Debug for Page {
         f.debug_struct("Page")
             .field("status", &self.status)
             .field("headers", &self.headers)
-            .field("body", &format_args!("[{} bytes redacted]", self.body.len()))
+            .field(
+                "body",
+                &format_args!("[{} bytes redacted]", self.body.len()),
+            )
             .field("class", &self.class)
             .field("unpadded_len", &self.unpadded_len)
             .finish()
@@ -166,7 +169,8 @@ pub fn pad_html(html: &str, class: SizeClass) -> Result<Zeroizing<Vec<u8>>, Over
     let fill = class
         .bytes()
         .checked_sub(len)
-        .and_then(|r| r.checked_sub(PAD_OPEN.len() + PAD_CLOSE.len()))
+        .and_then(|r| r.checked_sub(PAD_OPEN.len()))
+        .and_then(|r| r.checked_sub(PAD_CLOSE.len()))
         .ok_or(over)?;
     let at = html.rfind("</body>").unwrap_or(len);
     let (head, tail) = html.split_at(at);

@@ -215,9 +215,10 @@ impl Screen {
             Screen::MetadataWarning => Route::FilesCheck,
             Screen::Review | Screen::Credential | Screen::Confirm | Screen::Busy => Route::Review,
             Screen::Sent | Screen::Login => Route::Login,
-            Screen::Inbox | Screen::RotateCredential | Screen::RotateConfirm | Screen::RotateDone => {
-                Route::Inbox
-            }
+            Screen::Inbox
+            | Screen::RotateCredential
+            | Screen::RotateConfirm
+            | Screen::RotateDone => Route::Inbox,
             Screen::RotateExplain => Route::Rotate,
             Screen::Conversation | Screen::DeleteRequested => Route::Conversation,
             Screen::Discard | Screen::CloseMailbox | Screen::AskDelete => Route::End,
@@ -376,4 +377,3 @@ pub(crate) fn render_template(p: &PageView<'_>) -> Result<String, askama::Error>
         Screen::MethodNotAllowed => MethodTpl { p }.render(),
     }
 }
-

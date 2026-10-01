@@ -78,10 +78,10 @@ fn validate(screen: Screen, vm: &ViewModel) -> Result<(), RenderError> {
             return Err(bad("error field"));
         }
     }
-    if let Some(t) = &vm.ctx.form_token {
-        if !view::valid_value(t) {
-            return Err(bad("form token"));
-        }
+    if let Some(t) = &vm.ctx.form_token
+        && !view::valid_value(t)
+    {
+        return Err(bad("form token"));
     }
     match screen {
         Screen::Questionnaire => {
@@ -90,15 +90,19 @@ fn validate(screen: Screen, vm: &ViewModel) -> Result<(), RenderError> {
                     return Err(bad("question id"));
                 }
                 if let QuestionKind::SingleChoice(opts) | QuestionKind::MultiChoice(opts) = &q.kind
+                    && opts.iter().any(|o| !view::valid_value(&o.value))
                 {
-                    if opts.iter().any(|o| !view::valid_value(&o.value)) {
-                        return Err(bad("choice value"));
-                    }
+                    return Err(bad("choice value"));
                 }
             }
         }
         Screen::NewReport => {
-            if vm.new_report.channels.iter().any(|c| !view::valid_value(&c.id)) {
+            if vm
+                .new_report
+                .channels
+                .iter()
+                .any(|c| !view::valid_value(&c.id))
+            {
                 return Err(bad("channel id"));
             }
         }

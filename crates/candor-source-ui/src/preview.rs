@@ -17,7 +17,10 @@ fn channel(id: &str, name: &str, desc: &str, available: bool, independent: bool)
         name: name.to_owned(),
         description: desc.to_owned(),
         languages: "EN, FR".to_owned(),
-        triage: vec!["Audit Committee Chair".to_owned(), "External Counsel".to_owned()],
+        triage: vec![
+            "Audit Committee Chair".to_owned(),
+            "External Counsel".to_owned(),
+        ],
         allows_confidential: true,
         allows_identified: true,
         available,
@@ -83,12 +86,21 @@ pub fn sample_view_model(screen: Screen, mode: Mode, with_errors: bool) -> ViewM
     vm.landing.purpose = "Tell the Audit Committee about fraud or misconduct. Your report goes to people who are independent of management.".to_owned();
     vm.status.channels = vec![ChannelRoles {
         channel: "Audit Committee".to_owned(),
-        triage: vec!["Audit Committee Chair".to_owned(), "External Counsel".to_owned()],
+        triage: vec![
+            "Audit Committee Chair".to_owned(),
+            "External Counsel".to_owned(),
+        ],
         others: vec!["Internal Audit investigators".to_owned()],
     }];
     vm.new_report = NewReportData {
         channels: vec![
-            channel("audit", "Audit Committee", "Fraud and accounting", true, true),
+            channel(
+                "audit",
+                "Audit Committee",
+                "Fraud and accounting",
+                true,
+                true,
+            ),
             channel("ethics", "Ethics Office", "Workplace conduct", false, false),
         ],
         selected_channel: None,
@@ -96,7 +108,10 @@ pub fn sample_view_model(screen: Screen, mode: Mode, with_errors: bool) -> ViewM
         snapshot_stale: false,
     };
     vm.concerns = ConcernsData {
-        triage: vec!["Audit Committee Chair".to_owned(), "External Counsel".to_owned()],
+        triage: vec![
+            "Audit Committee Chair".to_owned(),
+            "External Counsel".to_owned(),
+        ],
         roles: vec![
             "Chief Financial Officer".to_owned(),
             "Head of Internal Audit".to_owned(),
@@ -106,8 +121,20 @@ pub fn sample_view_model(screen: Screen, mode: Mode, with_errors: bool) -> ViewM
         load_failed: false,
     };
     vm.no_reader.alternatives = vec![
-        channel("board", "Board Audit Committee", "Independent of management", true, true),
-        channel("ombuds", "External Ombudsperson", "Outside the organization", true, false),
+        channel(
+            "board",
+            "Board Audit Committee",
+            "Independent of management",
+            true,
+            true,
+        ),
+        channel(
+            "ombuds",
+            "External Ombudsperson",
+            "Outside the organization",
+            true,
+            false,
+        ),
     ];
     let cats = vec![
         ChoiceOption {
@@ -234,7 +261,8 @@ pub fn sample_view_model(screen: Screen, mode: Mode, with_errors: bool) -> ViewM
     if !session {
         // Session-less GET pages: the landing page carries no token (its only form is Leave);
         // others carry a pre-session token (08 SW-03).
-        vm.ctx.form_token = (screen != Screen::Landing).then(|| "cHJlLXNlc3Npb24tdG9rZW4".to_owned());
+        vm.ctx.form_token =
+            (screen != Screen::Landing).then(|| "cHJlLXNlc3Npb24tdG9rZW4".to_owned());
     }
     // Responses to POST-only routes.
     if matches!(

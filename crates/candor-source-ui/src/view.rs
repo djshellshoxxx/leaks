@@ -65,8 +65,7 @@ pub(crate) fn valid_id(id: &str) -> bool {
 /// Validates a form value (`[A-Za-z0-9_-]{1,64}`).
 pub(crate) fn valid_value(v: &str) -> bool {
     (1..=64).contains(&v.len())
-        && v
-            .bytes()
+        && v.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
@@ -74,7 +73,7 @@ pub(crate) fn valid_value(v: &str) -> bool {
 pub(crate) fn size_parts(bytes: u64) -> (&'static str, u64) {
     const MB: u64 = 1_000_000;
     const GB: u64 = 1_000_000_000;
-    if bytes >= GB && bytes % GB == 0 {
+    if bytes >= GB && bytes.is_multiple_of(GB) {
         ("sui-size-gb", bytes / GB)
     } else if bytes < MB / 2 {
         ("sui-size-small", 0)
@@ -181,6 +180,8 @@ impl<'a> PageView<'a> {
         self.fmt_args(key, &[(n1, v1.into()), (n2, v2.into())])
     }
 
+    // Three named arguments mirror the template call site; a slice API is less readable there.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn t3(
         &self,
         key: &str,
@@ -203,7 +204,15 @@ impl<'a> PageView<'a> {
     pub(crate) fn fmt_hint(&self, h: &crate::model::IdentityHint) -> String {
         let kind = self.t(h.kind.key());
         let field = self.text_plain(&h.field);
-        self.t3("sui-review-hint", "kind", kind, "field", field, "line", h.line)
+        self.t3(
+            "sui-review-hint",
+            "kind",
+            kind,
+            "field",
+            field,
+            "line",
+            h.line,
+        )
     }
 
     /// The three S10c fields with their 1-based word positions.
@@ -302,11 +311,19 @@ impl<'a> PageView<'a> {
     }
 
     pub(crate) fn allow_conf(&self) -> bool {
-        self.vm.new_report.channels.iter().any(|c| c.allows_confidential)
+        self.vm
+            .new_report
+            .channels
+            .iter()
+            .any(|c| c.allows_confidential)
     }
 
     pub(crate) fn allow_ident(&self) -> bool {
-        self.vm.new_report.channels.iter().any(|c| c.allows_identified)
+        self.vm
+            .new_report
+            .channels
+            .iter()
+            .any(|c| c.allows_identified)
     }
 
     pub(crate) fn lang(&self) -> &'static str {
@@ -353,10 +370,7 @@ impl<'a> PageView<'a> {
             ),
             Mode::Clearnet => self.marked(
                 m.banner_key(),
-                &[(
-                    "onion",
-                    Arg::Text(self.vm.deployment.onion_address.clone()),
-                )],
+                &[("onion", Arg::Text(self.vm.deployment.onion_address.clone()))],
             ),
             _ => self.marked(m.banner_key(), &[]),
         }
@@ -527,7 +541,10 @@ impl<'a> PageView<'a> {
 
     pub(crate) fn q_has_hint(&self, q: &Question) -> bool {
         q.hint.is_some()
-            || matches!(q.kind, QuestionKind::LongText | QuestionKind::MonthYear { .. })
+            || matches!(
+                q.kind,
+                QuestionKind::LongText | QuestionKind::MonthYear { .. }
+            )
     }
 
     pub(crate) fn q_maxlen(&self, q: &Question) -> u64 {
@@ -731,7 +748,9 @@ impl<'a> PageView<'a> {
     /// The onion address in 4-character groups (S03).
     pub(crate) fn onion_groups(&self) -> Vec<String> {
         let a = &self.vm.deployment.onion_address;
-        let (host, suffix) = a.strip_suffix(".onion").map_or((a.as_str(), ""), |h| (h, ".onion"));
+        let (host, suffix) = a
+            .strip_suffix(".onion")
+            .map_or((a.as_str(), ""), |h| (h, ".onion"));
         let chars: Vec<char> = host.chars().collect();
         let mut groups: Vec<String> = chars.chunks(4).map(|c| c.iter().collect()).collect();
         if !suffix.is_empty() {
@@ -772,5 +791,50 @@ impl<'a> PageView<'a> {
     /// Positions to render as login boxes when `layout=ten`.
     pub(crate) fn login_boxes(&self) -> Vec<u32> {
         (1..=self.vm.deployment.passphrase_words.clamp(1, 64)).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    #[test]
+    fn marked_pairs() {
+        assert_eq!(escape_marked("a **b** c"), "a <strong>b</strong> c");
+        assert_eq!(
+            escape_marked("**a** **b**"),
+            "<strong>a</strong> <strong>b</strong>"
+        );
+        assert_eq!(escape_marked("a ** b"), "a ** b");
+        assert_eq!(escape_marked("**a** b **"), "<strong>a</strong> b **");
+        assert_eq!(escape_marked("<x>**&**"), "&lt;x&gt;<strong>&amp;</strong>");
+    }
+
+    #[test]
+    fn ids_and_values() {
+        assert!(valid_id("what") && valid_id("how_know") && valid_id("w_a"));
+        assert!(!valid_id("") && !valid_id("A") && !valid_id("a-b") && !valid_id(&"a".repeat(33)));
+        assert!(valid_value("1-5") && valid_value("Zm9y_bS-0"));
+        assert!(!valid_value("a b") && !valid_value("\"") && !valid_value(""));
+    }
+
+    #[test]
+    fn sizes() {
+        assert_eq!(size_parts(0), ("sui-size-small", 0));
+        assert_eq!(size_parts(2_100_000), ("sui-size-mb", 2));
+        assert_eq!(size_parts(4_000_000_000), ("sui-size-gb", 4));
+        assert_eq!(size_parts(u64::MAX).0, "sui-size-mb");
+    }
+
+    proptest! {
+        // ST: SUI-023 — escaping never lets markup characters through.
+        #[test]
+        fn escape_has_no_markup(s in any::<String>()) {
+            let e = escape(&s);
+            prop_assert!(!e.contains('<') && !e.contains('>') && !e.contains('"') && !e.contains('\''));
+            let m = escape_marked(&s);
+            prop_assert!(!m.replace("<strong>", "").replace("</strong>", "").contains('<'));
+        }
     }
 }

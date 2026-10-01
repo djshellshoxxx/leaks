@@ -11,7 +11,7 @@ use crate::kdf::derive_payload_key;
 use crate::kem::KemPublicKey;
 use crate::rand::{OsRandom, RandomSource};
 use crate::secret::ContentKey;
-use crate::slots::{RecipientSlotBlock, SlotBinding, SlotContext};
+use crate::slots::{RecipientListEntry, RecipientSlotBlock, SlotBinding, SlotContext};
 use crate::stream::{self, StreamDecryptor};
 use crate::suite::Suite;
 use zeroize::Zeroizing;
@@ -33,8 +33,22 @@ pub struct SealRequest<'a> {
     pub day_stamp: u32,
     /// Slot context and recipients; required exactly for intake-sealed types.
     pub recipients: Option<(SlotContext, &'a [KemPublicKey])>,
-    /// Padded plaintext (length must be a legal bucket; see [`crate::padding::pad`]).
-    pub padded_plaintext: &'a [u8],
+    /// Padded plaintext length (a legal bucket for the type, §13.6).
+    pub padded_len: u64,
+}
+
+/// What the payload builder sees: the final CoreHeader (for `H(CoreHeader)` in
+/// `source_sig`/`sealer_sig`, §13.4) and the Recipient List entries (ADR-050(3)) that
+/// must be embedded in the signed Recipient List inside the payload.
+#[derive(Debug)]
+pub struct PayloadContext<'a> {
+    /// Final header.
+    pub header: &'a CoreHeader,
+    /// Encoded header (128 bytes).
+    pub header_bytes: &'a [u8; HEADER_LEN],
+    /// Recipient List entries, in the order of `SealRequest::recipients` (empty for
+    /// non-intake objects).
+    pub recipient_list: &'a [RecipientListEntry],
 }
 
 /// A sealed object.
@@ -48,34 +62,61 @@ pub struct SealedObject {
     pub object_hash: [u8; 32],
     /// The slot block (intake-sealed objects only); stored alongside the blob.
     pub slot_block: Option<RecipientSlotBlock>,
+    /// Recipient List entries that were handed to the payload builder.
+    pub recipient_list: Vec<RecipientListEntry>,
     /// Blob bytes: `CoreHeader ‖ header_mac ‖ Payload`.
     pub bytes: Vec<u8>,
 }
 
-/// Seal with a fresh random CK. Returns the CK (for stanzas) and the object.
-pub fn seal(req: &SealRequest<'_>) -> Result<(ContentKey, SealedObject)> {
+/// Seal with a fresh random CK. `build` returns the padded plaintext (exactly
+/// `padded_len` bytes) once the header and Recipient List are known. Returns the CK
+/// (for stanzas) and the object.
+pub fn seal<F, P>(req: &SealRequest<'_>, build: F) -> Result<(ContentKey, SealedObject)>
+where
+    F: FnOnce(&PayloadContext<'_>) -> Result<P>,
+    P: AsRef<[u8]>,
+{
     let mut rng = OsRandom;
     let ck = ContentKey::generate_with(&mut rng)?;
-    let obj = seal_with_ck_rng(&mut rng, &ck, req)?;
+    let obj = seal_with_ck_rng(&mut rng, &ck, req, build)?;
     Ok((ck, obj))
 }
 
 /// Seal with a caller-supplied CK (e.g. chaff CK derived per §12.7).
-pub fn seal_with_ck(ck: &ContentKey, req: &SealRequest<'_>) -> Result<SealedObject> {
-    seal_with_ck_rng(&mut OsRandom, ck, req)
+pub fn seal_with_ck<F, P>(ck: &ContentKey, req: &SealRequest<'_>, build: F) -> Result<SealedObject>
+where
+    F: FnOnce(&PayloadContext<'_>) -> Result<P>,
+    P: AsRef<[u8]>,
+{
+    seal_with_ck_rng(&mut OsRandom, ck, req, build)
 }
 
-pub(crate) fn seal_with_ck_rng(
+/// Convenience for objects without recipient slots (REPLY, CASE_*, EXPORT_PACKAGE):
+/// seal a ready padded plaintext. Intake-sealed types are refused because their
+/// payload must embed the Recipient List (use [`seal`]).
+pub fn seal_bytes(req: &SealRequest<'_>, padded_plaintext: &[u8]) -> Result<(ContentKey, SealedObject)> {
+    if req.object_type.is_intake_sealed() {
+        return Err(Error::Malformed("intake objects must embed the Recipient List"));
+    }
+    seal(req, |_| Ok(padded_plaintext))
+}
+
+pub(crate) fn seal_with_ck_rng<F, P>(
     rng: &mut dyn RandomSource,
     ck: &ContentKey,
     req: &SealRequest<'_>,
-) -> Result<SealedObject> {
+    build: F,
+) -> Result<SealedObject>
+where
+    F: FnOnce(&PayloadContext<'_>) -> Result<P>,
+    P: AsRef<[u8]>,
+{
     req.suite.require_supported()?;
     let mut object_id = [0u8; 16];
     rng.fill(&mut object_id)?;
     let mut payload_nonce = [0u8; 16];
     rng.fill(&mut payload_nonce)?;
-    let slot_block = match (req.object_type.is_intake_sealed(), &req.recipients) {
+    let (slot_block, recipient_list) = match (req.object_type.is_intake_sealed(), &req.recipients) {
         (true, Some((ctx, pks))) => {
             let b = SlotBinding {
                 suite: req.suite,
@@ -83,9 +124,10 @@ pub(crate) fn seal_with_ck_rng(
                 payload_nonce,
                 context: ctx.clone(),
             };
-            Some(RecipientSlotBlock::build_with(rng, ck, &b, pks)?)
+            let (blk, list) = RecipientSlotBlock::build_with(rng, ck, &b, pks)?;
+            (Some(blk), list)
         }
-        (false, None) => None,
+        (false, None) => (None, Vec::new()),
         _ => {
             return Err(Error::Malformed(
                 "recipients required exactly for intake-sealed objects",
@@ -103,14 +145,22 @@ pub(crate) fn seal_with_ck_rng(
             .map_or([0u8; 32], RecipientSlotBlock::hash),
         object_id,
         day_stamp: req.day_stamp,
-        padded_plaintext_len: u64::try_from(req.padded_plaintext.len())
-            .map_err(|_| Error::TooLarge)?,
+        padded_plaintext_len: req.padded_len,
         payload_nonce,
     };
     let header_bytes = header.encode()?;
+    let padded = build(&PayloadContext {
+        header: &header,
+        header_bytes: &header_bytes,
+        recipient_list: &recipient_list,
+    })?;
+    let padded = padded.as_ref();
+    if u64::try_from(padded.len()).ok() != Some(req.padded_len) {
+        return Err(Error::Length);
+    }
     let header_mac = header.header_mac(ck)?;
     let k_pay = derive_payload_key(req.suite, ck, &payload_nonce)?;
-    let payload = stream::encrypt(k_pay, req.padded_plaintext)?;
+    let payload = stream::encrypt(k_pay, padded)?;
     let mut bytes = Vec::with_capacity(
         HEADER_LEN
             .saturating_add(HEADER_MAC_LEN)
@@ -124,6 +174,7 @@ pub(crate) fn seal_with_ck_rng(
         header,
         header_mac,
         slot_block,
+        recipient_list,
         bytes,
     })
 }
@@ -239,9 +290,17 @@ mod tests {
             epoch_id: 3,
             day_stamp: 0,
             recipients: Some((ctx.clone(), core::slice::from_ref(&m.public))),
-            padded_plaintext: &pt,
+            padded_len: pt.len() as u64,
         };
-        let obj = seal_with_ck_rng(&mut rng, &ck, &req).unwrap();
+        let mut seen = Vec::new();
+        let obj = seal_with_ck_rng(&mut rng, &ck, &req, |pc| {
+            seen = pc.recipient_list.to_vec();
+            assert_eq!(pc.header.padded_plaintext_len, pt.len() as u64);
+            Ok(pt.clone())
+        })
+        .unwrap();
+        assert_eq!(seen, obj.recipient_list);
+        assert_eq!(seen.len(), 1);
         let p = parse(&obj.bytes).unwrap();
         assert_eq!(p.object_hash(), obj.object_hash);
         let blk = obj.slot_block.as_ref().unwrap();
@@ -249,7 +308,12 @@ mod tests {
         let (ck2, pos) = blk
             .trial_open(&m.private, &p.slot_binding(ctx.clone()))
             .unwrap();
-        blk.verify(&ck2, &p.slot_binding(ctx), 1, Some(pos))
+        assert_eq!(usize::from(obj.recipient_list[0].slot_index), pos);
+        let dir = |kid: &[u8; 32]| {
+            (crate::hash::key_id(Suite::CandorStd1, crate::hash::KeyKind::Mek, &m.public.to_bytes()) == *kid)
+                .then(|| m.public.clone())
+        };
+        blk.verify_slot_block(&ck2, &p.slot_binding(ctx), &obj.recipient_list, dir)
             .unwrap();
         assert_eq!(p.open(&ck2).unwrap().as_slice(), pt.as_slice());
 
@@ -293,17 +357,20 @@ mod tests {
             epoch_id: 0,
             day_stamp: 0,
             recipients: None,
-            padded_plaintext: &pt,
+            padded_len: pt.len() as u64,
         };
-        let (ck, obj) = seal(&req).unwrap();
+        let (ck, obj) = seal_bytes(&req, &pt).unwrap();
         assert!(obj.slot_block.is_none());
         assert_eq!(obj.bytes.len(), 128 + 32 + 4096 + 16);
         assert_eq!(parse(&obj.bytes).unwrap().open(&ck).unwrap().len(), 4096);
         let bad = SealRequest {
-            padded_plaintext: &pt[..100],
+            padded_len: 100,
             ..req
         };
-        assert_eq!(seal(&bad).err(), Some(Error::IllegalBucket));
+        assert_eq!(seal_bytes(&bad, &pt[..100]).err(), Some(Error::IllegalBucket));
+        // Builder output must match the declared length.
+        let req2 = SealRequest { padded_len: 4096, ..bad };
+        assert_eq!(seal_bytes(&req2, &pt[..100]).err(), Some(Error::Length));
     }
 
     #[test]
@@ -317,9 +384,9 @@ mod tests {
             epoch_id: 0,
             day_stamp: 20_000,
             recipients: None,
-            padded_plaintext: &pt,
+            padded_len: pt.len() as u64,
         };
-        let (ck, obj) = seal(&req).unwrap();
+        let (ck, obj) = seal_bytes(&req, &pt).unwrap();
         let p = parse(&obj.bytes).unwrap();
         let (dec, payload) = p.open_stream(&ck).unwrap();
         let mut rd = dec.reader(payload);

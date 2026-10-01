@@ -31,7 +31,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
                 let vm = sample_view_model(screen, mode, errors);
-                let page = match render(screen, &vm, &locale) { Ok(p) => p, Err(e) => { eprintln!("FAIL {} {} {:?} {}: {:?}", locale.tag(), screen.spec_id(), mode, errors, e); continue; } };
+                let page = render(screen, &vm, &locale)
+                    .map_err(|e| format!("{} {}: {e}", locale.tag(), screen.spec_id()))?;
                 let name = format!(
                     "{}_{}_{:?}{}.html",
                     locale.tag(),
@@ -44,7 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "<li><a href=\"{name}\">{name}</a> ({} bytes unpadded, class {:?}, status {})</li>\n",
                     page.unpadded_len, page.class, page.status
                 ));
-                count += 1;
+                count = count.saturating_add(1);
             }
         }
     }

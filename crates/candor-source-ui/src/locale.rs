@@ -135,7 +135,10 @@ fn parse_resources() -> Result<Vec<FluentResource>, CatalogError> {
         match FluentResource::try_new(src.to_owned()) {
             Ok(r) => out.push(r),
             Err((_, errs)) => {
-                return Err(CatalogError(format!("{name}: {} parse error(s): {errs:?}", errs.len())));
+                return Err(CatalogError(format!(
+                    "{name}: {} parse error(s): {errs:?}",
+                    errs.len()
+                )));
             }
         }
     }
@@ -166,13 +169,12 @@ fn build_catalog() -> Result<Catalog, CatalogError> {
         let res = fluent_syntax::parser::parse(src)
             .map_err(|(_, errs)| CatalogError(format!("{name}: {} parse error(s)", errs.len())))?;
         for entry in &res.body {
-            if let ast::Entry::Message(m) = entry {
-                if classes
+            if let ast::Entry::Message(m) = entry
+                && classes
                     .insert(m.id.name.to_owned(), class_of(m.comment.as_ref()))
                     .is_some()
-                {
-                    return Err(CatalogError(format!("duplicate key {}", m.id.name)));
-                }
+            {
+                return Err(CatalogError(format!("duplicate key {}", m.id.name)));
             }
         }
     }
@@ -202,12 +204,7 @@ fn build_catalog() -> Result<Catalog, CatalogError> {
 
 impl Catalog {
     /// Formats a message. Returns `None` if the key or any referenced argument is missing.
-    pub(crate) fn format(
-        &self,
-        locale: Locale,
-        key: &str,
-        args: &[(&str, Arg)],
-    ) -> Option<String> {
+    pub(crate) fn format(&self, locale: Locale, key: &str, args: &[(&str, Arg)]) -> Option<String> {
         let bundle = self.bundles.get(locale.index())?;
         let pattern = bundle.get_message(key)?.value()?;
         let mut fargs = FluentArgs::new();
@@ -288,7 +285,9 @@ fn pseudo_xa(s: &str) -> Cow<'_, str> {
             other => other,
         });
     }
-    let target = s.len().saturating_add(s.len().saturating_mul(2).div_ceil(5));
+    let target = s
+        .len()
+        .saturating_add(s.len().saturating_mul(2).div_ceil(5));
     let pad = target.saturating_sub(out.len());
     out.extend(core::iter::repeat_n('~', pad));
     Cow::Owned(out)

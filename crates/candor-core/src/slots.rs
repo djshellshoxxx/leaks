@@ -458,6 +458,15 @@ mod tests {
         }
     }
 
+    /// A Key Directory stub: resolve key ids of the given public keys.
+    fn directory(pks: &[KemPublicKey], kind: KeyKind) -> impl Fn(&[u8; 32]) -> Option<KemPublicKey> + '_ {
+        move |kid| {
+            pks.iter()
+                .find(|pk| key_id(Suite::CandorStd1, kind, &pk.to_bytes()) == *kid)
+                .cloned()
+        }
+    }
+
     #[test]
     fn build_open_verify() {
         let mut rng = TestRng::new(10);
@@ -467,17 +476,24 @@ mod tests {
             .collect();
         let pks: Vec<KemPublicKey> = members.iter().map(|m| m.public.clone()).collect();
         let b = binding();
-        let blk = RecipientSlotBlock::build_with(&mut rng, &ck, &b, &pks).unwrap();
+        let (blk, list) = RecipientSlotBlock::build_with(&mut rng, &ck, &b, &pks).unwrap();
+        assert_eq!(list.len(), 3);
+        for (e, pk) in list.iter().zip(&pks) {
+            assert_eq!(e.key_id, key_id(Suite::CandorStd1, KeyKind::Mek, &pk.to_bytes()));
+            assert_eq!(RecipientListEntry::from_bytes(&e.to_bytes()).unwrap(), *e);
+        }
         let enc = blk.encode();
         assert_eq!(enc.len(), SLOT_BLOCK_LEN);
         assert_eq!(enc.len(), 18_692);
         let blk2 = RecipientSlotBlock::decode(&enc).unwrap();
         assert_eq!(blk2, blk);
-        for m in &members {
+        for (i, m) in members.iter().enumerate() {
             let (got, pos) = blk2.trial_open(&m.private, &b).unwrap();
             assert_eq!(got.expose(), ck.expose());
-            let v = blk2.verify(&got, &b, 3, Some(pos)).unwrap();
-            assert_eq!(v.real_positions.len(), 3);
+            assert_eq!(usize::from(list[i].slot_index), pos);
+            // Honest envelope verifies (ADR-050(3)).
+            blk2.verify_slot_block(&got, &b, &list, directory(&pks, KeyKind::Mek))
+                .unwrap();
         }
         // Outsider cannot open.
         let outsider = KemKeyPair::generate_with(Suite::CandorStd1, &mut rng).unwrap();
@@ -493,9 +509,13 @@ mod tests {
             epoch_id: 6,
         };
         assert!(blk2.trial_open(&members[0].private, &wrong).is_err());
+        assert!(blk2.verify_slot_block(&ck, &wrong, &list, directory(&pks, KeyKind::Mek)).is_err());
         let mut wrong = b.clone();
         wrong.payload_nonce[0] ^= 1;
         assert!(blk2.trial_open(&members[0].private, &wrong).is_err());
+        // Wrong CK: nothing re-derives.
+        let ck2 = ContentKey::from_bytes([0x12; 32]);
+        assert!(blk2.verify_slot_block(&ck2, &b, &list, directory(&pks, KeyKind::Mek)).is_err());
     }
 
     /// §22.2 negative vector: slot block with an unlisted non-dummy slot (hidden recipient).
@@ -506,27 +526,58 @@ mod tests {
         let a = KemKeyPair::generate_with(Suite::CandorStd1, &mut rng).unwrap();
         let hidden = KemKeyPair::generate_with(Suite::CandorStd1, &mut rng).unwrap();
         let b = binding();
-        let blk = RecipientSlotBlock::build_with(
-            &mut rng,
-            &ck,
-            &b,
-            &[a.public.clone(), hidden.public.clone()],
-        )
-        .unwrap();
-        // Recipient List claims only one recipient.
+        let pks = [a.public.clone(), hidden.public.clone()];
+        let (blk, list) = RecipientSlotBlock::build_with(&mut rng, &ck, &b, &pks).unwrap();
+        let dir = directory(&pks, KeyKind::Mek);
+        assert!(blk.verify_slot_block(&ck, &b, &list, &dir).is_ok());
+        // Recipient List omits the hidden recipient's entry.
         assert_eq!(
-            blk.verify(&ck, &b, 1, None).err(),
+            blk.verify_slot_block(&ck, &b, &list[..1], &dir).err(),
             Some(Error::SlotVerification)
         );
-        assert!(blk.verify(&ck, &b, 2, None).is_ok());
-        // Wrong CK: no slot verifies as dummy.
-        let ck2 = ContentKey::from_bytes([0x23; 32]);
-        assert!(blk.verify(&ck2, &b, 2, None).is_err());
-        // Swapping two slots breaks dummy verification (dummies are position-bound).
+        // Duplicate / out-of-range slot indices are rejected.
+        let dup = vec![list[0].clone(), list[0].clone()];
+        assert!(blk.verify_slot_block(&ck, &b, &dup, &dir).is_err());
+        let mut oob = list[0].clone();
+        oob.slot_index = 16;
+        assert!(blk.verify_slot_block(&ck, &b, &[oob], &dir).is_err());
+        // Unresolvable key id.
+        assert!(blk.verify_slot_block(&ck, &b, &list, |_| None).is_err());
+        // Permuting slots breaks verification (slots are position-bound).
         let mut swapped = blk.clone();
         swapped.slots.swap(0, 15);
         swapped.slots.swap(1, 14);
-        let _ = swapped.verify(&ck, &b, 2, None); // must not panic; usually Err
+        assert!(swapped.verify_slot_block(&ck, &b, &list, &dir).is_err());
+    }
+
+    /// ADR-050(3): a slot sealed to an attacker key while the list names a member is
+    /// detected (count-based verification would have missed this).
+    #[test]
+    fn swapped_recipient_detected() {
+        let mut rng = TestRng::new(15);
+        let ck = ContentKey::from_bytes([0x44; 32]);
+        let member = KemKeyPair::generate_with(Suite::CandorStd1, &mut rng).unwrap();
+        let attacker = KemKeyPair::generate_with(Suite::CandorStd1, &mut rng).unwrap();
+        let b = binding();
+        // Malicious sealer seals to the attacker but lists the member's key id at the
+        // same slot (with the same or any enc_rand).
+        let (blk, mut list) =
+            RecipientSlotBlock::build_with(&mut rng, &ck, &b, &[attacker.public.clone()]).unwrap();
+        list[0].key_id = key_id(Suite::CandorStd1, KeyKind::Mek, &member.public.to_bytes());
+        let dir = directory(core::slice::from_ref(&member.public), KeyKind::Mek);
+        assert_eq!(
+            blk.verify_slot_block(&ck, &b, &list, &dir).err(),
+            Some(Error::SlotVerification)
+        );
+        // A directory that maps the listed id to a different key is also rejected.
+        let lying = |_: &[u8; 32]| Some(attacker.public.clone());
+        assert!(blk.verify_slot_block(&ck, &b, &list, lying).is_err());
+        // Tampered enc_rand is detected.
+        let (blk2, mut list2) =
+            RecipientSlotBlock::build_with(&mut rng, &ck, &b, &[member.public.clone()]).unwrap();
+        assert!(blk2.verify_slot_block(&ck, &b, &list2, &dir).is_ok());
+        list2[0].enc_rand[0] ^= 1;
+        assert!(blk2.verify_slot_block(&ck, &b, &list2, &dir).is_err());
     }
 
     #[test]
@@ -535,13 +586,15 @@ mod tests {
         let ck = ContentKey::from_bytes([0x33; 32]);
         let mut b = binding();
         b.context = SlotContext::Custodian { tenant_id: [3; 16] };
-        let blk = RecipientSlotBlock::build_with(&mut rng, &ck, &b, &[]).unwrap();
-        assert!(
-            blk.verify(&ck, &b, 0, None)
-                .unwrap()
-                .real_positions
-                .is_empty()
-        );
+        let (blk, list) = RecipientSlotBlock::build_with(&mut rng, &ck, &b, &[]).unwrap();
+        assert!(list.is_empty());
+        assert!(blk.verify_slot_block(&ck, &b, &[], |_| None).is_ok());
+        // Custodian slot with key kind 3.
+        let k13 = KemKeyPair::generate_with(Suite::CandorStd1, &mut rng).unwrap();
+        let pks = [k13.public.clone()];
+        let (blk, list) = RecipientSlotBlock::build_with(&mut rng, &ck, &b, &pks).unwrap();
+        assert!(blk.verify_slot_block(&ck, &b, &list, directory(&pks, KeyKind::Custodian)).is_ok());
+        assert!(blk.verify_slot_block(&ck, &b, &list, directory(&pks, KeyKind::Mek)).is_err());
         // Dummy derivation is deterministic.
         assert_eq!(
             dummy_slot(&ck, &b, 3).unwrap(),
@@ -570,7 +623,7 @@ mod tests {
     #[test]
     fn decode_rejects() {
         let mut rng = TestRng::new(14);
-        let blk = RecipientSlotBlock::build_with(
+        let (blk, _) = RecipientSlotBlock::build_with(
             &mut rng,
             &ContentKey::from_bytes([0; 32]),
             &binding(),

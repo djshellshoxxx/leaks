@@ -3,7 +3,12 @@
 //! Requirement IDs refer to `specs/11-FRONTEND-SOURCE.md` (SUI-*), `26-ACCESSIBILITY.md`
 //! (A11Y-*, I18N-*) and `08-API.md` (API-*).
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 
 use std::collections::HashSet;
 
@@ -121,9 +126,23 @@ fn no_script_handlers_external_urls_or_inline_styles() {
         let lower = b.to_ascii_lowercase();
         let id = format!("{} {} {m:?} {e}", s.spec_id(), l.tag());
         for bad in [
-            "<script", "javascript:", "<iframe", "<object", "<embed", "<video", "<audio", "<img",
-            "http-equiv", "localstorage", "sessionstorage", "indexeddb", "serviceworker",
-            "<link rel=\"stylesheet", "@import", "url(", "<base",
+            "<script",
+            "javascript:",
+            "<iframe",
+            "<object",
+            "<embed",
+            "<video",
+            "<audio",
+            "<img",
+            "http-equiv",
+            "localstorage",
+            "sessionstorage",
+            "indexeddb",
+            "serviceworker",
+            "<link rel=\"stylesheet",
+            "@import",
+            "url(",
+            "<base",
         ] {
             assert!(!lower.contains(bad), "{id}: found {bad}");
         }
@@ -156,7 +175,9 @@ fn regex_lite_on() -> impl Fn(&str) -> bool {
         let b = s.as_bytes();
         let mut i = 0;
         while i + 3 < b.len() {
-            if (b[i] == b' ' || b[i] == b'\n' || b[i] == b'\t') && b[i + 1] == b'o' && b[i + 2] == b'n'
+            if (b[i] == b' ' || b[i] == b'\n' || b[i] == b'\t')
+                && b[i + 1] == b'o'
+                && b[i + 2] == b'n'
             {
                 let mut j = i + 3;
                 while j < b.len() && b[j].is_ascii_lowercase() {
@@ -184,7 +205,11 @@ fn well_formed_and_structured() {
         let (_, b) = render_ok(s, l, m, e);
         let id = format!("{} {} {m:?} {e}", s.spec_id(), l.tag());
         let html = Html::parse_document(&b);
-        assert!(html.errors.is_empty(), "{id}: parse errors {:?}", html.errors);
+        assert!(
+            html.errors.is_empty(),
+            "{id}: parse errors {:?}",
+            html.errors
+        );
         let root = html.select(&sel("html")).next().unwrap();
         assert_eq!(root.value().attr("lang"), Some(l.tag()), "{id}");
         assert_eq!(root.value().attr("dir"), Some(l.dir().as_str()), "{id}");
@@ -244,8 +269,8 @@ fn every_control_is_labelled() {
             if v.attr("type") == Some("hidden") {
                 continue;
             }
-            let named = v.attr("aria-label").is_some()
-                || v.id().is_some_and(|i| labels.contains(i));
+            let named =
+                v.attr("aria-label").is_some() || v.id().is_some_and(|i| labels.contains(i));
             assert!(named, "{id}: unlabelled control {:?}", v.attr("name"));
         }
         for btn in html.select(&sel("button")) {
@@ -264,7 +289,16 @@ fn every_control_is_labelled() {
         for h in html.select(&sel("input[type=hidden]")) {
             let n = h.value().attr("name").unwrap();
             assert!(
-                ["csrf", "nav", "step", "action", "part_index", "reply_index", "page"].contains(&n),
+                [
+                    "csrf",
+                    "nav",
+                    "step",
+                    "action",
+                    "part_index",
+                    "reply_index",
+                    "page"
+                ]
+                .contains(&n),
                 "{id}: hidden field {n}"
             );
         }
@@ -285,9 +319,16 @@ fn size_classes_exact() {
         assert_eq!(p.class, expect);
         assert_eq!(p.body.len(), expect.bytes());
         assert_eq!(b.len(), expect.bytes());
-        assert_eq!(p.header("Content-Length"), Some(expect.bytes().to_string().as_str()));
+        assert_eq!(
+            p.header("Content-Length"),
+            Some(expect.bytes().to_string().as_str())
+        );
         assert!(p.unpadded_len <= expect.max_unpadded());
-        assert!(b.trim_end().ends_with("--></body>\n</html>"), "{}", s.spec_id());
+        assert!(
+            b.trim_end().ends_with("--></body>\n</html>"),
+            "{}",
+            s.spec_id()
+        );
     }
 }
 
@@ -331,11 +372,21 @@ fn response_headers() {
         assert_eq!(p.header("X-Content-Type-Options"), Some("nosniff"));
         assert_eq!(p.header("X-Frame-Options"), Some("DENY"));
         assert_eq!(p.header("Cross-Origin-Opener-Policy"), Some("same-origin"));
-        assert_eq!(p.header("Cross-Origin-Embedder-Policy"), Some("require-corp"));
-        assert_eq!(p.header("Cross-Origin-Resource-Policy"), Some("same-origin"));
+        assert_eq!(
+            p.header("Cross-Origin-Embedder-Policy"),
+            Some("require-corp")
+        );
+        assert_eq!(
+            p.header("Cross-Origin-Resource-Policy"),
+            Some("same-origin")
+        );
         assert_eq!(p.header("Origin-Agent-Cluster"), Some("?1"));
         assert_eq!(p.header("Content-Language"), Some(l.tag()));
-        assert!(p.header("Permissions-Policy").unwrap().contains("camera=()"));
+        assert!(
+            p.header("Permissions-Policy")
+                .unwrap()
+                .contains("camera=()")
+        );
         assert_eq!(p.header("Content-Type"), Some("text/html; charset=utf-8"));
         let csp = p.header("Content-Security-Policy").unwrap();
         assert_eq!(csp, content_security_policy());
@@ -380,7 +431,11 @@ fn mode_banner_per_mode() {
             let p = render(s, &vm, &Locale::En).unwrap();
             let html = Html::parse_document(&body(&p));
             let header = html.select(&sel("header")).next().unwrap();
-            let first = header.children().filter_map(ElementRef::wrap).next().unwrap();
+            let first = header
+                .children()
+                .filter_map(ElementRef::wrap)
+                .next()
+                .unwrap();
             assert!(first.value().classes().any(|c| c == "mode"), "banner first");
             let banner = text_of(first.select(&sel("p")).next().unwrap());
             assert_eq!(banner, text, "{} {m:?}", s.spec_id());
@@ -394,7 +449,13 @@ fn mode_banner_per_mode() {
 }
 
 fn has_text(b: &str, needle: &str) -> bool {
-    plain(&Html::parse_document(b).root_element().text().collect::<String>()).contains(needle)
+    plain(
+        &Html::parse_document(b)
+            .root_element()
+            .text()
+            .collect::<String>(),
+    )
+    .contains(needle)
 }
 
 const HONESTY: &str = "If the intake server is compromised or legally compelled while you use the website (no-JavaScript) version, what you type, and your passphrase when you log in, can be captured. For the highest risk, use the Candor Source App.";
@@ -416,23 +477,53 @@ fn required_strings_per_screen() {
         );
     }
     let (_, b) = render_ok(Screen::Status, Locale::En, Mode::Anonymous, false);
-    assert!(has_text(&b, "Checking these values does not protect a report sent from this website; only the Candor app checks them before encrypting."));
+    assert!(has_text(
+        &b,
+        "Checking these values does not protect a report sent from this website; only the Candor app checks them before encrypting."
+    ));
     assert!(has_text(&b, "the server looks up your mailbox"));
     assert!(has_text(&b, "(as listed by this site)"));
     let (_, b) = render_ok(Screen::Files, Locale::En, Mode::Anonymous, false);
-    assert!(has_text(&b, "can recognise a large upload by its size and time"));
+    assert!(has_text(
+        &b,
+        "can recognise a large upload by its size and time"
+    ));
     let (_, b) = render_ok(Screen::Concerns, Locale::En, Mode::Anonymous, false);
-    assert!(has_text(&b, "Your answers are encrypted and seen only by the independent triage team, who use them to keep the people involved away from your report. They may still suggest what your report is about."));
-    assert!(has_text(&b, "If you tick your own manager, the triage team will know which team you work in."));
-    for s in [Screen::NewReport, Screen::Files, Screen::Review, Screen::ServerError] {
+    assert!(has_text(
+        &b,
+        "Your answers are encrypted and seen only by the independent triage team, who use them to keep the people involved away from your report. They may still suggest what your report is about."
+    ));
+    assert!(has_text(
+        &b,
+        "If you tick your own manager, the triage team will know which team you work in."
+    ));
+    for s in [
+        Screen::NewReport,
+        Screen::Files,
+        Screen::Review,
+        Screen::ServerError,
+    ] {
         let (_, b) = render_ok(s, Locale::En, Mode::Anonymous, false);
-        assert!(has_text(&b, "Your draft is kept only in the server's memory"), "SUI-061 {}", s.spec_id());
+        assert!(
+            has_text(&b, "Your draft is kept only in the server's memory"),
+            "SUI-061 {}",
+            s.spec_id()
+        );
     }
     let (_, b) = render_ok(Screen::Inbox, Locale::En, Mode::Anonymous, false);
-    assert!(has_text(&b, "Replies stay here for 30 days after they arrive."));
+    assert!(has_text(
+        &b,
+        "Replies stay here for 30 days after they arrive."
+    ));
     let (_, b) = render_ok(Screen::Conversation, Locale::En, Mode::Anonymous, false);
-    assert!(has_text(&b, "The team should never ask you to move to email, phone or chat."));
-    assert!(has_text(&b, "Your messages go only to people who could read your first report"));
+    assert!(has_text(
+        &b,
+        "The team should never ask you to move to email, phone or chat."
+    ));
+    assert!(has_text(
+        &b,
+        "Your messages go only to people who could read your first report"
+    ));
 }
 
 // ST: SUI-016 — send buttons name the mode.
@@ -470,7 +561,11 @@ fn privacy_defaults() {
     let h = Html::parse_document(&b);
     let f = h.select(&sel("input[type=file]")).next().unwrap();
     assert!(f.value().attr("accept").is_none() && f.value().attr("capture").is_none());
-    assert!(h.select(&sel("input[name=neutral_names][checked]")).next().is_some());
+    assert!(
+        h.select(&sel("input[name=neutral_names][checked]"))
+            .next()
+            .is_some()
+    );
     let (_, b) = render_ok(Screen::Review, Locale::En, Mode::Anonymous, false);
     let h = Html::parse_document(&b);
     let d: Vec<_> = h
@@ -502,7 +597,10 @@ fn passphrase_display() {
             line.value().attr("value"),
             Some("cobalt ripple anthem gravel sonnet mosaic tundra whistle ember lantern")
         );
-        assert!(h.select(&sel("details ol li")).any(|li| text_of(li) == "c o b a l t"));
+        assert!(
+            h.select(&sel("details ol li"))
+                .any(|li| text_of(li) == "c o b a l t")
+        );
         // No download, print, QR, email or scripted copy affordances (SOPS-022).
         for el in h.select(&sel("main a, main button")) {
             let t = text_of(el).to_lowercase();
@@ -523,7 +621,10 @@ fn passphrase_display() {
         RenderError::MissingData("passphrase")
     );
     // Debug output never shows the words.
-    let dbg = format!("{:?}", sample_view_model(Screen::Credential, Mode::Anonymous, false));
+    let dbg = format!(
+        "{:?}",
+        sample_view_model(Screen::Credential, Mode::Anonymous, false)
+    );
     assert!(!dbg.contains("cobalt"));
     let page = render(Screen::Credential, &vm_cred(), &Locale::En).unwrap();
     assert!(!format!("{page:?}").contains("cobalt"));
@@ -548,7 +649,12 @@ fn confirm_exhausted() {
 // ST: SUI-022 — error pattern.
 #[test]
 fn error_pattern() {
-    for s in [Screen::Questionnaire, Screen::Login, Screen::NewReport, Screen::Confirm] {
+    for s in [
+        Screen::Questionnaire,
+        Screen::Login,
+        Screen::NewReport,
+        Screen::Confirm,
+    ] {
         let (_, b) = render_ok(s, Locale::En, Mode::Anonymous, true);
         let h = Html::parse_document(&b);
         let title = text_of(h.select(&sel("title")).next().unwrap());
@@ -575,7 +681,8 @@ fn error_pattern() {
 // ST: SUI-023 — all user/recipient content is escaped and never interpreted.
 #[test]
 fn hostile_content_is_escaped() {
-    let evil = "<script>alert(1)</script><img src=x onerror=alert(1)>\"'&{{x}}**b**javascript:alert(1)";
+    let evil =
+        "<script>alert(1)</script><img src=x onerror=alert(1)>\"'&{{x}}**b**javascript:alert(1)";
     for s in Screen::ALL {
         let mut vm = sample_view_model(s, Mode::Confidential, false);
         vm.ctx.org = evil.into();
@@ -595,8 +702,16 @@ fn hostile_content_is_escaped() {
         let lower = b.to_ascii_lowercase();
         assert!(!lower.contains("<script"), "{}", s.spec_id());
         assert!(!lower.contains("<img"), "{}", s.spec_id());
-        assert!(!lower.contains("<strong>b</strong>"), "{}: markup in user content", s.spec_id());
-        assert!(Html::parse_document(&b).errors.is_empty(), "{}", s.spec_id());
+        assert!(
+            !lower.contains("<strong>b</strong>"),
+            "{}: markup in user content",
+            s.spec_id()
+        );
+        assert!(
+            Html::parse_document(&b).errors.is_empty(),
+            "{}",
+            s.spec_id()
+        );
     }
 }
 
@@ -606,7 +721,10 @@ fn warning_banners() {
     let d = Day::new(2026, 8, 1).unwrap();
     let mut vm = sample_view_model(Screen::Landing, Mode::Anonymous, false);
     let b = body(&render(Screen::Landing, &vm, &Locale::En).unwrap());
-    assert!(!b.contains("class=\"warn\""), "no banners when all is current");
+    assert!(
+        !b.contains("class=\"warn\""),
+        "no banners when all is current"
+    );
     vm.ctx.banners.operator_statement = OperatorStatement::Missing;
     let b = body(&render(Screen::Landing, &vm, &Locale::En).unwrap());
     assert!(has_text(&b, "Last statement: none."));
@@ -622,8 +740,14 @@ fn warning_banners() {
     });
     let b = body(&render(Screen::Landing, &vm, &Locale::En).unwrap());
     assert!(has_text(&b, "Last statement: 2026-08-01."));
-    assert!(has_text(&b, "declared a security incident affecting this site, dated 2026-08-01"));
-    assert!(has_text(&b, "The list of people who receive reports in Audit is changing on 2026-08-01"));
+    assert!(has_text(
+        &b,
+        "declared a security incident affecting this site, dated 2026-08-01"
+    ));
+    assert!(has_text(
+        &b,
+        "The list of people who receive reports in Audit is changing on 2026-08-01"
+    ));
     vm.ctx.banners.incident = Some(IncidentNotice {
         date: d,
         text: "notice".into(),
@@ -633,8 +757,14 @@ fn warning_banners() {
         }),
     });
     let b = body(&render(Screen::Landing, &vm, &Locale::En).unwrap());
-    assert!(has_text(&b, "Security notice. On 2026-08-01 the operator made an incident-response recording"));
-    assert!(!has_text(&b, "declared a security incident"), "WB-2c replaces WB-2");
+    assert!(has_text(
+        &b,
+        "Security notice. On 2026-08-01 the operator made an incident-response recording"
+    ));
+    assert!(
+        !has_text(&b, "declared a security incident"),
+        "WB-2c replaces WB-2"
+    );
 }
 
 // ST: SUI-078 / SUI-079 / SUI-080 — configuration-driven disclosures.
@@ -648,7 +778,10 @@ fn configuration_disclosures() {
     let b = body(&render(Screen::Landing, &vm, &Locale::En).unwrap());
     assert!(has_text(&b, "can unlock reports (2 of them together)"));
     assert!(has_text(&b, "reduced separation of duties"));
-    assert!(has_text(&b, "Can't use Tor Browser? Hotline 0800 000 000 — this is NOT ANONYMOUS."));
+    assert!(has_text(
+        &b,
+        "Can't use Tor Browser? Hotline 0800 000 000 — this is NOT ANONYMOUS."
+    ));
     let mut vm = sample_view_model(Screen::CloseMailbox, Mode::Anonymous, false);
     let b = body(&render(Screen::CloseMailbox, &vm, &Locale::En).unwrap());
     assert!(has_text(&b, "deleted within 14 days"));
@@ -666,7 +799,17 @@ fn rtl_locale() {
     assert_eq!(h.select(&sel("html[dir=rtl][lang=ar-XB]")).count(), 1);
     assert!(h.select(&sel("p.ut[dir=auto]")).next().is_some());
     let css = STYLESHEET;
-    for physical in ["margin-left", "margin-right", "padding-left", "padding-right", "text-align:left", "text-align:right", "float:", "left:", "right:"] {
+    for physical in [
+        "margin-left",
+        "margin-right",
+        "padding-left",
+        "padding-right",
+        "text-align:left",
+        "text-align:right",
+        "float:",
+        "left:",
+        "right:",
+    ] {
         assert!(!css.contains(physical), "physical property {physical}");
     }
 }
@@ -730,10 +873,7 @@ fn templates_have_no_hard_coded_text() {
                 _ => {}
             }
         }
-        let leftover: String = text
-            .chars()
-            .filter(|c| c.is_alphabetic())
-            .collect();
+        let leftover: String = text.chars().filter(|c| c.is_alphabetic()).collect();
         assert!(
             leftover.is_empty() || leftover == "DOCTYPEhtml",
             "{}: hard-coded text {leftover:?}",
@@ -757,10 +897,22 @@ fn security_critical_strings_flagged() {
             || k.starts_with("sui-concerns-explain")
             || k == "sui-concerns-who-sees"
             || k.starts_with("sui-id-confirm")
-            || k.starts_with("sui-cred-") && !matches!(k.as_str(), "sui-cred-step" | "sui-cred-h2" | "sui-cred-oneline" | "sui-cred-spell" | "sui-cred-next")
+            || k.starts_with("sui-cred-")
+                && !matches!(
+                    k.as_str(),
+                    "sui-cred-step"
+                        | "sui-cred-h2"
+                        | "sui-cred-oneline"
+                        | "sui-cred-spell"
+                        | "sui-cred-next"
+                )
             || k.starts_with("sui-send-")
             || k == "sui-rotate-explain"
-            || k.starts_with("sui-close-") && !matches!(k.as_str(), "sui-close-step" | "sui-close-passphrase" | "sui-close-yes" | "sui-close-no")
+            || k.starts_with("sui-close-")
+                && !matches!(
+                    k.as_str(),
+                    "sui-close-step" | "sui-close-passphrase" | "sui-close-yes" | "sui-close-no"
+                )
             || k.starts_with("sui-end-discard") && !k.ends_with("-yes") && !k.ends_with("-no");
         if must_tier0 {
             assert_eq!(c, StringClass::Tier0, "{k} must be tier0");
@@ -838,8 +990,16 @@ fn leave_page_minimal() {
 #[test]
 fn dates_day_only() {
     let (_, b) = render_ok(Screen::Inbox, Locale::En, Mode::Anonymous, false);
-    assert!(has_text(&b, "Message from Audit Committee team, 2026-10-04 (UTC)"));
-    let text = plain(&Html::parse_document(&b).root_element().text().collect::<String>());
+    assert!(has_text(
+        &b,
+        "Message from Audit Committee team, 2026-10-04 (UTC)"
+    ));
+    let text = plain(
+        &Html::parse_document(&b)
+            .root_element()
+            .text()
+            .collect::<String>(),
+    );
     assert!(!text.contains("unread") && !text.contains("last visit"));
 }
 
@@ -847,4 +1007,48 @@ fn dates_day_only() {
 fn robots_padded() {
     let p = robots_txt();
     assert_eq!(p.body.len(), SizeClass::P1.bytes());
+}
+
+mod prop {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+        // ST: SUI-023 / SUI-005 — arbitrary team and source text is escaped, parses cleanly, and
+        // never changes the response size.
+        #[test]
+        fn arbitrary_text_is_inert(text in any::<String>(), sender in "[^\u{0}]{0,40}") {
+            let mut vm = sample_view_model(Screen::Conversation, Mode::Anonymous, false);
+            vm.conversation.messages[0].text = text.clone();
+            vm.conversation.messages[0].sender = sender;
+            vm.conversation.draft_text = text;
+            let p = render(Screen::Conversation, &vm, &Locale::En).unwrap();
+            prop_assert_eq!(p.body.len(), SizeClass::P2.bytes());
+            let b = body(&p);
+            prop_assert!(!b.to_ascii_lowercase().contains("<script"));
+            let h = Html::parse_document(&b);
+            prop_assert_eq!(h.select(&sel("article")).count(), 2);
+        }
+    }
+}
+
+// ST: SUI-005 — the largest P1 page (S02) keeps headroom in every built-in locale.
+#[test]
+fn s02_budget_report() {
+    for l in Locale::ALL {
+        let vm = max_content(sample_view_model(Screen::Safety, Mode::Anonymous, false));
+        let p = render(Screen::Safety, &vm, &l).unwrap();
+        assert!(
+            p.unpadded_len <= SizeClass::P1.max_unpadded(),
+            "{}",
+            l.tag()
+        );
+        println!(
+            "S02 {}: {} of {} bytes",
+            l.tag(),
+            p.unpadded_len,
+            SizeClass::P1.max_unpadded()
+        );
+    }
 }
