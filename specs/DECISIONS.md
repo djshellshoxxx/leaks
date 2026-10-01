@@ -504,3 +504,8 @@ The project owner approved the following judgement calls raised during revision:
 1. The sealer hands sealed bundles to the intake store as anonymous memfds, sealed `F_SEAL_WRITE|F_SEAL_GROW|F_SEAL_SHRINK|F_SEAL_SEAL`, over `SCM_RIGHTS` on `istore.sock`; there are no bundle files in staging. The store must verify that all four seals are set, the descriptor is a regular file, its size matches the header, and the peer UID is the sealer's (STO-27). The sealer unit allows `memfd_create`.
 2. The CBOR body key numbering, `signer_key_id` form and composite subject derivations for KD entries chosen in `crates/candor-sealer/SPEC-NOTES.md` (C-3) are canonical until 04 §14.2 is amended to match; changing them is a format break.
 3. No interpreter is added to H-INTAKE for configuration checking: the safe reader (DEP-24) becomes a compiled, reproducibly built tool; python3 is not part of the H-INTAKE platform manifest (AUD-RM2-DEP-26).
+
+### ADR-056 Sealer session capacity (2026-10-01; AUD-RM2-SEA-32/33)
+1. The default sealer session cap is 512, at least 10× the 34 §3.1 design peak of 50 concurrent sessions (PERF-019, ADR-038(5)). It is configured with `CANDOR_SEALER_MAX_SESSIONS`, and larger deployments scale it with their population column.
+2. Upload slots equal the session cap. The sealer refuses to start if `CANDOR_SEALER_UPLOAD_SLOTS` is less than `CANDOR_SEALER_MAX_SESSIONS`, so a draft can never get BUSY within its own guaranteed slice.
+3. The budget for the second population column (5,000 sessions) is about 10 GiB, with MemoryMax raised to match. config-check enforces the memory rules.

@@ -656,7 +656,7 @@ Rules:
 | Global login (Argon2id, m = 64 MiB) concurrency | 4 active, 32 queued, 30 s wait (ADR-046(7)) | sealer | "busy" page |
 | New Tier W sessions (global) | 600 / hour default (ADVANCED); sized so that it is reached only at ≥ 10× design peak (34) | web | "busy" page; SYSTEM alert |
 | Tier W staging (tmpfs) | `intake.tierw_staging_bytes` total | istore | "busy" page for new uploads |
-| Sealer sessions | 64 | sealer | `BUSY` |
+| Sealer sessions | 512 (≥ 10× design peak, PERF-019; upload slots = sessions; ADR-056) | sealer | `BUSY` |
 | Web sessions | 10,000 | web | oldest idle evicted |
 | Request body (message and questionnaire routes) | 112 KiB (≤ 96 KiB answers per 11 §5.7, or 64 KiB message text, + form overhead) | web parser | 413 page |
 | Message text | 64 KiB after UTF-8 validation | web | 413 page |

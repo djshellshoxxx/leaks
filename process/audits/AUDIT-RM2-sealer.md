@@ -677,3 +677,56 @@ Regression: the PoC (a third source is admitted while two 1-byte drafts stay ali
 | Low / Info | SEA-17 (workspace); deploy config-check rule (assigned); C-5 hash echo (wave 2); the post-check store failure losing parts is documented |
 
 **Gate: FAIL 2026-10-01 35f851d**: SEA-31 (Medium) needs a fix or the lead's written acceptance with an expiry. Everything else in scope is fixed or accepted. With SEA-31 fixed or accepted, the sealer gate is **PASS**.
+
+---
+
+## Re-test (round 6, delta: SEA-31)
+
+| Item | Value |
+|---|---|
+| Re-tested revision | Live tree, HEAD `bed0377` (on top of `acf9721`); the working tree is clean for the sealer |
+| Results | `cargo test -p candor-sealer --locked`: 81 pass, 0 fail. `clippy --all-targets --all-features -D warnings`: clean. lint-safefs (with tests): 0 sealer hits. PoCs ran in a scratch `git archive` copy, which has been removed |
+
+### SEA-31 verification
+
+The design is as stated. The budget is split by `guaranteed_permille` (500) into `upload_slots` (64) guaranteed slices of 30 MiB at the default 3,840 MiB budget, plus a shared pool of 1,920 MiB. Within its slice a draft only ever gets `LIMIT`. Above the slice, the draft draws from the shared pool, up to `per_session_upload_bytes`, and gets the uniform `BUSY` if the pool is exhausted. `rebalance` shrinks or releases both grants on drop, abort, the 120 s stall and draft end. A slice below 1 MiB, or any invalid `CANDOR_SEALER_UPLOAD_SLOTS`, is refused at start-up.
+
+PoC results at production sizes (budget 3,840 MiB, cap 768 MiB, 64 slots, `max_sessions` 64, paused clock, 60 min of `TOUCH`; the probe is a new session sending `PART_BEGIN` of 10 MiB, which fits within the slice):
+
+| 1-byte holders | Probe result |
+|---|---|
+| 5 | `Part` (admitted) |
+| 10 | `Part` |
+| 63 | `Part` |
+| 64 | `SESSION_OPEN` → `BUSY` (the session table is full; that cap is 07 §11, not a slot effect) |
+
+- **Within-slice responses do not depend on other drafts.** The same 10 MiB probe returns `Part` on an idle sealer and while three drafts hold 2.0 GiB of the shared pool (a fourth 300 MiB declaration got `BUSY` at that moment).
+- **The pool recovers.** After one large part is dropped, the fourth 300 MiB declaration is admitted. After 121 s without bytes, the stall reap returns the reservation to 0.
+
+**Status: SEA-31 Fixed.** The shared-pool `BUSY` reveals only aggregate large-upload pressure and is accepted by the lead as a Low residual. Exhausting it costs real bytes, since declared-but-unsent parts are reaped at 120 s.
+
+### Design peak and the right slot default (ADR-038(5), PERF-019)
+
+Spec 34 §3.1 gives concurrent source sessions at burst as 50 for the first population column and 500 for the second, with 20 % of envelopes carrying attachments. Applying the 10× rule:
+- **Sessions:** ≥ 500 for the first column and ≥ 5,000 for the second.
+- **Uploading drafts:** ≥ 100 and ≥ 1,000 respectively.
+
+Because each session holds at most one slot, slot `BUSY` is unreachable whenever `upload_slots ≥ max_sessions`. **The right default is `upload_slots = max_sessions`, enforced as `upload_slots ≥ max_sessions` at start-up**, so that no draft can ever be refused a slice. Today that is 64, so the 64 default is correct for the current `max_sessions`. The code does not enforce the relation, though: `CANDOR_SEALER_UPLOAD_SLOTS=8` with 64 sessions would bring back the per-draft admission oracle.
+
+The session cap itself is the remaining problem. 07 §11 sets "Sealer sessions 64", which is only about 1.3× the 34 §3.1 burst of 50. Session `BUSY` therefore triggers far below 10× peak and is itself an activity oracle, as the 64-holder row shows. Meeting PERF-019 means `max_sessions` ≥ 500 (first column), with `upload_slots` set to match. At the default budget that gives 1,920 MiB / 500 ≈ 3.8 MiB slices, which passes the 1 MiB floor. The second column (5,000 sessions) needs a budget of at least about 10 GiB, or a smaller guaranteed share; the start-up check already refuses smaller slices.
+
+### New findings (round 6)
+
+**AUD-RM2-SEA-32 — `upload_slots < max_sessions` is accepted (Low).** `Sealer::new` checks only `slots ≥ 1` and `slice ≥ 1 MiB`. A configuration with fewer slots than sessions recreates the slot-admission `BUSY` that SEA-31 removed. Fix: require `upload_slots ≥ max_sessions` (`StartError::Config`), and add the same rule to deploy's config-check.
+
+**AUD-RM2-SEA-33 — Sealer session cap of 64 conflicts with the 10× design-peak rule (Info, spec).** 07 §11 (64) contradicts 34 §3.1 / PERF-019 / ADR-038(5) (≥ 500 for the first population column), and session `BUSY` is reachable at about 1.3× peak. Flag for the spec owners. Raising `max_sessions` is a sizing change only, and slots and budget follow from the rule above.
+
+### Gate (round 6)
+
+| Severity | Open |
+|---|---|
+| Critical / High / Medium | 0 / 0 / 0 |
+| Low | SEA-32; shared-pool aggregate-pressure residual (accepted by the lead) |
+| Info | SEA-33 (spec), SEA-17 (workspace), C-5 hash echo (wave 2), deploy config-check rule (assigned) |
+
+**Gate: PASS 2026-10-01 bed0377**: there are no open Critical, High or Medium findings, and the Lows are tracked. SEA-30 and the residuals listed under round 5 remain accepted as recorded.
