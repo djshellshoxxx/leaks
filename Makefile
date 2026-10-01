@@ -52,6 +52,7 @@ workflow-lint: gate-selftest
 gate-selftest:
 	sh scripts/tests/test-check-dco.sh
 	sh scripts/tests/test-check-actions-pinned.sh
+	sh scripts/tests/test-repro-check.sh
 	$(PYTHON) scripts/check-codeowners.py --self-test
 
 secret-scan:

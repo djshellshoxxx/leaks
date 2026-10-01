@@ -17,7 +17,12 @@ sha2 = { version = "=0.11.0", default-features = false }
 base64 = { version = "=0.22.1", default-features = false, features = ["alloc"] }
 zeroize = { version = "=1.8.2", default-features = false, features = ["alloc"] }
 
+[features]
+preview = []
+pseudo-locales = []
+
 [dev-dependencies]
+candor-source-ui = { path = ".", features = ["preview", "pseudo-locales"] }
 scraper = { version = "=0.27.0", default-features = false, features = ["errors"] }
 proptest = { version = "=1.11.0", default-features = false, features = ["std"] }
 

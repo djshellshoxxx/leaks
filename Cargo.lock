@@ -301,6 +301,7 @@ version = "0.1.0"
 dependencies = [
  "askama",
  "base64",
+ "candor-source-ui",
  "fluent-bundle",
  "fluent-syntax",
  "proptest",

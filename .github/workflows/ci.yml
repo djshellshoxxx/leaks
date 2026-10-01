@@ -253,6 +253,8 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           components: rustfmt
+      - name: Reproducibility gate self-tests (vacuous-pass fixtures)
+        run: sh scripts/tests/test-repro-check.sh
       - uses: ./.github/actions/cargo-install
         with:
           crate: zizmor
