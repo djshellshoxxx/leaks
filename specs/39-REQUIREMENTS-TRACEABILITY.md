@@ -1211,7 +1211,7 @@ Links every requirement: RESEARCH/FINDING (Evidence) → THREAT → REQUIREMENT 
 | AUTH-013 | Knowledge (unverified): SAML/OIDC best practice | THR-022 | C-21 | TST: replay, unsigned, wrong-audience and skewed assertions rejected | 15-AUTHENTICATION-AUTHORIZATION.md |
 | AUTH-014 | B-CO-49 (FIPS 201-3); B-CO-41 | THR-022 | C-21; C-15 | TST: PIV test cards with valid, revoked and expired certificates | 15-AUTHENTICATION-AUTHORIZATION.md |
 | AUTH-015 | ADR-007; ADR-036(2); INC-14; RVW-C-05 | THR-046; THR-018 | C-21; C-14 | TST: self-approval rejected; management-only approval for Triage Set account rejected; key bundle appears in transparency log | 15-AUTHENTICATION-AUTHORIZATION.md |
-| AUTH-016 | ADR-029; B-SD-20 (CVE-2026-50000) | THR-022; THR-021 | C-21; C-10 | TST: cross-audience replay matrix across ≥ 4 workers; unsigned request rejected; revoked token rejected on next request | 15-AUTHENTICATION-AUTHORIZATION.md |
+| AUTH-016 | ADR-029; B-SD-20 (CVE-2026-50000 [CVE record unconfirmed]) | THR-022; THR-021 | C-21; C-10 | TST: cross-audience replay matrix across ≥ 4 workers; unsigned request rejected; revoked token rejected on next request | 15-AUTHENTICATION-AUTHORIZATION.md |
 | AUTH-017 | B-SD-02 | THR-022; THR-031 | C-21; C-15 | TST: timer tests; memory inspection after lock (test build) | 15-AUTHENTICATION-AUTHORIZATION.md |
 | AUTH-018 | B-SD-13 (SEC-01-010); B-GL-04 | THR-022; THR-018 | C-21; C-22 | TST: stale assertion, mismatched descriptor, and replayed assertion rejected | 15-AUTHENTICATION-AUTHORIZATION.md |
 | AUTH-019 | B-CO-49 (ISO 27001 A.5.18) | THR-022 | C-21 | TST: time-advanced suspension | 15-AUTHENTICATION-AUTHORIZATION.md |
@@ -1222,15 +1222,15 @@ Links every requirement: RESEARCH/FINDING (Evidence) → THREAT → REQUIREMENT 
 | AUTHZ-004 | ADR-015 | THR-018 | C-22; C-21 | TST: role-assignment conflicts rejected | 15-AUTHENTICATION-AUTHORIZATION.md |
 | AUTHZ-005 | ADR-007; INC-14 | THR-046; THR-018 | C-15; C-14 | TST: ACL row inserted by admin yields no content; substituted key detected | 15-AUTHENTICATION-AUTHORIZATION.md |
 | AUTHZ-006 | B-SD-20; R1 §5 item 2 | THR-019 | C-22 | TST: property test over policies; INSP: baseline invariant | 15-AUTHENTICATION-AUTHORIZATION.md |
-| AUTHZ-007 | ADR-021; B-GL-37 (CVE-2026-46648) | THR-021; THR-045 | C-22; C-12 | TST: IDOR suite with two tenants; RLS bypass attempt via direct SQL role fails | 15-AUTHENTICATION-AUTHORIZATION.md |
+| AUTHZ-007 | ADR-021; B-GL-37 (CVE-2026-46648 [CVE record unconfirmed]) | THR-021; THR-045 | C-22; C-12 | TST: IDOR suite with two tenants; RLS bypass attempt via direct SQL role fails | 15-AUTHENTICATION-AUTHORIZATION.md |
 | AUTHZ-008 | ADR-015 | THR-019 | C-22 | TST: cross-department access denied | 15-AUTHENTICATION-AUTHORIZATION.md |
 | AUTHZ-009 | ADR-015 | THR-019 | C-22; C-15 | TST: expiry fixtures; post-expiry access 403 | 15-AUTHENTICATION-AUTHORIZATION.md |
 | AUTHZ-010 | ADR-015; ADR-013; ADR-045; RVW-C-10 | THR-018; THR-020 | C-22; C-10 | TST: each constraint violated once → denied (incl. two internal-counsel approvers); LEGAL_DEADLINE executes only after 24 h; refusal event recorded; review task created | 15-AUTHENTICATION-AUTHORIZATION.md |
 | AUTHZ-011 | ADR-012; ADR-013; ADR-014; REQ-H-16 | THR-018; THR-019; THR-041 | C-22 | TST: same person with two accounts rejected; replayed approval rejected | 15-AUTHENTICATION-AUTHORIZATION.md |
-| AUTHZ-012 | ADR-029; B-GL-37 (CVE-2026-46647) | THR-021 | C-10; C-31 | TST: CI job `route-authz-coverage` | 15-AUTHENTICATION-AUTHORIZATION.md |
+| AUTHZ-012 | ADR-029; B-GL-37 (CVE-2026-46647 [CVE record unconfirmed]) | THR-021 | C-10; C-31 | TST: CI job `route-authz-coverage` | 15-AUTHENTICATION-AUTHORIZATION.md |
 | AUTHZ-013 | ADR-029 | THR-021 | C-10 | TST: lint rule; compile-fail tests | 15-AUTHENTICATION-AUTHORIZATION.md |
 | AUTHZ-014 | REQ-H-09 | THR-021 | C-10; C-12 | TST: IDOR enumeration test; query plan inspection | 15-AUTHENTICATION-AUTHORIZATION.md |
-| AUTHZ-015 | B-GL-37 (CVE-2026-45020) | THR-021 | C-10 | TST: mass-assignment fuzz adds unknown/forbidden fields → rejected | 15-AUTHENTICATION-AUTHORIZATION.md |
+| AUTHZ-015 | B-GL-37 (CVE-2026-45020 [CVE record unconfirmed]) | THR-021 | C-10 | TST: mass-assignment fuzz adds unknown/forbidden fields → rejected | 15-AUTHENTICATION-AUTHORIZATION.md |
 | AUTHZ-016 | REQ-H-09 | THR-021; THR-019 | C-10 | TST: response-schema per role tests | 15-AUTHENTICATION-AUTHORIZATION.md |
 | AUTHZ-017 | ADR-015 | THR-035; THR-021 | C-22 | TST: policy attempting global read or admin content access rejected at load | 15-AUTHENTICATION-AUTHORIZATION.md |
 | AUTHZ-018 | Design | THR-021 | C-22 | TST: CI differential job | 15-AUTHENTICATION-AUTHORIZATION.md |
@@ -1391,7 +1391,7 @@ Links every requirement: RESEARCH/FINDING (Evidence) → THREAT → REQUIREMENT 
 | DEP-024 | ADR-007; ADR-013 | THR-013, THR-018 | C-25 | TST: planted forbidden item → alert + intake closed | 18-DEPLOYMENT.md |
 | DEP-025 | THR-035; B-GL-04 | THR-035 | C-19, C-25 | TST: rule-coverage test (every CFG row has a checker rule); exit-code tests | 18-DEPLOYMENT.md |
 | DEP-026 | ADR-016; INC-56 | THR-016 | C-19 | TST: canary scan of `--json` output | 18-DEPLOYMENT.md |
-| DEP-027 | ADR-021; B-GL-37 (CVE-2026-46648 cross-tenant) | THR-045, THR-027 | C-05, C-12, C-27 | TST: cross-customer reachability tests; INSP: vendor architecture audit (AUD) | 18-DEPLOYMENT.md |
+| DEP-027 | ADR-021; B-GL-37 (CVE-2026-46648 [CVE record unconfirmed] cross-tenant) | THR-045, THR-027 | C-05, C-12, C-27 | TST: cross-customer reachability tests; INSP: vendor architecture audit (AUD) | 18-DEPLOYMENT.md |
 | DEP-028 | INC-56; INC-69 | THR-027, THR-018 | C-34, C-36 | TST: single-person issuance refused; DEMO: customer views log | 18-DEPLOYMENT.md |
 | DEP-029 | Design; THR-026 | THR-026 | C-19 | DEMO: export/import exercise | 18-DEPLOYMENT.md |
 | DEP-030 | ADR-008; ADR-030; B-SD-04 | THR-013, THR-023 | C-15, C-18, C-25 | TST: manifest check on WS-SYNC; timer test | 18-DEPLOYMENT.md |
@@ -1514,7 +1514,7 @@ Links every requirement: RESEARCH/FINDING (Evidence) → THREAT → REQUIREMENT 
 | ENT-005 | ADR-002; ADR-005; REQ-H-05 | THR-040, THR-009 | C-10, C-06 | TST: lint unit tests for 20 lexicon locales; INSP | 21-ENTERPRISE.md |
 | ENT-006 | ADR-017; ADR-018 | THR-028, THR-029 | C-10, C-23 | TST: action registry test; ST: attempt to register custom egress action | 21-ENTERPRISE.md |
 | ENT-007 | ADR-015; ADR-010; ADR-037; RVW-B-10 | THR-011, THR-015, THR-039 | C-06, C-10, C-15 | TST: schema test rejects non-enumerated or small-population `routing_visible` fields in ANONYMOUS channels; TST: DB scan shows no routing field values outside `ct` columns; DEMO: source UI shows label | 21-ENTERPRISE.md |
-| ENT-008 | ADR-045; ADR-040; B-GL-37 (CVE-2026-46647); ADR-022; RVW-C-13 | THR-035, THR-025, THR-032, THR-020 | C-34, C-19 | TST: bundle fuzzing with every non-allow-listed key and every loosening/availability diff, all refused; ST: mass-suppression attempt via fleet | 21-ENTERPRISE.md |
+| ENT-008 | ADR-045; ADR-040; B-GL-37 (CVE-2026-46647 [CVE record unconfirmed]); ADR-022; RVW-C-13 | THR-035, THR-025, THR-032, THR-020 | C-34, C-19 | TST: bundle fuzzing with every non-allow-listed key and every loosening/availability diff, all refused; ST: mass-suppression attempt via fleet | 21-ENTERPRISE.md |
 | ENT-009 | ADR-014; ADR-047(5); B-CO-02 (Art 16, 17); B-CO-12; RVW-B-33(c) | THR-017, THR-026 | C-10, C-12 | TST: retention engine tests incl. IDENTIFIED-over-onion case; TST: hold does not extend identity expiry; INSP: 35 D-09 cross-check | 21-ENTERPRISE.md |
 | ENT-010 | B-CO-02 (Art 18); ADR-025 | THR-040 | C-06 | TST: render test on schedule change | 21-ENTERPRISE.md |
 | ENT-011 | B-CO-15; B-CO-69; ADR-025; ADR-045; RVW-C-10 | THR-017, THR-020 | C-10 | TST: hold workflow tests incl. tenant-wide hold vs source deletion; ST: legal-only approver set rejected; INSP | 21-ENTERPRISE.md |
@@ -1562,8 +1562,8 @@ Links every requirement: RESEARCH/FINDING (Evidence) → THREAT → REQUIREMENT 
 | HA-018 | ADR-044(4); RVW-C-06 | THR-017, THR-030 | C-12, C-25, C-39 | TST: checker fails without attestation; DEMO: restore-probe canary not restorable; INSP | 21-ENTERPRISE.md |
 | HA-019 | RVW-C-19; ADR-044(2) | THR-042, THR-031 | C-19, C-25 | TST: site-diversity warning; DEMO: quarterly drill record | 21-ENTERPRISE.md |
 | HA-020 | ADR-047(9); RVW-A-28; ADR-046(1) | THR-017, THR-034 | C-08, C-09 | TST: delete a mailbox on A, fail over to B → mailbox absent on B before first source request | 21-ENTERPRISE.md |
-| TEN-001 | B-GL-37 (CVE-2026-46648); B-GL-40 | THR-045, THR-021 | C-05..C-08 | TST: two-tenant isolation harness; ST | 21-ENTERPRISE.md |
-| TEN-002 | B-GL-37 (CVE-2026-46648) | THR-021 | C-12 | TST: raw SQL without context errors; CI byte-identical tenant-B snapshot test | 21-ENTERPRISE.md |
+| TEN-001 | B-GL-37 (CVE-2026-46648 [CVE record unconfirmed]); B-GL-40 | THR-045, THR-021 | C-05..C-08 | TST: two-tenant isolation harness; ST | 21-ENTERPRISE.md |
+| TEN-002 | B-GL-37 (CVE-2026-46648 [CVE record unconfirmed]) | THR-021 | C-12 | TST: raw SQL without context errors; CI byte-identical tenant-B snapshot test | 21-ENTERPRISE.md |
 | TEN-003 | B-GL-37 | THR-021 | C-10, C-19 | TST: static analysis rule | 21-ENTERPRISE.md |
 | TEN-004 | ADR-021 | THR-045 | C-13, C-14, C-24 | TST | 21-ENTERPRISE.md |
 | TEN-005 | ADR-021; ADR-043; INC-22; RVW-C-23 | THR-020, THR-045 | C-34, C-19 | TST: onboarding workflow blocks on trigger and on a classification not signed by a tenant OVERSIGHT key; INSP | 21-ENTERPRISE.md |
@@ -1571,7 +1571,7 @@ Links every requirement: RESEARCH/FINDING (Evidence) → THREAT → REQUIREMENT 
 | TEN-007 | Design | THR-045 | C-19 | TST: enforced limit | 21-ENTERPRISE.md |
 | TEN-008 | ADR-026 | THR-032, THR-045 | C-05, C-06 | TST: flood test on tenant A while measuring tenant B latency | 21-ENTERPRISE.md |
 | TEN-009 | ADR-009 | THR-011, THR-045 | C-09 | TST | 21-ENTERPRISE.md |
-| TEN-010 | ADR-029; B-GL-37 (CVE-2026-46647) | THR-021, THR-035 | C-21, C-22 | TST: route × role × tenant matrix | 21-ENTERPRISE.md |
+| TEN-010 | ADR-029; B-GL-37 (CVE-2026-46647 [CVE record unconfirmed]) | THR-021, THR-035 | C-21, C-22 | TST: route × role × tenant matrix | 21-ENTERPRISE.md |
 | TEN-011 | ADR-018 | THR-021, THR-029 | C-10 | TST | 21-ENTERPRISE.md |
 | TEN-012 | B-CO-02 (Art 8(6)); ADR-002; RVW-C-23 | THR-040 | C-06 | TST: template render | 21-ENTERPRISE.md |
 | ENT-036 | ADR-022; C-34 note | THR-026, THR-027 | C-34 | TST: schema test; AUD: DB dump inspection | 21-ENTERPRISE.md |
@@ -1700,7 +1700,7 @@ Links every requirement: RESEARCH/FINDING (Evidence) → THREAT → REQUIREMENT 
 | TEL-014 | B-CO-66 | THR-036 | C-25 | INSP; TST: consent version check | 24-LICENSING-BUSINESS-MODEL.md |
 | COMP-001 | B-GL-10 (self-declaration critique); DECISIONS §0 | THR-040 | C-30 | TST: phrase lint; INSP | 25-COMPLIANCE.md |
 | COMP-002 | Design | — | C-30 | TST: doc parser (`39-REQUIREMENTS-TRACEABILITY.md`) | 25-COMPLIANCE.md |
-| COMP-003 | ADR-020; B-GL-37 (CVE-2026-46647) | THR-035 | C-10 | TST: pack fuzz with forbidden keys; ST | 25-COMPLIANCE.md |
+| COMP-003 | ADR-020; B-GL-37 (CVE-2026-46647 [CVE record unconfirmed]) | THR-035 | C-10 | TST: pack fuzz with forbidden keys; ST | 25-COMPLIANCE.md |
 | COMP-004 | ADR-022; B-CR-45 | THR-025 | C-10, C-33 | TST: unsigned and wrong-key rejection | 25-COMPLIANCE.md |
 | COMP-005 | Design; ADR-016 | THR-035 | C-19 | TST | 25-COMPLIANCE.md |
 | COMP-006 | INC-53; B-GL-39 (Hush Line XSS) | THR-006, THR-036 | C-06 | TST: renderer XSS corpus | 25-COMPLIANCE.md |

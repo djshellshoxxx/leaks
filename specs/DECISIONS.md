@@ -259,7 +259,7 @@ Each ADR: CONTEXT / OPTIONS / DECISION / SECURITY EFFECT / PRIVACY EFFECT / USAB
 
 ### ADR-013 Recovery: no escrow by default; optional k-of-n Recovery Quorum
 - DECISION: CE and EE default: no escrow; case keys wrapped to ≥2 case members (loss of all members' devices = loss of access; warned). Optional Organization Recovery Quorum (C-28): X-Wing keypair generated offline, private key Shamir-split k-of-n (default 3-of-5) on hardware tokens held by independent roles (e.g., audit committee, ombudsman, external counsel). Enabling it is a DANGEROUS config (CFG) requiring dual approval, published in key directory (visible to sources as "Recovery escrow: ENABLED, held by: …").
-- EVIDENCE: R2 (GlobaLeaks escrow risks, CVE-2026-46648; CoverDrop k-of-n), R3 insider incidents.
+- EVIDENCE: R2 (GlobaLeaks escrow risks, CVE-2026-46648 [CVE record unconfirmed]; CoverDrop k-of-n), R3 insider incidents.
 
 ### ADR-014 Sealed Identity Store for Confidential mode
 - DECISION: Identity details a source chooses to provide are encrypted to a separate **Identity Custodian** key set (not the case key), never shown in case view; unsealing requires recorded legal basis, dual approval, and generates a source-visible notice where law requires (EU Directive Art 16(3)).
@@ -291,7 +291,7 @@ Each ADR: CONTEXT / OPTIONS / DECISION / SECURITY EFFECT / PRIVACY EFFECT / USAB
 
 ### ADR-021 Multi-tenancy
 - DECISION: CE: single tenant. EE shared-instance multi-tenancy is allowed only for low/moderate-risk tenants within one customer group (subsidiaries/departments) with PostgreSQL RLS + per-tenant channel keys + per-tenant onion services. High-risk customers (government IG, law-enforcement internal affairs, intelligence-adjacent, customers whose adversary is the parent org) SHALL get dedicated instances. Managed service: one dedicated intake gateway + onion key per customer; no cross-customer shared Z-INTAKE.
-- EVIDENCE: R2 GlobaLeaks CVE-2026-46648 cross-site escrow wipe.
+- EVIDENCE: R2 GlobaLeaks CVE-2026-46648 [CVE record unconfirmed] cross-site escrow wipe.
 
 ### ADR-022 Updates: TUF + threshold signing + transparency; no targeted updates
 - DECISION: Updates delivered via TUF metadata (root keys offline, threshold 3-of-5 for root, 2-of-3 for targets), artifacts reproducibly built by ≥2 independent builders whose outputs must match before signing, logged in a public transparency log (Sigsum/Rekor), and identical for all customers (no per-customer builds of trust-path code). Update client does not report onion addresses or instance identity; EE Fleet Manager uses opaque instance IDs.
@@ -324,7 +324,7 @@ Each ADR: CONTEXT / OPTIONS / DECISION / SECURITY EFFECT / PRIVACY EFFECT / USAB
 
 ### ADR-029 Audience-bound tokens and deny-by-default routes
 - DECISION: Every session/token is bound to one audience (source-web, source-app, desk-api, admin-api) and one tenant; route registry is deny-by-default with explicit authorization declaration per route checked in CI.
-- EVIDENCE: R1 CVE-2026-50000 (API token reused on web UI); R2 GlobaLeaks CVE-2026-46647 (missing admin check), CVE-2026-45020.
+- EVIDENCE: R1 CVE-2026-50000 [CVE record unconfirmed] (API token reused on web UI); R2 GlobaLeaks CVE-2026-46647 [CVE record unconfirmed] (missing admin check), CVE-2026-45020 [CVE record unconfirmed].
 
 ### ADR-030 Per-member epoch keys so conflict-of-interest exclusion is cryptographic (amends ADR-008, ADR-015)
 - CONTEXT: With a single channel-wide epoch key (ADR-008 as first written), every channel member holds a key that decrypts every envelope, so excluding an accused member "before key wrapping" (ADR-015) is only policy. Raised by 21-ENTERPRISE author.
@@ -456,3 +456,8 @@ The project owner approved the following judgement calls raised during revision:
 2. **GOV Recovery Quorum**: enabled by default in the GOV profile, custodians from independent roles, disclosed to sources (ADR-044(3)).
 3. **Library licensing**: `candor-core` and `candor-safefs` are Apache-2.0 OR MIT; all other Trust Path code AGPL-3.0-or-later (ADR-031).
 4. **Implementation scope**: implementation begins with the Community Edition only (open-source Trust Path, milestones RM-0 and RM-1 of 38). No Enterprise module work until CE 1.0 GA (RM-004).
+
+### ADR-049 Verification-pass corrections (2026-10-01; process/VERIFICATION-PASS.md)
+1. **Vanguards** (amends ADR-001, ADR-046(9)): the Python `vanguards` add-on is dormant (no commit since 2023-10-31, last tag v0.3.1), so its maintenance gate fails. All profiles, including HIGH, use C-tor's built-in **vanguards-lite**; the add-on SHALL NOT be deployed. Full vanguards arrive with the Arti migration (Arti enables vanguards by default).
+2. **Arti PoW** (amends 16 NET-017 / RM-12): Arti's onion-service PoW exists only behind the experimental `hs-pow-full` feature. Arti migration of the intake onion service is blocked until PoW is available in a non-experimental, default-enabled form; until then C-tor ≥0.4.8 with PoW remains the intake daemon.
+3. **Unconfirmed CVE identifiers**: CVE-2026-45020 [CVE record unconfirmed], -46647, -46648 and -50000 appear on GitHub advisory pages cited in R1/R2, but no CVE List record was found on 2026-10-01. Specs cite them as "[CVE record unconfirmed]"; the design lessons stand on the advisory descriptions (B-GL-37, B-SD-20) regardless of CVE numbering.

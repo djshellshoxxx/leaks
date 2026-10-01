@@ -626,7 +626,7 @@ pub trait TransportAdapter: Send + Sync {
 
 - `EphemeralCircuitToken` is a type that has no `Serialize` implementation and no `Debug` output. It is dropped when the connection closes, which enforces "circuit IDs never persisted" (ADR-026) at compile time.
 - v1 implementations:
-  - `tor-onion-v3-ctor`: C-tor ≥0.4.8, `HiddenServiceExportCircuitID haproxy`, PoW on, vanguards-lite, plus the full vanguards add-on for HIGH profiles.
+  - `tor-onion-v3-ctor`: C-tor ≥0.4.8, `HiddenServiceExportCircuitID haproxy`, PoW on, vanguards-lite, plus the full vanguards add-on (NOT deployed — dormant upstream, ADR-049) for HIGH profiles.
   - `tor-onion-v3-arti`: gated off until Arti onion services are declared production-ready (B-AN-47, B-AN-45).
 - **Admission criteria** for any new adapter. All are required, and assessment is recorded as a new ADR:
   1. an independent peer-reviewed anonymity analysis;

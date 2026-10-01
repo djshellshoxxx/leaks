@@ -740,7 +740,7 @@ Format: `[ID] Title — Publisher. URL — Date — Relevance`. "UNVERIFIED" mea
 - [B-INC-63] "Scheme flooding fingerprint technique may deanonymize Tor users" — Security Affairs. https://securityaffairs.com/117933/digital-id/fingerprinting-technique-scheme-flooding.html — 2021-05 — Cross-browser fingerprint.
 - [B-INC-64] "Tor Browser 10.0.18 fixes a bug that allows to track users…" — Security Affairs. https://securityaffairs.com/119222/deep-web/tor-browser-10-0-18.html — 2021-06 — Mitigation.
 - [B-INC-65] "The xz backdoor: CVE-2024-3094" — Snyk. https://snyk.io/blog/the-xz-backdoor-cve-2024-3094/ — 2024-03/04 — Technical summary.
-- [B-INC-66] A. Freund, "backdoor in upstream xz/liblzma leading to ssh server compromise" — oss-security mailing list — 2024-03-29 — Original disclosure. URL UNVERIFIED (openwall.com blocked; commonly cited as https://www.openwall.com/lists/oss-security/2024/03/29/4 — re-verify).
+- [B-INC-66] A. Freund, "backdoor in upstream xz/liblzma leading to ssh server compromise" — oss-security mailing list — 2024-03-29 — Original disclosure. https://www.openwall.com/lists/oss-security/2024/03/29/4 [verified 2026-10-01, search index of openwall.com; mirror https://seclists.org/oss-sec/2024/q1/274].
 - [B-INC-67] "CISA demands US govt agencies to update SolarWinds Orion software" — Security Affairs. https://securityaffairs.com/112797/hacking/cisa-solarwinds-guidance-update.html — 2020-12 — ED 21-01 context.
 - [B-INC-68] "Bash Uploader Security Update" — Codecov. https://about.codecov.io/security-update/ — 2021-04-15 — Official postmortem.
 - [B-INC-69] "Details about the event-stream incident" — npm Blog. https://blog.npmjs.org/post/180565383195/details-about-the-event-stream-incident — 2018-11 — Official postmortem.

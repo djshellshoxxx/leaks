@@ -39,7 +39,7 @@
   - `0x0040/0x0041/0x0042` ML-KEM-512/768/1024 (pure PQ)
   - `0x0050` MLKEM768-P256, `0x0051` MLKEM1024-P384, **`0x647a` MLKEM768-X25519**. The X-Wing draft requests the same memorable codepoint (25519+203 = 0x647a), so MLKEM768-X25519 *is* X-Wing via draft-irtf-cfrg-concrete-hybrid-kems.
   - New single-stage KDFs: SHAKE128 `0x0010`, SHAKE256 `0x0011`, TurboSHAKE128/256 `0x0012/0x0013`. `DeriveKeyPair` uses SHAKE256.
-  - TLS equivalent: X25519MLKEM768 is widely deployed. Search results show it published as **RFC 10024** (PQ/T hybrid key agreement for TLS 1.3) [B-CR-08]. The RFC number came from search only and is **UNVERIFIED** against rfc-editor.
+  - TLS equivalent: X25519MLKEM768 is widely deployed. Search results show it published as **RFC 10024** (PQ/T hybrid key agreement for TLS 1.3) [B-CR-08]. RFC 10024, August 2026, Standards Track [verified 2026-10-01, https://www.rfc-editor.org/rfc/rfc10024.html via search index].
 - **HQC** was selected in March 2025 as a backup (code-based) KEM. A draft standard is expected, but its status is **UNVERIFIED**. **FN-DSA (FIPS 206, Falcon)** is draft/final status **UNVERIFIED**. Do not depend on it.
 
 ### A.2 HPKE, X25519/Ed25519
@@ -82,7 +82,7 @@
 - **Tink.** Misuse-resistant APIs and key management via keysets. Recommended for the server side in Java, Go or C++.
 - **FIPS 140-3 validated modules**:
   - **AWS-LC 3**: CMVP **#5314**, FIPS 140-3 L1, validated 2026-06-05 (per sec-certs), sunset 2031. It is **the first open-source module with ML-KEM inside the FIPS boundary** [B-CR-11].
-  - **OpenSSL 3.1.2 FIPS provider**: **#4985**, active to 10 Mar 2030, no PQC. **OpenSSL 3.5.4** (with ML-KEM/ML-DSA/SLH-DSA) was *submitted* to CMVP in Oct 2025. Certificate issuance by 2026-09 is **UNVERIFIED** [B-CR-12].
+  - **OpenSSL 3.1.2 FIPS provider**: **#4985**, active to 10 Mar 2030, no PQC. **OpenSSL 3.5.4** (with ML-KEM/ML-DSA/SLH-DSA) was *submitted* to CMVP in Oct 2025. No certificate issued yet: OpenSSL lists 3.5.4 as in CMVP review; active OpenSSL certs are #4985 (140-3) and #4282/#4811 (140-2, end 2026-09-21) [verified 2026-10-01, https://openssl-library.org/news/fips-cve/index.html via search index] [B-CR-12].
   - **Go Cryptographic Module v1.0.0** (Go 1.24+): **CMVP #5247**, CAVP A6650. v1.26.0 was "Pending Review" as of 2026-04-28. Go+BoringCrypto is deprecated and incompatible with native FIPS mode [B-CR-13]. Whether ML-KEM is inside the #5247 boundary is **UNVERIFIED**.
   - **BoringCrypto** (BoringSSL FIPS module) has FIPS 140-3 validations. The current certificate number is **UNVERIFIED**.
 
@@ -220,7 +220,7 @@ Strength: ★★★★★ strongest. Feasibility (2026, for anonymous Tor-using 
 - **OpenSSF Scorecard**: automated repo-hygiene checks (branch protection, pinned deps, token permissions, signed releases, fuzzing, SAST). Gate CI on a minimum score and on no regressions.
 - **S2C2F** (Secure Supply Chain Consumption Framework, contributed by Microsoft to OpenSSF): levels 1-4 for *consuming* OSS (ingest via internal mirror, scan, inventory, update, audit, rebuild from source at L4).
 - **CISA Secure by Design** (principles 2023; pledge May 2024): memory-safe languages roadmap, MFA by default, eliminate vulnerability classes, publish CVEs with CWE, vulnerability disclosure policy. Implementation choice: **Rust for crypto and parsing components**, and parsers inside sandboxes.
-- **SBOM**: CycloneDX 1.6 (Apr 2024; also Ecma-424, with CBOM/cryptography-asset support that is useful for PQC inventory) and SPDX 3.0 (Apr 2024). CycloneDX 1.7's existence and date are **UNVERIFIED**. Produce SBOMs per release, sign them, and log them next to the artifact.
+- **SBOM**: CycloneDX 1.6 (Apr 2024; also Ecma-424, with CBOM/cryptography-asset support that is useful for PQC inventory) and SPDX 3.0 (Apr 2024). CycloneDX 1.7 was released 2025-10-21 [verified 2026-10-01, https://cyclonedx.org/news/cyclonedx-v1.7-released via search index]. Produce SBOMs per release, sign them, and log them next to the artifact.
 - **EU Cyber Resilience Act (Reg. (EU) 2024/2847)**:
   - **Reporting obligations** (Art. 14: actively exploited vulnerabilities and severe incidents, via the ENISA Single Reporting Platform) **apply from 11 Sep 2026**, i.e., already in force now. Main obligations apply from **11 Dec 2027** [B-CR-50].
   - **Open-source software stewards** have a light-touch regime: a documented cybersecurity policy, vulnerability handling, cooperation with market-surveillance authorities, no CE marking and no administrative fines [B-CR-50][B-CR-51]. A non-profit publishing the platform as FOSS is plausibly a *steward*. An entity that monetises hosted or supported versions is plausibly a *manufacturer*. **Legal review required.**
@@ -269,7 +269,7 @@ Strength: ★★★★★ strongest. Feasibility (2026, for anonymous Tor-using 
 - **CDR (content disarm & reconstruction).** Dangerzone is a pixel-level CDR. Commercial structural CDR (rebuild the file from a whitelist of elements) keeps editability but has a larger parser attack surface. For a newsroom, pixel-CDR for viewing plus a sealed original kept for forensics is the safer pairing.
 - **Isolation substrates:**
   - **Qubes OS disposables.** The **SecureDrop Workstation** is Qubes-based: `sd-viewer` opens files in networkless disposable VMs, export goes through a dedicated VM, and it is at 1.x.
-    - An X41 D-Sec review of SecureDrop Workstation was published 2026-04-21. Its findings were not retrievable, so they are **UNVERIFIED**.
+    - An X41 D-Sec review of SecureDrop Workstation was published 2026-04-21. Findings: X41 2026: 4 vulnerabilities (2 fully mitigated during the audit), none easily exploitable; informational: gaps in commit-signing enforcement, weak hash algorithms, no mitigation for compromised submission keys [verified 2026-10-01, https://www.x41-dsec.de/security/research/job/news/2026/04/21/securedrop-review-2026/].
   - **gVisor** (user-space kernel in Go; used by Dangerzone).
   - **Firecracker** microVMs (KVM, minimal device model; AWS Lambda/Fargate). Use them for server-side batch processing such as thumbnailing or OCR, where needed.
 - **DEDA** (TU Dresden) extracts, decodes and **anonymises** yellow tracking dots in scanned colour-laser prints. Use lossless 300 dpi scans. Monochrome or inkjet prints may contain none. Reference: Richter et al., IH&MMSec 2018 [B-CR-54]. Rasterising and converting to greyscale/thresholding also destroys most dot patterns, at a fidelity cost.
@@ -314,7 +314,7 @@ Strength: ★★★★★ strongest. Feasibility (2026, for anonymous Tor-using 
 | B-CR-05 | draft-connolly-cfrg-xwing-kem-11 (X-Wing) + repo | https://www.ietf.org/archive/id/draft-connolly-cfrg-xwing-kem-11.html ; https://github.com/dconnolly/draft-connolly-cfrg-xwing-kem | 2026-09 | Hybrid KEM |
 | B-CR-06 | draft-ietf-hpke-pq-05 PQ & PQ/T hybrid HPKE (WG repo read) | https://datatracker.ietf.org/doc/draft-ietf-hpke-pq/ ; https://github.com/hpkewg/hpke-pq | 2026-07-06 | HPKE codepoints 0x0040-42, 0x0050/51, 0x647a |
 | B-CR-07 | RFC 9180 Hybrid Public Key Encryption | https://www.rfc-editor.org/rfc/rfc9180 | 2022-02 | Core PKE |
-| B-CR-08 | RFC 10024 PQ/T hybrid key agreement for TLS 1.3 (X25519MLKEM768) | https://rfc-editor.org/info/rfc10024/ | 2026 (UNVERIFIED number/date) | Transport PQ |
+| B-CR-08 | RFC 10024 PQ/T hybrid key agreement for TLS 1.3 (X25519MLKEM768) | https://rfc-editor.org/info/rfc10024/ | 2026-08, Standards Track [verified 2026-10-01, https://www.rfc-editor.org/rfc/rfc10024.html] | Transport PQ |
 | B-CR-10 | NSA CNSA 2.0 (summaries) | https://www.encryptionconsulting.com/education-center/what-is-cnsa-2-0/ ; https://postquantum.com/security-pqc/nsa-cnsa-2-0-faq-v2-1-update/ | 2022-09, updates | High-assurance profile/timeline |
 | B-CR-11 | AWS-LC FIPS 3.0: first library with ML-KEM in FIPS 140-3 validation; sec-certs #5314 | https://aws.amazon.com/blogs/security/aws-lc-fips-3-0-first-cryptographic-library-to-include-ml-kem-in-fips-140-3-validation ; https://sec-certs.org/fips/1e0b605fa2f516ae/ | 2025 / cert 2026-06-05 | FIPS-mode PQ |
 | B-CR-12 | OpenSSL FIPS provider 3.1.2 (#4985); OpenSSL 3.5.4 FIPS submission | https://openssl-library.org/news/fips-cve/index.html ; https://mirror.openssl-library.org/post/2025-10-09-ossl3.5.4-fips-submission/ | 2025-10-09 | FIPS modules |
@@ -355,7 +355,7 @@ Strength: ★★★★★ strongest. Feasibility (2026, for anonymous Tor-using 
 | B-CR-52 | Fifield, A better zip bomb (USENIX WOOT 2019) | https://www.bamsoftware.com/hacks/zipbomb/ (UNVERIFIED fetch) | 2019 | Decompression limits |
 | B-CR-53 | mat2 repo (CHANGELOG, README, doc/threat_model.md) | https://github.com/jvoisin/mat2 | 0.15.0, 2026-08-04 | Metadata removal limits |
 | B-CR-54 | DEDA repo; Richter et al., Forensic Analysis and Anonymisation of Printed Documents (IH&MMSec 2018, doi:10.1145/3206004.3206019) | https://github.com/dfd-tud/deda | 2018 | Printer dots |
-| B-CR-55 | X41 D-Sec Review of SecureDrop Workstation 2026 | https://x41-dsec.de/security/research/job/news/2026/04/21/securedrop-review-2026/ | 2026-04-21 | Workstation audit (content UNVERIFIED) |
+| B-CR-55 | X41 D-Sec Review of SecureDrop Workstation 2026 | https://x41-dsec.de/security/research/job/news/2026/04/21/securedrop-review-2026/ | 2026-04-21 | Workstation audit (4 vulns, 2 mitigated in-audit; [verified 2026-10-01, https://www.x41-dsec.de/security/research/job/news/2026/04/21/securedrop-review-2026/]) |
 | B-CR-56 | CVE records: CVE-2021-22204 (ExifTool), CVE-2016-3714 (ImageMagick), CVE-2023-36664, CVE-2023-43115, CVE-2024-29510 (Ghostscript), CVE-2024-47538/47607/47615 (GStreamer) | https://www.cve.org/ (per-ID) | various | Parser exploit history |
 
 *(IDs B-CR-09, -18, -28, -31, -32, -34 intentionally unused.)*

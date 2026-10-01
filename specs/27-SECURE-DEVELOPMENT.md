@@ -340,8 +340,8 @@ Changes to: logging/metrics/tracing schema; timestamps; ID generation (e.g. a sw
 | Logging | Only the typed `candor-log` event API; `println!`, `eprintln!`, `log::*!`/`tracing::*!` with free-form fields banned in T0/T1 (ADR-016) | ST-006 lint |
 | HTTP routes | Registered only through the route registry with `authz = …` and `audience = …` declarations (ADR-029) | ST-004 lint |
 | HTTP clients | `candor-http` wrapper: redirects disabled, proxy-from-env disabled, cookie store disabled, pinned endpoint; lesson from CVE-2026-49996 [B-SD-36] | ST-008 Semgrep rule; ST-092 |
-| SQL | `sqlx::query!` compile-time checked macros only; no string-built SQL; every connection acquired through the tenant-context wrapper that runs `SET LOCAL app.tenant_id` (R2 CVE-2026-46648) | ST-008; ST-063 |
-| Deserialization | `#[serde(deny_unknown_fields)]` on all external DTOs; one DTO per role per mutation (no generic "set attribute"); lesson from CVE-2026-45020 [B-GL-37] | ST-064 |
+| SQL | `sqlx::query!` compile-time checked macros only; no string-built SQL; every connection acquired through the tenant-context wrapper that runs `SET LOCAL app.tenant_id` (R2 CVE-2026-46648 [CVE record unconfirmed]) | ST-008; ST-063 |
+| Deserialization | `#[serde(deny_unknown_fields)]` on all external DTOs; one DTO per role per mutation (no generic "set attribute"); lesson from CVE-2026-45020 [CVE record unconfirmed] [B-GL-37] | ST-064 |
 | Identity | IPC/RPC peer identity from transport only (SO_PEERCRED, mTLS SAN, vsock CID), never from message fields (CVE-2025-24889 [B-SD-34]) | ST-097 |
 | Time | Only `candor-time`; source-linked records use `EpochDay`; `SystemTime::now()` banned in C-06/C-07/C-08 outside `candor-time` (ADR-010) | ST-008; AT-040 |
 | Identifiers | Random 128-bit IDs (UUIDv4) for all stored objects; time-ordered IDs (UUIDv7, ULID, snowflake) banned in source-linked tables | ST-008; AT-041 |

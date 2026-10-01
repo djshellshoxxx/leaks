@@ -583,19 +583,19 @@ Policy statements should be secondary controls.
 | 2013 | Cure53 GL01-003 | Unsafe file downloads in the receiver area causing local XSS (issue #313) | UNVERIFIED | Force `Content-Disposition: attachment`; sandbox viewers |
 | 2013 | Cure53 GL01-004 | Information leakage through browser and proxy cache (issue #314) | UNVERIFIED | `Cache-Control: no-store` |
 | 2013 | Cure53 GL01-011 | Admin uploads functional despite content filter (issue #300) | UNVERIFIED | Validate uploads server-side |
-| 2014 | LeastAuthority source audit [B-GL-15] | Findings fixed in 2.60 (2014-04-22) per CHANGELOG; contents not accessed | UNVERIFIED | — |
-| 2018 | Subgraph overall audit [B-GL-16] | Report not accessed; 3.3.0 (2018-08-06) "Fix SSRF issue on HTTPS Proxy", "Disable error stacktrace on production" | UNVERIFIED | SSRF controls on admin-configured outbound URLs |
+| 2014 | LeastAuthority source audit [B-GL-15] | Findings fixed in 2.60 (2014-04-22) per CHANGELOG [verified 2026-10-01, https://github.com/globaleaks/globaleaks-whistleblowing-software/blob/main/CHANGELOG]; contents not accessed | UNVERIFIED | — |
+| 2018 | Subgraph overall audit [B-GL-16] | Report not accessed; 3.3.0 (2018-08-06) "Fix SSRF issue on HTTPS Proxy", "Disable error stacktrace on production" [verified 2026-10-01, https://github.com/globaleaks/globaleaks-whistleblowing-software/blob/main/CHANGELOG] | UNVERIFIED | SSRF controls on admin-configured outbound URLs |
 | 2019 | Radically Open Security: crypto, multi-tenancy, overall [B-GL-17] | Report not accessed | UNVERIFIED | Multi-tenancy was already an audit focus in 2019 |
 | 2022 (Jun–Aug) | Radically Open Security: server source audit, client pentest, whistleblower and admin opsec [B-GL-18] | Per the OTF summary snippet, a "security-in-depth approach … low severity of findings" | Low (per snippet) | Defence in depth works |
 | 2024 | ISGroup surface analysis + network pentest | Report not accessed | UNVERIFIED | — |
-| 2026 | ISGroup "Source Code Audit under an LLM-Equipped Adversary Model" [B-GL-19] | Snippet: "29 confirmed vulnerabilities" (UNVERIFIED count); hardening in 5.0.94–5.0.99 (tenant isolation, redaction bypasses, TOTP, DPoP, rate limits, CSV injection, SMTP cert validation) | Mixed | LLM-assisted auditing finds many authorisation and logic bugs; budget for it |
+| 2026 | ISGroup "Source Code Audit under an LLM-Equipped Adversary Model" [B-GL-19] | "29 confirmed vulnerabilities", 2 High, no Critical, 12 DoS observations, audit 2026-06-01..30, fixes from 5.0.96 [verified 2026-10-01, https://globaleaks.org/2026/07/30/globaleaks-strengthens-security-against-ai-enabled-threats/]; hardening in 5.0.94–5.0.99 (tenant isolation, redaction bypasses, TOTP, DPoP, rate limits, CSV injection, SMTP cert validation) | Mixed | LLM-assisted auditing finds many authorisation and logic bugs; budget for it |
 | 2018-08-06 | GL 3.3.0 changelog | SSRF on HTTPS proxy | UNVERIFIED | Egress allow-lists |
 | 2024-07-29 | CVE-2024-41671 (Twisted) | Pipelined requests processed out of order; response disclosure | High 8.3 | Dependency SLA; HTTP-stack minimisation |
 | 2026-03-27 | GHSA-84wr-q36q-wqhv / CVE-2026-33284 | `/api/support` forwarded arbitrary URLs in admin e-mails (phishing vector); ≤5.0.88, fixed 5.0.89 | Low 2.1 (the project); NVD-type sources show 4.3 | Defang all untrusted URLs in notifications |
 | 2026-07-30 | GHSA-x4cq-h872-f8wx / CVE-2026-45020 | Recipient mass-assignment incl. `receipt_hash`; 4.12.1–5.0.91 | Moderate 6.5 | INC-1 |
 | 2026-07-30 | GHSA-w88m-4vmc-pq9g / CVE-2026-46648 | Cross-tenant escrow backup-key wipe; ≤5.0.93 | Moderate 4.1 | INC-2 |
 | 2026-07-30 | GHSA-m5xx-3qv7-37hj / CVE-2026-46647 | Missing admin role check on the network config endpoint; ≤5.0.92 | Low 3.3 | INC-3 |
-| 2026-07-30 | GHSA-9vhh-65v7-3xj6 / CVE-2026-70655 (ID as reported by the summarizer; re-verify) | Non-assigned reports visible on legacy unencrypted platforms; ≤5.0.96 | Low 2.2 | INC-4 |
+| 2026-07-30 | GHSA-9vhh-65v7-3xj6 / CVE-2026-70655 (ID as reported by the summarizer; no record in CVE List V5 as of 2026-10-01 (https://github.com/CVEProject/cvelistV5); cite the GHSA ID only. Fix consistent with GL 5.0.97 CHANGELOG "Correct reports listing on platforms still without encryption") | Non-assigned reports visible on legacy unencrypted platforms; ≤5.0.96 | Low 2.2 | INC-4 |
 | 2024-06-25 | Hush Line GHSA-4v8c-r6h2-fhh3 / CVE-2024-38521 | Stored XSS in inbox + encryption bypass flag | High 8.8 | INC-6 |
 | 2024-06-25 | Hush Line GHSA-4c38-hhxx-9mhx / CVE-2024-38523 | OTP reuse, no per-account throttle, no step-up | High 7.5 | INC-8 |
 | 2024-06-25 | Hush Line GHSA-r85c-95x7-4h7q | CSP bypass (dev beta) | Moderate | CSP must forbid inline scripts; use Trusted Types |
@@ -708,7 +708,7 @@ Entries marked "(repo)" were read from a cloned repository at the commit noted i
 - [B-GL-16] Subgraph 2018 audit — https://globaleaks.org/docs/pt/2018-subgraph.pdf — not fetched.
 - [B-GL-17] Radically Open Security 2019 — https://globaleaks.org/docs/pt/2019-radicallyopensecurity.pdf — not fetched.
 - [B-GL-18] Radically Open Security 2022 — https://globaleaks.org/docs/pt/2022-radicallyopensecurity.pdf; the OTF copy https://public.opentech.fund/documents/report_globaleaks-2022.pdf ("Penetration Test Report GlobaLeaks V 1.0 Amsterdam, August 18th, 2022") was found in search results but was blocked — 2022-08-18.
-- [B-GL-19] ISGroup 2024 pentest and 2026 LLM-adversary source audit — https://globaleaks.org/docs/pt/2024-isgroup.pdf and https://globaleaks.org/docs/pt/2026-isgroup.pdf — not fetched; the "29 confirmed vulnerabilities" figure is from a search snippet (UNVERIFIED).
+- [B-GL-19] ISGroup 2024 pentest and 2026 LLM-adversary source audit — https://globaleaks.org/docs/pt/2024-isgroup.pdf and https://globaleaks.org/docs/pt/2026-isgroup.pdf — not fetched; the "29 confirmed vulnerabilities" figure [verified 2026-10-01, https://globaleaks.org/2026/07/30/globaleaks-strengthens-security-against-ai-enabled-threats/].
 - [B-GL-20] Ahmed-Rengers, Vasile, Hugenroth, Beresford, Anderson, "CoverDrop: Blowing the Whistle Through A News App", PoPETs 2022 — URL not verified in session — design and threat model of CoverDrop.
 - [B-GL-21] CoverDrop Guardian implementation white paper, June 2025 — https://www.coverdrop.org/coverdrop_guardian_implementation_june_2025.pdf — June 2025 — linked from the repo README; not fetched.
 - [B-GL-22] guardian/coverdrop repository README — https://github.com/guardian/coverdrop — HEAD 2026-09-25 — architecture, security contact, OpenMLS work.

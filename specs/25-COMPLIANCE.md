@@ -305,7 +305,7 @@ Manifest fields:
 |---|---|---|---|---|---|
 | COMP-001 | No Candor UI, document, pack or marketing material SHALL claim that use of Candor makes an organization compliant or certified. A lint of prohibited phrases (e.g., "GDPR compliant", "makes you compliant", "certified whistleblowing") SHALL run in CI on docs and UI strings. | B-GL-10 (self-declaration critique); DECISIONS §0 | THR-040 | C-30 | TST: phrase lint; INSP |
 | COMP-002 | Each mapping row SHALL identify Candor features, customer responsibility and an evidence artifact. The traceability tool SHALL fail on rows with an empty column. | Design | — | C-30 | TST: doc parser (`39-REQUIREMENTS-TRACEABILITY.md`) |
-| COMP-003 | The pack loader SHALL enforce the §8.2 allow-list. Any key outside it SHALL reject the whole pack. | ADR-020; B-GL-37 (CVE-2026-46647) | THR-035 | C-10 | TST: pack fuzz with forbidden keys; ST |
+| COMP-003 | The pack loader SHALL enforce the §8.2 allow-list. Any key outside it SHALL reject the whole pack. | ADR-020; B-GL-37 (CVE-2026-46647 [CVE record unconfirmed]) | THR-035 | C-10 | TST: pack fuzz with forbidden keys; ST |
 | COMP-004 | Packs SHALL be signed. Publisher keys SHALL be delegated in TUF (`packs` role) or registered locally with dual approval. Unsigned packs SHALL be rejected. | ADR-022; B-CR-45 | THR-025 | C-10, C-33 | TST: unsigned and wrong-key rejection |
 | COMP-005 | Pack activation SHALL display a semantic diff and require dual approval. It SHALL be SECURITY-audited. | Design; ADR-016 | THR-035 | C-19 | TST |
 | COMP-006 | Notice Markdown SHALL be rendered by a restricted renderer: no raw HTML, no images, and links only to allow-listed hosts. | INC-53; B-GL-39 (Hush Line XSS) | THR-006, THR-036 | C-06 | TST: renderer XSS corpus |
