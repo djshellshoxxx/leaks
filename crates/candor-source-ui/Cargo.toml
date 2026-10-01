@@ -18,7 +18,7 @@ base64 = { version = "=0.22.1", default-features = false, features = ["alloc"] }
 zeroize = { version = "=1.8.2", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
-scraper = { version = "=0.27.0", default-features = false }
+scraper = { version = "=0.27.0", default-features = false, features = ["errors"] }
 proptest = { version = "=1.11.0", default-features = false, features = ["std"] }
 
 [lints]

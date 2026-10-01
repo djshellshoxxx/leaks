@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+# cargo-fuzz layout (§22.3, CRYPTO-039; ST-040/ST-041). Run with:
+#   cargo +nightly fuzz run <target>   (from crates/candor-core)
+# Own workspace so the main workspace never builds libFuzzer.
+[package]
+name = "candor-core-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.10"
+candor-core = { path = ".." }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "fuzz_header"
+path = "fuzz_targets/fuzz_header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_slot_block"
+path = "fuzz_targets/fuzz_slot_block.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_stanza"
+path = "fuzz_targets/fuzz_stanza.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_record"
+path = "fuzz_targets/fuzz_record.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_envelope_parse"
+path = "fuzz_targets/fuzz_envelope_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_stream_decrypt"
+path = "fuzz_targets/fuzz_stream_decrypt.rs"
+test = false
+doc = false
+bench = false

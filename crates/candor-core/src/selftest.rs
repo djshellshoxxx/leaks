@@ -121,6 +121,29 @@ pub fn self_test() -> Result<()> {
         d == hx::<32>("c2f4c2fdda6784454063b54c554d7fa58c08c1a09b354bb00503925eb34c7541")?,
         "x-wing",
     )?;
+    // Argon2id (RFC 9106 §5.3; m = 32 KiB, so cheap at start-up).
+    let params = argon2::ParamsBuilder::new()
+        .m_cost(32)
+        .t_cost(3)
+        .p_cost(4)
+        .data(argon2::AssociatedData::new(&[4u8; 12]).map_err(|_| Error::SelfTest("argon2"))?)
+        .output_len(32)
+        .build()
+        .map_err(|_| Error::SelfTest("argon2"))?;
+    let a2 = argon2::Argon2::new_with_secret(
+        &[3u8; 8],
+        argon2::Algorithm::Argon2id,
+        argon2::Version::V0x13,
+        params,
+    )
+    .map_err(|_| Error::SelfTest("argon2"))?;
+    let mut tag = [0u8; 32];
+    a2.hash_password_into(&[1u8; 32], &[2u8; 16], &mut tag)
+        .map_err(|_| Error::SelfTest("argon2"))?;
+    check(
+        tag == hx::<32>("0d640df58d78766c08c037a34a8b53c9d01ef0452d75b65eb52520e96b01e659")?,
+        "argon2id",
+    )?;
     // RNG health: two draws, non-zero and distinct.
     let mut a = [0u8; 32];
     let mut b = [0u8; 32];

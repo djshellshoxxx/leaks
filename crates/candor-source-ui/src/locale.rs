@@ -265,15 +265,23 @@ fn accent(c: char) -> char {
     }
 }
 
-/// en-XA: accent letters and double vowels (≈ +40 % length, 26 §12.4).
+/// en-XA: accent some letters and pad with `~` so that every text element grows by 40 % in
+/// UTF-8 bytes (26 §12.4 "+40 % length"). Byte growth is what the §5.4 size budget sees, so
+/// en-XA exercises the P1/P2 budgets at the expansion the spec expects of real translations.
 fn pseudo_xa(s: &str) -> Cow<'_, str> {
+    if s.is_empty() {
+        return Cow::Borrowed(s);
+    }
     let mut out = String::with_capacity(s.len().saturating_mul(2));
     for c in s.chars() {
-        out.push(accent(c));
-        if matches!(c, 'a' | 'e' | 'i' | 'o' | 'u' | 'A' | 'E' | 'I' | 'O' | 'U') {
-            out.push(accent(c));
-        }
+        out.push(match c {
+            'a' | 'e' | 'A' | 'E' => accent(c),
+            other => other,
+        });
     }
+    let target = s.len().saturating_add(s.len().saturating_mul(2).div_ceil(5));
+    let pad = target.saturating_sub(out.len());
+    out.extend(core::iter::repeat_n('~', pad));
     Cow::Owned(out)
 }
 
