@@ -171,12 +171,14 @@ mod tests {
             let s = d.as_str();
             prop_assert!(!s.is_empty());
             prop_assert!(s.len() <= MAX_DISPLAY_NAME_BYTES);
-            prop_assert!(!s.chars().any(|c| c.is_control() || is_bidi(c)
-                || c == '/' || c == '\\' || c == ':' || c == '\u{2028}' || c == '\u{2029}'));
+            let bad = |c: char| c.is_control() || is_bidi(c)
+                || matches!(c, '/' | '\\' | ':' | '\u{2028}' | '\u{2029}');
+            prop_assert!(!s.chars().any(bad), "forbidden char survived");
             prop_assert!(s != "." && s != "..");
             prop_assert!(unicode_normalization::is_nfc(s));
             // Idempotent.
-            prop_assert_eq!(DisplayName::sanitize(s).as_str(), s);
+            let again = DisplayName::sanitize(s);
+            prop_assert_eq!(again.as_str(), s);
         }
 
         #[test]
@@ -194,7 +196,8 @@ mod tests {
             let raw: String = parts.concat();
             let d = DisplayName::sanitize(&raw);
             prop_assert!(d.as_str().len() <= MAX_DISPLAY_NAME_BYTES);
-            prop_assert!(!d.as_str().contains(['/', '\\', '\0', '\u{1b}', '\u{202E}', '\u{2067}']));
+            let forbidden = ['/', '\\', '\0', '\u{1b}', '\u{202E}', '\u{2067}'];
+            prop_assert!(!d.as_str().contains(forbidden), "forbidden char survived");
         }
     }
 }
