@@ -25,13 +25,18 @@ use zeroize::Zeroizing;
 
 use crate::error::{Result, StoreError};
 use crate::types::{
-    Day, ImportSlot, MAX_REPLY_CT, REPLY_ENTRY_LEN, REPLY_PAGE_ENTRIES, REPLY_PAGE_LEN,
-    REPLY_WINDOW_DAYS, ReplyIndex,
+    Day, ImportSlot, MAX_REPLY_CT, REPLY_BUCKETS, REPLY_ENTRY_LEN, REPLY_PAGE_ENTRIES,
+    REPLY_PAGE_LEN, REPLY_WINDOW_DAYS, ReplyIndex, reply_bucket_of_len, reply_ct_len,
 };
 
-/// Default dummy body length when no real reply is being published (approximately
-/// one 4096-byte REPLY bucket plus header, MAC, STREAM tag and an X-Wing stanza).
-pub const DEFAULT_DUMMY_BODY_LEN: usize = 5_440;
+/// Default public distribution of dummy REPLY buckets (weights for k = 1..=16,
+/// AUD-RM2-STO-19). Text-only replies (≤ 60 KiB body, 04 §13.5) are mostly short,
+/// so small buckets dominate. Implementation decision: deployments should set
+/// [`DeadDropConfig::dummy_bucket_weights`] to the long-run bucket distribution
+/// of their real replies (a public, slowly changing profile constant); every
+/// dummy's bucket is drawn independently from it and never from a real reply.
+pub const DEFAULT_DUMMY_BUCKET_WEIGHTS: [u16; REPLY_BUCKETS as usize] =
+    [400, 200, 120, 80, 50, 35, 25, 20, 15, 12, 10, 8, 7, 6, 6, 6];
 /// Hard upper bound on the published page count (08 SA-19 EE figure: 128 pages ≈
 /// 573 MB). With the double buffer during a rebuild, peak RAM is bounded by
 /// 2 × 128 × 4.48 MB (AUD-RM2-STO-07).
@@ -45,20 +50,23 @@ pub const PADDING_GENERATION: u64 = 0;
 /// structurally real REPLY objects sealed to a random key (08 §3.8 "dummy reply
 /// ciphertexts under a random key"); [`RandomDummyReplies`] is for tests.
 pub trait DummyReplies: Send + Sync {
-    /// Return a dummy body of about `len_hint` bytes (≤ `MAX_REPLY_CT`).
-    fn dummy_body(&self, len_hint: usize) -> Result<Vec<u8>>;
+    /// Return a dummy body for REPLY bucket `size_bucket` (1..=16). It must be
+    /// exactly [`reply_ct_len`]`(size_bucket)` bytes; the store refuses any
+    /// other length (AUD-RM2-STO-20).
+    fn dummy_body(&self, size_bucket: u8) -> Result<Vec<u8>>;
 }
 
-/// CSPRNG bytes of exactly `len_hint` length. Size-indistinguishable from real
-/// entries (API-037) but structurally distinguishable (no CoreHeader magic): for
-/// tests and the in-memory store only. The PostgreSQL store requires an explicit
-/// [`DummyReplies`].
+/// CSPRNG bytes of the canonical length of the bucket. Size-indistinguishable
+/// from real entries (API-037) but structurally distinguishable (no CoreHeader
+/// magic): for tests and the in-memory store only. The PostgreSQL store requires
+/// an explicit [`DummyReplies`].
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RandomDummyReplies;
 
 impl DummyReplies for RandomDummyReplies {
-    fn dummy_body(&self, len_hint: usize) -> Result<Vec<u8>> {
-        let mut v = vec![0u8; len_hint.clamp(1, MAX_REPLY_CT)];
+    fn dummy_body(&self, size_bucket: u8) -> Result<Vec<u8>> {
+        let len = reply_ct_len(size_bucket).ok_or(StoreError::InvalidInput("bucket"))?;
+        let mut v = vec![0u8; len];
         fill_random(&mut v)?;
         Ok(v)
     }
@@ -74,6 +82,10 @@ pub struct DeadDropConfig {
     /// Largest backlog of real replies awaiting publication; further pushes are
     /// rejected (the relay keeps them and retries, like a full mailbox).
     pub max_pending: u32,
+    /// Public distribution of dummy REPLY buckets: relative weight of bucket
+    /// `k = index + 1` (AUD-RM2-STO-19). Each dummy's bucket is drawn
+    /// independently from it with the CSPRNG.
+    pub dummy_bucket_weights: [u16; REPLY_BUCKETS as usize],
 }
 
 impl DeadDropConfig {
@@ -87,6 +99,9 @@ impl DeadDropConfig {
         }
         if self.max_pending < u32::from(self.per_slot) || self.max_pending > HARD_MAX_PENDING {
             return Err(StoreError::InvalidInput("max_pending"));
+        }
+        if self.dummy_bucket_weights.iter().all(|w| *w == 0) {
+            return Err(StoreError::InvalidInput("dummy bucket weights"));
         }
         let pages = self.pages_needed()?;
         if pages > usize::from(HARD_MAX_PAGES) {
@@ -150,6 +165,12 @@ impl DeadDropConfig {
             .map_err(|_| StoreError::InvalidInput("generation"))
     }
 
+    /// Draw one dummy bucket from [`Self::dummy_bucket_weights`] (CSPRNG,
+    /// independent of every real reply).
+    pub fn draw_dummy_bucket(&self) -> Result<u8> {
+        draw_bucket(&self.dummy_bucket_weights)
+    }
+
     /// Lowest generation still in the window when `current` is the newest.
     #[must_use]
     pub fn window_start(&self, current: u64) -> u64 {
@@ -178,15 +199,34 @@ pub(crate) fn generations_to_publish(
     (start..=current).collect()
 }
 
-/// A dummy row: body and its REPLY size bucket (4096 × k, k in 1..=16).
-pub(crate) fn dummy_row(dummies: &dyn DummyReplies, len_hint: usize) -> Result<(Vec<u8>, u8)> {
-    let body = dummies.dummy_body(len_hint)?;
-    if body.is_empty() || body.len() > MAX_REPLY_CT {
+/// Weighted draw of a bucket `k = index + 1` (uniform over the total weight).
+pub(crate) fn draw_bucket(weights: &[u16; REPLY_BUCKETS as usize]) -> Result<u8> {
+    let total: usize = weights.iter().map(|w| usize::from(*w)).sum();
+    let mut x = uniform_below(total)?;
+    for (i, w) in weights.iter().enumerate() {
+        let w = usize::from(*w);
+        if x < w {
+            return u8::try_from(i)
+                .ok()
+                .and_then(|i| i.checked_add(1))
+                .ok_or(StoreError::InvalidInput("bucket"));
+        }
+        x = x.saturating_sub(w);
+    }
+    Err(StoreError::InvalidInput("dummy bucket weights"))
+}
+
+/// A dummy row (AUD-RM2-STO-19/20): its bucket drawn from the configured public
+/// distribution, never from a real reply; the stored `size_bucket` is derived
+/// from the body length by [`reply_bucket_of_len`], the same function as for
+/// real replies. A body of the wrong length is refused (fail closed).
+pub(crate) fn dummy_row(dummies: &dyn DummyReplies, cfg: &DeadDropConfig) -> Result<(Vec<u8>, u8)> {
+    let k = cfg.draw_dummy_bucket()?;
+    let body = dummies.dummy_body(k)?;
+    if body.len() > MAX_REPLY_CT || reply_bucket_of_len(body.len()) != Some(k) {
         return Err(StoreError::InvalidInput("dummy body size"));
     }
-    let k = body.len().div_ceil(4096).clamp(1, 16);
-    let bucket = u8::try_from(k).map_err(|_| StoreError::InvalidInput("bucket"))?;
-    Ok((body, bucket))
+    Ok((body, k))
 }
 
 /// A built published set.
@@ -369,11 +409,17 @@ impl PageBuilder {
     }
 
     /// Fill any remaining positions with ephemeral dummies (only after a
-    /// restart, early deletions or a concurrent purge; see SPEC-NOTES) and
-    /// freeze the pages under a fresh random `set_version`.
-    pub fn finish(mut self, dummies: &dyn DummyReplies) -> Result<PublishedSet> {
+    /// restart, early deletions or a concurrent purge; see SPEC-NOTES), sized
+    /// from the configured distribution, and freeze the pages under a fresh
+    /// random `set_version`.
+    pub fn finish(
+        mut self,
+        dummies: &dyn DummyReplies,
+        cfg: &DeadDropConfig,
+    ) -> Result<PublishedSet> {
         while self.remaining() > 0 {
-            let body = Zeroizing::new(dummies.dummy_body(DEFAULT_DUMMY_BODY_LEN)?);
+            let (body, _) = dummy_row(dummies, cfg)?;
+            let body = Zeroizing::new(body);
             self.push(&body)?;
         }
         let page_count =
@@ -393,7 +439,7 @@ impl PageBuilder {
 /// count, all ephemeral dummies (source routes are busy until the store has
 /// synchronised and rebuilt, BE-074).
 pub fn empty(cfg: &DeadDropConfig, dummies: &dyn DummyReplies) -> Result<PublishedSet> {
-    PageBuilder::new(cfg.page_count()?)?.finish(dummies)
+    PageBuilder::new(cfg.page_count()?)?.finish(dummies, cfg)
 }
 
 /// Parse a page into its 64 entry bodies (test and client helper).
@@ -432,6 +478,7 @@ mod tests {
             slots_per_day: spd,
             per_slot: k,
             max_pending: 1000,
+            dummy_bucket_weights: DEFAULT_DUMMY_BUCKET_WEIGHTS,
         }
     }
 
@@ -474,7 +521,8 @@ mod tests {
             DeadDropConfig {
                 slots_per_day: 1,
                 per_slot: 4,
-                max_pending: HARD_MAX_PENDING + 1
+                max_pending: HARD_MAX_PENDING + 1,
+                dummy_bucket_weights: DEFAULT_DUMMY_BUCKET_WEIGHTS,
             }
             .validate()
             .is_err()
@@ -498,7 +546,7 @@ mod tests {
         for c in &cts {
             b.push(c).unwrap();
         }
-        let set = b.finish(&RandomDummyReplies).unwrap();
+        let set = b.finish(&RandomDummyReplies, &cfg(1, 1)).unwrap();
         let mut found = Vec::new();
         for p in 0..2 {
             for e in parse_page(&set.page(p).unwrap()).unwrap() {
@@ -551,6 +599,53 @@ mod tests {
         assert_eq!(generations_to_publish(&c, Some(401), g), vec![402, 403]);
         assert!(generations_to_publish(&c, Some(403), g).is_empty());
         assert_eq!(generations_to_publish(&c, Some(1), g).len(), 120);
+    }
+
+    /// AUD-RM2-STO-19: dummy buckets follow the configured distribution
+    /// (χ² goodness of fit) and every dummy has the canonical length of its
+    /// bucket; zero-weight buckets never occur; all-zero weights are refused.
+    #[test]
+    fn dummy_buckets_follow_distribution() {
+        let mut c = cfg(1, 1);
+        c.dummy_bucket_weights = [0; 16];
+        assert!(c.validate().is_err());
+        c.dummy_bucket_weights[0] = 1;
+        c.dummy_bucket_weights[3] = 2;
+        c.dummy_bucket_weights[15] = 1;
+        let n = 4000usize;
+        let mut hist = [0usize; 16];
+        for _ in 0..n {
+            let (body, k) = dummy_row(&RandomDummyReplies, &c).unwrap();
+            assert_eq!(Some(body.len()), reply_ct_len(k));
+            hist[usize::from(k) - 1] += 1;
+        }
+        let exp = [(0usize, 0.25f64), (3, 0.5), (15, 0.25)];
+        assert_eq!(
+            hist.iter().sum::<usize>(),
+            exp.iter().map(|(i, _)| hist[*i]).sum::<usize>()
+        );
+        let chi2: f64 = exp
+            .iter()
+            .map(|(i, p)| {
+                let e = p * n as f64;
+                (hist[*i] as f64 - e).powi(2) / e
+            })
+            .sum();
+        // 2 degrees of freedom, p = 1e-4.
+        assert!(chi2 < 18.42, "chi2 = {chi2}, hist = {hist:?}");
+    }
+
+    /// A dummy source returning a non-canonical length is refused.
+    #[test]
+    fn wrong_length_dummy_refused() {
+        struct Bad;
+        impl DummyReplies for Bad {
+            fn dummy_body(&self, _k: u8) -> Result<Vec<u8>> {
+                Ok(vec![1; 5_440])
+            }
+        }
+        assert!(dummy_row(&Bad, &cfg(1, 1)).is_err());
+        assert!(empty(&cfg(1, 1), &Bad).is_err());
     }
 
     proptest! {

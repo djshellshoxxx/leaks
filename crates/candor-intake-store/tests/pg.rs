@@ -20,6 +20,8 @@ mod common;
 use candor_intake_store::lint::check_columns;
 use candor_intake_store::*;
 use sqlx::postgres::PgConnectOptions;
+use std::collections::HashSet;
+
 use sqlx::{AssertSqlSafe, Connection, PgConnection, Row};
 
 fn base() -> Option<PgConnectOptions> {
@@ -103,6 +105,7 @@ async fn maint(base: &PgConnectOptions, db: &str, tenant: TenantId) -> PgIntakeM
     PgIntakeMaintenance::open(
         base.clone().username("candor_intake_maint").database(db),
         tenant,
+        common::core_pk(),
     )
     .await
     .unwrap()
@@ -526,23 +529,6 @@ async fn pg_durability_and_guards() {
     deletion::verify_chain(&list, &pk, None).unwrap();
     assert_eq!(s.kd_high_water().await.unwrap().tree_size, 10);
     assert_eq!(s.pending_count().await.unwrap(), 1);
-    // Z-CORE's copy is behind (only seq 1): truncated relative to its claim,
-    // or behind the local head without anchoring rule violations -> accepted
-    // only when it ends at the asserted head.
-    assert!(
-        s.apply_pushed_deletion_list(&list[..1], 3, &pk, &common::PrefixHasher)
-            .await
-            .is_err()
-    );
-    assert!(!s.serving_allowed().await.unwrap());
-    assert_eq!(
-        s.apply_pushed_deletion_list(&list, 3, &pk, &common::PrefixHasher)
-            .await
-            .unwrap(),
-        3
-    );
-    assert!(s.serving_allowed().await.unwrap());
-
     // App role: no flagging, no deletion, not even after flipping relayed
     // (AUD-RM2-STO-03 two-statement bypass).
     for q in [
@@ -578,7 +564,27 @@ async fn pg_durability_and_guards() {
             "maint: {q}"
         );
     }
-    s.deletion_list_after(3, 10).await.unwrap();
+    // Z-CORE's copy must end at its signed head: a truncated copy is refused.
+    let h3 = common::zhead(list.last());
+    assert!(
+        s.apply_pushed_deletion_list(
+            &list[..1],
+            &h3,
+            &common::core_pk(),
+            &pk,
+            &common::PrefixHasher
+        )
+        .await
+        .is_err()
+    );
+    assert!(!s.serving_allowed().await.unwrap());
+    assert_eq!(
+        s.apply_pushed_deletion_list(&list, &h3, &common::core_pk(), &pk, &common::PrefixHasher)
+            .await
+            .unwrap(),
+        3
+    );
+    assert!(s.serving_allowed().await.unwrap());
     assert!(
         !try_as(
             &b,
@@ -855,4 +861,465 @@ async fn pg_statistics_reset() {
     let db = fresh_db(&b).await;
     let m = maint(&b, &db, common::TENANT).await;
     m.reset_statistics().await.unwrap();
+}
+
+/// Run `q` as `role` in a tenant-scoped transaction and commit it.
+async fn commit_as(base: &PgConnectOptions, db: &str, role: &str, q: &str) -> bool {
+    let mut c = PgConnection::connect_with(&base.clone().username(role).database(db))
+        .await
+        .unwrap();
+    let mut tx = c.begin().await.unwrap();
+    sqlx::query("SELECT pg_catalog.set_config('candor.tenant_id', $1, true)")
+        .bind("11111111-1111-1111-1111-111111111111")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    match sqlx::raw_sql(AssertSqlSafe(q.to_string()))
+        .execute(&mut *tx)
+        .await
+    {
+        Ok(_) => {
+            tx.commit().await.unwrap();
+            true
+        }
+        Err(_) => {
+            tx.rollback().await.unwrap();
+            false
+        }
+    }
+}
+
+/// AUD-RM2-STO-21 (the audit probe): the application role can neither insert
+/// an out-of-sequence head nor pre-flag an entry, and cannot acknowledge a
+/// head outside the local chain; a chained junk entry plus an acknowledgement
+/// without Z-CORE's signature is accepted by the database but the maintenance
+/// process re-verifies the signature and prunes nothing.
+#[tokio::test]
+async fn pg_deletion_list_append_guard() {
+    let Some(b) = base() else { return };
+    let db = fresh_db(&b).await;
+    let s = open(&b, &db, common::TENANT).await;
+    s.init(common::TENANT, common::SALT).await.unwrap();
+    let sg = common::signer();
+    for t in [2u8, 3, 4] {
+        let a = common::account(&s, t).await;
+        s.delete_account(a, common::TODAY, &sg).await.unwrap();
+    }
+    let app = "candor_istore";
+    let zeros = |n: usize| format!("pg_catalog.decode(pg_catalog.repeat('00', {n}), 'hex')");
+    // The audit probe: an arbitrary out-of-sequence head.
+    assert!(
+        !commit_as(
+            &b,
+            &db,
+            app,
+            &format!(
+                "INSERT INTO candor.deletion_list VALUES (1000, 'account', {}, DATE '2026-01-01', {}, {}, false)",
+                zeros(32),
+                zeros(32),
+                zeros(64)
+            )
+        )
+        .await,
+        "out-of-sequence insert"
+    );
+    // Correctly chained but pre-flagged relayed: refused.
+    let chained = |relayed: bool| {
+        format!(
+            "INSERT INTO candor.deletion_list SELECT 4, 'account', d.del_hash, DATE '2026-01-01', \
+             candor.deletion_chain_hash(d), d.sig, {relayed} FROM candor.deletion_list d WHERE d.seq = 3"
+        )
+    };
+    assert!(
+        !commit_as(&b, &db, app, &chained(true)).await,
+        "pre-flagged"
+    );
+    // Below the oldest entry without a link: refused.
+    assert!(
+        !commit_as(
+            &b,
+            &db,
+            app,
+            &format!(
+                "INSERT INTO candor.deletion_list VALUES (1, 'account', {}, DATE '2026-01-01', {}, {}, false)",
+                zeros(32),
+                zeros(32),
+                zeros(64)
+            )
+        )
+        .await,
+        "duplicate/unlinked genesis"
+    );
+    // Acknowledgement beyond the chain, or with a wrong hash: refused.
+    assert!(
+        !commit_as(
+            &b,
+            &db,
+            app,
+            &format!(
+                "UPDATE candor.intake_meta SET deletion_acked_seq = 1000, deletion_acked_hash = {}, deletion_acked_sig = {}",
+                zeros(32),
+                zeros(64)
+            )
+        )
+        .await
+    );
+    assert!(
+        !commit_as(
+            &b,
+            &db,
+            app,
+            &format!(
+                "UPDATE candor.intake_meta SET deletion_acked_seq = 3, deletion_acked_hash = {}, deletion_acked_sig = {}",
+                zeros(32),
+                zeros(64)
+            )
+        )
+        .await
+    );
+    // A chained junk entry and a chain-consistent acknowledgement with a junk
+    // signature pass the database (it cannot verify Ed25519) ...
+    assert!(commit_as(&b, &db, app, &chained(false)).await);
+    assert!(
+        commit_as(
+            &b,
+            &db,
+            app,
+            &format!(
+                "UPDATE candor.intake_meta SET deletion_acked_seq = 4, deletion_acked_hash = \
+                 (SELECT candor.deletion_chain_hash(d) FROM candor.deletion_list d WHERE d.seq = 4), \
+                 deletion_acked_sig = {}",
+                zeros(64)
+            )
+        )
+        .await
+    );
+    // ... but the maintenance process verifies Z-CORE's signature and refuses.
+    assert!(matches!(
+        s.prune_deletion_list(common::TODAY.plus(400).unwrap())
+            .await,
+        Err(StoreError::DeletionList(_))
+    ));
+    let mut c = su(&b, &db).await;
+    let left: Vec<(i64, bool)> =
+        sqlx::query("SELECT seq, relayed FROM candor.deletion_list ORDER BY seq")
+            .fetch_all(&mut c)
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| (r.get(0), r.get(1)))
+            .collect();
+    assert_eq!(left, vec![(1, false), (2, false), (3, false), (4, false)]);
+}
+
+/// Kendall's tau between two rankings given as pairs (x, y).
+fn kendall_tau(v: &[(usize, u32)]) -> f64 {
+    let (mut c, mut d) = (0i64, 0i64);
+    for i in 0..v.len() {
+        for j in i + 1..v.len() {
+            let s = (v[i].0 as i64 - v[j].0 as i64) * (i64::from(v[i].1) - i64::from(v[j].1));
+            if s > 0 {
+                c += 1;
+            } else if s < 0 {
+                d += 1;
+            }
+        }
+    }
+    (c - d) as f64 / (c + d).max(1) as f64
+}
+
+/// `(key attribute, toast chunk_id)` of every live tuple of `table`, read from
+/// the raw heap pages (pageinspect): the attribute `toast_attr` must be an
+/// on-disk TOAST pointer (`0x01`, tag 18, …, `va_valueid` at bytes 10..14).
+async fn chunk_ids(
+    c: &mut PgConnection,
+    table: &str,
+    key_attr: usize,
+    toast_attr: usize,
+) -> Vec<(Vec<u8>, Option<Vec<u8>>, u32)> {
+    let rows = sqlx::query(AssertSqlSafe(format!(
+        "SELECT a.t_attrs[{key_attr}], a.t_attrs[2], a.t_attrs[{toast_attr}] \
+         FROM generate_series(0, (pg_relation_size('{table}') / 8192)::int - 1) p, \
+         LATERAL heap_page_item_attrs(get_raw_page('{table}', p), '{table}'::regclass) a \
+         WHERE a.lp_flags = 1"
+    )))
+    .fetch_all(c)
+    .await
+    .unwrap();
+    rows.iter()
+        .map(|r| {
+            let key: Vec<u8> = r.get(0);
+            let second: Option<Vec<u8>> = r.get(1);
+            let ptr: Vec<u8> = r.get(2);
+            assert_eq!(
+                (ptr[0], ptr[1], ptr.len()),
+                (0x01, 18, 18),
+                "{table}: toast pointer"
+            );
+            (
+                key,
+                second,
+                u32::from_le_bytes(ptr[10..14].try_into().unwrap()),
+            )
+        })
+        .collect()
+}
+
+/// `(reply_ref bytes, first 12 bytes of reply_ct)` of every reply.
+async fn reply_prefixes(c: &mut PgConnection) -> Vec<(Vec<u8>, Vec<u8>)> {
+    sqlx::query("SELECT reply_ref, substring(reply_ct from 1 for 12) FROM candor.reply")
+        .fetch_all(c)
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| {
+            let id: uuid::Uuid = r.get(0);
+            (id.as_bytes().to_vec(), r.get::<Vec<u8>, _>(1))
+        })
+        .collect()
+}
+
+/// `t_xmin` of every live (LP_NORMAL) tuple in the raw pages of `rel`.
+async fn raw_xmins(c: &mut PgConnection, rel: &str) -> Vec<String> {
+    sqlx::query(AssertSqlSafe(format!(
+        "SELECT t.t_xmin::text FROM generate_series(0, (pg_relation_size('{rel}') / 8192)::int - 1) p, \
+         LATERAL heap_page_items(get_raw_page('{rel}', p)) t WHERE t.lp_flags = 1"
+    )))
+    .fetch_all(c)
+    .await
+    .unwrap()
+    .iter()
+    .map(|r| r.get(0))
+    .collect()
+}
+
+/// AUD-RM2-STO-18: after a mixed workload, `uniform_rewrite` re-creates every
+/// out-of-line value (new chunk_ids, the slot's `xmin`) in a shuffled order,
+/// account and envelope rows stay in line, and after the post-rewrite VACUUM
+/// the raw pages of every intake table and TOAST table hold only tuples with
+/// the slot's `xmin`. Pre-fix, TOAST tuples kept their creation `xmin` and the
+/// chunk_id order equalled the creation order (positive control below).
+#[tokio::test]
+async fn pg_uniform_rewrite_toast() {
+    let Some(b) = base() else { return };
+    let db = fresh_db(&b).await;
+    let s = open(&b, &db, common::TENANT).await;
+    s.init(common::TENANT, common::SALT).await.unwrap();
+    let a = workload(&s).await;
+    for t in 40u8..48 {
+        let mut na = common::new_account(t);
+        na.prefs_ct = vec![t; MAX_PREFS_CT];
+        s.create_account(na, common::TODAY).await.unwrap();
+    }
+    let n = 40usize;
+    let mut envs = Vec::new();
+    let mut replies = Vec::new();
+    for _ in 0..n {
+        envs.push(s.commit_envelope(common::envelope(0)).await.unwrap());
+        let r = common::reply(None, 0x71, 9000);
+        replies.push(r.reply_ct[..12].to_vec());
+        s.apply_replies(common::TODAY, vec![r]).await.unwrap();
+    }
+    let mut big = common::snap(2, 20, 20701, 10);
+    big.body = vec![0; 200_000];
+    getrandom::fill(&mut big.body).unwrap();
+    s.install_directory_snapshot(big, common::TODAY)
+        .await
+        .unwrap();
+
+    let mut c = su(&b, &db).await;
+    sqlx::raw_sql("CREATE EXTENSION IF NOT EXISTS pageinspect")
+        .execute(&mut c)
+        .await
+        .unwrap();
+    let env_rank = |rows: &[(Vec<u8>, Option<Vec<u8>>, u32)]| -> Vec<(usize, u32)> {
+        rows.iter()
+            .filter(|(_, part, _)| part.as_deref() == Some(&[0u8, 0][..]))
+            .filter_map(|(k, _, id)| {
+                envs.iter()
+                    .position(|e| e.0.as_slice() == k.as_slice())
+                    .map(|i| (i, *id))
+            })
+            .collect()
+    };
+    let reply_rank = |rows: &[(Vec<u8>, Option<Vec<u8>>, u32)],
+                      cts: &[(Vec<u8>, Vec<u8>)]|
+     -> Vec<(usize, u32)> {
+        rows.iter()
+            .filter_map(|(k, _, id)| {
+                let ct = &cts.iter().find(|(r, _)| r == k)?.1;
+                replies
+                    .iter()
+                    .position(|p| ct.starts_with(p))
+                    .map(|i| (i, *id))
+            })
+            .collect()
+    };
+    // Positive control: before the rewrite chunk_ids follow creation order.
+    let before = env_rank(&chunk_ids(&mut c, "candor.envelope_part", 1, 4).await);
+    assert_eq!(before.len(), n);
+    assert!(
+        kendall_tau(&before) > 0.95,
+        "control: {}",
+        kendall_tau(&before)
+    );
+    let cts = reply_prefixes(&mut c).await;
+    let rb = reply_rank(&chunk_ids(&mut c, "candor.reply", 1, 3).await, &cts);
+    assert_eq!(rb.len(), n);
+    assert!(kendall_tau(&rb) > 0.95);
+
+    s.uniform_rewrite(common::slot(common::TODAY), &[], &[a])
+        .await
+        .unwrap();
+    vacuum_after_rewrite(&b.clone().username(&superuser()).database(&db))
+        .await
+        .unwrap();
+
+    // One xmin over every heap row and every TOAST chunk (logical view).
+    let rels: Vec<(String, Option<String>)> = sqlx::query(
+        "SELECT k.oid::regclass::text, NULLIF(k.reltoastrelid, 0)::regclass::text \
+         FROM pg_class k JOIN pg_namespace n ON n.oid = k.relnamespace \
+         WHERE n.nspname = 'candor' AND k.relkind = 'r' AND k.relname <> 'schema_migration'",
+    )
+    .fetch_all(&mut c)
+    .await
+    .unwrap()
+    .iter()
+    .map(|r| (r.get(0), r.get(1)))
+    .collect();
+    assert_eq!(rels.len(), 8);
+    let (_, distinct) = distinct_xmin(&mut c).await;
+    assert_eq!(distinct, 1);
+    let slot_xmin: String = sqlx::query("SELECT xmin::text FROM candor.intake_meta")
+        .fetch_one(&mut c)
+        .await
+        .unwrap()
+        .get(0);
+    let mut toast_rows = 0usize;
+    for (rel, toast) in &rels {
+        let heap = raw_xmins(&mut c, rel).await;
+        assert!(
+            heap.iter().all(|x| *x == slot_xmin),
+            "{rel}: raw heap xmins {heap:?}"
+        );
+        let Some(t) = toast else { continue };
+        let logical: Vec<String> =
+            sqlx::query(AssertSqlSafe(format!("SELECT xmin::text FROM {t}")))
+                .fetch_all(&mut c)
+                .await
+                .unwrap()
+                .iter()
+                .map(|r| r.get(0))
+                .collect();
+        let raw = raw_xmins(&mut c, t).await;
+        assert_eq!(
+            raw.len(),
+            logical.len(),
+            "{rel}: dead TOAST tuples left after VACUUM"
+        );
+        assert!(logical.iter().all(|x| *x == slot_xmin), "{rel}: TOAST xmin");
+        if rel.ends_with("source_account") || rel.ends_with("envelope") {
+            assert!(logical.is_empty(), "{rel} must keep values in line");
+        }
+        toast_rows += logical.len();
+    }
+    assert!(toast_rows > 3 * n, "TOAST rows checked: {toast_rows}");
+    // New chunk_ids carry no creation order.
+    let after = env_rank(&chunk_ids(&mut c, "candor.envelope_part", 1, 4).await);
+    assert_eq!(after.len(), n);
+    let ids_before: Vec<u32> = before.iter().map(|x| x.1).collect();
+    assert!(
+        after.iter().all(|(_, id)| !ids_before.contains(id)),
+        "all chunk_ids are new"
+    );
+    let cts = reply_prefixes(&mut c).await;
+    let ra = reply_rank(&chunk_ids(&mut c, "candor.reply", 1, 3).await, &cts);
+    assert_eq!(ra.len(), n);
+    for (what, v) in [("envelope_part", &after), ("reply", &ra)] {
+        let t = kendall_tau(v);
+        // n = 40: sd ≈ 0.11, so |tau| < 0.5 fails a random order with p < 1e-5.
+        assert!(
+            t.abs() < 0.5,
+            "{what}: chunk_id order correlates with creation (tau {t})"
+        );
+    }
+}
+
+/// AUD-RM2-STO-19/20: in a seized database, published dummies and real Tier V
+/// replies cannot be told apart by any stored column: the same length→bucket
+/// function for both, NULL account and slot, the generation's day, one `xmin`
+/// after the rewrite, and statistically identical bucket distributions when
+/// real replies follow the configured profile. Pre-fix, dummies stored
+/// `⌈len/4096⌉` and reals the plaintext bucket.
+#[tokio::test]
+async fn pg_dummy_rows_indistinguishable() {
+    let Some(b) = base() else { return };
+    let db = fresh_db(&b).await;
+    let s = open(&b, &db, common::TENANT).await;
+    s.init(common::TENANT, common::SALT).await.unwrap();
+    let mut day = common::TODAY;
+    s.rebuild_published_set(common::slot(day)).await.unwrap();
+    let mut reals: Vec<Vec<u8>> = Vec::new();
+    for _ in 0..28 {
+        day = day.plus(1).unwrap();
+        let batch: Vec<IncomingReply> = (0..2)
+            .map(|_| {
+                let mut r = [0u8; 1];
+                getrandom::fill(&mut r).unwrap();
+                common::reply_bucket(None, 0x33, 1 + (r[0] % 4))
+            })
+            .collect();
+        reals.extend(batch.iter().map(|r| r.reply_ct.clone()));
+        s.apply_replies(day, batch).await.unwrap();
+        s.rebuild_published_set(common::slot(day)).await.unwrap();
+    }
+    s.uniform_rewrite(common::slot(day), &[], &[])
+        .await
+        .unwrap();
+    let mut c = su(&b, &db).await;
+    let rows = sqlx::query(
+        "SELECT reply_ct, size_bucket, (available_day - DATE '1970-01-01')::int4, slot IS NULL, \
+         source_account_id IS NULL, pub_gen, xmin::text FROM candor.reply",
+    )
+    .fetch_all(&mut c)
+    .await
+    .unwrap();
+    let (mut hr, mut hd) = ([0usize; 4], [0usize; 4]);
+    let mut xmins = HashSet::new();
+    let mut seen_real = 0;
+    for r in &rows {
+        let ct: Vec<u8> = r.get(0);
+        let bucket: i16 = r.get(1);
+        let avail: i32 = r.get(2);
+        let gen_: Option<i64> = r.get(5);
+        xmins.insert(r.get::<String, _>(6));
+        assert_eq!(
+            reply_bucket_of_len(ct.len()).map(i16::from),
+            Some(bucket),
+            "stored bucket is the length's bucket for every row"
+        );
+        assert!(
+            r.get::<bool, _>(3) && r.get::<bool, _>(4),
+            "no slot, no account"
+        );
+        let g = gen_.expect("everything published");
+        if g > 0 {
+            assert_eq!(
+                i64::from(avail),
+                g,
+                "available_day = generation day (1 slot/day)"
+            );
+        }
+        let real = reals.contains(&ct);
+        seen_real += usize::from(real);
+        let h = if real { &mut hr } else { &mut hd };
+        h[usize::try_from(bucket).unwrap() - 1] += 1;
+    }
+    assert_eq!(seen_real, reals.len());
+    assert_eq!(xmins.len(), 1);
+    let chi = common::chi2_two_sample(&hr, &hd);
+    assert!(
+        chi < common::CHI2_3DOF_P1E4,
+        "real vs dummy buckets separable: chi2 {chi} {hr:?} {hd:?}"
+    );
 }

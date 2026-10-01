@@ -490,7 +490,10 @@ mod tests {
         assert_eq!(p.headers.last().map(|(n, _)| *n), Some(PAD_HEADER));
         assert!(!format!("{p:?}").contains("aaaa"), "cookie never in Debug");
         p.status = 299;
-        assert_eq!(finalize_headers(&mut p, None), Err(HeaderError::UnknownStatus));
+        assert_eq!(
+            finalize_headers(&mut p, None),
+            Err(HeaderError::UnknownStatus)
+        );
     }
 
     #[test]

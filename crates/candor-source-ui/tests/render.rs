@@ -17,8 +17,8 @@ mod preview;
 
 use std::collections::HashSet;
 
-use preview::{all_cases, sample_view_model};
 use candor_source_ui::*;
+use preview::{all_cases, sample_view_model};
 use scraper::{ElementRef, Html, Selector};
 
 fn sel(s: &str) -> Selector {
@@ -1142,23 +1142,165 @@ fn oversized_chrome_fails_closed() {
 // `Clear-Site-Data` and the language tag, and P2 responses with the largest and smallest header
 // block (plus a 200-byte allowance for the session layer's `Set-Cookie`) need the same number
 // of 498-byte Tor RELAY cell payloads. A change that breaks this must pad the header block.
+// ST: AUD-RM1-SUI-05 / SUI-005 / ADR-011 — the serialized response head (status line, headers,
+// blank line) has the same length for every screen × locale × session state × cookie presence,
+// so with the fixed body every response of a class has the same wire size.
 #[test]
-fn header_block_spread_is_bounded() {
-    let mut lens = Vec::new();
-    for (s, l, m, e) in variants() {
-        let (p, _) = render_ok(s, l, m, e);
-        if p.class != SizeClass::P2 {
-            continue;
+fn response_head_length_is_constant() {
+    let max_cookie = format!(
+        "__Host-cs={}; Path=/; Secure; HttpOnly; SameSite=Strict",
+        "A".repeat(MAX_SET_COOKIE_BYTES - 51)
+    );
+    assert_eq!(max_cookie.len(), MAX_SET_COOKIE_BYTES);
+    let cookies = [
+        None,
+        Some("__Host-cs=x; Path=/; Secure; HttpOnly; SameSite=Strict"),
+        Some("__Host-cs=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict"),
+        Some(max_cookie.as_str()),
+    ];
+    let mut totals = std::collections::HashMap::new();
+    for (s, l) in all_cases() {
+        for (method, session) in [
+            (Method::Get, false),
+            (Method::Get, true),
+            (Method::Post, false),
+            (Method::Post, true),
+        ] {
+            let mut vm = sample_view_model(s, Mode::Anonymous, false);
+            vm.ctx.method = method;
+            vm.ctx.has_session_cookie = session;
+            let mut p =
+                render(s, &vm, &l).unwrap_or_else(|e| panic!("{} {}: {e:?}", s.spec_id(), l.tag()));
+            for c in cookies {
+                finalize_headers(&mut p, c).unwrap();
+                assert_eq!(p.header("Set-Cookie"), c);
+                assert_eq!(p.headers.last().unwrap().0, PAD_HEADER);
+                let head = p.head_len().unwrap();
+                assert_eq!(
+                    head,
+                    p.class.head_bytes(),
+                    "{} {} {c:?}",
+                    s.spec_id(),
+                    l.tag()
+                );
+                let total = head + p.body.len();
+                assert_eq!(*totals.entry(p.class.bytes()).or_insert(total), total);
+                // Serialize exactly as C-06 must and compare.
+                let mut wire = format!(
+                    "HTTP/1.1 {} {}\r\n",
+                    p.status,
+                    reason_phrase(p.status).unwrap()
+                );
+                for (k, v) in &p.headers {
+                    wire.push_str(&format!("{k}: {v}\r\n"));
+                }
+                wire.push_str("\r\n");
+                assert_eq!(wire.len(), p.class.head_bytes());
+            }
         }
-        let n: usize = p
-            .headers
-            .iter()
-            .map(|(k, v)| k.len() + 2 + v.len() + 2)
-            .sum();
-        lens.push(n);
     }
-    let (min, max) = (*lens.iter().min().unwrap(), *lens.iter().max().unwrap());
-    assert!(max - min <= 64, "header spread {min}..{max}");
-    let cells = |n: usize| (SizeClass::P2.bytes() + n).div_ceil(498);
-    assert_eq!(cells(min), cells(max + 200), "header block {min}..{max}");
+    let p = robots_txt();
+    assert_eq!(p.head_len(), Some(SizeClass::P1.head_bytes()));
+}
+
+// ST: AUD-RM1-SUI-06 / 11 §5.7 / ADR-051(4) — every <form> on every page (pre-session ones
+// included: S11 login, Leave, S01–S03) carries exactly one hidden `csrf` token field, and a page
+// with a form but no token fails closed.
+#[test]
+fn every_form_carries_a_token() {
+    let forms = sel("form");
+    let tok = sel("input[type=hidden][name=csrf]");
+    let mut n = 0usize;
+    for (s, l, m, e) in variants() {
+        let (_, b) = render_ok(s, l, m, e);
+        let h = Html::parse_document(&b);
+        for f in h.select(&forms) {
+            n += 1;
+            let toks: Vec<_> = f.select(&tok).collect();
+            assert_eq!(
+                toks.len(),
+                1,
+                "{} {}: form without one token",
+                s.spec_id(),
+                l.tag()
+            );
+            assert_eq!(toks[0].value().attr("value"), m_token(&s));
+        }
+        let mut vm = sample_view_model(s, m, e);
+        vm.ctx.form_token = None;
+        if b.contains("<form") {
+            assert_eq!(
+                render(s, &vm, &l).err(),
+                Some(RenderError::MissingData("form token")),
+                "{}",
+                s.spec_id()
+            );
+        }
+    }
+    assert!(n > 0);
+    for s in [
+        Screen::Login,
+        Screen::Leave,
+        Screen::Landing,
+        Screen::Safety,
+    ] {
+        let (_, b) = render_ok(s, Locale::En, Mode::Anonymous, false);
+        assert!(b.contains("name=\"csrf\""), "{}", s.spec_id());
+    }
+}
+
+fn m_token(s: &Screen) -> Option<&'static str> {
+    let vm = sample_view_model(*s, Mode::Anonymous, false);
+    Some(if vm.ctx.has_session_cookie {
+        "Zm9ybS10b2tlbi1zYW1wbGU"
+    } else {
+        "cHJlLXNlc3Npb24tdG9rZW4"
+    })
+}
+
+// ST: AUD-RM1-SUI-12 — on every part of S12, the part-navigation buttons belong to a
+// url-encoded form without a file input, so moving between parts never uploads a chosen file;
+// the file input is alone in its own multipart form (08 SW-13) with no navigation or send button.
+#[test]
+fn s12_navigation_never_posts_a_file() {
+    let mut vm = sample_view_model(Screen::Conversation, Mode::Anonymous, false);
+    vm.conversation.draft_text = "&".repeat(60_000);
+    vm.ctx.part = 0;
+    let first = render(Screen::Conversation, &vm, &Locale::En).unwrap();
+    assert!(first.parts >= 2);
+    let mut saw_file = false;
+    let mut saw_prev = false;
+    for part in 0..first.parts {
+        vm.ctx.part = u16::try_from(part).unwrap();
+        let b = body(&render(Screen::Conversation, &vm, &Locale::En).unwrap());
+        let h = Html::parse_document(&b);
+        for f in h.select(&sel("form")) {
+            let id = f.value().attr("id").unwrap_or("");
+            let owned = |q: &str| {
+                f.select(&sel(q)).count()
+                    + if id.is_empty() {
+                        0
+                    } else {
+                        h.select(&sel(&format!("{q}[form={id}]"))).count()
+                    }
+            };
+            let files = owned("input[type=file]");
+            let nav = owned("button[name=part]");
+            let send = owned("button[name=action][value=send]");
+            let multipart = f.value().attr("enctype") == Some("multipart/form-data");
+            if files > 0 {
+                saw_file = true;
+                assert!(multipart && nav == 0 && send == 0, "file form is separate");
+                assert_eq!(owned("textarea"), 0);
+            }
+            if nav > 0 || send > 0 {
+                assert!(
+                    !multipart && files == 0,
+                    "navigation/send form posts no file"
+                );
+            }
+            saw_prev |= nav > 0 && part + 1 == first.parts;
+        }
+    }
+    assert!(saw_file && saw_prev);
 }

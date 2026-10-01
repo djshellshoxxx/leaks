@@ -9,8 +9,8 @@
 #[allow(dead_code)]
 mod preview;
 
-use preview::sample_view_model;
 use candor_source_ui::*;
+use preview::sample_view_model;
 
 const MODEL_SRC: &str = include_str!("../src/model.rs");
 

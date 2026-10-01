@@ -14,8 +14,8 @@
 #[allow(dead_code)]
 mod preview;
 
-use preview::sample_view_model;
 use candor_source_ui::*;
+use preview::sample_view_model;
 use scraper::{ElementRef, Html, Selector};
 
 /// The English master tip catalog (compiled into the crate from the same file).
@@ -478,7 +478,10 @@ fn catalog_anonymity_claims_are_conditional() {
             }
         }
     }
-    assert!(checked >= 4, "the address statements were found ({checked})");
+    assert!(
+        checked >= 4,
+        "the address statements were found ({checked})"
+    );
     // The lint catches the audited phrasings.
     for old in [
         "anonymous: we don't know who you are unless you tell us.",

@@ -889,7 +889,7 @@ impl<S: CheckpointSigner, C: AuditClock> AuditLog<S, C> {
         self.signer.verifying_key()
     }
 
-    fn to_secondaries(&mut self, item: Option<Outgoing>) -> bool {
+    fn feed_secondaries(&mut self, item: Option<Outgoing>) -> bool {
         let mut lag = false;
         for s in &mut self.secondaries {
             lag |= s.deliver(item.clone());
@@ -976,7 +976,7 @@ impl<S: CheckpointSigner, C: AuditClock> AuditLog<S, C> {
         st.next_seq = next_seq;
         st.head = hash;
         st.pending.push(leaf);
-        let secondary_lag = self.to_secondaries(Some(Outgoing::Record(Box::new(record.clone()))));
+        let secondary_lag = self.feed_secondaries(Some(Outgoing::Record(Box::new(record.clone()))));
         Ok(Emitted {
             record,
             checkpoint,
@@ -995,7 +995,7 @@ impl<S: CheckpointSigner, C: AuditClock> AuditLog<S, C> {
                 out.push(cp);
             }
         }
-        self.to_secondaries(None);
+        self.feed_secondaries(None);
         Ok(out)
     }
 
@@ -1063,7 +1063,7 @@ impl<S: CheckpointSigner, C: AuditClock> AuditLog<S, C> {
         st.pending.clear();
         st.last_cp_hash = cp.hash();
         st.open_slot = boundary;
-        self.to_secondaries(Some(Outgoing::Checkpoint(Box::new(cp.clone()))));
+        self.feed_secondaries(Some(Outgoing::Checkpoint(Box::new(cp.clone()))));
         Ok(cp)
     }
 }

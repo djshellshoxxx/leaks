@@ -11,7 +11,7 @@
 use std::future::Future;
 use std::sync::Arc;
 
-use crate::deletion::{DeletionEntry, DeletionSigner, ReplyObjectHasher};
+use crate::deletion::{DeletionEntry, DeletionSigner, ReplyObjectHasher, SignedDeletionHead};
 use crate::error::Result;
 use crate::types::{
     AccountId, AckResult, ApplyRepliesResult, BackupSnapshot, ClaimLimits, ClaimedBatch,
@@ -210,27 +210,41 @@ pub trait IntakeStore: Send + Sync {
 
     // ----- deletion list -----
 
-    /// RL-11: entries with `seq > after`, at most `limit` (≤ 10,000). `after` is
-    /// the relay's last copied seq: it is recorded (monotonically) as the
-    /// acknowledged seq; `after` above the local head is `InvalidInput` and
-    /// changes nothing (AUD-RM2-STO-10). Entries are flagged relayed only by the
-    /// maintenance role ([`IntakeMaintenance::prune_deletion_list`]).
+    /// RL-11: entries with `seq > after`, at most `limit` (≤ 10,000); `after`
+    /// above the local head is `InvalidInput` (AUD-RM2-STO-10). Reading records
+    /// nothing: acknowledgement needs a Z-CORE-signed head
+    /// ([`IntakeStore::acknowledge_deletion_head`], AUD-RM2-STO-21).
     fn deletion_list_after(
         &self,
         after: u64,
         limit: u32,
     ) -> impl Future<Output = Result<Vec<DeletionEntry>>> + Send;
 
-    /// RL-12 / restore: verify the pushed Z-CORE copy (chain, K31, contiguous from
-    /// the local head, ending exactly at the asserted Z-CORE head `core_head`, no
-    /// fork with local entries), merge newer entries, delete every listed account
-    /// and reply, then clear the restore-pending flag. Any validation failure
-    /// persists restore-pending (fail closed, AUD-RM2-STO-04). Returns
+    /// RL-11 acknowledgement (AUD-RM2-STO-21): record the Z-CORE head the relay
+    /// received after copying entries. The head's signature must verify under
+    /// `core_pk` and the head must be part of the local chain (seq ≤ local head,
+    /// chain hash equal); it is stored monotonically with its signature, which
+    /// the maintenance role re-verifies before flagging or pruning anything. An
+    /// older head changes nothing.
+    fn acknowledge_deletion_head(
+        &self,
+        head: &SignedDeletionHead,
+        core_pk: &[u8; 32],
+    ) -> impl Future<Output = Result<()>> + Send;
+
+    /// RL-12 / restore: verify the pushed Z-CORE copy (Z-CORE head signature
+    /// under `core_pk`; chain and K31 signatures; contiguous from the local head;
+    /// ending exactly at the signed head; no fork with local entries; containing
+    /// the last verified head, which backups carry), merge newer entries, delete
+    /// every listed account and reply, record the head as acknowledged, then
+    /// clear the restore-pending flag. Any validation failure persists
+    /// restore-pending (fail closed, AUD-RM2-STO-04/22). Returns
     /// `applied_through_seq`.
     fn apply_pushed_deletion_list(
         &self,
         entries: &[DeletionEntry],
-        core_head: u64,
+        head: &SignedDeletionHead,
+        core_pk: &[u8; 32],
         k31_pk: &[u8; 32],
         hasher: &dyn ReplyObjectHasher,
     ) -> impl Future<Output = Result<u64>> + Send;
@@ -292,8 +306,10 @@ pub trait IntakeStore: Send + Sync {
 /// AUD-RM2-STO-03): the application role cannot flag or delete deletion-list
 /// entries.
 pub trait IntakeMaintenance: Send + Sync {
-    /// Daily `deletion_list_prune`: flag entries up to the acknowledged seq as
-    /// relayed, then delete relayed entries older than 35 days, always keeping
-    /// the newest entry as the chain head (the database refuses anything else).
+    /// Daily `deletion_list_prune`: re-verify the stored Z-CORE-signed
+    /// acknowledged head (AUD-RM2-STO-21; the PostgreSQL maintenance role does so
+    /// in its own process with the Z-CORE key), flag entries up to it as relayed,
+    /// then delete relayed entries older than 35 days, always keeping the newest
+    /// entry as the chain head (the database refuses anything else).
     fn prune_deletion_list(&self, today: Day) -> impl Future<Output = Result<u64>> + Send;
 }

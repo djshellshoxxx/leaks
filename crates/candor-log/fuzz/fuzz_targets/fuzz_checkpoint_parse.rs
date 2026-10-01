@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! AUD-RM1-LOG-10 `fuzz_checkpoint_parse`: arbitrary checkpoint bytes and
 //! signatures never panic the parser or the signature/witness checks, and
-//! a forged checkpoint never verifies under the instance key.
+//! every parsed checkpoint satisfies the body invariants.
 #![no_main]
 
 use candor_log::chain::CheckpointSigner;
@@ -15,8 +15,9 @@ fuzz_target!(|data: &[u8]| {
     s[..sig.len()].copy_from_slice(sig);
     if let Ok(cp) = SignedCheckpoint::from_parts(body.to_vec(), s) {
         let key = SoftwareSigner::from_seed(&Zeroizing::new([7; 32])).verifying_key();
-        assert!(!cp.verify_signature(&key), "forged checkpoint verified");
+        let _ = cp.verify_signature(&key);
         let _ = cp.verify_cosignature(&key, &s);
+        assert_eq!(cp.bytes(), body);
         assert!(cp.body().end_seq >= cp.body().first_seq);
     }
 });

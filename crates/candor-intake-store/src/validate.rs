@@ -318,7 +318,9 @@ pub(crate) fn ack_head(
         return if bool::from(c.head_hash.ct_eq(&head.head_hash)) {
             Ok(false)
         } else {
-            Err(StoreError::DeletionList("head differs from acknowledged head"))
+            Err(StoreError::DeletionList(
+                "head differs from acknowledged head",
+            ))
         };
     }
     let local_head = local.last().map_or(0, |e| e.seq);
@@ -358,9 +360,7 @@ pub(crate) fn merge_pushed(
         return Err(StoreError::InvalidInput("deletion list too long"));
     }
     if head.seq < verified.map_or(0, |v| v.seq) {
-        return Err(StoreError::DeletionList(
-            "Z-CORE head behind verified head",
-        ));
+        return Err(StoreError::DeletionList("Z-CORE head behind verified head"));
     }
     let map: BTreeMap<u64, &DeletionEntry> = local.iter().map(|e| (e.seq, e)).collect();
     let Some(last) = pushed.last() else {
@@ -570,9 +570,19 @@ mod tests {
         // Empty push while Z-CORE has entries the local list lacks.
         assert!(merge_pushed(local, None, &[], &head_of(all.get(5))).is_err());
         // Empty push when Z-CORE has none: fine.
-        assert_eq!(merge_pushed(local, None, &[], &head_of(None)).unwrap().len(), 0);
+        assert_eq!(
+            merge_pushed(local, None, &[], &head_of(None))
+                .unwrap()
+                .len(),
+            0
+        );
         // Empty push of a head the local list already holds: fine.
-        assert_eq!(merge_pushed(local, None, &[], &head_of(all.get(1))).unwrap().len(), 0);
+        assert_eq!(
+            merge_pushed(local, None, &[], &head_of(all.get(1)))
+                .unwrap()
+                .len(),
+            0
+        );
         // Z-CORE head behind the verified head.
         assert!(merge_pushed(local, Some(&head_of(all.get(1))), &[], &head_of(None)).is_err());
         // Truncated: the run ends before the signed head.
@@ -621,7 +631,10 @@ mod tests {
         );
         // ... and a run starting after a pruned verified head links via the
         // successor's prev_hash.
-        assert_eq!(merge_pushed(&[], Some(&v2), &all[2..], &h8).unwrap().len(), 6);
+        assert_eq!(
+            merge_pushed(&[], Some(&v2), &all[2..], &h8).unwrap().len(),
+            6
+        );
         assert!(merge_pushed(&[], Some(&v2), &all[3..], &h8).is_err());
     }
 

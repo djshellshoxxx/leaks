@@ -35,8 +35,8 @@ use crate::deaddrop::{
     self, DeadDropConfig, DummyReplies, PADDING_GENERATION, PageBuilder, PublishedSet,
 };
 use crate::deletion::{
-    DeletionEntry, DeletionKind, DeletionSigner, ReplyObjectHasher, account_del_hash,
-    mailbox_del_hash, make_entry, reply_del_hash,
+    DeletionEntry, DeletionKind, DeletionSigner, ReplyObjectHasher, SignedDeletionHead,
+    account_del_hash, mailbox_del_hash, make_entry, reply_del_hash,
 };
 use crate::error::{Result, StoreError};
 use crate::store::{IntakeMaintenance, IntakeStore};
@@ -47,7 +47,7 @@ use crate::types::{
     IncomingReply, InstallOutcome, KdHighWater, LookupTag, MAILBOX_SLOTS, MAX_DELETION_LIST_PAGE,
     MAX_REPLIES_PER_PUSH, MAX_SLOT_ACTIVE_ACCOUNTS, MailboxId, MetaSnapshot, NewAccount,
     ObjectData, PartRef, PartSelector, REPLY_WINDOW_DAYS, ReplyIndex, ReplyRef, SourceAccount,
-    StoredReply, TenantId, VerifiedSnapshot, group_digest, random_id16,
+    StoredReply, TenantId, VerifiedSnapshot, group_digest, random_id16, reply_bucket_of_len,
 };
 use crate::validate::{self, SnapshotDecision, day_i32, has_duplicates};
 
@@ -144,9 +144,10 @@ const SQL_ROLE_CHECK: &str = "SELECT r.rolsuper, r.rolbypassrls, \
      (SELECT count(*) FROM pg_catalog.pg_trigger g JOIN pg_catalog.pg_class k ON k.oid = g.tgrelid \
       JOIN pg_catalog.pg_namespace n ON n.oid = k.relnamespace \
       WHERE n.nspname = 'candor' AND NOT g.tgisinternal AND g.tgenabled = 'O' \
-      AND g.tgname IN ('intake_meta_monotonic', 'intake_meta_no_delete', 'deletion_list_guard')) \
+      AND g.tgname IN ('intake_meta_monotonic', 'intake_meta_no_delete', 'deletion_list_guard', \
+      'deletion_list_append')) \
      FROM pg_catalog.pg_roles r WHERE r.rolname = current_user";
-const EXPECTED_GUARD_TRIGGERS: i64 = 3;
+const EXPECTED_GUARD_TRIGGERS: i64 = 4;
 const SQL_META_HASH: &str = "SELECT schema_hash FROM candor.intake_meta";
 const SQL_META_INSERT: &str = "INSERT INTO candor.intake_meta (tenant_id, schema_hash, kdf_salt) \
      VALUES ($1, $2, $3) ON CONFLICT DO NOTHING";
@@ -232,7 +233,7 @@ const SQL_REPLIES_PAGE: &str = "SELECT reply_ref, reply_ct FROM candor.reply WHE
 const SQL_REPLY_DELETE_ONE: &str = "DELETE FROM candor.reply WHERE reply_ref = $1";
 
 const SQL_PUB_LAST: &str = "SELECT max(pub_gen) FROM candor.reply WHERE pub_gen > 0";
-const SQL_PUB_PENDING: &str = "SELECT reply_ref, octet_length(reply_ct)::int8 FROM candor.reply \
+const SQL_PUB_PENDING: &str = "SELECT reply_ref FROM candor.reply \
      WHERE pub_gen IS NULL ORDER BY available_day, reply_ref LIMIT $1";
 const SQL_PUB_ASSIGN: &str = "UPDATE candor.reply SET pub_gen = $1, available_day = DATE '1970-01-01' + $2::int4 \
      WHERE reply_ref = ANY($3)";
@@ -252,14 +253,21 @@ const SQL_DEL_ALL: &str = "SELECT d.seq, d.kind::text, d.del_hash, (d.del_day - 
 const SQL_DEL_AFTER: &str = "SELECT d.seq, d.kind::text, d.del_hash, (d.del_day - DATE '1970-01-01')::int4, \
      d.prev_hash, d.sig, (d.relayed OR d.seq <= m.deletion_acked_seq) \
      FROM candor.deletion_list d CROSS JOIN candor.intake_meta m WHERE d.seq > $1 ORDER BY d.seq LIMIT $2";
+/// New entries are never pre-flagged relayed (the database refuses it too).
 const SQL_DEL_INSERT: &str = "INSERT INTO candor.deletion_list (seq, kind, del_hash, del_day, prev_hash, sig, relayed) \
-     VALUES ($1, $2::text::candor.deletion_kind, $3, DATE '1970-01-01' + $4::int4, $5, $6, $7) \
+     VALUES ($1, $2::text::candor.deletion_kind, $3, DATE '1970-01-01' + $4::int4, $5, $6, false) \
      ON CONFLICT DO NOTHING";
-const SQL_DEL_ACKED: &str = "SELECT deletion_acked_seq FROM candor.intake_meta";
-const SQL_DEL_ACK: &str =
-    "UPDATE candor.intake_meta SET deletion_acked_seq = $1 WHERE deletion_acked_seq < $1";
-const SQL_DEL_MARK: &str = "UPDATE candor.deletion_list SET relayed = true WHERE NOT relayed \
-     AND seq <= (SELECT deletion_acked_seq FROM candor.intake_meta)";
+const SQL_DEL_ACKED: &str =
+    "SELECT deletion_acked_seq, deletion_acked_hash, deletion_acked_sig FROM candor.intake_meta";
+/// Record a verified Z-CORE head (AUD-RM2-STO-21); the trigger checks that it
+/// is part of the local chain.
+const SQL_DEL_ACK: &str = "UPDATE candor.intake_meta SET deletion_acked_seq = $1, deletion_acked_hash = $2, \
+     deletion_acked_sig = $3 WHERE deletion_acked_seq < $1";
+const SQL_DEL_AT: &str = "SELECT d.seq, d.kind::text, d.del_hash, (d.del_day - DATE '1970-01-01')::int4, \
+     d.prev_hash, d.sig, d.relayed FROM candor.deletion_list d WHERE d.seq BETWEEN $1 AND $1 + 1 ORDER BY d.seq";
+/// Flag entries up to the head the maintenance process verified itself.
+const SQL_DEL_MARK: &str =
+    "UPDATE candor.deletion_list SET relayed = true WHERE NOT relayed AND seq <= $1";
 const SQL_DEL_PRUNE: &str = "DELETE FROM candor.deletion_list WHERE relayed AND del_day < DATE '1970-01-01' + $1::int4 \
      AND seq < (SELECT max(seq) FROM candor.deletion_list)";
 const SQL_STAT_RESET: &str = "SELECT pg_catalog.pg_stat_reset()";
@@ -291,22 +299,43 @@ const SQL_COUNTERS_PRUNE: &str =
 /// table gets a new version in one transaction. `source_account` also folds
 /// `activity_month`: the slot month `$3` for the accounts in `$2` (recorded
 /// active in RAM since the last slot) and the month of stored replies ≤ `$1`.
+/// Its byte columns are recomputed (`|| ''`) so that they are new datums; the
+/// table keeps them in line (`toast_tuple_target`, AUD-RM2-STO-18).
 const SQL_REWRITE_ACCOUNTS: &str = "UPDATE candor.source_account a SET activity_month = GREATEST(a.activity_month, \
        CASE WHEN a.account_id = ANY($2) THEN DATE '1970-01-01' + $3::int4 END, \
        (SELECT max(r.available_day - (EXTRACT(DAY FROM r.available_day)::int4 - 1)) FROM candor.reply r \
-        WHERE r.source_account_id = a.account_id AND r.available_day <= DATE '1970-01-01' + $1::int4))";
+        WHERE r.source_account_id = a.account_id AND r.available_day <= DATE '1970-01-01' + $1::int4)), \
+       xwing_pk = a.xwing_pk || ''::bytea, prefs_ct = a.prefs_ct || ''::bytea";
 const SQL_REWRITE: &[&str] = &[
-    "UPDATE candor.envelope SET state = state",
-    "UPDATE candor.envelope_part SET padded_size = padded_size",
-    "UPDATE candor.reply SET size_bucket = size_bucket",
+    "UPDATE candor.envelope SET disposition_ct = disposition_ct || ''::bytea",
     "UPDATE candor.deletion_list SET relayed = relayed",
     "UPDATE candor.counter_month SET value = value",
-    "UPDATE candor.directory_snapshot SET applied_day = applied_day",
     "UPDATE candor.intake_meta SET relay_req_counter = relay_req_counter",
 ];
+/// Rows with out-of-line (TOAST) values (AUD-RM2-STO-18). An UPDATE that leaves
+/// a TOASTed column unchanged keeps the old TOAST tuples (their `xmin` and
+/// creation-ordered `chunk_id`); `col || ''` is computed, so PostgreSQL stores a
+/// new out-of-line value under a new `chunk_id` in this transaction. Rows are
+/// re-created one by one in a CSPRNG-shuffled order across the three tables, so
+/// the new chunk_ids follow the shuffle, not creation order.
+const SQL_TOAST_PARTS: &str = "SELECT envelope_ref, part_no FROM candor.envelope_part";
+const SQL_TOAST_REPLIES: &str = "SELECT reply_ref FROM candor.reply";
+const SQL_TOAST_SNAPSHOTS: &str = "SELECT version FROM candor.directory_snapshot";
+const SQL_RECREATE_PART: &str = "UPDATE candor.envelope_part SET slot_block = slot_block || ''::bytea \
+     WHERE envelope_ref = $1 AND part_no = $2";
+const SQL_RECREATE_REPLY: &str =
+    "UPDATE candor.reply SET reply_ct = reply_ct || ''::bytea WHERE reply_ref = $1";
+const SQL_RECREATE_SNAPSHOT: &str = "UPDATE candor.directory_snapshot SET body = body || ''::bytea, \
+     signatures = signatures || ''::bytea WHERE version = $1";
+/// Post-rewrite VACUUM (not FULL) as the table owner (AUD-RM2-STO-18): makes
+/// the dead pre-rewrite heap and TOAST tuples reclaimable.
+const SQL_VACUUM_ROLE: &str = "SET ROLE candor_intake_migrator";
+const SQL_VACUUM: &str = "VACUUM candor.source_account, candor.envelope, candor.envelope_part, candor.reply, \
+     candor.deletion_list, candor.counter_month, candor.directory_snapshot, candor.intake_meta";
 
 const SQL_META_FULL: &str = "SELECT tenant_id, kdf_salt, relay_req_counter, last_batch_no, kd_tree_size_hwm, \
-     (kd_checkpoint_day_hwm - DATE '1970-01-01')::int4, directory_version FROM candor.intake_meta";
+     (kd_checkpoint_day_hwm - DATE '1970-01-01')::int4, directory_version, \
+     deletion_acked_seq, deletion_acked_hash, deletion_acked_sig FROM candor.intake_meta";
 const SQL_META_SALT: &str = "SELECT kdf_salt FROM candor.intake_meta FOR UPDATE";
 const SQL_NONEMPTY: &str = "SELECT EXISTS (SELECT 1 FROM candor.source_account) OR EXISTS (SELECT 1 FROM candor.envelope) \
      OR EXISTS (SELECT 1 FROM candor.reply) OR EXISTS (SELECT 1 FROM candor.deletion_list)";
@@ -374,6 +403,68 @@ pub async fn migrate(opts: &PgConnectOptions) -> Result<()> {
         tx.commit().await.map_err(db)?;
     }
     conn.close().await.map_err(db)
+}
+
+/// Post-rewrite VACUUM (AUD-RM2-STO-18): run right after each slot's
+/// [`IntakeStore::uniform_rewrite`] commits, so that the dead pre-rewrite heap
+/// and TOAST tuples (with their old `xmin` and creation-ordered `chunk_id`) are
+/// reclaimable. PostgreSQL 16 lets only the table owner vacuum, so this connects
+/// with the migration login (`candor-migrate`, a member of
+/// `candor_intake_migrator`, ADR-052(9)), never with the service roles;
+/// autovacuum (scale factor 0.01) is the backstop. Plain VACUUM, not FULL: no
+/// exclusive lock, but freed space is reused rather than returned (residual,
+/// SPEC-NOTES).
+pub async fn vacuum_after_rewrite(owner_opts: &PgConnectOptions) -> Result<()> {
+    let mut conn = PgConnection::connect_with(&owner_opts.clone().disable_statement_logging())
+        .await
+        .map_err(db)?;
+    sqlx::raw_sql(SQL_VACUUM_ROLE)
+        .execute(&mut conn)
+        .await
+        .map_err(db)?;
+    sqlx::raw_sql(SQL_VACUUM)
+        .execute(&mut conn)
+        .await
+        .map_err(db)?;
+    conn.close().await.map_err(db)
+}
+
+/// Read the acknowledged head columns (`seq, hash, sig` at `i..i+3`).
+fn acked_from_row(r: &PgRow, i: usize) -> Result<Option<SignedDeletionHead>> {
+    let seq = get_u64(r, i)?;
+    let hash: Option<Vec<u8>> = r.try_get(i.saturating_add(1)).map_err(db)?;
+    let sig: Option<Vec<u8>> = r.try_get(i.saturating_add(2)).map_err(db)?;
+    match (seq, hash, sig) {
+        (0, None, None) => Ok(None),
+        (s, Some(h), Some(g)) if s > 0 => Ok(Some(SignedDeletionHead {
+            seq: s,
+            head_hash: h
+                .try_into()
+                .map_err(|_| StoreError::Integrity("column length"))?,
+            sig: g
+                .try_into()
+                .map_err(|_| StoreError::Integrity("column length"))?,
+        })),
+        _ => Err(StoreError::Integrity("acknowledged head")),
+    }
+}
+
+async fn acked_head(tx: &mut PgConnection) -> Result<Option<SignedDeletionHead>> {
+    acked_from_row(
+        &sqlx::query(SQL_DEL_ACKED).fetch_one(tx).await.map_err(db)?,
+        0,
+    )
+}
+
+async fn store_acked(tx: &mut PgConnection, h: &SignedDeletionHead) -> Result<()> {
+    sqlx::query(SQL_DEL_ACK)
+        .bind(i64_of(h.seq)?)
+        .bind(h.head_hash.as_slice())
+        .bind(h.sig.as_slice())
+        .execute(tx)
+        .await
+        .map_err(db_classified)?;
+    Ok(())
 }
 
 /// Open a pool for an intake role and verify its privileges and the live guards
@@ -587,14 +678,8 @@ impl PgIntakeStore {
         Ok(())
     }
 
-    async fn insert_dummy(
-        &self,
-        tx: &mut PgConnection,
-        hint: usize,
-        day: i32,
-        generation: i64,
-    ) -> Result<()> {
-        let (body, bucket) = deaddrop::dummy_row(self.dummies.as_ref(), hint)?;
+    async fn insert_dummy(&self, tx: &mut PgConnection, day: i32, generation: i64) -> Result<()> {
+        let (body, bucket) = deaddrop::dummy_row(self.dummies.as_ref(), &self.cfg)?;
         let n = sqlx::query(SQL_REPLY_INSERT)
             .bind(uuid(&random_id16()?))
             .bind(Option::<Uuid>::None)
@@ -617,7 +702,7 @@ impl PgIntakeStore {
     async fn merge_and_apply(
         &self,
         entries: &[DeletionEntry],
-        core_head: u64,
+        zhead: &SignedDeletionHead,
         hasher: &dyn ReplyObjectHasher,
     ) -> Result<u64> {
         let (mut tx, m) = self.begin(true).await?;
@@ -628,16 +713,17 @@ impl PgIntakeStore {
             .iter()
             .map(entry_from_row)
             .collect::<Result<_>>()?;
-        let acked = get_u64(
-            &sqlx::query(SQL_DEL_ACKED)
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(db)?,
-            0,
-        )?;
-        let new = validate::merge_pushed(&local, acked, entries, core_head)?;
+        let verified = acked_head(&mut tx).await?;
+        let mut new = validate::merge_pushed(&local, verified.as_ref(), entries, zhead)?;
+        // Chain-extending order for the database guard (AUD-RM2-STO-21).
+        validate::insertion_order(local.first().map(|e| e.seq), &mut new);
         for e in &new {
             insert_entry(&mut tx, e).await?;
+        }
+        // The verified head is part of the merged chain: it becomes the
+        // acknowledged head (monotonic; AUD-RM2-STO-22).
+        if verified.map_or(0, |v| v.seq) < zhead.seq {
+            store_acked(&mut tx, zhead).await?;
         }
         let acct: HashSet<[u8; 32]> = local
             .iter()
@@ -717,6 +803,54 @@ async fn rewrite_all(tx: &mut PgConnection, slot_day: Day, active: &[Uuid]) -> R
             .await
             .map_err(db_classified)?;
     }
+    recreate_toast(tx).await
+}
+
+/// One row holding out-of-line values.
+enum ToastRow {
+    Part(Uuid, i16),
+    Reply(Uuid),
+    Snapshot(i64),
+}
+
+/// Re-create every out-of-line value in a CSPRNG-shuffled order
+/// (AUD-RM2-STO-18, see `SQL_RECREATE_*`).
+async fn recreate_toast(tx: &mut PgConnection) -> Result<()> {
+    let mut rows: Vec<ToastRow> = Vec::new();
+    for r in sqlx::query(SQL_TOAST_PARTS)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(db)?
+    {
+        rows.push(ToastRow::Part(
+            uuid(&get_id(&r, 0)?),
+            r.try_get(1).map_err(db)?,
+        ));
+    }
+    for r in sqlx::query(SQL_TOAST_REPLIES)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(db)?
+    {
+        rows.push(ToastRow::Reply(uuid(&get_id(&r, 0)?)));
+    }
+    for r in sqlx::query(SQL_TOAST_SNAPSHOTS)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(db)?
+    {
+        rows.push(ToastRow::Snapshot(r.try_get(0).map_err(db)?));
+    }
+    deaddrop::shuffle(&mut rows)?;
+    for row in &rows {
+        let q = match row {
+            ToastRow::Part(e, n) => sqlx::query(SQL_RECREATE_PART).bind(*e).bind(*n),
+            ToastRow::Reply(r) => sqlx::query(SQL_RECREATE_REPLY).bind(*r),
+            ToastRow::Snapshot(v) => sqlx::query(SQL_RECREATE_SNAPSHOT).bind(*v),
+        };
+        // A row removed concurrently (e.g. expiry) simply matches nothing.
+        q.execute(&mut *tx).await.map_err(db_classified)?;
+    }
     Ok(())
 }
 
@@ -752,7 +886,6 @@ async fn insert_entry(tx: &mut PgConnection, e: &DeletionEntry) -> Result<()> {
         .bind(day_i32(e.del_day)?)
         .bind(e.prev_hash.as_slice())
         .bind(e.sig.as_slice())
-        .bind(e.relayed)
         .execute(tx)
         .await
         .map_err(db_classified)?
@@ -1309,7 +1442,10 @@ impl IntakeStore for PgIntakeStore {
                 .bind(uuid(&random_id16()?))
                 .bind(r.account.map(|a| uuid(&a.0)))
                 .bind(r.reply_ct.as_slice())
-                .bind(i16::from(r.size_bucket))
+                .bind(i16::from(
+                    reply_bucket_of_len(r.reply_ct.len())
+                        .ok_or(StoreError::InvalidInput("reply length"))?,
+                ))
                 .bind(d)
                 .bind(slot)
                 .bind(Option::<i64>::None)
@@ -1470,7 +1606,6 @@ impl IntakeStore for PgIntakeStore {
         for h in deaddrop::generations_to_publish(&cfg, last, g) {
             let day = day_i32(cfg.day_of(h)?)?;
             let hi = i64_of(h)?;
-            let mut hint = deaddrop::DEFAULT_DUMMY_BODY_LEN;
             let mut reals = 0usize;
             if h == g {
                 let rows = sqlx::query(SQL_PUB_PENDING)
@@ -1478,13 +1613,6 @@ impl IntakeStore for PgIntakeStore {
                     .fetch_all(&mut *tx)
                     .await
                     .map_err(db)?;
-                if !rows.is_empty() {
-                    let pick = rows
-                        .get(deaddrop::uniform_below(rows.len())?)
-                        .ok_or(StoreError::Integrity("pick"))?;
-                    hint = usize::try_from(get_u64(pick, 1)?)
-                        .unwrap_or(deaddrop::DEFAULT_DUMMY_BODY_LEN);
-                }
                 let ids: Vec<Uuid> = rows
                     .iter()
                     .map(|r| get_id(r, 0).map(|b| uuid(&b)))
@@ -1498,8 +1626,10 @@ impl IntakeStore for PgIntakeStore {
                     .await
                     .map_err(db_classified)?;
             }
+            // Dummies are sized from the configured distribution only, never
+            // from the real replies of this generation (AUD-RM2-STO-19).
             for _ in reals..k {
-                self.insert_dummy(&mut tx, hint, day, hi).await?;
+                self.insert_dummy(&mut tx, day, hi).await?;
             }
         }
         // Padding pool: window + padding = total entries, exactly.
@@ -1530,8 +1660,7 @@ impl IntakeStore for PgIntakeStore {
         }
         let pad_gen = i64_of(PADDING_GENERATION)?;
         for _ in padding..want {
-            self.insert_dummy(&mut tx, deaddrop::DEFAULT_DUMMY_BODY_LEN, slot_day, pad_gen)
-                .await?;
+            self.insert_dummy(&mut tx, slot_day, pad_gen).await?;
         }
         // Stream the window into the pre-reserved pages (AUD-RM2-STO-07).
         let mut builder = PageBuilder::new(cfg.page_count()?)?;
@@ -1552,7 +1681,7 @@ impl IntakeStore for PgIntakeStore {
             }
         }
         tx.commit().await.map_err(db)?;
-        let set = builder.finish(self.dummies.as_ref())?;
+        let set = builder.finish(self.dummies.as_ref(), &cfg)?;
         let idx = set.index();
         *self.published.write().await = Arc::new(set);
         Ok(idx)
@@ -1569,36 +1698,59 @@ impl IntakeStore for PgIntakeStore {
     async fn deletion_list_after(&self, after: u64, limit: u32) -> Result<Vec<DeletionEntry>> {
         let a = i64::try_from(after).map_err(|_| StoreError::InvalidInput("after"))?;
         let lim = i64::from(limit.min(MAX_DELETION_LIST_PAGE));
-        let (mut tx, _) = self.begin(true).await?;
+        let (mut tx, _) = self.begin(false).await?;
         let head_seq = head(&mut tx).await?.map_or(0, |e| e.seq);
         if after > head_seq {
             return Err(StoreError::InvalidInput("after beyond head"));
         }
-        sqlx::query(SQL_DEL_ACK)
-            .bind(a)
-            .execute(&mut *tx)
-            .await
-            .map_err(db_classified)?;
         let rows = sqlx::query(SQL_DEL_AFTER)
             .bind(a)
             .bind(lim)
             .fetch_all(&mut *tx)
             .await
             .map_err(db)?;
-        tx.commit().await.map_err(db)?;
+        tx.rollback().await.map_err(db)?;
         rows.iter().map(entry_from_row).collect()
+    }
+
+    async fn acknowledge_deletion_head(
+        &self,
+        head: &SignedDeletionHead,
+        core_pk: &[u8; 32],
+    ) -> Result<()> {
+        head.verify(&self.tenant, core_pk)?;
+        let (mut tx, m) = self.begin(true).await?;
+        if m.tenant != self.tenant {
+            return Err(StoreError::TenantMismatch);
+        }
+        let local: Vec<DeletionEntry> = sqlx::query(SQL_DEL_ALL)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(db)?
+            .iter()
+            .map(entry_from_row)
+            .collect::<Result<_>>()?;
+        let current = acked_head(&mut tx).await?;
+        if validate::ack_head(&local, current.as_ref(), head)? {
+            store_acked(&mut tx, head).await?;
+            tx.commit().await.map_err(db)
+        } else {
+            tx.rollback().await.map_err(db)
+        }
     }
 
     async fn apply_pushed_deletion_list(
         &self,
         entries: &[DeletionEntry],
-        core_head: u64,
+        head: &SignedDeletionHead,
+        core_pk: &[u8; 32],
         k31_pk: &[u8; 32],
         hasher: &dyn ReplyObjectHasher,
     ) -> Result<u64> {
-        // Signatures are verified before taking the row lock (AUD-RM2-STO-12).
-        let r = match validate::verify_pushed(entries, k31_pk) {
-            Ok(()) => self.merge_and_apply(entries, core_head, hasher).await,
+        // Head and entry signatures are verified before taking the row lock
+        // (AUD-RM2-STO-12/22).
+        let r = match validate::verify_pushed(entries, k31_pk, head, &self.tenant, core_pk) {
+            Ok(()) => self.merge_and_apply(entries, head, hasher).await,
             Err(e) => Err(e),
         };
         match r {
@@ -1794,6 +1946,7 @@ impl IntakeStore for PgIntakeStore {
                         .map_err(|_| StoreError::Integrity("day"))?,
                     directory_version: get_u64(&mr, 6)?,
                 },
+                deletion_head: acked_from_row(&mr, 7)?,
             },
             accounts: accounts
                 .iter()
@@ -1875,6 +2028,11 @@ impl IntakeStore for PgIntakeStore {
         for e in &b.deletion_list {
             insert_entry(&mut tx, e).await?;
         }
+        // The last verified Z-CORE head travels with the backup (AUD-RM2-STO-22):
+        // a later push must chain to it.
+        if let Some(h) = &b.meta.deletion_head {
+            store_acked(&mut tx, h).await?;
+        }
         tx.commit().await.map_err(db)
     }
 }
@@ -1895,6 +2053,7 @@ impl IntakeMaintenance for PgIntakeStore {
 pub struct PgIntakeMaintenance {
     pool: PgPool,
     tenant: TenantId,
+    core_pk: [u8; 32],
 }
 
 impl core::fmt::Debug for PgIntakeMaintenance {
@@ -1905,10 +2064,17 @@ impl core::fmt::Debug for PgIntakeMaintenance {
 
 impl PgIntakeMaintenance {
     /// Connect as the maintenance role (same privilege and guard checks as the
-    /// application role; must not be a member of `candor_istore`).
-    pub async fn open(opts: PgConnectOptions, tenant: TenantId) -> Result<Self> {
+    /// application role; must not be a member of `candor_istore`). `core_pk` is
+    /// the Z-CORE head key: the maintenance process re-verifies the stored
+    /// acknowledged head with it before flagging anything (AUD-RM2-STO-21), so a
+    /// compromised application role cannot make it prune unrelayed entries.
+    pub async fn open(opts: PgConnectOptions, tenant: TenantId, core_pk: [u8; 32]) -> Result<Self> {
         let pool = open_pool(opts, 1, "candor_istore").await?;
-        Ok(Self { pool, tenant })
+        Ok(Self {
+            pool,
+            tenant,
+            core_pk,
+        })
     }
 
     /// Close the pool.
@@ -1937,10 +2103,29 @@ impl IntakeMaintenance for PgIntakeMaintenance {
             .await
             .map_err(db)?
             .ok_or(StoreError::NotInitialized)?;
-        sqlx::query(SQL_DEL_MARK)
-            .execute(&mut *tx)
-            .await
-            .map_err(db_classified)?;
+        // AUD-RM2-STO-21: flag only up to a head this process verified itself:
+        // Z-CORE's signature, and the local chain at that seq (if still present).
+        if let Some(h) = acked_head(&mut tx).await? {
+            h.verify(&self.tenant, &self.core_pk)?;
+            let near: Vec<DeletionEntry> = sqlx::query(SQL_DEL_AT)
+                .bind(i64_of(h.seq)?)
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(db)?
+                .iter()
+                .map(entry_from_row)
+                .collect::<Result<_>>()?;
+            let map: std::collections::BTreeMap<u64, &DeletionEntry> =
+                near.iter().map(|e| (e.seq, e)).collect();
+            if !validate::links_to_head(&map, &h) {
+                return Err(StoreError::DeletionList("acknowledged head not in chain"));
+            }
+            sqlx::query(SQL_DEL_MARK)
+                .bind(i64_of(h.seq)?)
+                .execute(&mut *tx)
+                .await
+                .map_err(db_classified)?;
+        }
         let n = sqlx::query(SQL_DEL_PRUNE)
             .bind(c)
             .execute(&mut *tx)

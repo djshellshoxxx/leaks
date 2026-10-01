@@ -21,8 +21,8 @@ mod preview;
 
 use std::collections::HashSet;
 
-use preview::sample_view_model;
 use candor_source_ui::*;
+use preview::sample_view_model;
 use scraper::{Html, Selector};
 
 const LONG_BYTES: usize = 65_536;
@@ -168,7 +168,6 @@ fn rebuild(bodies: &[String], name: &str, original: &str) {
             .select(&piece)
             .filter_map(|p| parse_piece(p.value().attr("value").unwrap()))
             .filter(|p| p.field == name)
-            .map(|p| (p.start, p.end, p.total))
             .collect();
         match pieces.as_slice() {
             [] => {
@@ -176,8 +175,29 @@ fn rebuild(bodies: &[String], name: &str, original: &str) {
                 assert_eq!(norm(&value), norm(original), "{name}: whole value");
                 next = original.len();
             }
-            [(start, end, total)] => {
+            [p] => {
+                let (start, end, total) = (&p.start, &p.end, &p.total);
                 assert_eq!(*total, original.len());
+                // AUD-RM1-SUI-11: the piece is MAC-bound to the stored value: it splices back
+                // under the session key, and is refused for a same-length modified value.
+                let key = preview::sample_piece_key();
+                let piece_text = &original[*start..*end];
+                assert_eq!(
+                    splice_piece(&key, name, original, p, piece_text)
+                        .unwrap()
+                        .as_str(),
+                    original
+                );
+                if let Some(c) = original.chars().next() {
+                    let swapped = if c == 'x' { "y" } else { "x" };
+                    if c.len_utf8() == 1 {
+                        let changed = format!("{swapped}{}", &original[1..]);
+                        assert_eq!(
+                            splice_piece(&key, name, &changed, p, piece_text).err(),
+                            Some(SpliceError::Stale)
+                        );
+                    }
+                }
                 assert_eq!(*start, next, "{name}: pieces contiguous");
                 assert_eq!(
                     norm(&value),

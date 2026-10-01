@@ -233,7 +233,10 @@ pub(crate) fn piece_value(
     r: &Range<usize>,
     stored: &str,
 ) -> Option<String> {
-    let tag = key.mac(field, r.start, r.end, stored)?.finalize().into_bytes();
+    let tag = key
+        .mac(field, r.start, r.end, stored)?
+        .finalize()
+        .into_bytes();
     let mut v = format!("{field}-{}-{}-{}-", r.start, r.end, stored.len());
     for b in tag.iter().take(TAG_LEN) {
         v.push(char::from(HEX.get(usize::from(b >> 4)).copied()?));

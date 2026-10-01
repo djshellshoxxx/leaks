@@ -16,6 +16,10 @@ use candor_log::schema::registry_yaml;
 const COMMITTED: &str = include_str!("../audit/schema.yaml");
 
 #[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test fixture: writes the expected registry under cargo's test tmpdir"
+)]
 fn registry_matches_catalog() {
     let expected = registry_yaml();
     if expected == COMMITTED {

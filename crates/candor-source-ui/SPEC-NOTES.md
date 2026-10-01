@@ -20,9 +20,10 @@ specs disagreed, the stricter or more specific rule won, as recorded below.
 ## Spec conflicts and ambiguities
 
 3. **Name of the form-token field.**
-   * 11 §5.7 and ADP-14 call it `ft`. 08 SW-* lists `csrf`.
-   * Implemented: `csrf` (08 owns the form fields; constant `FORM_TOKEN_FIELD`).
-   * Spec feedback: align the two documents.
+   * 11 §5.7 and ADP-14 call it `ft`. 08 SW-* lists `csrf`, and ADR-051(4) decides `csrf`.
+   * Implemented: `csrf` (constant `FORM_TOKEN_FIELD`).
+   * **For the lead / spec owners:** 11 §5.7 ("Every form carries a hidden `ft`") and ADP-14
+     still say `ft`; update them to `csrf` per ADR-051(4).
 4. **File input.**
    * 11 S06 and SUI-025 require `<input type="file" multiple>` with name `f`.
    * 08 SW-06 (canonical for the upload protocol, ADR-046 §4) and 08 §4 say "Tier W: one file
@@ -95,10 +96,10 @@ specs disagreed, the stricter or more specific rule won, as recorded below.
 21. **Absolute-timeout reveal.** The delay is rounded **down** to 5-minute classes, so the
     warning can come early but never late. The minimum is 0, which reveals the warning
     immediately.
-22. **Pre-session pages.**
-    * A page without a token (`form_token: None`) renders the Leave form without a hidden token.
-    * Leave on a session-less page has nothing to protect except the cache, and C-06 decides
-      whether to accept it.
+22. **Pre-session pages (superseded by the AUD-RM1-SUI-06 fix).** Every form carries a `csrf`
+    token, including the pre-session forms (S11 login, Leave, the S01–S03 footer Leave). A page
+    that contains a form and has `form_token: None` fails closed
+    (`RenderError::MissingData("form token")`). See the C-06/C-07 contract, item 6.
 23. **Locale fallback.**
     * Any missing key fails the render (`RenderError::MissingStrings`). The 26 §12.2 per-string
       fallback for stale `critical` strings is not implemented, because only English and
@@ -217,12 +218,15 @@ specs disagreed, the stricter or more specific rule won, as recorded below.
 | **SUI-02** (Medium) `derive(Debug)` on sensitive types | `PageContext`, `FieldError`, `Msg`, `Arg`, `NewReportData`, `ConcernsData`, `Question`, `QuestionnaireData`, `IdentityData`, `AttachedFile`, `FilesData`, `ReviewAnswer`, `IdentityHint`, `ReviewData`, `SentData`, `InboxMessage`, `InboxData`, `ConversationData` and `ViewModel` now print only `Type { [redacted] }`. `Msg` and `FieldError` show the catalog key, field id and argument count only. `Page` no longer prints `unpadded_len`. | `tests/debug_redaction.rs`: a lint over `src/model.rs` (only allow-listed types may derive `Debug`), and a sentinel test that formats a fully populated view model and its parts. |
 | **SUI-03** (Medium) heap copies | Pages and items are rendered with `render_into` into a `CappedWriter`. It is allocated once at the class budget (zeroizing) and **fails instead of reallocating**, so no stale prefix of a page (passphrase, source text) is freed unzeroized. Item HTML is copied into an exactly sized zeroizing buffer, and the large one is zeroized. Source and team text is escaped by `escape_z` into one pre-sized zeroizing buffer. `spell()` and `passphrase_line()` build into one pre-sized `Zeroizing<String>`. `q_value()` (which cloned the answer) was removed. `splice_piece` returns `Zeroizing`. | `paging::tests::capped_writer_never_grows`; `render::oversized_chrome_fails_closed`; the existing passphrase tests. |
 | SUI-04 (Low) pseudo-locales offered | `Locale::from_tag` accepts only `Locale::PRODUCTION` (`[En]`). `from_tag_including_pseudo` exists only with the `preview` feature. An empty `offered_locales` now means `PRODUCTION`, not `ALL`. | `render::locale_allow_list` |
-| SUI-05 (Low) header block length | **Not fixed (spec decision needed).** A real fix needs a padding header, which 11 §5.3 does not allow ("the server must add nothing else except the session cookie"), or serialization done by C-06. Added a regression guard: the crate's P2 header block spread is ≤ 64 bytes, and min/max plus a 200-byte `Set-Cookie` allowance fall in the same number of 498-byte RELAY cell payloads. Spec feedback: add a fixed-width padding header to 11 §5.3, filled by C-06 after the cookie. | `render::header_block_spread_is_bounded` |
-| SUI-06 (Low) no pre-session CSRF token | **Not changed.** The crate already renders the token whenever C-06 supplies one (`ft.html`), including on S11 login. Requiring one would force a pre-session cookie design that C-06/C-07 own. Recorded: login CSRF protection relies on the C-07 `Origin` check plus `SameSite=Strict`. **C-07 must have a negative test**: missing, foreign or `null` `Origin` on POST `/login` → reject. The field name stays `csrf` (note 3; 08 is canonical for the form protocol). | — |
+| **SUI-05** (Low) header block length | **Fixed (lead decision).** `render()` ends the header list with a fixed-width padding header `X-Pad` (visible `0`s, since HTTP strips leading/trailing whitespace) so the serialized HTTP/1.1 head (status line with the standard reason phrase, `Name: value` lines, blank line) is exactly `SizeClass::head_bytes()` = 2,048 bytes for every screen, locale and session state. `finalize_headers(&mut Page, Option<&str>)` puts the session/pre-session `Set-Cookie` (≤ `MAX_SET_COOKIE_BYTES` = 256, visible ASCII, no CR/LF) into a reserved slot and recomputes the padding; it fails closed (`HeaderError`) instead of sending a head of another length. `Page::head_len()`, `reason_phrase()`. `Page`'s `Debug` prints header names only, and header values are zeroized on drop and on replacement (the cookie is a secret). Spec feedback: 11 §5.3 should list `X-Pad` and the fixed head length. | `render::response_head_length_is_constant` (every screen × locale × {GET, POST} × {cookie, none} × {no cookie, short, expiry, 256-byte cookie}, also serialized byte for byte); `page::tests::finalize_rejects_bad_cookies_and_keeps_length` |
+| **SUI-06** (Low) no pre-session CSRF token | **Fixed (lead decision).** Every form renders the hidden `csrf` field, pre-session forms included (S11 login, Leave, footer Leave on S01–S03 and error pages). A page with a form and no `form_token` fails closed (`MissingData("form token")`). The field name is `csrf` (ADR-051(4); 11 §5.7 `ft` recorded for the lead, note 3). C-06 obligations: contract item 6. | `render::every_form_carries_a_token` |
 | SUI-07 (Low) clipboard warning | S10/S11r: `sui-cred-copy-warning` (tier0) under the one-line field, linked by `aria-describedby`. Spec feedback: mirror it in 05 GC-32. | `render::passphrase_copy_warning` |
-| SUI-08 (Info) absolute anonymity copy | **Not changed.** The strings match 11 §7 S03/S04 verbatim. Changing them in the crate alone would diverge from the spec. Spec feedback, as the audit suggests: "Candor does not collect who you are. Your writing and files can still identify you." and "In Tor Browser, this site cannot see your internet address." | — |
-| SUI-09 (Info) preview data in production | `preview` is behind the cargo feature `preview`. Tests and the example enable it through a self dev-dependency, so the C-06 build does not contain it. `Page::unpadded_len` is `#[doc(hidden)]` and documented as CI-only. `Page::parts` is documented as never to be logged or exported. | builds: `cargo clippy -p candor-source-ui` (no feature) and `--all-targets` |
+| **SUI-08** (Info) absolute anonymity copy | **Fixed (lead decision).** Rewritten to conditional language (DECISIONS §0, ADR-035(5)): S03 `sui-status-mode-anonymous` and S04 `sui-new-mode-anon-consequence` now read "Candor does not collect who you are. Your writing and files can still identify you." (matching the mode banner); `sui-status-connection-dd` and S01 `sui-landing-b3` say "In Tor Browser, this site cannot/can't see your internet address"; GC `sops-limits-n1` says "When you use Tor Browser, your internet address is hidden from us …". All three catalogs were grepped; no other absolute anonymity claims. Spec feedback: change 11 §7 S01/S03/S04 and 05 GC limits text the same way. | `tips::catalog_anonymity_claims_are_conditional` (every catalog line: banned "won't/don't/… know who you are", "no one will know", "you are anonymous", …; any "cannot see / hides … internet address" sentence must name Tor Browser); the phrases are also added to `tips::honest_wording_lint` |
+| SUI-09 (Info) preview data in production | Superseded by the SUI-13 fix: there is no `preview` module or feature in the library any more. `Page::unpadded_len` is `#[doc(hidden)]` and documented as CI-only. `Page::parts` is documented as never to be logged or exported. | builds: `cargo clippy -p candor-source-ui --all-targets --all-features` |
 | SUI-10 (Low) bidi spoofing; tip wording | Team message text and sender labels have U+202A–U+202E and U+2066–U+2069 replaced by a visible U+FFFD. Each message is an `article.msg` framed with a full border (CSS hash updates automatically). File names get the same treatment through `label()`. The tip now reads "A password manager is fine only on a device only you use, and only if it does not sync online." Spec feedback: mirror this in 11a's passphrase row. | `render::team_message_bidi_neutralised`, `render::password_manager_tip_wording` |
+| **SUI-11** (Low) stale piece by length only | Each `piece` value is now `{field}-{start}-{end}-{total}-{tag}`, where `tag` is HMAC-SHA256 (truncated to 128 bits, lowercase hex) under a per-session `PieceKey` over a domain label, the field, the offsets, the length and the **whole stored value**. `render` takes the key from `PageContext::piece_key` and fails closed (`MissingData("piece key")`) if a value must be split and no key is set. `splice_piece(key, field, stored, piece, edited)` recomputes the MAC over the current stored value and compares in constant time (`verify_truncated_left`): any change since rendering, of any length, a piece from another session, or one applied to another field returns `Stale`. No unkeyed hash of plaintext is ever put in the page. | `paging::tests::same_length_change_is_stale` (the audit's `XYZdef` case), `splice_checks`, proptest `any_change_is_stale`; `content_limits` `rebuild` now splices every rendered piece back under the session key and checks a same-length change is `Stale` |
+| **SUI-12** (Low) S12 navigation re-posts the file | The S12 reply form is now url-encoded (08 SW-12): `csrf`, `page`, the composer `text`/`piece` (tied by `form="reply-form"`), delivery choice, Send and the part buttons. The file input moved to its own multipart form `file-form` (08 SW-13: `csrf`, `file`, button `action=upload`) on the last part, with no navigation or send button, so moving between parts never uploads a file. A hint (`sui-conv-file-separate`) says adding a file does not send or save the message text. Splice-before-send is now explicit in the contract (item 3). | `render::s12_navigation_never_posts_a_file` |
+| **SUI-13** (Info) `preview` in `--all-features` builds | The `preview` feature, the `preview` module, the self dev-dependency and `Locale::from_tag_including_pseudo` are removed from the library. The sample view models are `tests/support/preview.rs`, included with `#[path]` by the integration tests and the `render_all` example only (dev targets, never linked into the server), so `--all-features` CI and repro builds keep working and contain no sample data. | `cargo clippy -p candor-source-ui --all-targets --all-features -- -D warnings`; `cargo test -p candor-source-ui` |
 
 ### Contract for C-06/C-07 (new; implementation decisions)
 
@@ -244,11 +248,20 @@ specs disagreed, the stricter or more specific rule won, as recorded below.
    * S12: a POST without `text` (for example from a part without the text field) leaves the
      draft unchanged.
 3. **Pieces.** A part with a piece of a long value carries exactly one control for that field and
-   one `piece=field-start-end-total` (byte offsets into the stored value at render time).
+   one `piece=field-start-end-total-tag` (byte offsets into the stored value at render time and a keyed MAC of that value).
    * C-07 parses the value with `parse_piece` and applies the edit with `splice_piece`.
-   * `splice_piece` fails closed (`Stale`/`Boundary`) if the stored value changed or the offsets
-     are not character boundaries. C-07 then re-renders with the posted text kept (11 §5.7),
-     never discarding it.
+   * `splice_piece` fails closed (`Stale`/`Boundary`) if the stored value changed in any way
+     (keyed MAC, AUD-RM1-SUI-11) or the offsets are not character boundaries. C-07 then
+     re-renders with the posted text kept (11 §5.7), never discarding it.
+   * C-06/C-07 create one `PieceKey` per session from a CSPRNG, keep it in RAM with the session
+     record only, pass it as `PageContext::piece_key` on every render and to every
+     `splice_piece` call, and drop it with the session.
+   * **Splice before every action, including send (AUD-RM1-SUI-12).** A POST that carries
+     `piece` first applies `splice_piece` to the stored value, then performs its action on the
+     spliced value. `action=send` on the last part of a split draft carries only the last piece:
+     C-07 must send the **spliced whole draft** (all pieces), never the posted `text` alone. A
+     send whose piece is `Stale` or `Boundary` is refused and S12 is re-rendered with the posted
+     text kept; nothing is sent.
    * Browsers send textarea line breaks as CR LF. C-07 normalises line breaks before it stores
      or splices a value.
 4. **Errors on other parts.** An error-summary link to a field shown on another part points
@@ -257,6 +270,20 @@ specs disagreed, the stricter or more specific rule won, as recorded below.
    Fluent's formatting temporaries (see residuals). `ViewModel` strings are owned by C-06. C-06
    must hold the RAM draft and passphrase in zeroizing storage and must not keep view models
    longer than one render.
+6. **Form tokens before login (AUD-RM1-SUI-06).** Every form carries `csrf`. For pre-session
+   pages (S01, S02, S02b, S03, S11 login, Leave, error pages) C-06 issues a single-use
+   pre-session token bound (by MAC) to a short-lived, random pre-session cookie
+   (`__Host-` prefix, `Secure; HttpOnly; SameSite=Strict; Path=/`, a few minutes, RAM only), sent
+   through `finalize_headers`. POST `/login` and `/leave` are accepted only with a token that
+   matches that cookie. C-06/C-07 **also** enforce `Origin` (exact own onion origin; missing,
+   foreign or `null` → reject) and `Sec-Fetch-Site: same-origin` when present, on every POST.
+   C-07 tests: missing/foreign/`null` Origin, cross-site `Sec-Fetch-Site`, missing or foreign
+   token on POST `/login` → reject.
+7. **Response head (AUD-RM1-SUI-05).** C-06 calls `finalize_headers(&mut page, cookie)` last,
+   writes `HTTP/1.1 {status} {reason_phrase(status)}`, the headers in order as `Name: value`
+   lines and the blank line, adds no header of its own and serves HTTP/1.1 only (HPACK/QPACK
+   would change header sizes). The head is then exactly 2,048 bytes for both classes. HEAD
+   responses send the same head.
 
 ### Security self-review (AUD-RM1-SUI fixes)
 
@@ -286,9 +313,28 @@ specs disagreed, the stricter or more specific rule won, as recorded below.
   2. The allocator may copy freed blocks before our zeroizing drop (no `mlock` here). C-06
      process hardening (no core dumps, no swap) is still required.
   3. `askama`'s internal buffers and the caller's `ViewModel` are outside this crate's control.
-  4. SUI-05 header-length variance is guarded, not removed.
+  4. The fixed response head length holds only if C-06 serializes it exactly as contract item 7
+     says; a server library that adds headers (`Date`, `Transfer-Encoding`) breaks it. C-06 must
+     test the bytes on the wire.
+  5. Adding a file on S12 is a separate request (08 SW-13), so unsent text typed before adding a
+     file is not posted with it. The page says so (`sui-conv-file-separate`).
+
+### Security self-review (round-2 fixes: SUI-05, -06, -08, -11, -12, -13)
+
+* **Header padding.** The cookie value is validated (visible ASCII and space, no CR/LF, ≤ 256
+  bytes), so it cannot inject headers. It is never printed (`Page` `Debug` shows header names only)
+  and is zeroized on drop and when replaced. Padding uses checked arithmetic and fails closed.
+* **Piece MAC.** HMAC-SHA256 from RustCrypto (`hmac`), domain-separated, covering field, offsets,
+  length and the full value; constant-time verification; the key is `Zeroizing` and redacted in
+  `Debug`. The tag is not a hash of plaintext without the key, so it reveals nothing about the
+  text.
+* **Forms.** `<form` in the rendered page is only ever template markup (all content is escaped),
+  so the token check cannot be triggered or bypassed by content.
+* **Residual.** Pre-session CSRF depends on C-06 issuing and checking the pre-session token and
+  Origin (contract item 6); the crate can only make the field mandatory.
 
 ### Dependencies
 
-* Self dev-dependency `candor-source-ui = { path = ".", version = "=0.1.0", features = ["preview"] }`.
-  It is not a new crate: it only turns on the `preview` feature for tests and examples.
+* `hmac =0.13.0` (no default features): keyed MAC binding `piece` fields to the stored value
+  (AUD-RM1-SUI-11). Already a workspace dependency (candor-core, candor-log) at this version.
+* The former self dev-dependency (for the `preview` feature) is removed.

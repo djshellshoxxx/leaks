@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! ZIP extraction with Fifield overlap detection (B-CR-52) and
 //! central/local header cross-checks.
+#![allow(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "candor-safefs is the single audited safe-path API (ADR-027); every path/fd operation here is reviewed"
+)]
 
 use super::{ArchiveError, ExtractOptions, ExtractionReport, LimitKind, RejectReason, Session};
 use crate::{DisplayName, SafeRoot};

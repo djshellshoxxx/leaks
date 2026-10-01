@@ -5,6 +5,11 @@
 //! headers are read here with explicit size bounds (the crate's own
 //! handling buffers them without a bound). The gzip header's FNAME,
 //! FCOMMENT and FEXTRA fields are never read (CVE-2026-35465).
+#![allow(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "candor-safefs is the single audited safe-path API (ADR-027); every path/fd operation here is reviewed"
+)]
 
 use super::{ArchiveError, ExtractOptions, ExtractionReport, LimitKind, RejectReason, Session};
 use crate::{DisplayName, SafeRoot};

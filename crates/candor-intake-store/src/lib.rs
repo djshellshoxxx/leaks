@@ -23,10 +23,10 @@ mod validate;
 pub use deaddrop::{DeadDropConfig, DummyReplies, RandomDummyReplies};
 pub use deletion::{
     CoreReplyHasher, DeletionEntry, DeletionKind, DeletionSigner, Ed25519DeletionSigner,
-    ReplyObjectHasher,
+    ReplyObjectHasher, SignedDeletionHead,
 };
 pub use error::{Result, StoreError};
 pub use memory::{MEMORY_DEADDROP_CONFIG, MemoryStore};
-pub use pg::{PgIntakeMaintenance, PgIntakeStore, migrate, schema_hash};
+pub use pg::{PgIntakeMaintenance, PgIntakeStore, migrate, schema_hash, vacuum_after_rewrite};
 pub use store::{IntakeMaintenance, IntakeStore};
 pub use types::*;

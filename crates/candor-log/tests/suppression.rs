@@ -11,7 +11,7 @@
     clippy::arithmetic_side_effects
 )]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use candor_log::ids::{ChannelId, MonthStamp};
 use candor_log::metrics::*;

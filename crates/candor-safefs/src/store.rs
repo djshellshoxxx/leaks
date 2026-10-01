@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Capability-confined, content-addressed object store (07 §10, BE-009).
+#![allow(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "candor-safefs is the single audited safe-path API (ADR-027); every path/fd operation here is reviewed"
+)]
 
 use crate::id::{ID_LEN, id_from_hasher};
 use crate::{ContentKey, ObjectId, SafeFsError, SlotTime};
@@ -644,7 +649,7 @@ mod tests {
         assert!(w.poisoned);
         w.file = None;
         assert!(w.write_all(b"more").is_err());
-        let slot = SlotTime::from_unix_secs(1_800_000_000 - 1_800_000_000 % 900).unwrap();
+        let slot = SlotTime::from_unix_secs(1_800_000_000).unwrap();
         assert!(w.commit(slot).is_err());
         assert!(root.list().unwrap().is_empty());
     }

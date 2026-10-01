@@ -35,8 +35,8 @@ pub use page::{
     finalize_headers, pad_html, reason_phrase, robots_txt, stylesheet, stylesheet_hash,
 };
 pub use paging::{
-    PART_FIELD, PIECE_FIELD, PieceKey, PieceRef, SHOWN_FIELD, SpliceError, escaped_len, parse_piece,
-    splice_piece,
+    PART_FIELD, PIECE_FIELD, PieceKey, PieceRef, SHOWN_FIELD, SpliceError, escaped_len,
+    parse_piece, splice_piece,
 };
 pub use routes::Route;
 pub use screens::Screen;

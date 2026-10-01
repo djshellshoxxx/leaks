@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Tests for `scripts/lint-safefs.sh` (ST-005, SDL-030) on fixture
 //! workspaces.
+#![allow(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "test fixtures build hostile trees and archives directly"
+)]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::Path;

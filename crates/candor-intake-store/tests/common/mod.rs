@@ -27,11 +27,13 @@ pub const SALT: [u8; 32] = [0x5a; 32];
 /// 2026-10-15.
 pub const TODAY: Day = Day(20741);
 /// Published-set configuration of the suite: one slot per day, K = 4 entries per
-/// slot, 120 entries in the window -> 2 pages (128 entries, 8 padding).
+/// slot, 120 entries in the window -> 2 pages (128 entries, 8 padding). Dummy
+/// buckets are uniform over k = 1..=4 (AUD-RM2-STO-19 tests).
 pub const TEST_DEADDROP: DeadDropConfig = DeadDropConfig {
     slots_per_day: 1,
     per_slot: 4,
     max_pending: 64,
+    dummy_bucket_weights: [1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
 };
 
 /// Both traits (the PG factory attaches a maintenance handle).
@@ -40,6 +42,20 @@ impl<T: IntakeStore + IntakeMaintenance> Store for T {}
 
 pub fn signer() -> Ed25519DeletionSigner {
     Ed25519DeletionSigner::new(candor_core::sig::SigningKey::from_seed(&[0x31; 32]))
+}
+
+/// The Z-CORE head key (AUD-RM2-STO-21/22).
+pub fn core_key() -> candor_core::sig::SigningKey {
+    candor_core::sig::SigningKey::from_seed(&[0xc0; 32])
+}
+
+pub fn core_pk() -> [u8; 32] {
+    core_key().verifying_key_bytes()
+}
+
+/// Z-CORE's signed head over a copy of the list ending at `last`.
+pub fn zhead(last: Option<&DeletionEntry>) -> SignedDeletionHead {
+    SignedDeletionHead::sign(&TENANT, last, &core_key())
 }
 
 /// Test hasher: object hash = first 32 bytes of reply_ct.
@@ -106,16 +122,25 @@ pub fn new_account(tag: u8) -> NewAccount {
     }
 }
 
-pub fn reply(account: Option<AccountId>, mailbox: u8, len: usize) -> IncomingReply {
-    let mut ct = vec![mailbox; len];
+/// A reply whose plaintext is about `plain` bytes: its ciphertext has the
+/// canonical length of the REPLY bucket holding `plain` (AUD-RM2-STO-20).
+pub fn reply(account: Option<AccountId>, mailbox: u8, plain: usize) -> IncomingReply {
+    let k = u8::try_from(plain.div_ceil(REPLY_BUCKET_UNIT).clamp(1, 16)).unwrap();
+    reply_bucket(account, mailbox, k)
+}
+
+/// A reply of REPLY bucket `k`.
+pub fn reply_bucket(account: Option<AccountId>, mailbox: u8, k: u8) -> IncomingReply {
+    let mut ct = vec![mailbox; reply_ct_len(k).unwrap()];
     ct[..8].copy_from_slice(&uniq().to_be_bytes());
+    ct[8..12].copy_from_slice(&std::process::id().to_be_bytes());
     let oh: [u8; 32] = ct[..32].try_into().unwrap();
     IncomingReply {
         account,
         mailbox_id: Some(MailboxId([mailbox; 32])),
         object_hash: oh,
         reply_ct: ct,
-        size_bucket: 1,
+        size_bucket: k,
     }
 }
 
@@ -590,6 +615,100 @@ pub async fn dead_drop<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Output = S>
     assert_eq!(published(&s).await.len(), total);
 }
 
+/// χ² statistic of `hist` against a uniform distribution over its cells.
+pub fn chi2_uniform(hist: &[usize]) -> f64 {
+    let n: usize = hist.iter().sum();
+    let e = n as f64 / hist.len() as f64;
+    hist.iter().map(|h| (*h as f64 - e).powi(2) / e).sum()
+}
+
+/// χ² statistic of a 2 × c contingency table (homogeneity of two histograms).
+pub fn chi2_two_sample(a: &[usize], b: &[usize]) -> f64 {
+    let (na, nb) = (
+        a.iter().sum::<usize>() as f64,
+        b.iter().sum::<usize>() as f64,
+    );
+    let n = na + nb;
+    a.iter()
+        .zip(b)
+        .filter(|(x, y)| **x + **y > 0)
+        .map(|(x, y)| {
+            let col = (*x + *y) as f64;
+            let (ea, eb) = (na * col / n, nb * col / n);
+            (*x as f64 - ea).powi(2) / ea + (*y as f64 - eb).powi(2) / eb
+        })
+        .sum()
+}
+
+/// χ² critical value for 3 degrees of freedom at p = 1e-4.
+pub const CHI2_3DOF_P1E4: f64 = 21.11;
+
+/// AUD-RM2-STO-19: every dummy's bucket is drawn from the configured public
+/// distribution, independently of the real replies published in the same
+/// generation. Each slot adds K entries; in half of the slots one of them is a
+/// real bucket-16 reply. The dummies never copy it (no bucket 16), follow the
+/// configured uniform distribution over buckets 1..4 in both kinds of slot, and
+/// the two dummy histograms are statistically identical (pre-fix, every dummy
+/// copied the real reply's length).
+pub async fn dead_drop_sizes<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Output = S>>(mk: F) {
+    let s = fresh(&mk).await;
+    let mut day = TODAY;
+    s.rebuild_published_set(slot(day)).await.unwrap();
+    let mut prev: HashSet<Vec<u8>> = published(&s).await.into_iter().collect();
+    let boot: Vec<u8> = prev
+        .iter()
+        .map(|e| reply_bucket_of_len(e.len()).expect("canonical dummy length"))
+        .collect();
+    assert!(boot.iter().all(|k| (1..=4).contains(k)));
+    let (mut with_real, mut without) = ([0usize; 16], [0usize; 16]);
+    for step in 0..48 {
+        day = day.plus(1).unwrap();
+        let reals: Vec<IncomingReply> = if step % 2 == 0 {
+            vec![reply_bucket(None, 0x61, 16)]
+        } else {
+            Vec::new()
+        };
+        let real_cts: Vec<Vec<u8>> = reals.iter().map(|r| r.reply_ct.clone()).collect();
+        s.apply_replies(day, reals).await.unwrap();
+        s.rebuild_published_set(slot(day)).await.unwrap();
+        let next: HashSet<Vec<u8>> = published(&s).await.into_iter().collect();
+        let added: Vec<&Vec<u8>> = next.difference(&prev).collect();
+        assert_eq!(added.len(), usize::from(TEST_DEADDROP.per_slot));
+        for e in added {
+            if real_cts.contains(e) {
+                continue;
+            }
+            let k = reply_bucket_of_len(e.len()).expect("canonical dummy length");
+            assert!(
+                (1..=4).contains(&k),
+                "dummy bucket {k} outside the configuration"
+            );
+            let h = if real_cts.is_empty() {
+                &mut without
+            } else {
+                &mut with_real
+            };
+            h[usize::from(k) - 1] += 1;
+        }
+        prev = next;
+    }
+    assert_eq!(with_real.iter().sum::<usize>(), 24 * 3);
+    assert_eq!(without.iter().sum::<usize>(), 24 * 4);
+    assert_eq!(
+        with_real[15], 0,
+        "dummies never copy the real reply's bucket"
+    );
+    for h in [&with_real, &without] {
+        let c = chi2_uniform(&h[..4]);
+        assert!(c < CHI2_3DOF_P1E4, "chi2 {c} for {h:?}");
+    }
+    let c = chi2_two_sample(&with_real[..4], &without[..4]);
+    assert!(
+        c < CHI2_3DOF_P1E4,
+        "dummy sizes depend on real volume: chi2 {c}"
+    );
+}
+
 /// AUD-RM2-STO-07: the publication backlog is bounded; replies beyond it are
 /// rejected (the relay retries) instead of growing the published set.
 pub async fn reply_backlog<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Output = S>>(mk: F) {
@@ -622,16 +741,31 @@ pub async fn reply_rules<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Output = 
 
     let mut empty = reply(None, 1, 40);
     empty.reply_ct.clear();
-    let oversize = reply(None, 1, MAX_REPLY_CT + 1);
+    let mut oversize = reply(None, 1, 40);
+    oversize.reply_ct.resize(MAX_REPLY_CT + 1, 1);
     let mut bucket = reply(None, 1, 40);
     bucket.size_bucket = 0;
     let mut no_mailbox = reply(Some(acct), 1, 40);
     no_mailbox.mailbox_id = None;
     let unknown_account = reply(Some(AccountId([0x77; 16])), 1, 40);
+    // AUD-RM2-STO-20: only canonical lengths, and the bucket must be the one
+    // the store derives from the length (the function used for dummies).
+    let mut odd_len = reply(None, 1, 40);
+    odd_len.reply_ct.push(0);
+    let mut wrong_bucket = reply(None, 1, 40);
+    wrong_bucket.size_bucket = 2;
     let res = s
         .apply_replies(
             TODAY,
-            vec![empty, oversize, bucket, no_mailbox, unknown_account],
+            vec![
+                empty,
+                oversize,
+                bucket,
+                no_mailbox,
+                unknown_account,
+                odd_len,
+                wrong_bucket,
+            ],
         )
         .await
         .unwrap();
@@ -639,7 +773,7 @@ pub async fn reply_rules<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Output = 
         res,
         ApplyRepliesResult {
             accepted: 1,
-            rejected: vec![0, 1, 2, 3]
+            rejected: vec![0, 1, 2, 3, 5, 6]
         }
     );
     assert!(matches!(
@@ -790,6 +924,57 @@ pub async fn deletion_list<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Output 
     let all = s.deletion_list_after(0, 100).await.unwrap();
     assert_eq!(all.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![1, 2, 3]);
     verify_chain(&all, &sg.verifying_key(), None).unwrap();
+    // Reading acknowledges nothing (AUD-RM2-STO-21).
+    assert!(s.deletion_list_after(3, 100).await.unwrap().is_empty());
+    assert!(
+        s.deletion_list_after(0, 100)
+            .await
+            .unwrap()
+            .iter()
+            .all(|e| !e.relayed)
+    );
+    // AUD-RM2-STO-21: only a Z-CORE-signed head of the local chain is accepted.
+    let k31_signed = SignedDeletionHead::sign(
+        &TENANT,
+        all.get(1),
+        &candor_core::sig::SigningKey::from_seed(&[0x31; 32]),
+    );
+    let mut forged = zhead(all.get(1));
+    forged.seq = 3;
+    let other_chain = {
+        let e = deletion::make_entry(None, DeletionKind::Reply, [9; 32], TODAY, &sg).unwrap();
+        let f = deletion::make_entry(Some(&e), DeletionKind::Reply, [8; 32], TODAY, &sg).unwrap();
+        zhead(Some(&f))
+    };
+    let beyond = {
+        let e = deletion::make_entry(all.last(), DeletionKind::Reply, [7; 32], TODAY, &sg).unwrap();
+        zhead(Some(&e))
+    };
+    for (h, why) in [
+        (k31_signed, "signed by K31, not Z-CORE"),
+        (forged, "seq changed after signing"),
+        (other_chain, "not the local chain"),
+        (beyond, "beyond the local head"),
+    ] {
+        assert!(
+            s.acknowledge_deletion_head(&h, &core_pk()).await.is_err(),
+            "{why}"
+        );
+    }
+    assert_eq!(
+        s.prune_deletion_list(TODAY.plus(100).unwrap())
+            .await
+            .unwrap(),
+        0,
+        "rejected acknowledgements change nothing"
+    );
+    s.acknowledge_deletion_head(&zhead(all.get(1)), &core_pk())
+        .await
+        .unwrap();
+    // An older head is ignored (monotonic).
+    s.acknowledge_deletion_head(&zhead(all.first()), &core_pk())
+        .await
+        .unwrap();
     let tail = s.deletion_list_after(2, 100).await.unwrap();
     assert_eq!(tail.len(), 1);
     assert!(!tail[0].relayed);
@@ -827,7 +1012,9 @@ pub async fn deletion_list<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Output 
     let left = s.deletion_list_after(0, 100).await.unwrap();
     assert_eq!(left.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![3]);
     // The relay acknowledges the head; it is still never pruned.
-    s.deletion_list_after(3, 100).await.unwrap();
+    s.acknowledge_deletion_head(&zhead(all.get(2)), &core_pk())
+        .await
+        .unwrap();
     assert_eq!(
         s.prune_deletion_list(TODAY.plus(200).unwrap())
             .await
@@ -1097,11 +1284,17 @@ pub async fn restore_pending_gate<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<
         .unwrap();
     assert_eq!(b.objects.len(), 1);
     assert!(s.deletion_list_after(0, 10).await.unwrap().is_empty());
-    // An empty Z-CORE list with nothing acknowledged confirms the head.
+    // An empty Z-CORE list (signed empty head) confirms the empty local list.
     assert_eq!(
-        s.apply_pushed_deletion_list(&[], 0, &sg.verifying_key(), &PrefixHasher)
-            .await
-            .unwrap(),
+        s.apply_pushed_deletion_list(
+            &[],
+            &zhead(None),
+            &core_pk(),
+            &sg.verifying_key(),
+            &PrefixHasher
+        )
+        .await
+        .unwrap(),
         0
     );
     assert!(s.serving_allowed().await.unwrap());
@@ -1139,10 +1332,19 @@ pub async fn backup_restore<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Output
         }
     };
     a.delete_account(id(20).await, TODAY, &sg).await.unwrap();
+    // The relay copied entry 1 to Z-CORE and handed back Z-CORE's signed head.
+    let first = a.deletion_list_after(0, 10).await.unwrap();
+    let h1 = zhead(first.last());
+    a.acknowledge_deletion_head(&h1, &core_pk()).await.unwrap();
     let backup = a.export_backup().await.unwrap();
     assert_eq!(backup.accounts.len(), 4);
     assert_eq!(backup.deletion_list.len(), 1);
     assert_eq!(backup.meta.kd.tree_size, 400);
+    assert_eq!(
+        backup.meta.deletion_head,
+        Some(h1),
+        "backup carries the verified head"
+    );
 
     // After the backup, the source deletes accounts 21, 23, 24 (only Z-CORE has
     // those entries now).
@@ -1171,20 +1373,48 @@ pub async fn backup_restore<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Output
     );
 
     // Rejected pushes; the store keeps refusing.
+    let h4 = zhead(core_copy.last());
+    let cpk = core_pk();
     let mut forged = core_copy.clone();
     forged[1].del_hash[0] ^= 1;
     let wrong_key = Ed25519DeletionSigner::new(candor_core::sig::SigningKey::from_seed(&[1; 32]))
         .verifying_key();
+    let relay_key = candor_core::sig::SigningKey::from_seed(&[0xaa; 32]);
+    // AUD-RM2-STO-22 PoC: Z-CORE holds 1..4; the relay pushes 1..3 and claims
+    // its own head 3, either unsigned (copied sig of another head) or signed
+    // with a key that is not Z-CORE's.
+    let mut claimed = h4;
+    claimed.seq = 3;
+    claimed.head_hash = core_copy[2].next_prev_hash();
+    let self_signed = SignedDeletionHead::sign(&TENANT, core_copy.get(2), &relay_key);
     for (entries, head, key, why) in [
-        (forged.clone(), 4, pk, "forged"),
-        (core_copy.clone(), 4, wrong_key, "wrong key"),
-        (core_copy[2..].to_vec(), 4, pk, "gap after local head"),
-        (core_copy[..3].to_vec(), 4, pk, "truncated"),
-        (Vec::new(), 4, pk, "empty"),
+        (forged.clone(), h4, pk, "forged"),
+        (core_copy.clone(), h4, wrong_key, "wrong key"),
+        (core_copy[2..].to_vec(), h4, pk, "gap after local head"),
+        (core_copy[..3].to_vec(), h4, pk, "truncated"),
+        (Vec::new(), h4, pk, "empty"),
+        (
+            core_copy[..3].to_vec(),
+            claimed,
+            pk,
+            "relay-claimed head, no signature",
+        ),
+        (
+            core_copy[..3].to_vec(),
+            self_signed,
+            pk,
+            "relay-signed head",
+        ),
+        (
+            core_copy.clone(),
+            zhead(None),
+            pk,
+            "head behind the verified head",
+        ),
     ] {
         assert!(
             matches!(
-                b.apply_pushed_deletion_list(&entries, head, &key, &PrefixHasher)
+                b.apply_pushed_deletion_list(&entries, &head, &cpk, &key, &PrefixHasher)
                     .await,
                 Err(StoreError::DeletionList(_))
             ),
@@ -1195,12 +1425,17 @@ pub async fn backup_restore<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Output
     assert_eq!(b.export_backup().await.unwrap().accounts.len(), 4);
 
     assert_eq!(
-        b.apply_pushed_deletion_list(&core_copy, 4, &pk, &PrefixHasher)
+        b.apply_pushed_deletion_list(&core_copy, &h4, &cpk, &pk, &PrefixHasher)
             .await
             .unwrap(),
         4
     );
     assert!(b.serving_allowed().await.unwrap());
+    assert_eq!(
+        b.export_backup().await.unwrap().meta.deletion_head,
+        Some(h4),
+        "the confirmed head becomes the verified head"
+    );
     for t in [21u8, 23, 24] {
         assert!(
             b.lookup_account(&LookupTag([t; 32]))
@@ -1225,19 +1460,25 @@ pub async fn backup_restore<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Output
     ));
     // Idempotent re-push.
     assert_eq!(
-        b.apply_pushed_deletion_list(&core_copy, 4, &pk, &PrefixHasher)
+        b.apply_pushed_deletion_list(&core_copy, &h4, &cpk, &pk, &PrefixHasher)
             .await
             .unwrap(),
         4
     );
-    // A bad push to a serving store puts it back into restore-pending.
+    // A bad push to a serving store puts it back into restore-pending; so does
+    // a replay of the older head now that head 4 is verified.
     assert!(
-        b.apply_pushed_deletion_list(&core_copy[..2], 4, &pk, &PrefixHasher)
+        b.apply_pushed_deletion_list(&core_copy[..2], &h4, &cpk, &pk, &PrefixHasher)
             .await
             .is_err()
     );
     assert!(!b.serving_allowed().await.unwrap());
-    b.apply_pushed_deletion_list(&core_copy, 4, &pk, &PrefixHasher)
+    assert!(
+        b.apply_pushed_deletion_list(&core_copy[..1], &h1, &cpk, &pk, &PrefixHasher)
+            .await
+            .is_err()
+    );
+    b.apply_pushed_deletion_list(&core_copy, &h4, &cpk, &pk, &PrefixHasher)
         .await
         .unwrap();
     // Chain continues locally after the merged entries.
@@ -1265,9 +1506,15 @@ pub async fn backup_restore<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Output
     )
     .unwrap();
     assert_eq!(
-        c.apply_pushed_deletion_list(&[entry], 1, &pk, &PrefixHasher)
-            .await
-            .unwrap(),
+        c.apply_pushed_deletion_list(
+            &[entry],
+            &zhead(Some(&entry)),
+            &core_pk(),
+            &pk,
+            &PrefixHasher
+        )
+        .await
+        .unwrap(),
         1
     );
     c.rebuild_published_set(slot(TODAY)).await.unwrap();
@@ -1295,6 +1542,7 @@ macro_rules! conformance_tests {
             conf_claim_limits => claim_limits,
             conf_claim_fairness => claim_fairness,
             conf_dead_drop => dead_drop,
+            conf_dead_drop_sizes => dead_drop_sizes,
             conf_reply_backlog => reply_backlog,
             conf_reply_rules => reply_rules,
             conf_deletion_list => deletion_list,

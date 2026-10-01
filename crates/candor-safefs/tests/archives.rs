@@ -3,6 +3,11 @@
 //! B-SD-28/33/35 TOB-SDW-012 / CVE-2025-24888 / CVE-2026-35465,
 //! B-OS-03 CVE-2026-54706).
 #![allow(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "test fixtures build hostile trees and archives directly"
+)]
+#![allow(
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::indexing_slicing,

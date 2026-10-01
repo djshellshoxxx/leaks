@@ -97,14 +97,21 @@ CREATE TABLE candor.intake_meta (
   kd_checkpoint_day_hwm date    NULL,
   config_version        bigint  NOT NULL DEFAULT 0 CHECK (config_version >= 0),
   restore_pending       boolean NOT NULL DEFAULT false,
-  deletion_acked_seq    bigint  NOT NULL DEFAULT 0 CHECK (deletion_acked_seq >= 0)
+  deletion_acked_seq    bigint  NOT NULL DEFAULT 0 CHECK (deletion_acked_seq >= 0),
+  -- The Z-CORE-signed head behind deletion_acked_seq (AUD-RM2-STO-21): its chain
+  -- hash (checked against the local chain by the trigger below) and Z-CORE's
+  -- signature (re-verified by the maintenance process before any prune).
+  deletion_acked_hash   bytea   NULL CHECK (octet_length(deletion_acked_hash) = 32),
+  deletion_acked_sig    bytea   NULL CHECK (octet_length(deletion_acked_sig) = 64),
+  CHECK ((deletion_acked_seq = 0) = (deletion_acked_hash IS NULL) AND (deletion_acked_hash IS NULL) = (deletion_acked_sig IS NULL))
 );
 CREATE UNIQUE INDEX intake_meta_singleton ON candor.intake_meta ((true));
 
 -- Monotonic guards in the database as defence in depth (BE-060, 07 §5.4):
 -- the KD high-water mark, the directory version, the relay counter and the
 -- acknowledged deletion seq never decrease; tenant, salt and schema hash are
--- immutable; the acknowledged seq never exceeds the deletion-list head.
+-- immutable; the acknowledged head must be part of the local deletion-list
+-- chain (AUD-RM2-STO-21; candor.deletion_head_in_chain, defined below).
 CREATE FUNCTION candor.intake_meta_monotonic() RETURNS trigger
   LANGUAGE plpgsql SET search_path = pg_catalog, candor AS $fn$
 BEGIN
@@ -119,9 +126,12 @@ BEGIN
      OR NEW.deletion_acked_seq < OLD.deletion_acked_seq THEN
     RAISE EXCEPTION 'monotonic intake_meta value decreased' USING ERRCODE = 'P0002';
   END IF;
-  IF NEW.deletion_acked_seq > OLD.deletion_acked_seq
-     AND NEW.deletion_acked_seq > COALESCE((SELECT max(d.seq) FROM candor.deletion_list d), 0) THEN
-    RAISE EXCEPTION 'acknowledged seq beyond deletion-list head' USING ERRCODE = 'P0002';
+  IF NEW.deletion_acked_seq IS DISTINCT FROM OLD.deletion_acked_seq
+     OR NEW.deletion_acked_hash IS DISTINCT FROM OLD.deletion_acked_hash THEN
+    IF NEW.deletion_acked_seq = OLD.deletion_acked_seq
+       OR NOT candor.deletion_head_in_chain(NEW.deletion_acked_seq, NEW.deletion_acked_hash) THEN
+      RAISE EXCEPTION 'acknowledged head not in the deletion-list chain' USING ERRCODE = 'P0002';
+    END IF;
   END IF;
   RETURN NEW;
 END
@@ -214,6 +224,59 @@ CREATE TABLE candor.deletion_list (
   relayed   boolean              NOT NULL DEFAULT false
 );
 CREATE INDEX deletion_list_hash ON candor.deletion_list (kind, del_hash);
+-- Chain hash of an entry, exactly as deletion::DeletionEntry::next_prev_hash:
+-- SHA-256("candor/v1/intake/deletion-list" ‖ prev_hash ‖ u64be seq ‖ u8 kind ‖
+-- del_hash ‖ u32be del_day ‖ sig) (built-in sha256, no extension).
+CREATE FUNCTION candor.deletion_chain_hash(d candor.deletion_list) RETURNS bytea
+  LANGUAGE sql IMMUTABLE STRICT SET search_path = pg_catalog, candor AS $fn$
+  SELECT pg_catalog.sha256('candor/v1/intake/deletion-list'::bytea || d.prev_hash
+    || pg_catalog.int8send(d.seq)
+    || CASE d.kind WHEN 'account' THEN '\x01'::bytea WHEN 'mailbox' THEN '\x02'::bytea ELSE '\x03'::bytea END
+    || d.del_hash || pg_catalog.int4send((d.del_day - DATE '1970-01-01')::int4) || d.sig)
+$fn$;
+REVOKE ALL ON FUNCTION candor.deletion_chain_hash(candor.deletion_list) FROM PUBLIC;
+-- Whether the local chain contains the head (seq, hash): the entry at seq hashes
+-- to it, or (that entry pruned) its successor links to it; seq 0 = empty chain.
+CREATE FUNCTION candor.deletion_head_in_chain(s bigint, h bytea) RETURNS boolean
+  LANGUAGE sql STABLE SET search_path = pg_catalog, candor AS $fn$
+  SELECT s = 0 OR EXISTS (SELECT 1 FROM candor.deletion_list d WHERE d.seq = s AND candor.deletion_chain_hash(d) = h)
+    OR (NOT EXISTS (SELECT 1 FROM candor.deletion_list d WHERE d.seq = s)
+        AND EXISTS (SELECT 1 FROM candor.deletion_list d WHERE d.seq = s + 1 AND d.prev_hash = h))
+$fn$;
+REVOKE ALL ON FUNCTION candor.deletion_head_in_chain(bigint, bytea) FROM PUBLIC;
+-- Append-only chain (AUD-RM2-STO-21): an insert must extend the chain at its
+-- head (seq = max + 1 linking to the head) or below its oldest retained entry
+-- (seq = min - 1 linking to it; restore and RL-12 merges); only the first entry
+-- of an empty list is free (genesis, or a restored/pushed pruned list). New
+-- rows are never pre-flagged relayed, so nothing can be pruned without the
+-- maintenance role's verified acknowledgement.
+CREATE FUNCTION candor.deletion_list_append() RETURNS trigger
+  LANGUAGE plpgsql SET search_path = pg_catalog, candor AS $fn$
+DECLARE
+  hi bigint;
+  lo bigint;
+BEGIN
+  IF NEW.relayed OR (NEW.seq = 1 AND NEW.prev_hash <> pg_catalog.decode(pg_catalog.repeat('00', 32), 'hex')) THEN
+    RAISE EXCEPTION 'deletion_list entry rejected' USING ERRCODE = 'P0004';
+  END IF;
+  SELECT max(d.seq), min(d.seq) INTO hi, lo FROM candor.deletion_list d;
+  IF hi IS NULL THEN
+    RETURN NEW;
+  END IF;
+  IF NEW.seq = hi + 1
+     AND NEW.prev_hash = (SELECT candor.deletion_chain_hash(d) FROM candor.deletion_list d WHERE d.seq = hi) THEN
+    RETURN NEW;
+  END IF;
+  IF NEW.seq = lo - 1
+     AND candor.deletion_chain_hash(NEW) = (SELECT d.prev_hash FROM candor.deletion_list d WHERE d.seq = lo) THEN
+    RETURN NEW;
+  END IF;
+  RAISE EXCEPTION 'deletion_list insert must extend the chain' USING ERRCODE = 'P0004';
+END
+$fn$;
+REVOKE ALL ON FUNCTION candor.deletion_list_append() FROM PUBLIC;
+CREATE TRIGGER deletion_list_append BEFORE INSERT ON candor.deletion_list
+  FOR EACH ROW EXECUTE FUNCTION candor.deletion_list_append();
 CREATE FUNCTION candor.deletion_list_guard() RETURNS trigger
   LANGUAGE plpgsql SET search_path = pg_catalog, candor AS $fn$
 DECLARE
@@ -261,6 +324,18 @@ CREATE TABLE candor.counter_month (
   value      integer            NOT NULL CHECK (value >= 0),
   PRIMARY KEY (month, channel_id, name)
 );
+
+-- TOAST exposure (AUD-RM2-STO-18). Out-of-line values keep the xmin of the
+-- transaction that stored them and a chunk_id from the cluster-wide OID counter
+-- unless they are re-created. Account and envelope rows (≤ ~5.5 KB) are kept
+-- in line (no TOAST row, so no chunk_id or separate xmin at all); slot blocks,
+-- reply ciphertexts and snapshots cannot fit a page and are re-created by the
+-- import-slot rewrite in a CSPRNG-shuffled order. Ciphertexts are stored
+-- EXTERNAL (uncompressed: compression of random data is wasted work).
+ALTER TABLE candor.source_account SET (toast_tuple_target = 8160);
+ALTER TABLE candor.envelope       SET (toast_tuple_target = 8160);
+ALTER TABLE candor.envelope_part ALTER COLUMN slot_block SET STORAGE EXTERNAL;
+ALTER TABLE candor.reply ALTER COLUMN reply_ct SET STORAGE EXTERNAL;
 
 -- Aggressive autovacuum on intake tables (09 §10 "Deletion").
 ALTER TABLE candor.source_account SET (autovacuum_vacuum_scale_factor = 0.01);
@@ -315,7 +390,11 @@ GRANT SELECT ON candor.schema_migration TO candor_istore, candor_intake_maint;
 GRANT SELECT, INSERT ON candor.intake_meta TO candor_istore;
 -- No UPDATE of tenant_id, schema_hash, kdf_salt or config_version (AUD-RM2-STO-08).
 GRANT UPDATE (relay_req_counter, last_batch_no, directory_version, kd_tree_size_hwm,
-  kd_checkpoint_day_hwm, restore_pending, deletion_acked_seq) ON candor.intake_meta TO candor_istore;
+  kd_checkpoint_day_hwm, restore_pending, deletion_acked_seq, deletion_acked_hash, deletion_acked_sig)
+  ON candor.intake_meta TO candor_istore;
+-- Called from the guard triggers in the application role's context.
+GRANT EXECUTE ON FUNCTION candor.deletion_chain_hash(candor.deletion_list),
+  candor.deletion_head_in_chain(bigint, bytea) TO candor_istore;
 GRANT SELECT, INSERT, UPDATE, DELETE ON candor.source_account, candor.envelope, candor.envelope_part,
   candor.reply, candor.directory_snapshot, candor.counter_month TO candor_istore;
 -- deletion_list: append and unchanged rewrite only; no DELETE (AUD-RM2-STO-03).

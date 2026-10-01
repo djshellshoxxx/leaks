@@ -683,12 +683,20 @@ mod tests {
             channel_id: [2; 16],
             mailbox_id: [3; 32],
         };
-        let st = WrapStanza::seal_hpke(Suite::CandorStd1, &kp.public, [0; 32], [9; 32], &ctx, &[5u8; 32])
-            .unwrap();
+        let st = WrapStanza::seal_hpke(
+            Suite::CandorStd1,
+            &kp.public,
+            [0; 32],
+            [9; 32],
+            &ctx,
+            &[5u8; 32],
+        )
+        .unwrap();
         let stanza_len = st.encode().unwrap().len();
         for k in 1..=REPLY_BUCKETS {
             let pt = u64::from(k) * 4096;
-            let payload = usize::try_from(candor_core::stream::ciphertext_len(pt).unwrap()).unwrap();
+            let payload =
+                usize::try_from(candor_core::stream::ciphertext_len(pt).unwrap()).unwrap();
             let expect = candor_core::header::HEADER_LEN
                 + candor_core::header::HEADER_MAC_LEN
                 + payload

@@ -213,12 +213,11 @@ fn piece_field(
     let Some(r) = range else {
         return Ok(Zeroizing::default());
     };
-    let key = p
-        .vm
-        .ctx
-        .piece_key
-        .as_ref()
-        .ok_or(RenderError::MissingData("piece key"))?;
+    let key =
+        p.vm.ctx
+            .piece_key
+            .as_ref()
+            .ok_or(RenderError::MissingData("piece key"))?;
     piece_value(key, field, r, stored)
         .map(Zeroizing::new)
         .ok_or(RenderError::MissingData("piece key"))

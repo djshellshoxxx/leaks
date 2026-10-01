@@ -27,15 +27,16 @@ let page = render(Screen::Landing, &view_model, &Locale::En)?;
   and one data struct per screen. All strings are treated as untrusted and are HTML-escaped.
 * `Locale` is one of `en` (master), `en-XA`, `ar-XB` (RTL) or `en-XL`. The last three are
   pseudo-locales (`is_pseudo()`) for CI and previews only. A locale is chosen only by the path
-  prefix (`Locale::from_tag`, which accepts `Locale::PRODUCTION` only; pseudo-locales need
-  `from_tag_including_pseudo`, behind the `preview` feature).
+  prefix (`Locale::from_tag`, which accepts `Locale::PRODUCTION` only; pseudo-locales have no
+  tag parser in the library).
 * `Page` contains the status, the headers, a body padded to exactly 65,536 or 131,072 bytes
   (`Zeroizing`, redacted in `Debug`), the size class, the part shown and the number of parts.
 * **Parts (AUD-RM1-SUI-01).** S05, S06, S07, S08, the S11 inbox and S12 never fail or grow
   because of long or heavily escaped text. Content that does not fit the class is split into
   parts (`PageContext::part`, buttons named `part`). Nothing is cut. A long editable value is
-  shown one piece per part with a hidden `piece` field (`{field}-{start}-{end}-{total}`), and
-  C-07 applies the edit with `parse_piece` and `splice_piece`. S05 parts also list the questions
+  shown one piece per part with a hidden `piece` field (`{field}-{start}-{end}-{total}-{tag}`,
+  `tag` = HMAC under the session `PieceKey` of the whole stored value), and C-07 applies the edit
+  with `parse_piece` and `splice_piece`, which refuses any stale piece. S05 parts also list the questions
   on the part in hidden `shown` fields. `escaped_len()` predicts the escaped size of a text.
 * `RenderError` makes rendering fail closed. Causes: a missing catalog string, an id or value
   that is not allow-listed, missing screen data (for example S10 without words), or a page over
@@ -47,11 +48,14 @@ let page = render(Screen::Landing, &view_model, &Locale::En)?;
   * `classify(file_name)`: the 05 §7.2 file classes.
   * `default_questionnaire_step()`: the 11 §S05 default template.
   * `string_class(key)` / `catalog_keys()`: the review class of each string (tier0 / critical / ui).
-  * `preview::sample_view_model()`: fictional fixtures (cargo feature `preview`; tests, CI and
-    the example only, never in the C-06 build).
+  * `finalize_headers(&mut page, cookie)`, `reason_phrase()`, `Page::head_len()`: the response
+    head is padded (`X-Pad`) to exactly `SizeClass::head_bytes()` bytes, cookie included.
+  * Fictional fixtures (`sample_view_model()`) live in `tests/support/preview.rs`, used only by
+    the tests and the example; the library has no cargo features.
 
-The server must add only the `__Host-cs` cookie (§5.6). It must not add `Date`, `Server`, `ETag`,
-`Last-Modified` or `Content-Encoding`. For HEAD it sends the same headers without a body.
+The server adds the session or pre-session cookie only through `finalize_headers` (§5.6). It
+must not add `Date`, `Server`, `ETag`, `Last-Modified` or `Content-Encoding`. Every form needs a
+`form_token` (pre-session token before login). For HEAD it sends the same headers without a body.
 
 ## Design
 

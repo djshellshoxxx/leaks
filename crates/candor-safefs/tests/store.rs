@@ -2,6 +2,11 @@
 //! Store confinement tests (BE-009, DB-028, ST-080, ST-086; CVE-2026-54706,
 //! CVE-2025-24888, TOB-SDW-012).
 #![allow(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "test fixtures build hostile trees and archives directly"
+)]
+#![allow(
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::indexing_slicing,

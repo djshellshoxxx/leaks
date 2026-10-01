@@ -9,12 +9,12 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::deaddrop::{
-    self, DeadDropConfig, DummyReplies, PADDING_GENERATION, PageBuilder, PublishedSet,
-    RandomDummyReplies,
+    self, DEFAULT_DUMMY_BUCKET_WEIGHTS, DeadDropConfig, DummyReplies, PADDING_GENERATION,
+    PageBuilder, PublishedSet, RandomDummyReplies,
 };
 use crate::deletion::{
-    DeletionEntry, DeletionKind, DeletionSigner, ReplyObjectHasher, account_del_hash,
-    mailbox_del_hash, make_entry, reply_del_hash,
+    DeletionEntry, DeletionKind, DeletionSigner, ReplyObjectHasher, SignedDeletionHead,
+    account_del_hash, mailbox_del_hash, make_entry, reply_del_hash,
 };
 use crate::error::{Result, StoreError};
 use crate::store::{IntakeMaintenance, IntakeStore};
@@ -26,6 +26,7 @@ use crate::types::{
     MAILBOX_SLOTS, MAX_DELETION_LIST_PAGE, MAX_REPLIES_PER_PUSH, MAX_SLOT_ACTIVE_ACCOUNTS,
     MailboxId, MetaSnapshot, NewAccount, ObjectData, PartSelector, REPLY_WINDOW_DAYS, ReplyIndex,
     ReplyRef, SourceAccount, StoredReply, TenantId, VerifiedSnapshot, group_digest, random_id16,
+    reply_bucket_of_len,
 };
 use crate::validate::{self, SnapshotDecision, has_duplicates};
 
@@ -35,6 +36,7 @@ pub const MEMORY_DEADDROP_CONFIG: DeadDropConfig = DeadDropConfig {
     slots_per_day: 1,
     per_slot: 2,
     max_pending: 64,
+    dummy_bucket_weights: DEFAULT_DUMMY_BUCKET_WEIGHTS,
 };
 
 #[derive(Clone)]
@@ -45,7 +47,14 @@ struct Meta {
     last_batch_no: u64,
     kd: KdHighWater,
     restore_pending: bool,
-    deletion_acked_seq: u64,
+    /// Last verified Z-CORE head (AUD-RM2-STO-21/22).
+    ack_head: Option<SignedDeletionHead>,
+}
+
+impl Meta {
+    fn acked_seq(&self) -> u64 {
+        self.ack_head.map_or(0, |h| h.seq)
+    }
 }
 
 #[derive(Clone)]
@@ -117,7 +126,7 @@ impl State {
             .any(|e| e.kind == kind && &e.del_hash == h)
     }
     fn with_relayed(&self, e: &DeletionEntry) -> DeletionEntry {
-        let acked = self.meta.as_ref().map_or(0, |m| m.deletion_acked_seq);
+        let acked = self.meta.as_ref().map_or(0, Meta::acked_seq);
         let mut e = *e;
         e.relayed = e.relayed || e.seq <= acked;
         e
@@ -208,7 +217,7 @@ impl IntakeStore for MemoryStore {
                     last_batch_no: 0,
                     kd: KdHighWater::default(),
                     restore_pending: false,
-                    deletion_acked_seq: 0,
+                    ack_head: None,
                 });
                 Ok(())
             }
@@ -579,8 +588,9 @@ impl IntakeStore for MemoryStore {
                 ReplyRef(random_id16()?),
                 ReplyRow {
                     account: r.account,
+                    size_bucket: reply_bucket_of_len(r.reply_ct.len())
+                        .ok_or(StoreError::InvalidInput("reply length"))?,
                     reply_ct: r.reply_ct,
-                    size_bucket: r.size_bucket,
                     available_day: today,
                     slot,
                     pub_gen: None,
@@ -739,15 +749,6 @@ impl IntakeStore for MemoryStore {
                     reals.sort_unstable();
                     reals.truncate(k);
                 }
-                let mut hint = deaddrop::DEFAULT_DUMMY_BODY_LEN;
-                if !reals.is_empty() {
-                    let pick = reals
-                        .get(deaddrop::uniform_below(reals.len())?)
-                        .map(|x| x.1);
-                    if let Some(r) = pick.and_then(|p| st.replies.get(&p)) {
-                        hint = r.reply_ct.len();
-                    }
-                }
                 for (_, r) in &reals {
                     if let Some(row) = st.replies.get_mut(r) {
                         row.pub_gen = Some(h);
@@ -755,7 +756,7 @@ impl IntakeStore for MemoryStore {
                     }
                 }
                 for _ in reals.len()..k {
-                    let (body, bucket) = deaddrop::dummy_row(self.dummies.as_ref(), hint)?;
+                    let (body, bucket) = deaddrop::dummy_row(self.dummies.as_ref(), &cfg)?;
                     st.replies.insert(
                         ReplyRef(random_id16()?),
                         ReplyRow {
@@ -784,8 +785,7 @@ impl IntakeStore for MemoryStore {
                 st.replies.remove(r);
             }
             for _ in padding.len()..want {
-                let (body, bucket) =
-                    deaddrop::dummy_row(self.dummies.as_ref(), deaddrop::DEFAULT_DUMMY_BODY_LEN)?;
+                let (body, bucket) = deaddrop::dummy_row(self.dummies.as_ref(), &cfg)?;
                 st.replies.insert(
                     ReplyRef(random_id16()?),
                     ReplyRow {
@@ -804,7 +804,7 @@ impl IntakeStore for MemoryStore {
                     b.push(&r.reply_ct)?;
                 }
             }
-            b.finish(self.dummies.as_ref())?
+            b.finish(self.dummies.as_ref(), &cfg)?
         };
         let idx = set.index();
         *self.published.write().await = Arc::new(set);
@@ -822,14 +822,12 @@ impl IntakeStore for MemoryStore {
     async fn deletion_list_after(&self, after: u64, limit: u32) -> Result<Vec<DeletionEntry>> {
         let limit = usize::try_from(limit.min(MAX_DELETION_LIST_PAGE)).unwrap_or(0);
         i64::try_from(after).map_err(|_| StoreError::InvalidInput("after"))?;
-        let mut st = self.state.lock().await;
+        let st = self.state.lock().await;
         st.meta()?;
         let head = st.head().map_or(0, |e| e.seq);
         if after > head {
             return Err(StoreError::InvalidInput("after beyond head"));
         }
-        let m = st.meta_mut()?;
-        m.deletion_acked_seq = m.deletion_acked_seq.max(after);
         Ok(st
             .deletion
             .values()
@@ -839,21 +837,40 @@ impl IntakeStore for MemoryStore {
             .collect())
     }
 
+    async fn acknowledge_deletion_head(
+        &self,
+        head: &SignedDeletionHead,
+        core_pk: &[u8; 32],
+    ) -> Result<()> {
+        let mut st = self.state.lock().await;
+        let (tenant, current) = {
+            let m = st.meta()?;
+            (m.tenant, m.ack_head)
+        };
+        head.verify(&tenant, core_pk)?;
+        let local: Vec<DeletionEntry> = st.deletion.values().copied().collect();
+        if validate::ack_head(&local, current.as_ref(), head)? {
+            st.meta_mut()?.ack_head = Some(*head);
+        }
+        Ok(())
+    }
+
     async fn apply_pushed_deletion_list(
         &self,
         entries: &[DeletionEntry],
-        core_head: u64,
+        head: &SignedDeletionHead,
+        core_pk: &[u8; 32],
         k31_pk: &[u8; 32],
         hasher: &dyn ReplyObjectHasher,
     ) -> Result<u64> {
         let mut st = self.state.lock().await;
-        let (tenant, acked) = {
+        let (tenant, verified) = {
             let m = st.meta()?;
-            (m.tenant, m.deletion_acked_seq)
+            (m.tenant, m.ack_head)
         };
         let local: Vec<DeletionEntry> = st.deletion.values().copied().collect();
-        let merged = validate::verify_pushed(entries, k31_pk)
-            .and_then(|()| validate::merge_pushed(&local, acked, entries, core_head));
+        let merged = validate::verify_pushed(entries, k31_pk, head, &tenant, core_pk)
+            .and_then(|()| validate::merge_pushed(&local, verified.as_ref(), entries, head));
         let new = match merged {
             Ok(n) => n,
             Err(e) => {
@@ -893,7 +910,13 @@ impl IntakeStore for MemoryStore {
                 .is_some_and(|h| reps.contains(&reply_del_hash(&tenant, &h)))
         });
         let through = st.head().map_or(0, |e| e.seq);
-        st.meta_mut()?.restore_pending = false;
+        let m = st.meta_mut()?;
+        // The pushed head is verified and contained in the merged chain: it is
+        // the new acknowledged head (never lowered).
+        if m.acked_seq() < head.seq {
+            m.ack_head = Some(*head);
+        }
+        m.restore_pending = false;
         Ok(through)
     }
 
@@ -1013,6 +1036,7 @@ impl IntakeStore for MemoryStore {
                 relay_req_counter: m.relay_req_counter,
                 last_batch_no: m.last_batch_no,
                 kd: m.kd,
+                deletion_head: m.ack_head,
             },
             accounts,
             deletion_list: st.deletion.values().map(|e| st.with_relayed(e)).collect(),
@@ -1055,12 +1079,13 @@ impl IntakeStore for MemoryStore {
                 .max(b.meta.last_batch_no),
             kd,
             restore_pending: true,
-            deletion_acked_seq: 0,
+            ack_head: b.meta.deletion_head,
         });
         for a in b.accounts {
             st.accounts.insert(a.account_id, a);
         }
-        for e in b.deletion_list {
+        for mut e in b.deletion_list {
+            e.relayed = false;
             st.deletion.insert(e.seq, e);
         }
         Ok(())
@@ -1071,7 +1096,7 @@ impl IntakeMaintenance for MemoryStore {
     async fn prune_deletion_list(&self, today: Day) -> Result<u64> {
         let cutoff = today.saturating_minus(DELETION_LIST_RETENTION_DAYS);
         let mut st = self.state.lock().await;
-        let acked = st.meta()?.deletion_acked_seq;
+        let acked = st.meta()?.acked_seq();
         for e in st.deletion.values_mut().filter(|e| e.seq <= acked) {
             e.relayed = true;
         }

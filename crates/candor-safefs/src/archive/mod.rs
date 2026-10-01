@@ -12,6 +12,11 @@
 //!   [`ArchiveLimits::max_nesting_depth`].
 //! * On any archive-level failure every member already written is removed
 //!   (all-or-nothing) and no partial report is returned.
+#![allow(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "candor-safefs is the single audited safe-path API (ADR-027); every path/fd operation here is reviewed"
+)]
 
 mod tar_impl;
 mod zip_impl;
@@ -538,7 +543,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let root = SafeRoot::open(dir.path(), crate::RootPolicy::Scratch).unwrap();
-        let slot = SlotTime::from_unix_secs(1_800_000_000 - 1_800_000_000 % 900).unwrap();
+        let slot = SlotTime::from_unix_secs(1_800_000_000).unwrap();
         let opts = ExtractOptions::new(slot);
         let mut s = Session::new(&root, &opts).unwrap();
         // A "member" whose entry cannot be unlinked (a directory).
