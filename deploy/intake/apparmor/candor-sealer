@@ -1,0 +1,71 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# AppArmor profile for C-07 candor-sealer (17 §5.2; R7 SI-B-04). Enforce mode.
+# Installed as /etc/apparmor.d/candor-sealer; attached by AppArmorProfile=candor-sealer.
+# Allowed: read program, config bundle, Key Directory snapshot and its own systemd
+# credentials; accept on the inherited seal.sock listener; connect to the intake store (chaff).
+# Denied: all IP networking, every write, exec, capabilities (incl. ipc_lock: mlock works via
+# LimitMEMLOCK - stricter than 17 §5.2), any read of blobs or staging (07 §4.2).
+abi <abi/3.0>,
+include <tunables/global>
+
+profile candor-sealer /usr/lib/candor/sealer/candor-sealer {
+  include <abstractions/base>
+
+  /usr/lib/candor/sealer/candor-sealer mr,
+  /run/candor/config/ r,
+  /run/candor/config/** r,
+  /run/candor/directory/ r,
+  /run/candor/directory/** r,
+  # TPM-unsealed credentials of this unit only (K35, Argon2id salt; ADR-028).
+  /run/credentials/candor-sealer.service/ r,
+  /run/credentials/candor-sealer.service/* r,
+
+  # Inherited stderr stream only (no stream listener).
+  network unix stream,
+  unix (send, getattr, getopt, shutdown) type=stream,
+  # Inherited seal.sock listener + client connection to istore.sock (chaff COMMIT_ENVELOPE).
+  network unix seqpacket,
+  unix (create, connect, accept, receive, send, getattr, getopt, setopt, shutdown) type=seqpacket,
+  /run/candor/istore/istore.sock rw,
+
+  # Rust std runtime: available_parallelism() reads the cgroup CPU quota.
+  @{PROC}/@{pid}/cgroup r,
+  @{PROC}/@{pid}/mountinfo r,
+  /sys/fs/cgroup/**/cpu.max r,
+  /sys/devices/system/cpu/online r,
+  # Signals from systemd only.
+  signal (receive) peer=unconfined,
+
+  # ---- explicit denials (win over any allow, incl. abstractions; denials are audited) ----
+  deny capability,
+  deny ptrace,
+  deny mount,
+  deny umount,
+  deny pivot_root,
+  deny network inet6,
+  deny network netlink,
+  deny network packet,
+  deny @{PROC}/*/mem rw,
+  deny @{PROC}/*/environ r,
+  deny @{PROC}/kcore r,
+  deny /dev/mem rw,
+  deny /dev/kmem rw,
+  # No syslog path: output only via the inherited stderr stream (typed candor-log, ADR-016).
+  deny /dev/log w,
+  deny /run/systemd/journal/dev-log w,
+  deny /run/systemd/journal/socket w,
+  deny /run/systemd/journal/syslog w,
+  deny /run/tor-instances/** rwklx,
+  deny /var/lib/tor-instances/** rwklx,
+  deny /var/lib/postgresql/** rwklx,
+  deny /etc/credstore.encrypted/** rwklx,
+  deny /etc/tor/** rwklx,
+  deny /etc/shadow r,
+  deny /etc/gshadow r,
+  deny /boot/** rwklx,
+  deny network inet,
+  deny /var/lib/candor/** rwklx,
+  deny /run/candor/staging/** rwklx,
+  deny /run/candor/source-web/** rwklx,
+  deny /run/credentials/candor-intake-store.service/** rwklx,
+}

@@ -1,0 +1,69 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# AppArmor profile for C-06 candor-web (17 §5.2; R7 SI-B-04). Enforce mode.
+# Installed as /etc/apparmor.d/candor-web; attached by AppArmorProfile=candor-web in
+# candor-intake-web.service (the unit fails to start if the profile is not loaded).
+# Allowed: read program, templates/static assets and the signed config bundle; accept on the
+# inherited http listener; connect to the sealer and intake-store sockets. Nothing else:
+# no IP networking, no writes anywhere, no exec, no capabilities.
+abi <abi/3.0>,
+include <tunables/global>
+
+profile candor-web /usr/lib/candor/source-web/candor-web {
+  include <abstractions/base>
+
+  /usr/lib/candor/source-web/candor-web mr,
+  /usr/share/candor/web/ r,
+  /usr/share/candor/web/** r,
+  /run/candor/config/ r,
+  /run/candor/config/** r,
+
+  # Inherited AF_UNIX stream listener "http" (from tor) and the inherited stderr stream.
+  network unix stream,
+  unix (accept, receive, send, getattr, getopt, setopt, shutdown) type=stream,
+  # Client of the sealer (07 §5.2) and intake store (07 §5.3), SOCK_SEQPACKET.
+  network unix seqpacket,
+  unix (create, connect, receive, send, getattr, getopt, setopt, shutdown) type=seqpacket,
+  /run/candor/sealer/seal.sock rw,
+  /run/candor/istore/istore.sock rw,
+
+  # Rust std runtime: available_parallelism() reads the cgroup CPU quota.
+  @{PROC}/@{pid}/cgroup r,
+  @{PROC}/@{pid}/mountinfo r,
+  /sys/fs/cgroup/**/cpu.max r,
+  /sys/devices/system/cpu/online r,
+  # Signals from systemd only.
+  signal (receive) peer=unconfined,
+
+  # ---- explicit denials (win over any allow, incl. abstractions; denials are audited) ----
+  deny capability,
+  deny ptrace,
+  deny mount,
+  deny umount,
+  deny pivot_root,
+  deny network inet6,
+  deny network netlink,
+  deny network packet,
+  deny @{PROC}/*/mem rw,
+  deny @{PROC}/*/environ r,
+  deny @{PROC}/kcore r,
+  deny /dev/mem rw,
+  deny /dev/kmem rw,
+  # No syslog path: output only via the inherited stderr stream (typed candor-log, ADR-016).
+  deny /dev/log w,
+  deny /run/systemd/journal/dev-log w,
+  deny /run/systemd/journal/socket w,
+  deny /run/systemd/journal/syslog w,
+  deny /run/tor-instances/** rwklx,
+  deny /var/lib/tor-instances/** rwklx,
+  deny /var/lib/postgresql/** rwklx,
+  deny /etc/credstore.encrypted/** rwklx,
+  deny /etc/tor/** rwklx,
+  deny /etc/shadow r,
+  deny /etc/gshadow r,
+  deny /boot/** rwklx,
+  deny network inet,
+  deny /var/lib/candor/** rwklx,
+  deny /run/candor/staging/** rwklx,
+  deny /run/candor/directory/** rwklx,
+  deny /run/credentials/** rwklx,
+}

@@ -1,0 +1,83 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# AppArmor profile for C-08 candor-intake-store (17 §5.2 "candor-relay-endpoint" role is
+# implemented by this process, 07 §4.1/§5.3). Enforce mode. Installed as
+# /etc/apparmor.d/candor-intake-store; attached by AppArmorProfile=candor-intake-store.
+# Allowed: its blob directory and staging tmpfs (ciphertext only), the Key Directory snapshot
+# it publishes for the sealer, the PostgreSQL socket, its own credentials; accept on the
+# inherited IPC (SEQPACKET) and relay (TCP 7443, bound by PID 1) listeners.
+# Denied: exec, capabilities, IPv6/netlink/packet, any tor/sealer/web state.
+abi <abi/3.0>,
+include <tunables/global>
+
+profile candor-intake-store /usr/lib/candor/intake-store/candor-intake-store {
+  include <abstractions/base>
+
+  /usr/lib/candor/intake-store/candor-intake-store mr,
+  /run/candor/config/ r,
+  /run/candor/config/** r,
+  /var/lib/candor/relay/ r,
+  /var/lib/candor/relay/*.crt r,
+  /run/credentials/candor-intake-store.service/ r,
+  /run/credentials/candor-intake-store.service/* r,
+
+  # Ciphertext store (07 §5.3) and RAM-only staging (ADR-034). Locks for atomic commit; no
+  # hard links ("l") and no exec.
+  /var/lib/candor/intake/ r,
+  /var/lib/candor/intake/** rwk,
+  /run/candor/staging/ r,
+  /run/candor/staging/** rw,
+  /run/candor/directory/ r,
+  /run/candor/directory/** rw,
+
+  # Inherited stderr stream; PostgreSQL client over the Unix socket (DB-022).
+  network unix stream,
+  unix (create, connect, receive, send, getattr, getopt, setopt, shutdown) type=stream,
+  /run/candor/intake-pg/.s.PGSQL.5432 rw,
+  # Inherited istore.sock listener (SEQPACKET).
+  network unix seqpacket,
+  unix (accept, receive, send, getattr, getopt, setopt, shutdown) type=seqpacket,
+  # Inherited relay listener (TCP 7443 on relay0). The unit's RestrictAddressFamilies=AF_UNIX
+  # prevents creating any new IP socket; this rule only lets it accept/serve the inherited one.
+  network inet stream,
+
+  # Rust std runtime: available_parallelism() reads the cgroup CPU quota.
+  @{PROC}/@{pid}/cgroup r,
+  @{PROC}/@{pid}/mountinfo r,
+  /sys/fs/cgroup/**/cpu.max r,
+  /sys/devices/system/cpu/online r,
+  # Signals from systemd only.
+  signal (receive) peer=unconfined,
+
+  # ---- explicit denials (win over any allow, incl. abstractions; denials are audited) ----
+  deny capability,
+  deny ptrace,
+  deny mount,
+  deny umount,
+  deny pivot_root,
+  deny network inet6,
+  deny network netlink,
+  deny network packet,
+  deny @{PROC}/*/mem rw,
+  deny @{PROC}/*/environ r,
+  deny @{PROC}/kcore r,
+  deny /dev/mem rw,
+  deny /dev/kmem rw,
+  # No syslog path: output only via the inherited stderr stream (typed candor-log, ADR-016).
+  deny /dev/log w,
+  deny /run/systemd/journal/dev-log w,
+  deny /run/systemd/journal/socket w,
+  deny /run/systemd/journal/syslog w,
+  deny /run/tor-instances/** rwklx,
+  deny /var/lib/tor-instances/** rwklx,
+  deny /var/lib/postgresql/** rwklx,
+  deny /etc/credstore.encrypted/** rwklx,
+  deny /etc/tor/** rwklx,
+  deny /etc/shadow r,
+  deny /etc/gshadow r,
+  deny /boot/** rwklx,
+  deny network inet dgram,
+  deny network inet raw,
+  deny /run/candor/source-web/** rwklx,
+  deny /run/candor/sealer/** rwklx,
+  deny /run/credentials/candor-sealer.service/** rwklx,
+}
