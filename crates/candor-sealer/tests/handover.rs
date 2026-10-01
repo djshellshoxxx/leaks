@@ -3,8 +3,10 @@
 //! the sealed bundle is an immutable anonymous file passed as a descriptor
 //! over a SEQPACKET socketpair (`SCM_RIGHTS`, safe rustix API), with the
 //! 41-byte header of `candor-intake-store::staged`; `Ok` only on the store's
-//! commit acknowledgement. The "store" here is a minimal receiver that checks
-//! what the real one checks.
+//! two acknowledgements `0x02 ‖ h` (copied, length-scaled deadline) and
+//! `0x01 ‖ h` (committed, 60 s), both echoing the bundle hash
+//! (AUD-RM2-STO-29). The "store" here is a minimal receiver that checks what
+//! the real one checks.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -20,9 +22,11 @@ use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, OwnedFd};
 
 use candor_sealer::server::handover::{
-    ACK_COMMITTED, ACK_REFUSED, MSG_LEN, StoreConnection, VERSION,
+    ACK_COMMITTED, ACK_COPIED, ACK_LEN, ACK_REFUSED, MAX_BUNDLE_LEN, MSG_LEN, StoreConnection,
+    VERSION, copy_deadline, encode_ack,
 };
-use candor_sealer::server::sink::{SinkError, StagedBundle};
+use candor_core::header::ObjectType;
+use candor_sealer::server::sink::{Blob, EnvelopeGroup, EnvelopeObject, SinkError, StagedBundle};
 use candor_sealer::server::{ChaffConfig, Limits};
 use common::*;
 use rustix::fs::SealFlags; // safefs-lint: allow(memfd seal flags)
@@ -139,7 +143,8 @@ async fn bundle_is_handed_over_as_a_sealed_descriptor() {
             off += k;
         }
         assert_eq!(candor_core::hash::sha256(&[&buf]), expect_hash);
-        reply(&store_end, &[ACK_COMMITTED], None);
+        reply(&store_end, &encode_ack(ACK_COPIED, &expect_hash), None);
+        reply(&store_end, &encode_ack(ACK_COMMITTED, &expect_hash), None);
         buf
     });
     let mut conn = StoreConnection::new(sealer_end);
@@ -151,38 +156,78 @@ async fn bundle_is_handed_over_as_a_sealed_descriptor() {
     assert_eq!(bytes.len() as u64, b.len());
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn hand_over_fails_closed_without_a_commit_ack() {
-    let (_f, b) = bundle().await;
-    // Refused.
+/// Run one hand-over against a scripted store that answers `answers` (each a
+/// separate SEQPACKET message) after receiving the bundle.
+fn scripted(b: &StagedBundle, answers: Vec<Vec<u8>>) -> Result<(), SinkError> {
     let (s, st) = pair();
     let t = std::thread::spawn(move || {
         let _ = receive(&st);
-        reply(&st, &[ACK_REFUSED], None);
+        for a in answers {
+            reply(&st, &a, None);
+        }
+        // Keep the socket open until the sealer side is done.
+        let mut b = [0u8; 1];
+        let _ = rustix::net::recv(&st, &mut b, rustix::net::RecvFlags::empty());
+    });
+    let mut conn = StoreConnection::with_ack_timeout(s, std::time::Duration::from_millis(300));
+    let r = conn.hand_over(b);
+    if r.is_err() {
+        assert!(!conn.is_open(), "closed after a failure");
+    }
+    drop(conn);
+    t.join().unwrap();
+    r
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hand_over_fails_closed_without_a_commit_ack() {
+    let (_f, b) = bundle().await;
+    let h = b.sha256();
+    let copied = encode_ack(ACK_COPIED, &h).to_vec();
+    let committed = encode_ack(ACK_COMMITTED, &h).to_vec();
+    // The well-formed exchange succeeds.
+    assert_eq!(scripted(&b, vec![copied.clone(), committed.clone()]), Ok(()));
+    // Refused, before or after the copy.
+    let refused = encode_ack(ACK_REFUSED, &h).to_vec();
+    assert_eq!(scripted(&b, vec![refused.clone()]), Err(SinkError));
+    assert_eq!(scripted(&b, vec![copied.clone(), refused]), Err(SinkError));
+    // STO-29: the commit ack without the copied ack first.
+    assert_eq!(scripted(&b, vec![committed.clone()]), Err(SinkError));
+    // STO-29: the copied ack twice (no commit).
+    assert_eq!(scripted(&b, vec![copied.clone(), copied.clone()]), Err(SinkError));
+    // STO-29 hash echo: an ack for another bundle is refused in either phase.
+    let mut other = h;
+    other[0] ^= 1;
+    assert_eq!(
+        scripted(&b, vec![encode_ack(ACK_COPIED, &other).to_vec(), committed.clone()]),
+        Err(SinkError)
+    );
+    assert_eq!(
+        scripted(&b, vec![copied.clone(), encode_ack(ACK_COMMITTED, &other).to_vec()]),
+        Err(SinkError)
+    );
+    // Old one-byte acks (protocol 1), an unknown code, short and long acks.
+    assert_eq!(scripted(&b, vec![vec![ACK_COMMITTED]]), Err(SinkError));
+    assert_eq!(scripted(&b, vec![encode_ack(0x03, &h).to_vec()]), Err(SinkError));
+    assert_eq!(
+        scripted(&b, vec![copied[..ACK_LEN - 1].to_vec()]),
+        Err(SinkError)
+    );
+    let mut long = committed.clone();
+    long.push(0);
+    assert_eq!(scripted(&b, vec![copied.clone(), long]), Err(SinkError));
+    // A descriptor sent back with an ack is refused (and closed).
+    let (s, st) = pair();
+    let (c2, k2) = (copied.clone(), committed.clone());
+    let t = std::thread::spawn(move || {
+        let (_, _, fds) = receive(&st);
+        reply(&st, &c2, fds.first());
+        reply(&st, &k2, None);
     });
     let mut conn = StoreConnection::new(s);
     assert_eq!(conn.hand_over(&b), Err(SinkError));
-    assert!(!conn.is_open(), "closed after a failure");
-    assert_eq!(conn.hand_over(&b), Err(SinkError));
-    t.join().unwrap();
-    // An unknown byte, or more than one byte.
-    for answer in [&[0x02u8][..], &[ACK_COMMITTED, 0][..]] {
-        let (s, st) = pair();
-        let a = answer.to_vec();
-        let t = std::thread::spawn(move || {
-            let _ = receive(&st);
-            reply(&st, &a, None);
-        });
-        assert_eq!(StoreConnection::new(s).hand_over(&b), Err(SinkError));
-        t.join().unwrap();
-    }
-    // A descriptor sent back with the ack is refused (and closed).
-    let (s, st) = pair();
-    let t = std::thread::spawn(move || {
-        let (_, _, fds) = receive(&st);
-        reply(&st, &[ACK_COMMITTED], fds.first());
-    });
-    assert_eq!(StoreConnection::new(s).hand_over(&b), Err(SinkError));
+    assert!(!conn.is_open());
+    assert_eq!(conn.hand_over(&b), Err(SinkError), "closed connection refuses");
     t.join().unwrap();
     // The store goes away without answering.
     let (s, st) = pair();
@@ -192,25 +237,88 @@ async fn hand_over_fails_closed_without_a_commit_ack() {
     });
     assert_eq!(StoreConnection::new(s).hand_over(&b), Err(SinkError));
     t.join().unwrap();
-    // A store that answers too late: bounded wait, failure, socket closed —
-    // the late ack can never be credited to the next bundle.
+    // A store that never reports the copy: bounded by the copy deadline
+    // (base 200 ms + the length term of a small bundle, 1 s), then closed —
+    // a late ack can never be credited to the next bundle.
     let (s, st) = pair();
     let t = std::thread::spawn(move || {
         let _ = receive(&st);
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        // The late ack goes nowhere: the sealer side is closed.
-        let late = rustix::net::send(&st, &[ACK_COMMITTED], SendFlags::NOSIGNAL);
+        std::thread::sleep(std::time::Duration::from_millis(1_600));
+        let late = rustix::net::send(&st, &copied, SendFlags::NOSIGNAL);
         assert!(late.is_err(), "late ack must not reach an open socket");
     });
     let mut conn = StoreConnection::with_ack_timeout(s, std::time::Duration::from_millis(200));
     let start = std::time::Instant::now();
     assert_eq!(conn.hand_over(&b), Err(SinkError));
-    assert!(start.elapsed() < std::time::Duration::from_millis(450));
+    assert!(start.elapsed() < std::time::Duration::from_millis(1_500));
     assert!(!conn.is_open());
+    t.join().unwrap();
+    // A store that copies but never commits: bounded by the commit deadline.
+    let (s, st) = pair();
+    let c3 = encode_ack(ACK_COPIED, &h).to_vec();
+    let t = std::thread::spawn(move || {
+        let _ = receive(&st);
+        reply(&st, &c3, None);
+        std::thread::sleep(std::time::Duration::from_millis(2_000));
+        let late = rustix::net::send(&st, &committed, SendFlags::NOSIGNAL);
+        assert!(late.is_err(), "late commit ack must not reach an open socket");
+    });
+    let mut conn = StoreConnection::with_ack_timeout(s, std::time::Duration::from_millis(200));
+    let start = std::time::Instant::now();
     assert_eq!(conn.hand_over(&b), Err(SinkError));
+    // copy phase answered at once; commit phase bounded by 200 ms.
+    assert!(start.elapsed() < std::time::Duration::from_millis(1_500));
     t.join().unwrap();
     // Peer already closed: the send itself fails (no SIGPIPE).
     let (s, st) = pair();
     drop(st);
     assert_eq!(StoreConnection::new(s).hand_over(&b), Err(SinkError));
+}
+
+/// AUD-RM2-STO-29: the copy deadline is length-scaled (a 1 GiB bundle gets
+/// 22 s of copy time on top of the base) and the cap is shared with the
+/// store; an oversize bundle is refused without sending anything.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn copy_deadline_and_bundle_cap() {
+    assert_eq!(
+        copy_deadline(1 << 30),
+        std::time::Duration::from_secs(10 + 22)
+    );
+    assert_eq!(MAX_BUNDLE_LEN, 4 << 30);
+    let (_f, b) = bundle().await;
+    assert!(b.len() <= MAX_BUNDLE_LEN);
+    // The group helper hands over exactly the bundle object.
+    let (s, st) = pair();
+    let h = b.sha256();
+    let t = std::thread::spawn(move || {
+        let (hdr, n, fds) = receive(&st);
+        assert_eq!((n, fds.len(), hdr[0]), (MSG_LEN, 1, VERSION));
+        assert_eq!(&hdr[9..], &h);
+        reply(&st, &encode_ack(ACK_COPIED, &h), None);
+        reply(&st, &encode_ack(ACK_COMMITTED, &h), None);
+    });
+    let obj = |object_type, blob| EnvelopeObject {
+        object_type,
+        object_hash: [0; 32],
+        slot_block: Vec::new(),
+        blob,
+    };
+    let group = EnvelopeGroup {
+        channel_id: CHANNEL,
+        main: obj(ObjectType::Submission, Blob::Inline(vec![1])),
+        bundle: obj(ObjectType::AttachmentBundle, Blob::Staged(b.clone())),
+        identity: obj(ObjectType::Identity, Blob::Inline(vec![3])),
+        disposition_ct: Vec::new(),
+    };
+    let mut conn = StoreConnection::new(s);
+    conn.hand_over_group_bundle(&group).unwrap();
+    t.join().unwrap();
+    assert!(conn.is_open());
+    // An inline bundle cannot be handed over: fail closed, connection closed.
+    let (s, _st) = pair();
+    let mut bad = group.clone();
+    bad.bundle.blob = Blob::Inline(vec![2]);
+    let mut conn = StoreConnection::new(s);
+    assert_eq!(conn.hand_over_group_bundle(&bad), Err(SinkError));
+    assert!(!conn.is_open());
 }
