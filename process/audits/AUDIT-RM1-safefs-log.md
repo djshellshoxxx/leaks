@@ -616,3 +616,30 @@ Re-tested HEAD `8163ede` (WIP 422fbbb/5b05257/8163ede) plus the uncommitted tree
 - **LOG-25 (Low): sent to the fixer** (crash-loss marker for staged slot events).
 - **Nightly fuzz job:** added as `.github/workflows/fuzz-nightly.yml`, covering every target in core, safefs, log and sealer.
 - **O_TMPFILE wording:** tracked before RM-2 go-live.
+
+---
+
+## Re-test (round 4, candor-log delta)
+
+Commit `8517304`; candor-log clean in the working tree. Clippy `-D warnings` is clean. `cargo test -p candor-log`: 102 passed, 0 failed (incl. `crafted_failure_seq_cannot_be_logged`). Scratch-corpus fuzz smoke runs (`fuzz_audit_log_verify` cov 1486, `fuzz_jsonl_read_verify` cov 2976, 40 s each): clean. The repo is unchanged.
+
+| Finding | Status | Evidence / remark |
+|---|---|---|
+| LOG-24 (M) | **Fixed** | `origin_ok(key, max_seq)`: a `Seq` must be ≤ the writer's largest `next_seq`, and a `SeqRange` must satisfy `first ≤ last < max_seq`. My round-3 PoC (`r3seq`, `0xcb007107000001bb`) now gets `emit` → `Err(ForeignArtefact)` |
+| LOG-24 residual | **Rated Low** (new ID LOG-26) | See below |
+| LOG-25 (L) | **Fixed** | `note_restart()` stages a date-only `sys.stage_lost {stream}` per slot stream, written to `sys-slot` at the next boundary (no finer time). A full stage returns `StageFull`. Effectiveness depends on C-24 calling it at every start-up; the doc comment says so. Track it as a C-24 integration test |
+| Lead dispositions after round 3 | **Reviewed: consistent** | safefs PASS; LOG-14 accepted for 90 days with the C-22 system-actor condition (matches the round-3 ruling); fuzz-nightly workflow added (closes the SFS-08/LOG-10 CI deferral); O_TMPFILE tracked before RM-2 |
+
+### AUD-RM1-LOG-26 — Counter-bounded sequence fields still carry ≈log2(next_seq) bits
+- Severity: Low
+- Location: crates/candor-log/src/field.rs `Seq`/`SeqRange::origin_ok`; producers `Seq::of_failure`, `SeqRange::within`
+- Description: Through a crafted verification failure a caller can still choose any value below the counter. Once a stream holds n events, that is ≈log2 n bits per `Seq`, and ≈2·log2 n bits per `SeqRange`. A `SeqRange` carries an IPv4 address once the largest stream exceeds about 92 k events, which is realistic within weeks. The bound is also taken over the *largest* stream, not the stream the field names. Exploitation still needs a deliberate covert encoding by a developer, the producing APIs are limited to verification tooling, and capacity has dropped from 64 caller bits to a counter-bounded value. Low.
+- Fix recommendation: Bound against the named stream's `next_seq`. Add workspace `disallowed-methods` for `Seq::of_failure` and `SeqRange::within` outside the audit-tooling crate(s), with a reasoned allow at the legitimate call sites, so code review sees every producer. Optionally, clamp failure seqs in `verify_inner` to the walked position.
+- Status: Open (Low; does not block)
+
+**candor-log: Gate PASS 2026-10-01 8517304.** There are no open Critical, High or Medium findings. Open Lows (LOG-25 C-24 call-site test, LOG-26) and the accepted LOG-14 are tracked. **candor-safefs: PASS** (unchanged).
+
+## Lead dispositions after round 4 (2026-10-01)
+- **candor-log: gate PASS (8517304).**
+- **LOG-26 (Low):** fix assigned (bound against the named stream's counter; clippy bans on `Seq::of_failure` / `SeqRange::within` outside the audit tooling).
+- **LOG-25 call site:** C-24 must call `AuditLog::note_restart()` at every start-up, with an integration test; tracked for C-24.

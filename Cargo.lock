@@ -270,6 +270,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "candor-safe-read"
+version = "0.1.0"
+dependencies = [
+ "md-5",
+ "rustix",
+ "tempfile",
+]
+
+[[package]]
 name = "candor-safefs"
 version = "0.1.0"
 dependencies = [

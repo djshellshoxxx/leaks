@@ -593,7 +593,17 @@ check_pg() {
     if printf '%s\n' "$hba" | awk '$3 ~ /(^|,)\+?(postgres|all)(,|$)/ && $4!="reject" {bad=1} END {exit bad?0:1}'; then fail pg.hba_no_superuser "a postgres/all line other than reject is present (09 s10, D-11)"; else ok pg.hba_no_superuser; fi
     last=$(printf '%s\n' "$hba" | tail -n 1)
     if [ "$last" = "local all all reject" ]; then ok pg.hba_reject_last; else fail pg.hba_reject_last "last line must be 'local all all reject'"; fi
-    pg_exact pg.hba_exact hba "$hba"
+    # ADR-054 / AUD-RM2-DEP-25: every peer line names the same single database, exactly. The
+    # release tree carries the installer placeholder; an installed host must have a real name
+    # (and the --pg-db name, when given).
+    local hdb
+    hdb=$(printf '%s\n' "$hba" | awk '$4 != "reject" {print $2}' | sort -u)
+    if [ "$(printf '%s\n' "$hdb" | grep -c .)" -ne 1 ]; then fail pg.hba_database "peer lines must name one and the same database"; hdb=""
+    elif [ "$MODE" = static ] && [ "$hdb" = candor_intake_TENANT ]; then ok pg.hba_database "installer placeholder candor_intake_TENANT"
+    elif ! printf '%s' "$hdb" | grep -qxE 'candor_intake_[a-z0-9_]{1,49}'; then fail pg.hba_database "database field must be one exact candor_intake_<tenant> name (no regex, list, all or placeholder)"; hdb=""
+    elif [ -n "$PGDB" ] && [ "$hdb" != "$PGDB" ]; then fail pg.hba_database "pg_hba names another database than --pg-db"; hdb=""
+    else ok pg.hba_database "exactly one intake database"; fi
+    pg_exact pg.hba_exact hba "$hba" "${hdb:-<invalid>}"
   fi
   if snap pg.ident_conf "$PGIDENT" pg_ident.conf; then
     pg_exact pg.ident_exact ident "$(sed -e 's/#.*$//' "$SNAP" | trim | tr -s ' \t' '  ' | grep -v '^$')"
@@ -660,10 +670,24 @@ pg_maint_role() { # normalised-conf
       (r.rolsuper OR r.rolcreaterole OR r.rolcreatedb OR r.rolreplication OR r.rolbypassrls OR r.rolinherit)::text,
       (SELECT pg_catalog.pg_get_userbyid(d.datdba) FROM pg_catalog.pg_database d WHERE d.datname = pg_catalog.current_database()),
       (SELECT count(*) FROM pg_catalog.pg_class WHERE relowner = r.oid) + (SELECT count(*) FROM pg_catalog.pg_namespace WHERE nspowner = r.oid)
-        + (SELECT count(*) FROM pg_catalog.pg_proc WHERE proowner = r.oid) + (SELECT count(*) FROM pg_catalog.pg_type WHERE typowner = r.oid)
+        + (SELECT count(*) FROM pg_catalog.pg_proc WHERE proowner = r.oid) + (SELECT count(*) FROM pg_catalog.pg_type WHERE typowner = r.oid),
+      (SELECT count(*) FROM pg_catalog.pg_database WHERE NOT datistemplate AND datname <> 'postgres'),
+      (SELECT d.datconnlimit FROM pg_catalog.pg_database d WHERE d.datname = pg_catalog.current_database()),
+      r.rolconnlimit,
+      (SELECT count(*) FROM pg_catalog.pg_db_role_setting s WHERE s.setrole = 0),
+      (SELECT count(*) FROM pg_catalog.pg_db_role_setting s CROSS JOIN LATERAL pg_catalog.unnest(s.setconfig) AS c(kv)
+         WHERE s.setrole <> 0 AND (s.setdatabase = 0 OR pg_catalog.split_part(c.kv, '=', 1) NOT IN
+           ('search_path', 'statement_timeout', 'idle_in_transaction_session_timeout', 'temp_file_limit', 'default_transaction_read_only')))
       FROM pg_catalog.pg_roles r WHERE r.rolname = current_user" </dev/null 2>/dev/null) || { fail pg.maint_role "cannot connect as candor_intake_maint (peer map maint) to --pg-db"; return; }
-  local mem nmem attr dba own
-  IFS='|' read -r mem nmem attr dba own <<< "$out"
+  local mem nmem attr dba own ndb dcl rcl dbset rset
+  IFS='|' read -r mem nmem attr dba own ndb dcl rcl dbset rset <<< "$out"
+  # ADR-054 / AUD-RM2-DEP-25: one intake database per cluster, and none of the owner's DoS
+  # levers in use (connection limits, ALTER DATABASE ... SET, other role settings).
+  if [ "$ndb" = 1 ]; then ok pg.maint_role.single_database "the cluster holds exactly one intake database"; else fail pg.maint_role.single_database "the cluster holds $ndb databases besides postgres and the templates (ADR-054: exactly one)"; fi
+  if [ "$dcl" = -1 ]; then ok pg.maint_role.db_connlimit "no CONNECTION LIMIT on the database"; else fail pg.maint_role.db_connlimit "ALTER DATABASE ... CONNECTION LIMIT set"; fi
+  if [ "$rcl" = -1 ]; then ok pg.maint_role.role_connlimit "no CONNECTION LIMIT on candor_intake_maint"; else fail pg.maint_role.role_connlimit "CONNECTION LIMIT set on candor_intake_maint"; fi
+  if [ "$dbset" = 0 ]; then ok pg.maint_role.no_database_settings "no ALTER DATABASE ... SET"; else fail pg.maint_role.no_database_settings "$dbset database-wide setting row(s) (ALTER DATABASE ... SET)"; fi
+  if [ "$rset" = 0 ]; then ok pg.maint_role.role_settings "role settings only per database and on the store's allow-list"; else fail pg.maint_role.role_settings "$rset role setting(s) global or outside the allow-list"; fi
   case "$mem" in ""|"pg_checkpoint:false:true:false") ok pg.maint_role.memberships "member of pg_checkpoint only (no schema owner, no SET)" ;;
     *) fail pg.maint_role.memberships "candor_intake_maint is a member of another role (e.g. the schema owner), or with ADMIN/SET: $(printf '%s' "$mem" | tr ' ' '\n' | cut -d: -f1 | san_names)" ;; esac
   if [ "$nmem" = 0 ]; then ok pg.maint_role.no_members; else fail pg.maint_role.no_members "$nmem role(s) are members of candor_intake_maint"; fi
@@ -671,10 +695,10 @@ pg_maint_role() { # normalised-conf
   if [ "$dba" = candor_intake_maint ]; then ok pg.maint_role.db_owner "owns the tenant database"; else fail pg.maint_role.db_owner "tenant database is not owned by candor_intake_maint"; fi
   if [ "$own" = 0 ]; then ok pg.maint_role.owns_no_objects; else fail pg.maint_role.owns_no_objects "owns $own table/schema/function/type object(s) in the tenant database"; fi
 }
-pg_exact() { # rule kind text: normalised lines must equal the baseline's <kind>| lines, in order
+pg_exact() { # rule kind text [db]: normalised lines must equal the baseline's <kind>| lines, in order ({DB} -> db)
   local n
   printf '%s\n' "$3" | grep -v '^$' > "$WORK/$2.got"
-  awk -F'|' -v k="$2" '$1==k {print substr($0, length(k)+2)}' "$BASE" > "$WORK/$2.want"
+  awk -F'|' -v k="$2" -v db="${4:-}" '$1==k { l=substr($0, length(k)+2); if (db != "") gsub(/\{DB\}/, db, l); print l }' "$BASE" > "$WORK/$2.want"
   if cmp -s "$WORK/$2.got" "$WORK/$2.want"; then ok "$1" "$(wc -l < "$WORK/$2.want") line(s) equal the release file"
   else
     n=$(awk 'NR==FNR { a[FNR]=$0; na=FNR; next } { nb=FNR; if (!(FNR in a) || a[FNR]!=$0) { print FNR; f=1; exit } } END { if (!f) print (nb < na ? nb+1 : na+1) }' "$WORK/$2.want" "$WORK/$2.got")

@@ -24,7 +24,8 @@
 #   pg|<guc>|<b|s>|<value>      postgresql.conf, static (b = boolean, s = lower-case string)
 #   pgc|<guc>|<value>           effective value printed by `postgres -C <guc>` (--host)
 #   pg|<guc>|<b|s>|<value>      is also the allow-list: a key of the file not listed here FAILs
-#   hba|<line> / ident|<line>   pg_hba.conf / pg_ident.conf, normalised (comments dropped,
+#   hba|<line> / ident|<line>   pg_hba.conf / pg_ident.conf, normalised ({DB}: the one intake
+#                               database, AUD-RM2-DEP-25; comments dropped,
 #                               blanks collapsed), exact and in order (AUD-RM2-DEP-19)
 #   aa|<profile>|<statement>    AppArmor profile, normalised the same way, exact and in order
 #   aa-inet|<profile>           profile may allow `network inet stream` (AUD-RM2-DEP-15)
@@ -1024,9 +1025,9 @@ pg|log_executor_stats|b|off
 pg|log_statement_stats|b|off
 pg|client_min_messages|s|notice
 # ---------------------------------------------------------------- pg_hba / pg_ident, exact (09 §10, ADR-052(9), AUD-RM2-DEP-19)
-hba|local /^candor_intake_ candor_istore peer map=candor
-hba|local /^candor_intake_ candor_intake_maint peer map=maint
-hba|local /^candor_intake_ candor_intake_migrator peer map=migrate
+hba|local {DB} candor_istore peer map=candor
+hba|local {DB} candor_intake_maint peer map=maint
+hba|local {DB} candor_intake_migrator peer map=migrate
 hba|local all all reject
 ident|candor candor-istore candor_istore
 ident|maint candor-imaint candor_intake_maint

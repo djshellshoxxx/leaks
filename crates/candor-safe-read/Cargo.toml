@@ -1,0 +1,25 @@
+[package]
+name = "candor-safe-read"
+version = "0.1.0"
+description = "Race-free, size-capped reader for config-check inputs on the intake host (AUD-RM2-DEP-24/26, ADR-055(3))"
+license = "Apache-2.0 OR MIT"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "candor-safe-read"
+path = "src/main.rs"
+
+[dependencies]
+# openat2(RESOLVE_NO_SYMLINKS|RESOLVE_BENEATH), fstatat/fstat, O_NOFOLLOW|O_NONBLOCK without unsafe.
+rustix = { version = "=1.1.2", default-features = false, features = ["std", "fs"] }
+# dpkg records conffile digests as MD5 (--md5 mode only; consistency check, ADR/DEP-28).
+md-5 = { version = "=0.11.0", default-features = false }
+
+[dev-dependencies]
+tempfile = { version = "=3.23.0", default-features = false }
+
+[lints]
+workspace = true
