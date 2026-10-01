@@ -65,9 +65,13 @@ run_case() { # dir name base rel expr args...
   case "$expr" in
     -)  if [ -e "$d/$rel" ] || [ -L "$d/$rel" ]; then rm -f "$d/$rel"; else echo nochange > "$d.rc"; return; fi ;;
     +*) mkdir -p "$(dirname "$d/$rel")"; printf '%s\n' "${expr#+}" >> "$d/$rel" ;;
+    @*) # replace by a symlink; the original moves out of the tree (next to the copy)
+        mkdir -p "$(dirname "$d/$rel")"
+        if [ -e "$d/$rel" ] || [ -L "$d/$rel" ]; then mv -- "$d/$rel" "$d.orig"; fi
+        ln -s "${expr#@}" "$d/$rel" ;;
     *)  sed -i -e "$expr" "$d/$rel" ;;
   esac
-  if [ "$expr" != - ] && [ -f "$src/$rel" ] && cmp -s "$src/$rel" "$d/$rel"; then echo nochange > "$d.rc"; return; fi
+  case "$expr" in -|@*) ;; *) if [ -f "$src/$rel" ] && cmp -s "$src/$rel" "$d/$rel"; then echo nochange > "$d.rc"; return; fi ;; esac
   while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do wait -n; done
   ( "$TOOLS/config-check.sh" -q "$@" > "$d.out" 2>&1; echo $? > "$d.rc" ) &
 }
@@ -79,12 +83,18 @@ mutate_results() {
   for i in $(seq 1 "$MUTN"); do
     name=$(cat "$T/mut.$i.name"); rc=$(cat "$T/mut.$i.rc" 2>/dev/null || echo none)
     if [ "$rc" = nochange ]; then bad "mutation '$name' did not change its file (test bug)"
+    elif grep -q CANDORLEAKMARKER "$T/mut.$i.out"; then bad "config-check printed content of a file it must not read: $name"
     elif [ "$rc" = 30 ]; then pass "config-check rejects: $name ($(grep -c ' FAIL ' "$T/mut.$i.out") rule(s))"
     else bad "config-check accepted broken copy: $name (exit $rc)"; fi
   done
 }
 # An nft file for the include bypass (AUD-RM2-DEP-02): would open egress for every UID.
 printf 'insert rule inet candor_intake output accept\n' > "$T/extra.nft"
+# Files a symlinked input points at (AUD-RM2-DEP-17): their content must never be read or
+# printed (mutate_results fails on the marker in any report).
+printf 'CANDORLEAKMARKER 1\n_apt:CANDORLEAKMARKER:20501:0:99999:7:::\n' > "$T/secret"
+printf '[Service]\nCANDORLEAKMARKER=1\n' > "$T/secret.conf"
+mkdir -p "$T/tordir/candor-intake"; cp "$INTAKE/torrc" "$T/tordir/candor-intake/torrc"
 FP=0123456789ABCDEF0123456789ABCDEF01234567
 # torrc (16 §7.1/§7.4, NET-002/005/006/008/009/011, LOG-005)
 mutate "tor log to file"               torrc 's|^Log warn stderr$|Log notice file /var/log/tor/notices.log|'
@@ -239,8 +249,58 @@ mutate "DEP-09 coredump stored"        coredump.conf.d/50-candor-intake.conf 's|
 mutate "DEP-11 tor group torctl"       systemd/tor@candor-intake.service 's|^Group=_tor-candor-intake$|Group=_candor-torctl|'
 mutate "DEP-12 tor /var/tmp visible"   systemd/tor@candor-intake.service '/^InaccessiblePaths=-\/var\/tmp$/d'
 
+# ---- AUD-RM2-DEP round 2 (DEP-15..22), AUD-RM2-SEA-16, lead additions for STO-08/11/23/24
+mutate "DEP-15 sealer /** rwlkix + network," apparmor/candor-sealer 's|^  deny network inet,$|  /** rwlkix,\n  network,|'
+mutate "DEP-15 tor /usr/bin/** ux"          apparmor/candor-tor-intake 's|^  /usr/bin/tor mr,$|  /usr/bin/tor mr,\n  /usr/bin/** ux,|'
+mutate "DEP-15 web flags=(complain)"        apparmor/candor-web 's|^profile candor-web /usr/lib/candor/source-web/candor-web {$|profile candor-web /usr/lib/candor/source-web/candor-web flags=(complain) {|'
+mutate "DEP-15 pg capability sys_admin"     apparmor/candor-intake-pg 's|^  deny capability,$|  capability sys_admin,|'
+mutate "DEP-15 store change_profile"        apparmor/candor-intake-store 's|^  deny capability,$|  deny capability,\n  change_profile -> unconfined,|'
+mutate "DEP-15 maint pux transition"        apparmor/candor-intake-maint 's|^  /run/candor/config/ r,$|  /run/candor/config/ r,\n  /usr/bin/** pux,|'
+mutate "DEP-15 web #include local"          apparmor/candor-web 's|^  include <abstractions/base>$|  include <abstractions/base>\n  #include <local/candor-web>|'
+mutate "DEP-15 tor network inet (any type)" apparmor/candor-tor-intake 's|^  network inet stream,$|  network inet,|'
+mutate "DEP-15 sealer deny rule removed"    apparmor/candor-sealer '/^  deny ptrace,$/d'
+mutate "DEP-16 sealer drop-in re-allows io_uring" systemd/candor-sealer.service.d/zz.conf $'+[Service]\nSystemCallFilter=io_uring_setup io_uring_enter io_uring_register'
+mutate "DEP-16 sealer deny line drops userfaultfd" systemd/candor-sealer.service 's| userfaultfd | |'
+mutate "DEP-16 sealer re-add line widened"  systemd/candor-sealer.service 's|^SystemCallFilter=seccomp landlock_create_ruleset|SystemCallFilter=seccomp bpf landlock_create_ruleset|'
+mutate "DEP-17 torrc is a symlink"          torrc "@$T/secret"
+mutate "DEP-17 pg conf is a symlink"        postgresql/candor-intake.conf "@$T/secret"
+mutate "DEP-17 pg_hba is a symlink"         postgresql/pg_hba.conf "@$T/secret"
+mutate "DEP-17 AppArmor profile symlink"    apparmor/candor-web "@$T/secret"
+mutate "DEP-17 unit drop-in is a symlink"   systemd/candor-intake-web.service.d/zz.conf "@$T/secret.conf"
+mutate "DEP-17 sysctl file is a symlink"    sysctl.d/90-candor-intake.conf "@$T/secret"
+mutate "DEP-19 pg_hba postgres peer line"   postgresql/pg_hba.conf 's|^local   /^candor_intake_  candor_istore |local all postgres peer\n&|'
+mutate "DEP-19 pg_hba migrator to all dbs"  postgresql/pg_hba.conf 's|^local   /^candor_intake_  candor_intake_migrator|local   all               candor_intake_migrator|'
+mutate "DEP-19 pg_ident extra mapping"      postgresql/pg_ident.conf '+candor     root             candor_istore'
+mutate "DEP-19 pg key not on allow-list"    postgresql/candor-intake.conf "+session_replication_role = 'replica'"
+mutate "DEP-19 pg unix_socket_group"        postgresql/candor-intake.conf "s|^unix_socket_group = 'candor-istore'|unix_socket_group = 'candor-web'|"
+mutate "DEP-19 pg dynamic_library_path"     postgresql/candor-intake.conf "s|^dynamic_library_path = '\$libdir'|dynamic_library_path = '/tmp:\$libdir'|"
+mutate "STO-08 temp_file_limit unlimited"   postgresql/candor-intake.conf "s|^temp_file_limit = '256MB'|temp_file_limit = -1|"
+mutate "STO-08 idle-in-transaction off"     postgresql/candor-intake.conf "s|^idle_in_transaction_session_timeout = '60s'|idle_in_transaction_session_timeout = 0|"
+mutate "STO-11 track_counts on"             postgresql/candor-intake.conf 's|^track_counts = off|track_counts = on|'
+mutate "STO-11 track_activities on"         postgresql/candor-intake.conf 's|^track_activities = off|track_activities = on|'
+mutate "STO-11 autovacuum on"               postgresql/candor-intake.conf 's|^autovacuum = off|autovacuum = on|'
+mutate "STO-11 pg stats dir not writable"   systemd/candor-intake-pg.service 's|^ReadWritePaths=/run/candor/intake-pg /run/candor/intake-pg-stat$|ReadWritePaths=/run/candor/intake-pg|'
+mutate "STO-23 vacuum timer hourly"         systemd/candor-intake-vacuum.timer 's|^OnCalendar=.*|OnCalendar=hourly|'
+mutate "STO-23 maint timer randomised"      systemd/candor-intake-maint.timer 's|^RandomizedDelaySec=0$|RandomizedDelaySec=1h|'
+mutate "STO-23 maint timer catch-up"        systemd/candor-intake-maint.timer 's|^Persistent=false$|Persistent=true|'
+mutate "STO-23 maint timer removed"         systemd/candor-intake-maint.timer -
+mutate "STO-24 maint runs as candor-istore" systemd/candor-intake-maint.service 's|^User=candor-imaint$|User=candor-istore|'
+mutate "STO-24 vacuum with network"         systemd/candor-intake-vacuum.service 's|^PrivateNetwork=yes$|PrivateNetwork=no|'
+mutate "STO-24 maint output to journal"     systemd/candor-intake-maint.service 's|^StandardError=null$|StandardError=journal|'
+mutate "STO-24 maint unconfined"            systemd/candor-intake-maint.service '/^AppArmorProfile=candor-intake-maint$/d'
+mutate "DEP-20 exception-trace on"          sysctl.d/90-candor-intake.conf 's|^debug.exception-trace = 0$|debug.exception-trace = 1|'
+mutate "DEP-22 mon_hosts 0.0.0.0 + broadcast" nftables.conf 's|^  set mon_hosts  { type ipv4_addr; }|  set mon_hosts  { type ipv4_addr; elements = { 0.0.0.0, 255.255.255.255 } }|'
+mutate "DEP-22 admin_jump loopback"         nftables.conf 's|^  set admin_jump { type ipv4_addr; }|  set admin_jump { type ipv4_addr; elements = { 127.0.0.1 } }|'
+mutate "DEP-22 core_relay multicast"        nftables.conf 's|^  set core_relay { type ipv4_addr; }|  set core_relay { type ipv4_addr; elements = { 224.0.0.1 } }|'
+mutate "SEA-16 sealer socket SEQPACKET"     systemd/candor-sealer.socket 's|^ListenStream=|ListenSequentialPacket=|'
+mutate "SEA-16 sealer loses staging"        systemd/candor-sealer.service '/^ReadWritePaths=\/run\/candor\/staging$/d'
+mutate "SEA-16 store writes staging"        systemd/candor-intake-store.service 's|^ReadWritePaths=/run/candor/directory$|ReadWritePaths=/run/candor/staging /run/candor/directory|'
+mutate "SEA-16 staging owned by istore"     systemd/run-candor-staging.mount 's|X-mount.owner=candor-sealer|X-mount.owner=candor-istore|'
+mutate "SEA-16 store AppArmor staging rw"   apparmor/candor-intake-store 's|^  /var/lib/candor/intake/ r,$|  /var/lib/candor/intake/ r,\n  /run/candor/staging/** rw,|'
+mutate "SEA-16 sealer MemoryMax w/o staging" systemd/candor-sealer.service 's|^MemoryMax=6656M$|MemoryMax=2560M|'
+
 # ---- --host --root: a synthetic installed host (README install layout, CE-SINGLE)
-HONLY=tor,nft,units,journald,kernel,dns,host
+HONLY=tor,nft,units,journald,kernel,dns,apparmor,host
 HR="$T/hostroot"
 mkhost() {
   local r=$1 u d
@@ -259,6 +319,14 @@ mkhost() {
   cp "$INTAKE/postgresql/"* "$r/etc/candor/intake/postgresql/"
   cp "$INTAKE/resolv.conf" "$r/etc/resolv.conf"
   : > "$r/etc/fstab"; : > "$r/etc/crypttab"
+  # Debian: /etc/sysctl.conf is read by systemd-sysctl only through this link (AUD-RM2-DEP-18).
+  printf 'kernel.yama.ptrace_scope = 3\n' > "$r/etc/sysctl.conf"; ln -s ../sysctl.conf "$r/etc/sysctl.d/99-sysctl.conf"
+  # Distribution units the baseline depends on (Debian 13 content), nftables enabled.
+  printf '[Unit]\nDescription=nftables\nWants=network-pre.target\nBefore=network-pre.target shutdown.target\nConflicts=shutdown.target\nDefaultDependencies=no\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nStandardInput=null\nProtectSystem=full\nProtectHome=true\nExecStart=/usr/sbin/nft -f /etc/nftables.conf\nExecReload=/usr/sbin/nft -f /etc/nftables.conf\nExecStop=/usr/sbin/nft flush ruleset\n\n[Install]\nWantedBy=sysinit.target\n' > "$r/usr/lib/systemd/system/nftables.service"
+  printf '[Unit]\nDescription=Apply Kernel Variables\nDefaultDependencies=no\nConflicts=shutdown.target\nAfter=systemd-modules-load.service\nBefore=sysinit.target shutdown.target\nConditionPathIsReadWrite=/proc/sys/net/\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/usr/lib/systemd/systemd-sysctl\nTimeoutSec=90s\n' > "$r/usr/lib/systemd/system/systemd-sysctl.service"
+  mkdir -p "$r/usr/lib/systemd/system/sysinit.target.wants" "$r/etc/systemd/system/sysinit.target.wants"
+  ln -s ../systemd-sysctl.service "$r/usr/lib/systemd/system/sysinit.target.wants/systemd-sysctl.service"
+  ln -s /usr/lib/systemd/system/nftables.service "$r/etc/systemd/system/sysinit.target.wants/nftables.service"
   # Distribution units that must be masked (AUD-RM2-DEP-09/14).
   for u in tor.service tor@.service systemd-coredump.socket; do : > "$r/usr/lib/systemd/system/$u"; done
   for u in tor.service tor@default.service systemd-coredump.socket; do ln -s /dev/null "$r/etc/systemd/system/$u"; done
@@ -291,20 +359,73 @@ if is_root && users_exist && have tor && have nft && have jq; then
   hmutate "AppArmor profile file missing"      etc/apparmor.d/candor-tor-intake -
   hmutate "torrc edited on host"               etc/tor/instances/candor-intake/torrc '+/SafeLogging'
   hmutate "site relay drop-in IPAddressAllow=any" etc/systemd/system/candor-intake-store-relay.socket.d/site.conf $'+[Socket]\nIPAddressAllow=any'
+  # AUD-RM2-DEP round 2 on the installed host
+  hmutate "DEP-15 web flags=(complain)"        etc/apparmor.d/candor-web 's|^profile candor-web /usr/lib/candor/source-web/candor-web {$|profile candor-web /usr/lib/candor/source-web/candor-web flags=(complain) {|'
+  hmutate "DEP-15 sealer /** rwlkix + network," etc/apparmor.d/candor-sealer 's|^  deny network inet,$|  /** rwlkix,\n  network,|'
+  hmutate "DEP-15 tor /usr/bin/** ux"          etc/apparmor.d/candor-tor-intake 's|^  /usr/bin/tor mr,$|  /usr/bin/tor mr,\n  /usr/bin/** ux,|'
+  hmutate "DEP-15 profile disabled"            etc/apparmor.d/disable/candor-sealer @/etc/apparmor.d/candor-sealer
+  hmutate "DEP-15 profile forced to complain"  etc/apparmor.d/force-complain/candor-tor-intake @/etc/apparmor.d/candor-tor-intake
+  hmutate "DEP-15 foreign file redefines profile" etc/apparmor.d/zz-local '+profile candor-sealer /usr/lib/candor/sealer/candor-sealer { /** rwlkix, }'
+  hmutate "DEP-16 sealer drop-in re-allows io_uring" etc/systemd/system/candor-sealer.service.d/zz.conf $'+[Service]\nSystemCallFilter=io_uring_setup io_uring_enter io_uring_register'
+  hmutate "DEP-17 torrc symlink to a secret"   etc/tor/instances/candor-intake/torrc "@$T/secret"
+  hmutate "DEP-17 torrc parent dir symlinked"  etc/tor/instances "@$T/tordir"
+  hmutate "DEP-17 drop-in symlink to a secret" etc/systemd/system/candor-intake-web.service.d/zz.conf "@$T/secret.conf"
+  hmutate "DEP-17 /etc/group symlink"          etc/group "@$T/secret"
+  hmutate "DEP-17 nftables.conf symlink"       etc/nftables.conf "@$T/secret"
+  hmutate "DEP-18 DefaultEnvironment LD_PRELOAD" etc/systemd/system.conf.d/zz.conf $'+[Manager]\nDefaultEnvironment=LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libx.so'
+  hmutate "DEP-18 ManagerEnvironment"          etc/systemd/system.conf.d/zz.conf $'+[Manager]\nManagerEnvironment=LD_LIBRARY_PATH=/opt/x'
+  hmutate "DEP-18 /etc/ld.so.preload"          etc/ld.so.preload '+/usr/lib/x86_64-linux-gnu/libx.so'
+  hmutate "DEP-18 sysctl.conf ok, 99-zz overrides" etc/sysctl.d/99-zz.conf '+kernel.yama.ptrace_scope = 0'
+  hmutate "DEP-18 nftables drop-in /bin/true"  etc/systemd/system/nftables.service.d/zz.conf $'+[Service]\nExecStart=\nExecStart=/bin/true'
+  hmutate "DEP-18 nftables loads another file" etc/systemd/system/nftables.service.d/candor-intake.conf $'+[Service]\nExecStart=\nExecStart=/usr/sbin/nft -f /etc/other.nft'
+  hmutate "DEP-18 nftables not enabled"        etc/systemd/system/sysinit.target.wants/nftables.service -
+  hmutate "DEP-18 nftables masked at runtime"  run/systemd/system/nftables.service @/dev/null
+  hmutate "DEP-18 systemd-sysctl masked"       etc/systemd/system/systemd-sysctl.service @/dev/null
+  hmutate "DEP-18 systemd-sysctl condition"    etc/systemd/system/systemd-sysctl.service.d/zz.conf $'+[Unit]\nConditionPathExists=/nonexistent'
+  hmutate "DEP-20 exception-trace on (sysctl.d)" etc/sysctl.d/99-local.conf '+debug.exception-trace = 1'
+  hmutate "DEP-22 site set 0.0.0.0 + broadcast" etc/nftables.conf 's|^  set mon_hosts  { type ipv4_addr; }|  set mon_hosts  { type ipv4_addr; elements = { 0.0.0.0, 255.255.255.255 } }|'
+  hmutate "STO-23 maint timer drop-in moves time" etc/systemd/system/candor-intake-maint.timer.d/zz.conf $'+[Timer]\nOnCalendar=\nOnCalendar=hourly'
 else skip "config-check --host --root cases (need root, users, tor, nft, jq)"; fi
 mutate_results
 
+# ---- AUD-RM2-DEP-21: invocation and policy integrity
+"$TOOLS/config-check.sh" -q --dir "$INTAKE" --only typo >/dev/null 2>&1; rc=$?
+if [ "$rc" -eq 2 ]; then pass "config-check rejects --only with an unknown section (exit 2)"; else bad "config-check --only typo: exit $rc, want 2"; fi
+"$TOOLS/config-check.sh" -q --dir "$INTAKE" --only tor,typo >/dev/null 2>&1; rc=$?
+if [ "$rc" -eq 2 ]; then pass "config-check rejects --only tor,typo (exit 2)"; else bad "config-check --only tor,typo: exit $rc, want 2"; fi
+"$TOOLS/config-check.sh" -q --dir "$INTAKE" --only host >/dev/null 2>&1; rc=$?
+if [ "$rc" -eq 2 ]; then pass "config-check: a selection that runs no check is an error (static --only host, exit 2)"; else bad "config-check static --only host: exit $rc, want 2"; fi
+mkdir -p "$T/tools.b" "$T/tools.m"
+cp -p "$TOOLS/config-check.sh" "$TOOLS/config-check.baseline" "$TOOLS/config-check.manifest" "$T/tools.b/"
+cp -p "$TOOLS/config-check.sh" "$TOOLS/config-check.baseline" "$TOOLS/config-check.manifest" "$T/tools.m/"
+# Baseline edited (a weakened allow-list line): the manifest digest no longer matches.
+sed -i 's/^pg|track_counts|b|off$/pg|track_counts|b|on/' "$T/tools.b/config-check.baseline"
+"$T/tools.b/config-check.sh" -q --dir "$INTAKE" > "$T/int.out" 2>&1; rc=$?
+if [ "$rc" -eq 30 ] && grep -q 'tool.baseline_integrity' "$T/int.out"; then pass "config-check rejects an edited baseline (digest, exit 30)"; else bad "edited baseline: exit $rc"; fi
+# Baseline and manifest edited together: the manifest digest pinned in the script catches it.
+sed -i 's/^pg|track_counts|b|off$/pg|track_counts|b|on/' "$T/tools.m/config-check.baseline"
+printf '%s  config-check.baseline\n' "$(sha256sum < "$T/tools.m/config-check.baseline" | cut -c1-64)" > "$T/tools.m/config-check.manifest"
+"$T/tools.m/config-check.sh" -q --dir "$INTAKE" > "$T/int.out" 2>&1; rc=$?
+if [ "$rc" -eq 30 ] && grep -q 'tool.baseline_integrity' "$T/int.out"; then pass "config-check rejects a re-signed manifest (pinned digest, exit 30)"; else bad "re-written manifest: exit $rc"; fi
+# AUD-RM2-DEP-17: the private work directories are gone after all runs above.
+if is_root; then
+  if [ -z "$(find /run/candor-config-check -mindepth 1 -maxdepth 1 2>/dev/null)" ] && [ "$(stat -c '%u %a' /run/candor-config-check 2>/dev/null)" = "0 700" ]; then
+    pass "config-check work base is root 0700 and every run cleaned up after itself"
+  else bad "config-check left work directories behind or the work base is not root 0700"; fi
+fi
+
 # ------------------------------------------------------------------------- 3./4. systemd-analyze
 UNITS=(tor@candor-intake.service candor-intake-web.service candor-sealer.service candor-intake-store.service candor-intake-pg.service
-       candor-intake-web.socket candor-sealer.socket candor-intake-store.socket candor-intake-store-relay.socket run-candor-staging.mount)
+       candor-intake-web.socket candor-sealer.socket candor-intake-store.socket candor-intake-store-relay.socket run-candor-staging.mount
+       candor-intake-vacuum.service candor-intake-vacuum.timer candor-intake-maint.service candor-intake-maint.timer)
 if have systemd-analyze; then
   for u in "${UNITS[@]}"; do
     out=$(SYSTEMD_LOG_LEVEL=warning systemd-analyze verify --man=no --recursive-errors=no "$INTAKE/systemd/$u" 2>&1 |
-          grep -v '^$' | grep -vE "Command /usr/lib/candor/(source-web/candor-web|sealer/candor-sealer|intake-store/candor-intake-store) is not executable: No such file or directory" |
+          grep -v '^$' | grep -vE "Command /usr/lib/candor/(source-web/candor-web|sealer/candor-sealer|intake-store/candor-intake-store|intake-store/candor-intake-maint) is not executable: No such file or directory" |
           grep -vE "Unknown key name 'PrivatePIDs'" || true)
     if [ -z "$out" ]; then pass "systemd-analyze verify $u"; else bad "systemd-analyze verify $u: $out"; fi
   done
-  for u in candor-intake-web.service:5 candor-sealer.service:5 candor-intake-store.service:5 candor-intake-pg.service:5 tor@candor-intake.service:15; do
+  for u in candor-intake-web.service:5 candor-sealer.service:5 candor-intake-store.service:5 candor-intake-pg.service:5 tor@candor-intake.service:15 candor-intake-vacuum.service:5 candor-intake-maint.service:5; do
     name=${u%%:*}; thr=${u##*:}
     score=$(systemd-analyze security --offline=true --no-pager "$INTAKE/systemd/$name" 2>/dev/null | sed -n 's/.*Overall exposure level for .*: \([0-9.]*\) .*/\1/p')
     if systemd-analyze security --offline=true --threshold="$thr" --no-pager "$INTAKE/systemd/$name" >/dev/null 2>&1; then
@@ -419,17 +540,25 @@ if [ -n "${CANDOR_TEST_PG:-}" ] && is_root && users_exist && [ -x "$PGBIN/initdb
   P="$T/pg"; mkdir -p "$P/sock" "$P/etc"
   cp "$INTAKE/postgresql/pg_hba.conf" "$INTAKE/postgresql/pg_ident.conf" "$P/etc/"
   chown -R pgtest "$P"; chgrp candor-istore "$P/sock"; chmod 0750 "$P/sock"
-  sed -e "s#/var/lib/postgresql/16/candor-intake#$P/data#; s#/etc/candor/intake/postgresql/#$P/etc/#; s#/run/candor/intake-pg#$P/sock#; s#^unix_socket_group = .*#unix_socket_group = 'candor-istore'#" \
+  # The cluster lives inside a synthetic root (config-check --host --root resolves the data
+  # directory inside the root only and refuses symlinked components, AUD-RM2-DEP-17).
+  PR="$T/pgroot"; DD="$PR/var/lib/postgresql/16/candor-intake"
+  mkdir -p "$PR/etc/candor/intake/postgresql" "$PR/var/lib/postgresql/16"
+  chmod 0755 "$PR" "$PR/var" "$PR/var/lib" "$PR/var/lib/postgresql"; chown pgtest "$PR/var/lib/postgresql/16"
+  sed -e "s#/var/lib/postgresql/16/candor-intake#$DD#; s#/etc/candor/intake/postgresql/#$P/etc/#; s#/run/candor/intake-pg#$P/sock#; s#^unix_socket_group = .*#unix_socket_group = 'candor-istore'#" \
       "$INTAKE/postgresql/candor-intake.conf" > "$P/test.conf"
   chown pgtest "$P/test.conf"
-  if su -s /bin/sh pgtest -c "$PGBIN/initdb -D '$P/data' -U postgres -A reject --data-checksums" >/dev/null 2>&1; then
+  if su -s /bin/sh pgtest -c "$PGBIN/initdb -D '$DD' -U postgres -A reject --data-checksums" >/dev/null 2>&1; then
+    # AUD-RM2-STO-11 installer step: cumulative statistics in RAM (pg_stat -> tmpfs dir; the
+    # target does not exist on this test host, so nothing is written at shutdown either).
+    rmdir "$DD/pg_stat" && ln -s /run/candor/intake-pg-stat "$DD/pg_stat" && chown -h pgtest "$DD/pg_stat"
     printf 'CREATE ROLE candor_istore LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;\nCREATE DATABASE candor_intake_t1 OWNER candor_istore;\n' |
       su -s /bin/sh pgtest -c "$PGBIN/postgres --single -c config_file='$P/test.conf' postgres" >/dev/null 2>&1
     su -s /bin/sh pgtest -c "$PGBIN/postgres -c config_file='$P/test.conf'" >"$P/log" 2>&1 &
     for _ in 1 2 3 4 5 6 7 8 9 10; do [ -S "$P/sock/.s.PGSQL.5432" ] && break; sleep 1; done
     q() { su -s /bin/sh "$1" -c "psql -X -h '$P/sock' -U '$2' -d '$3' -Atc \"$4\"" 2>/dev/null; }
-    got=$(q candor-istore candor_istore candor_intake_t1 "select string_agg(name||'='||setting, ',' order by name) from pg_settings where name in ('wal_level','archive_mode','max_wal_senders','track_commit_timestamp','listen_addresses','log_connections','log_statement','log_line_prefix','log_checkpoints','logging_collector','jit','max_wal_size','min_wal_size','wal_recycle')")
-    want="archive_mode=off,jit=off,listen_addresses=,log_checkpoints=off,log_connections=off,log_line_prefix=%e ,log_statement=none,logging_collector=off,max_wal_senders=0,max_wal_size=256,min_wal_size=32,track_commit_timestamp=off,wal_level=minimal,wal_recycle=off"
+    got=$(q candor-istore candor_istore candor_intake_t1 "select string_agg(name||'='||setting, ',' order by name) from pg_settings where name in ('wal_level','archive_mode','max_wal_senders','track_commit_timestamp','listen_addresses','log_connections','log_statement','log_line_prefix','log_checkpoints','logging_collector','jit','max_wal_size','min_wal_size','wal_recycle','autovacuum','track_counts','track_activities','temp_file_limit')")
+    want="archive_mode=off,autovacuum=off,jit=off,listen_addresses=,log_checkpoints=off,log_connections=off,log_line_prefix=%e ,log_statement=none,logging_collector=off,max_wal_senders=0,max_wal_size=256,min_wal_size=32,temp_file_limit=262144,track_activities=off,track_commit_timestamp=off,track_counts=off,wal_level=minimal,wal_recycle=off"
     if [ "$got" = "$want" ]; then pass "PostgreSQL effective settings"; else bad "PostgreSQL settings: $got"; fi
     if [ -z "$(q candor-istore candor_istore postgres 'select 1')" ]; then pass "pg: candor_istore limited to candor_intake_* databases"; else bad "pg: candor_istore reached postgres db"; fi
     if [ -z "$(q candor-istore postgres postgres 'select 1')" ]; then pass "pg: peer map refuses role switch"; else bad "pg: candor-istore became postgres"; fi
@@ -441,17 +570,26 @@ if [ -n "${CANDOR_TEST_PG:-}" ] && is_root && users_exist && [ -x "$PGBIN/initdb
     if [ -s "$P/log" ]; then bad "pg: server emitted log output: $(head -c 200 "$P/log" | tr -c '[:print:]' '?')"; else pass "pg: no server log output at all (errors and rejected connections included)"; fi
     # config-check --host: effective settings via `postgres -C` (AUD-RM2-DEP-03(1)), on a
     # synthetic root whose data directory is this cluster's.
-    PR="$T/pgroot"; mkdir -p "$PR/etc/candor/intake/postgresql" "$PR/var/lib/postgresql/16"
-    cp "$INTAKE/postgresql/"* "$PR/etc/candor/intake/postgresql/"; chmod 0755 "$PR" "$PR/etc" "$PR/etc/candor" "$PR/etc/candor/intake" "$PR/etc/candor/intake/postgresql"; chmod 0644 "$PR/etc/candor/intake/postgresql/"*
-    ln -s "$P/data" "$PR/var/lib/postgresql/16/candor-intake"
-    if "$TOOLS/config-check.sh" -q --host --root "$PR" --only pg > "$T/pgc.out" 2>&1; then pass "config-check --host pg: effective settings (postgres -C) match"
+    cp "$INTAKE/postgresql/"* "$PR/etc/candor/intake/postgresql/"; chmod 0755 "$PR/etc" "$PR/etc/candor" "$PR/etc/candor/intake" "$PR/etc/candor/intake/postgresql"; chmod 0644 "$PR/etc/candor/intake/postgresql/"*
+    if "$TOOLS/config-check.sh" -q --host --root "$PR" --only pg > "$T/pgc.out" 2>&1; then pass "config-check --host pg: effective settings (postgres -C) match, stats in RAM"
     else bad "config-check --host pg on a clean cluster: $(grep ' FAIL ' "$T/pgc.out" | head -n 3 | tr -s ' ')"; fi
-    printf "log_statement = 'all'\n" >> "$P/data/postgresql.auto.conf"
+    # AUD-RM2-STO-11: pg_stat as a real directory (stats file persisted on disk) is rejected.
+    mv "$DD/pg_stat" "$P/pg_stat.link"; mkdir "$DD/pg_stat"
+    "$TOOLS/config-check.sh" -q --host --root "$PR" --only pg > "$T/pgc.out" 2>&1; rc=$?
+    if [ "$rc" -eq 30 ] && grep -q 'pg.stats_in_ram' "$T/pgc.out"; then pass "config-check rejects: pg_stat on the data volume (exit 30)"; else bad "config-check accepted pg_stat on disk (exit $rc)"; fi
+    rmdir "$DD/pg_stat"; mv "$P/pg_stat.link" "$DD/pg_stat"
+    # AUD-RM2-DEP-17: a data directory reached through a symlink inside --root is refused.
+    mkdir -p "$T/pgroot2/etc/candor/intake" "$T/pgroot2/var/lib/postgresql/16"; cp -a "$PR/etc/candor/intake/postgresql" "$T/pgroot2/etc/candor/intake/"
+    chmod 0755 "$T/pgroot2" "$T/pgroot2/etc" "$T/pgroot2/etc/candor" "$T/pgroot2/etc/candor/intake" "$T/pgroot2/var" "$T/pgroot2/var/lib" "$T/pgroot2/var/lib/postgresql" "$T/pgroot2/var/lib/postgresql/16"
+    ln -s "$DD" "$T/pgroot2/var/lib/postgresql/16/candor-intake"
+    "$TOOLS/config-check.sh" -q --host --root "$T/pgroot2" --only pg > "$T/pgc.out" 2>&1; rc=$?
+    if [ "$rc" -eq 30 ] && grep -q 'symlinked component' "$T/pgc.out"; then pass "config-check rejects: data directory behind a symlink in --root (exit 30)"; else bad "config-check followed a symlinked data directory (exit $rc)"; fi
+    printf "log_statement = 'all'\n" >> "$DD/postgresql.auto.conf"
     "$TOOLS/config-check.sh" -q --host --root "$PR" --only pg > "$T/pgc.out" 2>&1; rc=$?
     if [ "$rc" -eq 30 ] && grep -q 'pg.effective.log_statement' "$T/pgc.out"; then pass "config-check rejects: ALTER SYSTEM log_statement=all in postgresql.auto.conf (exit 30)"
     else bad "config-check accepted postgresql.auto.conf override (exit $rc)"; fi
     # AUD-RM2-DEP-12: stop exactly this cluster (its postmaster PID), not every pgtest postgres.
-    pgpid=$(head -n 1 "$P/data/postmaster.pid" 2>/dev/null)
+    pgpid=$(head -n 1 "$DD/postmaster.pid" 2>/dev/null)
     case "$pgpid" in ''|*[!0-9]*) bad "pg: no postmaster.pid" ;; *) kill -INT "$pgpid" 2>/dev/null; for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$pgpid" 2>/dev/null || break; sleep 1; done ;; esac
   else bad "initdb failed"; fi
 else skip "PostgreSQL run (set CANDOR_TEST_PG=1; needs root, users, user pgtest, $PGBIN)"; fi

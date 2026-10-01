@@ -28,13 +28,47 @@ pub const SALT: [u8; 32] = [0x5a; 32];
 pub const TODAY: Day = Day(20741);
 /// Published-set configuration of the suite: one slot per day, K = 4 entries per
 /// slot, 120 entries in the window -> 2 pages (128 entries, 8 padding). Dummy
-/// buckets are uniform over k = 1..=4 (AUD-RM2-STO-19 tests).
+/// buckets are uniform over k = 1..=4 except for the per-bucket floor that
+/// covers every canonical bucket (AUD-RM2-STO-19/25 tests).
 pub const TEST_DEADDROP: DeadDropConfig = DeadDropConfig {
     slots_per_day: 1,
     per_slot: 4,
     max_pending: 64,
-    dummy_bucket_weights: [1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    dummy_bucket_weights: [
+        TEST_MAIN_WEIGHT,
+        TEST_MAIN_WEIGHT,
+        TEST_MAIN_WEIGHT,
+        TEST_MAIN_WEIGHT,
+        MIN_DUMMY_BUCKET_WEIGHT,
+        MIN_DUMMY_BUCKET_WEIGHT,
+        MIN_DUMMY_BUCKET_WEIGHT,
+        MIN_DUMMY_BUCKET_WEIGHT,
+        MIN_DUMMY_BUCKET_WEIGHT,
+        MIN_DUMMY_BUCKET_WEIGHT,
+        MIN_DUMMY_BUCKET_WEIGHT,
+        MIN_DUMMY_BUCKET_WEIGHT,
+        MIN_DUMMY_BUCKET_WEIGHT,
+        MIN_DUMMY_BUCKET_WEIGHT,
+        MIN_DUMMY_BUCKET_WEIGHT,
+        MIN_DUMMY_BUCKET_WEIGHT,
+    ],
 };
+/// Weight of each of buckets 1..=4 in [`TEST_DEADDROP`].
+pub const TEST_MAIN_WEIGHT: f64 = (1.0 - 12.0 * MIN_DUMMY_BUCKET_WEIGHT) / 4.0;
+
+/// Group a 16-bucket histogram into the cells [1], [2], [3], [4], [5..=16].
+pub fn grouped(h: &[usize; 16]) -> [usize; 5] {
+    [h[0], h[1], h[2], h[3], h[4..].iter().sum()]
+}
+
+/// Cell probabilities of [`grouped`] under [`TEST_DEADDROP`].
+pub const TEST_GROUPED_P: [f64; 5] = [
+    TEST_MAIN_WEIGHT,
+    TEST_MAIN_WEIGHT,
+    TEST_MAIN_WEIGHT,
+    TEST_MAIN_WEIGHT,
+    12.0 * MIN_DUMMY_BUCKET_WEIGHT,
+];
 
 /// Both traits (the PG factory attaches a maintenance handle).
 pub trait Store: IntakeStore + IntakeMaintenance {}
@@ -53,9 +87,15 @@ pub fn core_pk() -> [u8; 32] {
     core_key().verifying_key_bytes()
 }
 
-/// Z-CORE's signed head over a copy of the list ending at `last`.
+/// Z-CORE's signed head over a copy of the list ending at `last`, attested on
+/// [`TODAY`] with an attestation counter that grows with the seq.
 pub fn zhead(last: Option<&DeletionEntry>) -> SignedDeletionHead {
-    SignedDeletionHead::sign(&TENANT, last, &core_key())
+    zhead_at(last, TODAY, last.map_or(0, |e| e.seq) + 1)
+}
+
+/// Z-CORE's signed head with an explicit day and counter (AUD-RM2-STO-24).
+pub fn zhead_at(last: Option<&DeletionEntry>, day: Day, counter: u64) -> SignedDeletionHead {
+    SignedDeletionHead::sign(&TENANT, last, day, counter, &core_key())
 }
 
 /// Test hasher: object hash = first 32 bytes of reply_ct.
@@ -615,13 +655,6 @@ pub async fn dead_drop<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Output = S>
     assert_eq!(published(&s).await.len(), total);
 }
 
-/// χ² statistic of `hist` against a uniform distribution over its cells.
-pub fn chi2_uniform(hist: &[usize]) -> f64 {
-    let n: usize = hist.iter().sum();
-    let e = n as f64 / hist.len() as f64;
-    hist.iter().map(|h| (*h as f64 - e).powi(2) / e).sum()
-}
-
 /// χ² statistic of a 2 × c contingency table (homogeneity of two histograms).
 pub fn chi2_two_sample(a: &[usize], b: &[usize]) -> f64 {
     let (na, nb) = (
@@ -642,14 +675,28 @@ pub fn chi2_two_sample(a: &[usize], b: &[usize]) -> f64 {
 
 /// χ² critical value for 3 degrees of freedom at p = 1e-4.
 pub const CHI2_3DOF_P1E4: f64 = 21.11;
+/// χ² critical value for 4 degrees of freedom at p = 1e-4.
+pub const CHI2_4DOF_P1E4: f64 = 23.51;
+
+/// χ² goodness of fit of `hist` against cell probabilities `p`.
+pub fn chi2_fit(hist: &[usize], p: &[f64]) -> f64 {
+    let n = hist.iter().sum::<usize>() as f64;
+    hist.iter()
+        .zip(p)
+        .map(|(o, p)| {
+            let e = p * n;
+            (*o as f64 - e).powi(2) / e
+        })
+        .sum()
+}
 
 /// AUD-RM2-STO-19: every dummy's bucket is drawn from the configured public
 /// distribution, independently of the real replies published in the same
 /// generation. Each slot adds K entries; in half of the slots one of them is a
-/// real bucket-16 reply. The dummies never copy it (no bucket 16), follow the
-/// configured uniform distribution over buckets 1..4 in both kinds of slot, and
-/// the two dummy histograms are statistically identical (pre-fix, every dummy
-/// copied the real reply's length).
+/// real bucket-16 reply. The dummies do not copy it (bucket 16 only at its
+/// configured floor rate), follow the configured distribution in both kinds of
+/// slot, and the two dummy histograms are statistically identical (pre-fix,
+/// every dummy copied the real reply's length).
 pub async fn dead_drop_sizes<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Output = S>>(mk: F) {
     let s = fresh(&mk).await;
     let mut day = TODAY;
@@ -659,7 +706,7 @@ pub async fn dead_drop_sizes<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Outpu
         .iter()
         .map(|e| reply_bucket_of_len(e.len()).expect("canonical dummy length"))
         .collect();
-    assert!(boot.iter().all(|k| (1..=4).contains(k)));
+    assert!(boot.iter().all(|k| (1..=16).contains(k)));
     let (mut with_real, mut without) = ([0usize; 16], [0usize; 16]);
     for step in 0..48 {
         day = day.plus(1).unwrap();
@@ -679,10 +726,6 @@ pub async fn dead_drop_sizes<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Outpu
                 continue;
             }
             let k = reply_bucket_of_len(e.len()).expect("canonical dummy length");
-            assert!(
-                (1..=4).contains(&k),
-                "dummy bucket {k} outside the configuration"
-            );
             let h = if real_cts.is_empty() {
                 &mut without
             } else {
@@ -694,17 +737,18 @@ pub async fn dead_drop_sizes<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Outpu
     }
     assert_eq!(with_real.iter().sum::<usize>(), 24 * 3);
     assert_eq!(without.iter().sum::<usize>(), 24 * 4);
-    assert_eq!(
-        with_real[15], 0,
-        "dummies never copy the real reply's bucket"
+    // 72 dummies at p = 0.005: P(≥ 5 of bucket 16) < 1e-4 (copying gives 72).
+    assert!(
+        with_real[15] <= 4,
+        "dummies copy the real reply's bucket: {with_real:?}"
     );
     for h in [&with_real, &without] {
-        let c = chi2_uniform(&h[..4]);
-        assert!(c < CHI2_3DOF_P1E4, "chi2 {c} for {h:?}");
+        let c = chi2_fit(&grouped(h), &TEST_GROUPED_P);
+        assert!(c < CHI2_4DOF_P1E4, "chi2 {c} for {h:?}");
     }
-    let c = chi2_two_sample(&with_real[..4], &without[..4]);
+    let c = chi2_two_sample(&grouped(&with_real), &grouped(&without));
     assert!(
-        c < CHI2_3DOF_P1E4,
+        c < CHI2_4DOF_P1E4,
         "dummy sizes depend on real volume: chi2 {c}"
     );
 }
@@ -937,6 +981,8 @@ pub async fn deletion_list<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Output 
     let k31_signed = SignedDeletionHead::sign(
         &TENANT,
         all.get(1),
+        TODAY,
+        3,
         &candor_core::sig::SigningKey::from_seed(&[0x31; 32]),
     );
     let mut forged = zhead(all.get(1));
@@ -971,8 +1017,14 @@ pub async fn deletion_list<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Output 
     s.acknowledge_deletion_head(&zhead(all.get(1)), &core_pk())
         .await
         .unwrap();
-    // An older head is ignored (monotonic).
-    s.acknowledge_deletion_head(&zhead(all.first()), &core_pk())
+    // An older attestation is refused and changes nothing (AUD-RM2-STO-24);
+    // the identical one is a no-op.
+    assert!(matches!(
+        s.acknowledge_deletion_head(&zhead(all.first()), &core_pk())
+            .await,
+        Err(StoreError::DeletionList(_))
+    ));
+    s.acknowledge_deletion_head(&zhead(all.get(1)), &core_pk())
         .await
         .unwrap();
     let tail = s.deletion_list_after(2, 100).await.unwrap();
@@ -1291,7 +1343,7 @@ pub async fn restore_pending_gate<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<
             &zhead(None),
             &core_pk(),
             &sg.verifying_key(),
-            &PrefixHasher
+            &PrefixHasher, TODAY
         )
         .await
         .unwrap(),
@@ -1386,7 +1438,7 @@ pub async fn backup_restore<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Output
     let mut claimed = h4;
     claimed.seq = 3;
     claimed.head_hash = core_copy[2].next_prev_hash();
-    let self_signed = SignedDeletionHead::sign(&TENANT, core_copy.get(2), &relay_key);
+    let self_signed = SignedDeletionHead::sign(&TENANT, core_copy.get(2), TODAY, 4, &relay_key);
     for (entries, head, key, why) in [
         (forged.clone(), h4, pk, "forged"),
         (core_copy.clone(), h4, wrong_key, "wrong key"),
@@ -1414,7 +1466,7 @@ pub async fn backup_restore<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Output
     ] {
         assert!(
             matches!(
-                b.apply_pushed_deletion_list(&entries, &head, &cpk, &key, &PrefixHasher)
+                b.apply_pushed_deletion_list(&entries, &head, &cpk, &key, &PrefixHasher, TODAY)
                     .await,
                 Err(StoreError::DeletionList(_))
             ),
@@ -1425,7 +1477,7 @@ pub async fn backup_restore<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Output
     assert_eq!(b.export_backup().await.unwrap().accounts.len(), 4);
 
     assert_eq!(
-        b.apply_pushed_deletion_list(&core_copy, &h4, &cpk, &pk, &PrefixHasher)
+        b.apply_pushed_deletion_list(&core_copy, &h4, &cpk, &pk, &PrefixHasher, TODAY)
             .await
             .unwrap(),
         4
@@ -1460,7 +1512,7 @@ pub async fn backup_restore<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Output
     ));
     // Idempotent re-push.
     assert_eq!(
-        b.apply_pushed_deletion_list(&core_copy, &h4, &cpk, &pk, &PrefixHasher)
+        b.apply_pushed_deletion_list(&core_copy, &h4, &cpk, &pk, &PrefixHasher, TODAY)
             .await
             .unwrap(),
         4
@@ -1468,17 +1520,17 @@ pub async fn backup_restore<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Output
     // A bad push to a serving store puts it back into restore-pending; so does
     // a replay of the older head now that head 4 is verified.
     assert!(
-        b.apply_pushed_deletion_list(&core_copy[..2], &h4, &cpk, &pk, &PrefixHasher)
+        b.apply_pushed_deletion_list(&core_copy[..2], &h4, &cpk, &pk, &PrefixHasher, TODAY)
             .await
             .is_err()
     );
     assert!(!b.serving_allowed().await.unwrap());
     assert!(
-        b.apply_pushed_deletion_list(&core_copy[..1], &h1, &cpk, &pk, &PrefixHasher)
+        b.apply_pushed_deletion_list(&core_copy[..1], &h1, &cpk, &pk, &PrefixHasher, TODAY)
             .await
             .is_err()
     );
-    b.apply_pushed_deletion_list(&core_copy, &h4, &cpk, &pk, &PrefixHasher)
+    b.apply_pushed_deletion_list(&core_copy, &h4, &cpk, &pk, &PrefixHasher, TODAY)
         .await
         .unwrap();
     // Chain continues locally after the merged entries.
@@ -1511,7 +1563,8 @@ pub async fn backup_restore<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Output
             &zhead(Some(&entry)),
             &core_pk(),
             &pk,
-            &PrefixHasher
+            &PrefixHasher,
+            TODAY
         )
         .await
         .unwrap(),

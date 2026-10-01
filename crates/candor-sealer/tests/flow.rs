@@ -81,7 +81,7 @@ fn make_reply(
         mailbox_id,
     };
     let stanza =
-        WrapStanza::seal_hpke_ck(Suite::CandorStd1, &pk, [0; 32], obj.object_hash, &ctx, &ck)
+        WrapStanza::seal_hpke_ck(Suite::CandorStd1, &pk, [0; 32], obj.object_hash, &ctx, ck.ck())
             .unwrap()
             .encode()
             .unwrap();

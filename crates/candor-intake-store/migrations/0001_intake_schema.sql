@@ -23,6 +23,13 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'candor_intake_maint') THEN
     CREATE ROLE candor_intake_maint LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS NOREPLICATION;
   END IF;
+  -- Separate VACUUM login (slot VACUUM, daily VACUUM FULL; AUD-RM2-STO-11/23/24):
+  -- it owns the database (PostgreSQL 16 lets the database owner vacuum every
+  -- table) but no table, so it cannot disable RLS or the guard triggers. It is
+  -- not the schema owner and not the migration login.
+  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'candor_intake_vacuum') THEN
+    CREATE ROLE candor_intake_vacuum LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS NOREPLICATION;
+  END IF;
 END
 $roles$;
 
@@ -40,8 +47,8 @@ BEGIN
 END
 $settings$;
 
--- Superuser-only settings (09 §10 temp_file_limit; AUD-RM2-STO-08/11). Applied
--- when the migration runs as a superuser (test clusters); production
+-- Superuser-only settings (09 §10 temp_file_limit; AUD-RM2-STO-08/11/23/24).
+-- Applied when the migration runs as a superuser (test clusters); production
 -- provisioning applies the same settings (SPEC-NOTES "Deployment settings").
 DO $su$
 BEGIN
@@ -49,17 +56,25 @@ BEGIN
     EXECUTE pg_catalog.format('ALTER ROLE candor_istore IN DATABASE %I SET temp_file_limit = %L', pg_catalog.current_database(), '1GB');
     EXECUTE pg_catalog.format('ALTER ROLE candor_intake_maint IN DATABASE %I SET temp_file_limit = %L', pg_catalog.current_database(), '1GB');
     GRANT EXECUTE ON FUNCTION pg_catalog.pg_stat_reset() TO candor_intake_maint;
+    EXECUTE pg_catalog.format('ALTER DATABASE %I OWNER TO candor_intake_vacuum', pg_catalog.current_database());
+    GRANT pg_checkpoint TO candor_intake_vacuum WITH INHERIT TRUE, SET FALSE;
   END IF;
 END
 $su$;
 
 REVOKE ALL ON SCHEMA public FROM PUBLIC;
+-- Database privileges: only a superuser or the database owner can grant them;
+-- production provisioning does the same (the migration login is neither).
 DO $db$
 BEGIN
-  EXECUTE pg_catalog.format('REVOKE ALL ON DATABASE %I FROM PUBLIC', pg_catalog.current_database());
-  EXECUTE pg_catalog.format('GRANT CONNECT ON DATABASE %I TO candor_istore, candor_intake_backup, candor_intake_maint', pg_catalog.current_database());
-  -- The migrator creates the schema (in production it owns the database).
-  EXECUTE pg_catalog.format('GRANT CREATE ON DATABASE %I TO candor_intake_migrator', pg_catalog.current_database());
+  IF (SELECT r.rolsuper FROM pg_catalog.pg_roles r WHERE r.rolname = current_user)
+     OR pg_catalog.pg_has_role(current_user, (SELECT d.datdba FROM pg_catalog.pg_database d
+                                              WHERE d.datname = pg_catalog.current_database()), 'USAGE') THEN
+    EXECUTE pg_catalog.format('REVOKE ALL ON DATABASE %I FROM PUBLIC', pg_catalog.current_database());
+    EXECUTE pg_catalog.format('GRANT CONNECT ON DATABASE %I TO candor_istore, candor_intake_backup, candor_intake_maint', pg_catalog.current_database());
+    -- The migrator creates the schema; the database is owned by the VACUUM login.
+    EXECUTE pg_catalog.format('GRANT CREATE ON DATABASE %I TO candor_intake_migrator', pg_catalog.current_database());
+  END IF;
 END
 $db$;
 
@@ -69,6 +84,8 @@ SET LOCAL ROLE candor_intake_migrator;
 CREATE SCHEMA candor AUTHORIZATION candor_intake_migrator;
 REVOKE ALL ON SCHEMA candor FROM PUBLIC;
 GRANT USAGE ON SCHEMA candor TO candor_istore, candor_intake_backup, candor_intake_maint;
+-- Name lookup only, for VACUUM (no table privilege).
+GRANT USAGE ON SCHEMA candor TO candor_intake_vacuum;
 ALTER DEFAULT PRIVILEGES IN SCHEMA candor REVOKE ALL ON TABLES FROM PUBLIC;
 ALTER DEFAULT PRIVILEGES IN SCHEMA candor REVOKE ALL ON FUNCTIONS FROM PUBLIC;
 ALTER DEFAULT PRIVILEGES IN SCHEMA candor REVOKE ALL ON TYPES FROM PUBLIC;
@@ -103,7 +120,12 @@ CREATE TABLE candor.intake_meta (
   -- signature (re-verified by the maintenance process before any prune).
   deletion_acked_hash   bytea   NULL CHECK (octet_length(deletion_acked_hash) = 32),
   deletion_acked_sig    bytea   NULL CHECK (octet_length(deletion_acked_sig) = 64),
-  CHECK ((deletion_acked_seq = 0) = (deletion_acked_hash IS NULL) AND (deletion_acked_hash IS NULL) = (deletion_acked_sig IS NULL))
+  -- Z-CORE day and attestation counter of that head (AUD-RM2-STO-24): signed
+  -- with it; neither ever decreases.
+  deletion_acked_day     date   NULL,
+  deletion_acked_counter bigint NOT NULL DEFAULT 0 CHECK (deletion_acked_counter >= 0),
+  CHECK ((deletion_acked_seq = 0) = (deletion_acked_hash IS NULL) AND (deletion_acked_hash IS NULL) = (deletion_acked_sig IS NULL)),
+  CHECK ((deletion_acked_hash IS NULL) = (deletion_acked_day IS NULL) AND (deletion_acked_hash IS NULL) = (deletion_acked_counter = 0))
 );
 CREATE UNIQUE INDEX intake_meta_singleton ON candor.intake_meta ((true));
 
@@ -123,8 +145,16 @@ BEGIN
      OR NEW.directory_version < OLD.directory_version
      OR NEW.relay_req_counter < OLD.relay_req_counter
      OR NEW.last_batch_no < OLD.last_batch_no
-     OR NEW.deletion_acked_seq < OLD.deletion_acked_seq THEN
+     OR NEW.deletion_acked_seq < OLD.deletion_acked_seq
+     OR NEW.deletion_acked_counter < OLD.deletion_acked_counter
+     OR (OLD.deletion_acked_day IS NOT NULL AND (NEW.deletion_acked_day IS NULL OR NEW.deletion_acked_day < OLD.deletion_acked_day)) THEN
     RAISE EXCEPTION 'monotonic intake_meta value decreased' USING ERRCODE = 'P0002';
+  END IF;
+  -- Any change of the acknowledged head needs a newer Z-CORE attestation.
+  IF ROW(NEW.deletion_acked_seq, NEW.deletion_acked_hash, NEW.deletion_acked_sig, NEW.deletion_acked_day)
+       IS DISTINCT FROM ROW(OLD.deletion_acked_seq, OLD.deletion_acked_hash, OLD.deletion_acked_sig, OLD.deletion_acked_day)
+     AND NEW.deletion_acked_counter <= OLD.deletion_acked_counter THEN
+    RAISE EXCEPTION 'acknowledged head changed without a newer attestation' USING ERRCODE = 'P0002';
   END IF;
   IF NEW.deletion_acked_seq IS DISTINCT FROM OLD.deletion_acked_seq
      OR NEW.deletion_acked_hash IS DISTINCT FROM OLD.deletion_acked_hash THEN
@@ -337,12 +367,20 @@ ALTER TABLE candor.envelope       SET (toast_tuple_target = 8160);
 ALTER TABLE candor.envelope_part ALTER COLUMN slot_block SET STORAGE EXTERNAL;
 ALTER TABLE candor.reply ALTER COLUMN reply_ct SET STORAGE EXTERNAL;
 
--- Aggressive autovacuum on intake tables (09 §10 "Deletion").
-ALTER TABLE candor.source_account SET (autovacuum_vacuum_scale_factor = 0.01);
-ALTER TABLE candor.envelope       SET (autovacuum_vacuum_scale_factor = 0.01);
-ALTER TABLE candor.envelope_part  SET (autovacuum_vacuum_scale_factor = 0.01);
-ALTER TABLE candor.reply          SET (autovacuum_vacuum_scale_factor = 0.01);
-ALTER TABLE candor.deletion_list  SET (autovacuum_vacuum_scale_factor = 0.01);
+-- No autovacuum on intake tables (AUD-RM2-STO-11): its timing would follow
+-- source activity (and needs track_counts). VACUUM runs at every fixed import
+-- slot and VACUUM FULL daily in the maintenance window, as the VACUUM login
+-- (pg.rs vacuum_after_rewrite / vacuum_full_daily); this also holds if the
+-- cluster-wide autovacuum = off were forgotten. PostgreSQL still forces an
+-- anti-wraparound VACUUM when a table nears autovacuum_freeze_max_age.
+ALTER TABLE candor.source_account     SET (autovacuum_enabled = false, toast.autovacuum_enabled = false);
+ALTER TABLE candor.envelope           SET (autovacuum_enabled = false, toast.autovacuum_enabled = false);
+ALTER TABLE candor.envelope_part      SET (autovacuum_enabled = false, toast.autovacuum_enabled = false);
+ALTER TABLE candor.reply              SET (autovacuum_enabled = false, toast.autovacuum_enabled = false);
+ALTER TABLE candor.deletion_list      SET (autovacuum_enabled = false, toast.autovacuum_enabled = false);
+ALTER TABLE candor.counter_month      SET (autovacuum_enabled = false, toast.autovacuum_enabled = false);
+ALTER TABLE candor.directory_snapshot SET (autovacuum_enabled = false, toast.autovacuum_enabled = false);
+ALTER TABLE candor.intake_meta        SET (autovacuum_enabled = false, toast.autovacuum_enabled = false);
 
 -- Row-level security (defence in depth; 09 says one DB per tenant needs none, R7
 -- SI-E-03 asks for it): every transaction must SET LOCAL candor.tenant_id to the
@@ -390,7 +428,8 @@ GRANT SELECT ON candor.schema_migration TO candor_istore, candor_intake_maint;
 GRANT SELECT, INSERT ON candor.intake_meta TO candor_istore;
 -- No UPDATE of tenant_id, schema_hash, kdf_salt or config_version (AUD-RM2-STO-08).
 GRANT UPDATE (relay_req_counter, last_batch_no, directory_version, kd_tree_size_hwm,
-  kd_checkpoint_day_hwm, restore_pending, deletion_acked_seq, deletion_acked_hash, deletion_acked_sig)
+  kd_checkpoint_day_hwm, restore_pending, deletion_acked_seq, deletion_acked_hash, deletion_acked_sig,
+  deletion_acked_day, deletion_acked_counter)
   ON candor.intake_meta TO candor_istore;
 -- Called from the guard triggers in the application role's context.
 GRANT EXECUTE ON FUNCTION candor.deletion_chain_hash(candor.deletion_list),

@@ -6,7 +6,7 @@
 
 /// Expected columns per table: 09 §5.1 plus the documented additions
 /// (`envelope.epoch_index`, `intake_meta.restore_pending`,
-/// `intake_meta.deletion_acked_seq/_hash/_sig`, `reply.pub_gen`, `schema_migration`),
+/// `intake_meta.deletion_acked_seq/_hash/_sig/_day/_counter`, `reply.pub_gen`, `schema_migration`),
 /// without `source_account.quota_bucket` (quota is RAM-only, AUD-RM2-STO-01) and
 /// with the fixed-shape envelope group of ADR-052(1)/(2): no account reference,
 /// three parts each with `object_hash` and `slot_block`.
@@ -27,6 +27,8 @@ pub const EXPECTED: &[(&str, &[&str])] = &[
             "deletion_acked_seq",
             "deletion_acked_hash",
             "deletion_acked_sig",
+            "deletion_acked_day",
+            "deletion_acked_counter",
         ],
     ),
     (

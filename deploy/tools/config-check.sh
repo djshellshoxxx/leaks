@@ -180,7 +180,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # Names taken from inputs (option, key, directive, user names) are the only input-derived text
 # a report may carry: reduced to a name alphabet, 48 characters each, at most 8 (DEP-17).
 san_names() { # stdin: names separated by blanks/newlines
-  tr -s ' \t\n' '\n\n\n' | awk 'NF { t=$0; gsub(/[^A-Za-z0-9_.@:+\/-]/, "?", t); t=substr(t, 1, 48); n++; if (n <= 8) out=out (n>1 ? " " : "") t }
+  tr -s ' \t' '\n' | awk 'NF { t=$0; gsub(/[^A-Za-z0-9_.@:+\/-]/, "?", t); t=substr(t, 1, 48); n++; if (n <= 8) out=out (n>1 ? " " : "") t }
     END { if (n > 8) out=out " (+" n-8 " more)"; print out }'
 }
 # First symlinked (or '.'/'..') component of path below prefix; prefix itself was resolved.

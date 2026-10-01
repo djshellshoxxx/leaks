@@ -40,7 +40,7 @@ use candor_core::kdf::ct_eq;
 use candor_core::kem::KemPublicKey;
 use candor_core::passphrase::{self, SourceKeys, Wordlist};
 use candor_core::record::{RecordAad, open_record, seal_record};
-use candor_core::secret::{AeadKey, Secret32};
+use candor_core::secret::{AeadKey, Secret32, SessionKey};
 use candor_core::sig::SigningKey;
 use candor_core::{Suite, padding};
 use candor_safefs::{SafeRoot, SlotTime};
@@ -289,6 +289,11 @@ fn random_secret32() -> Result<Secret32, Response> {
     let mut k = Zeroizing::new([0u8; 32]);
     candor_core::fill_random(k.as_mut()).map_err(core_err)?;
     Ok(Secret32::from_bytes(*k))
+}
+
+/// A fresh K36 from the CSPRNG (never a fixed value on failure, SEA-05).
+fn random_k36() -> Result<SessionKey, Response> {
+    SessionKey::generate().map_err(core_err)
 }
 
 /// Map a generated passphrase back to word indices, scanning the whole list for
@@ -626,7 +631,7 @@ impl Sealer {
         if !known {
             return err(ErrorCode::Unavailable);
         }
-        let k36 = match random_secret32() {
+        let k36 = match random_k36() {
             Ok(k) => k,
             Err(e) => return e,
         };
@@ -859,7 +864,7 @@ impl Sealer {
             Err(e) => return e,
         };
         let lookup_tag = keys.lookup_tag();
-        let k36 = match random_secret32() {
+        let k36 = match random_k36() {
             Ok(k) => k,
             Err(e) => return e,
         };
@@ -965,14 +970,15 @@ impl Sealer {
             Ok(b) => b,
             Err(_) => return err(ErrorCode::Limit),
         };
-        let part_id = match rand::random16() {
+        let fresh_part = match candor_core::stream::PartId::generate() {
             Ok(p) => p,
             Err(e) => return core_err(e),
         };
-        let enc = match seal::staged_part_encryptor(&g.k36, &part_id, padded_len) {
+        let enc = match seal::staged_part_encryptor(&g.k36, &fresh_part, padded_len) {
             Ok(e) => e,
             Err(e) => return core_err(e),
         };
+        let part_id = *fresh_part.as_bytes();
         let (object_id, pending) = match seal::stage_create(self.st.staging) {
             Ok(p) => p,
             // Staging full or unavailable: the uniform busy page (07 §5.3).
@@ -1038,7 +1044,7 @@ impl Sealer {
             Ok(g) => g,
             Err(e) => return e,
         };
-        match random_secret32() {
+        match random_k36() {
             Ok(k36) => {
                 g.clear_draft(k36);
                 g.pending = None;
@@ -1697,7 +1703,7 @@ fn prefs_ct(st: &State, keys: &SourceKeys, prefs: &Prefs) -> Result<Vec<u8>, can
 /// `true` asks the caller to remove the whole session (AUD-RM2-SEA-05).
 fn rekey_after_commit(
     sess: &mut Session,
-    rng: impl FnOnce() -> Result<Secret32, Response>,
+    rng: impl FnOnce() -> Result<SessionKey, Response>,
 ) -> bool {
     match rng() {
         Ok(fresh) => {
@@ -1841,7 +1847,7 @@ fn seal_blocking(mut g: OwnedMutexGuard<Session>, st: &State, job: SealJob) -> (
     // Committed and fsynced: zeroize K36, the draft and staged parts (§9.13).
     // On CSPRNG failure the draft is still dropped and the whole session is
     // removed; a fixed key is never installed (AUD-RM2-SEA-05).
-    let drop_session = rekey_after_commit(sess, random_secret32);
+    let drop_session = rekey_after_commit(sess, random_k36);
     if job.initial {
         sess.phase = Phase::Authenticated;
     }
@@ -1986,13 +1992,13 @@ mod tests {
     /// a fixed K36; the draft is dropped and the session is marked for removal.
     #[test]
     fn rng_failure_after_commit_never_installs_a_fixed_key() {
-        let mut s = Session::new(Phase::Drafting, Secret32::from_bytes([7; 32]));
+        let mut s = Session::new(Phase::Drafting, SessionKey::from_bytes([7; 32]));
         s.draft.message = SecretText::new("draft");
         let drop = rekey_after_commit(&mut s, || Err(err(ErrorCode::Internal)));
         assert!(drop);
         assert_eq!(s.k36.expose(), &[7; 32]);
         assert!(s.draft.message.expose().is_empty());
-        let drop = rekey_after_commit(&mut s, || Ok(Secret32::from_bytes([9; 32])));
+        let drop = rekey_after_commit(&mut s, || Ok(SessionKey::from_bytes([9; 32])));
         assert!(!drop);
         assert_eq!(s.k36.expose(), &[9; 32]);
     }

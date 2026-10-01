@@ -20,16 +20,15 @@ use super::sink::{Blob, EnvelopeGroup, EnvelopeObject};
 use crate::proto::cbor::Value;
 use crate::proto::{Mode, PendingReply, SecretText};
 use candor_core::header::{CoreHeader, HEADER_LEN, HEADER_MAC_LEN, ObjectType, object_hash};
-use candor_core::kdf::{ct_eq, derive_payload_key, derive_stage_part_key};
+use candor_core::kdf::ct_eq;
 use candor_core::kem::{self, KemPublicKey};
 use candor_core::object::{self, SealRequest, SealedObject};
 use candor_core::passphrase::SourceKeys;
-use candor_core::secret::AeadKey;
-use candor_core::secret::{ContentKey, Secret32};
+use candor_core::secret::{ContentKey, Secret32, SessionKey};
 use candor_core::sig::{SigningKey, verify_strict};
-use candor_core::slots::{RecipientListEntry, RecipientSlotBlock, SlotBinding, SlotContext};
+use candor_core::slots::{RecipientList, RecipientListEntry, RecipientSlotBlock, SlotBinding, SlotContext};
 use candor_core::stanza::{HpkeWrapContext, WrapStanza};
-use candor_core::stream::{self, CHUNK_SIZE, StreamDecryptor, StreamEncryptor};
+use candor_core::stream::{self, CHUNK_SIZE, PartId, StreamDecryptor, StreamEncryptor};
 use candor_core::{Error, Suite, fill_random, labels, padding};
 use candor_safefs::{ObjectId, PendingObject, SafeRoot, SlotTime};
 use zeroize::{Zeroize, Zeroizing};
@@ -61,47 +60,28 @@ fn io_err<E>(_: E) -> Error {
 }
 
 // ---------------------------------------------------------------------------
-// STREAM constructors. AUD-RM1-CORE-04 replaces candor-core's raw-key STREAM
-// constructor; these three functions are the only call sites, so integration is
-// a one-line swap each (`StreamEncryptor::for_staged_part(k36, part_id)`, …).
-
-fn stream_key<T>(r: Result<AeadKey, Error>, f: impl FnOnce(AeadKey) -> T) -> Result<T, Error> {
-    r.map(f)
-}
+// STREAM constructors (candor-core AUD-RM1-CORE-04 API): no raw keys or caller
+// nonces; staged parts use single-use `PartId`s, payloads draw their nonce
+// inside candor-core.
 
 /// STREAM encryptor for a staged Tier W part under
-/// `K_stage = HKDF(K36, part_id, "candor/v1/stage/part")` (§9.13).
+/// `K_stage = HKDF(K36, part_id, "candor/v1/stage/part")` (§9.13). Each
+/// [`PartId`] is accepted once.
 pub(crate) fn staged_part_encryptor(
-    k36: &Secret32,
-    part_id: &[u8; 16],
+    k36: &SessionKey,
+    part_id: &PartId,
     padded_len: u64,
 ) -> Result<StreamEncryptor, Error> {
-    stream_key(derive_stage_part_key(k36, part_id), |k| {
-        StreamEncryptor::new(k, padded_len)
-    })
+    StreamEncryptor::for_staged_part(k36, part_id, padded_len)
 }
 
 /// STREAM decryptor for a staged Tier W part (§9.13).
 pub(crate) fn staged_part_decryptor(
-    k36: &Secret32,
+    k36: &SessionKey,
     part_id: &[u8; 16],
     padded_len: u64,
 ) -> Result<StreamDecryptor, Error> {
-    stream_key(derive_stage_part_key(k36, part_id), |k| {
-        StreamDecryptor::new(k, padded_len)
-    })
-}
-
-/// STREAM encryptor for an object payload under the CK (§13.3).
-fn payload_encryptor(
-    suite: Suite,
-    ck: &ContentKey,
-    payload_nonce: &[u8; 16],
-    padded_len: u64,
-) -> Result<StreamEncryptor, Error> {
-    stream_key(derive_payload_key(suite, ck, payload_nonce), |k| {
-        StreamEncryptor::new(k, padded_len)
-    })
+    StreamDecryptor::for_staged_part(k36, part_id, padded_len)
 }
 
 /// Start a staging file under a caller-known id, so a failed `commit` (which
@@ -266,7 +246,7 @@ fn envelope_object(o: &SealedObject, blob: Blob) -> Result<EnvelopeObject, Error
 /// The sealed ATTACHMENT_BUNDLE (staged) and what the SUBMISSION needs about it.
 pub(crate) struct BundleOut {
     pub object: EnvelopeObject,
-    pub entries: Vec<RecipientListEntry>,
+    pub entries: RecipientList,
     pub manifest: Vec<ManifestFile>,
     pub total_len: u64,
 }
@@ -276,7 +256,7 @@ pub(crate) fn seal_bundle(
     ctx: &SealCtx<'_>,
     sel: &Selection,
     parts: &[StagedPart],
-    k36: &Secret32,
+    k36: &SessionKey,
 ) -> Result<BundleOut, Error> {
     let count = u32::try_from(parts.len()).map_err(|_| Error::TooLarge)?;
     let mut total_len: u64 = 8;
@@ -287,8 +267,8 @@ pub(crate) fn seal_bundle(
     let ck = ContentKey::generate()?;
     let mut object_id = [0u8; 16];
     fill_random(&mut object_id)?;
-    let mut payload_nonce = [0u8; 16];
-    fill_random(&mut payload_nonce)?;
+    // The payload nonce is drawn inside candor-core with the encryptor.
+    let (enc, payload_nonce) = StreamEncryptor::for_payload(ctx.suite, &ck, padded)?;
     let binding = SlotBinding {
         suite: ctx.suite,
         object_id,
@@ -314,7 +294,6 @@ pub(crate) fn seal_bundle(
     let (staged_id, mut w) = stage_create(ctx.staging)?;
     w.write_all(&header_bytes).map_err(io_err)?;
     w.write_all(&mac).map_err(io_err)?;
-    let enc = payload_encryptor(ctx.suite, &ck, &payload_nonce, padded)?;
     let mut sink = StreamSink::new(enc, w, padded);
     sink.push(&BUNDLE_MAGIC)?;
     sink.push(&count.to_be_bytes())?;
@@ -369,7 +348,7 @@ fn seal_identity(
     ctx: &SealCtx<'_>,
     channel_id: [u8; 16],
     text: &str,
-) -> Result<SealedObject, Error> {
+) -> Result<(RecipientList, SealedObject), Error> {
     let payload = inner::identity_payload(text)?;
     let pks = [ctx.custodian_pk.clone()];
     let req = SealRequest {
@@ -387,8 +366,8 @@ fn seal_identity(
         )),
         padded_len: u64::try_from(payload.len()).map_err(|_| Error::Internal)?,
     };
-    let (_ck, obj) = object::seal(&req, |_| Ok(payload.as_slice()))?;
-    Ok(obj)
+    let (secrets, obj) = object::seal(&req, |_| Ok(payload.as_slice()))?;
+    Ok((secrets.into_parts().1, obj))
 }
 
 fn nfc(s: &str) -> Zeroizing<String> {
@@ -457,7 +436,7 @@ fn submission_entries(
         coi_policy_entry_hash: p.sel.coi_policy_entry_hash,
         tree_size: p.sel.tree_size,
         root_hash: p.sel.root_hash,
-        bundle_entries: Some(&p.bundle.entries),
+        bundle_entries: Some(p.bundle.entries.as_slice()),
         identity_entries: Some(p.identity_entries),
     };
     let mut concerns: Zeroizing<Vec<u16>> = Zeroizing::new(p.draft.flagged_labels.to_vec());
@@ -534,7 +513,7 @@ pub(crate) fn seal_initial(
     report_index: u32,
     draft: &DraftInput<'_>,
     parts: &[StagedPart],
-    k36: &Secret32,
+    k36: &SessionKey,
 ) -> Result<(SealedGroup, [u8; 32]), Error> {
     let mailbox_id = keys.mailbox_id(report_index)?;
     let bundle = seal_bundle(ctx, sel, parts, k36)?;
@@ -543,7 +522,7 @@ pub(crate) fn seal_initial(
             Mode::Anonymous => "",
             _ => draft.identity.unwrap_or(""),
         };
-        let identity = seal_identity(ctx, sel.channel_id, identity_text)?;
+        let (identity_list, identity) = seal_identity(ctx, sel.channel_id, identity_text)?;
         let message_nfc = nfc(draft.message);
         let sp = SubmissionParts {
             keys,
@@ -555,7 +534,7 @@ pub(crate) fn seal_initial(
             bundle_hash: bundle.object.object_hash,
             identity_hash: identity.object_hash,
             bundle: &bundle,
-            identity_entries: &identity.recipient_list,
+            identity_entries: identity_list.as_slice(),
         };
         let sigs = [
             SigSpec {
@@ -641,7 +620,7 @@ fn source_message_entries(
         coi_policy_entry_hash: sel.coi_policy_entry_hash,
         tree_size: sel.tree_size,
         root_hash: sel.root_hash,
-        bundle_entries: Some(&p.bundle.entries),
+        bundle_entries: Some(p.bundle.entries.as_slice()),
         identity_entries: Some(p.identity_entries),
     };
     let mut m = Vec::with_capacity(16);
@@ -679,11 +658,11 @@ pub(crate) fn seal_source_message(
     sel: &Selection,
     sm: &SourceMessageInput<'_>,
     parts: &[StagedPart],
-    k36: &Secret32,
+    k36: &SessionKey,
 ) -> Result<SealedGroup, Error> {
     let bundle = seal_bundle(ctx, sel, parts, k36)?;
     let result = (|| {
-        let identity = seal_identity(ctx, sel.channel_id, "")?;
+        let (identity_list, identity) = seal_identity(ctx, sel.channel_id, "")?;
         let message_nfc = nfc(sm.message);
         let mut sigs = vec![
             SigSpec {
@@ -710,7 +689,7 @@ pub(crate) fn seal_source_message(
             message_nfc: &message_nfc,
             bundle: &bundle,
             identity_hash: identity.object_hash,
-            identity_entries: &identity.recipient_list,
+            identity_entries: identity_list.as_slice(),
         };
         let pks: Vec<KemPublicKey> = sel.recipients.iter().map(|r| r.pk.clone()).collect();
         let req = SealRequest {
@@ -828,7 +807,8 @@ fn chaff_object(
         padded_len,
     };
     let n = usize::try_from(padded_len).map_err(|_| Error::TooLarge)?;
-    object::seal_with_ck(ck, &req, |_| Ok(vec![0u8; n]))
+    let (_list, obj) = object::seal_with_ck(ck, &req, |_| Ok(vec![0u8; n]))?;
+    Ok(obj)
 }
 
 /// Build one chaff envelope group (04 §12.7, ADR-052(1)): the same three-object

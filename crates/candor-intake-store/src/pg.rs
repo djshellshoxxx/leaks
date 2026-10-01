@@ -131,12 +131,16 @@ const SQL_LEDGER_PUT: &str =
     "INSERT INTO candor.schema_migration (version, sha256) VALUES ($1, $2)";
 const SQL_MIGRATE_TIMEOUTS: &str = "SELECT pg_catalog.set_config('lock_timeout', '10s', true), pg_catalog.set_config('statement_timeout', '10min', true)";
 /// Privilege and live-guard check at open (AUD-RM2-STO-08): not superuser, not
-/// BYPASSRLS, not a member of any role owning a `candor` table, not a member of
-/// the other intake role (`$1`), RLS forced on every data table, and the three
-/// guard triggers enabled.
+/// BYPASSRLS, not a member of any role owning a `candor` table, of the
+/// database owner (the VACUUM login), of the other intake role (`$1`) or of the
+/// VACUUM role; RLS enabled and forced on every data table with exactly the
+/// eight tenant policies; and the four guard triggers enabled.
 const SQL_ROLE_CHECK: &str = "SELECT r.rolsuper, r.rolbypassrls, \
      EXISTS (SELECT 1 FROM pg_catalog.pg_tables t WHERE t.schemaname = 'candor' \
-             AND pg_catalog.pg_has_role(current_user, t.tableowner, 'MEMBER')), \
+             AND pg_catalog.pg_has_role(current_user, t.tableowner, 'MEMBER')) \
+       OR pg_catalog.pg_has_role(current_user, (SELECT d.datdba FROM pg_catalog.pg_database d \
+             WHERE d.datname = pg_catalog.current_database()), 'MEMBER') \
+       OR pg_catalog.pg_has_role(current_user, 'candor_intake_vacuum', 'MEMBER'), \
      pg_catalog.pg_has_role(current_user, $1::name, 'MEMBER'), \
      (SELECT count(*) FROM pg_catalog.pg_class k JOIN pg_catalog.pg_namespace n ON n.oid = k.relnamespace \
       WHERE n.nspname = 'candor' AND k.relkind = 'r' AND k.relname <> 'schema_migration' \
@@ -145,9 +149,56 @@ const SQL_ROLE_CHECK: &str = "SELECT r.rolsuper, r.rolbypassrls, \
       JOIN pg_catalog.pg_namespace n ON n.oid = k.relnamespace \
       WHERE n.nspname = 'candor' AND NOT g.tgisinternal AND g.tgenabled = 'O' \
       AND g.tgname IN ('intake_meta_monotonic', 'intake_meta_no_delete', 'deletion_list_guard', \
-      'deletion_list_append')) \
+      'deletion_list_append')), \
+     (SELECT count(*) FROM pg_catalog.pg_policy p JOIN pg_catalog.pg_class k ON k.oid = p.polrelid \
+      JOIN pg_catalog.pg_namespace n ON n.oid = k.relnamespace WHERE n.nspname = 'candor'), \
+     (SELECT count(*) FROM pg_catalog.pg_policy p JOIN pg_catalog.pg_class k ON k.oid = p.polrelid \
+      JOIN pg_catalog.pg_namespace n ON n.oid = k.relnamespace WHERE n.nspname = 'candor' \
+      AND p.polname = 'p_tenant' AND p.polpermissive AND p.polcmd = '*' AND p.polroles = '{0}') \
      FROM pg_catalog.pg_roles r WHERE r.rolname = current_user";
 const EXPECTED_GUARD_TRIGGERS: i64 = 4;
+/// One `p_tenant` policy (permissive, all commands, PUBLIC) per data table.
+const EXPECTED_POLICIES: i64 = 8;
+/// Session hardening check, on every new connection (AUD-RM2-STO-08).
+/// PostgreSQL lets an ordinary role `ALTER ROLE` its own defaults, which cannot
+/// be revoked; so (1) the role's stored defaults (cluster-wide and for this
+/// database) must be exactly [`EXPECTED_ROLE_SETTINGS`], and (2) the effective
+/// session values (after the startup options of [`SESSION_OPTIONS`], which
+/// override role defaults) must be [`EXPECTED_SESSION`]. Anything else refuses
+/// the connection (fail closed).
+const SQL_SESSION_CHECK: &str = "SELECT COALESCE((SELECT pg_catalog.array_agg(x ORDER BY x) \
+     FROM pg_catalog.pg_db_role_setting s, pg_catalog.unnest(s.setconfig) x \
+     WHERE s.setrole = (SELECT r.oid FROM pg_catalog.pg_roles r WHERE r.rolname = current_user) \
+     AND s.setdatabase IN (0, (SELECT d.oid FROM pg_catalog.pg_database d \
+     WHERE d.datname = pg_catalog.current_database()))), '{}'::text[]), \
+     pg_catalog.current_setting('search_path'), pg_catalog.current_setting('statement_timeout'), \
+     pg_catalog.current_setting('idle_in_transaction_session_timeout'), \
+     pg_catalog.current_setting('lock_timeout'), pg_catalog.current_setting('temp_file_limit'), \
+     pg_catalog.current_setting('synchronous_commit'), pg_catalog.current_setting('row_security'), \
+     pg_catalog.current_setting('default_transaction_read_only'), \
+     pg_catalog.current_setting('session_replication_role'), \
+     pg_catalog.current_setting('default_transaction_isolation')";
+/// Stored role defaults of `candor_istore` and `candor_intake_maint` (sorted;
+/// `temp_file_limit` is superuser-only and set at provisioning, 09 §10).
+const EXPECTED_ROLE_SETTINGS: [&str; 4] = [
+    "idle_in_transaction_session_timeout=60s",
+    "search_path=candor",
+    "statement_timeout=30s",
+    "temp_file_limit=1GB",
+];
+/// Effective session values (columns 1.. of [`SQL_SESSION_CHECK`]).
+const EXPECTED_SESSION: [&str; 10] = [
+    "candor",
+    "30s",
+    "1min",
+    "10s",
+    "1GB",
+    "on",
+    "on",
+    "off",
+    "origin",
+    "read committed",
+];
 const SQL_META_HASH: &str = "SELECT schema_hash FROM candor.intake_meta";
 const SQL_META_INSERT: &str = "INSERT INTO candor.intake_meta (tenant_id, schema_hash, kdf_salt) \
      VALUES ($1, $2, $3) ON CONFLICT DO NOTHING";
@@ -257,12 +308,14 @@ const SQL_DEL_AFTER: &str = "SELECT d.seq, d.kind::text, d.del_hash, (d.del_day 
 const SQL_DEL_INSERT: &str = "INSERT INTO candor.deletion_list (seq, kind, del_hash, del_day, prev_hash, sig, relayed) \
      VALUES ($1, $2::text::candor.deletion_kind, $3, DATE '1970-01-01' + $4::int4, $5, $6, false) \
      ON CONFLICT DO NOTHING";
-const SQL_DEL_ACKED: &str =
-    "SELECT deletion_acked_seq, deletion_acked_hash, deletion_acked_sig FROM candor.intake_meta";
-/// Record a verified Z-CORE head (AUD-RM2-STO-21); the trigger checks that it
-/// is part of the local chain.
+const SQL_DEL_ACKED: &str = "SELECT deletion_acked_seq, deletion_acked_hash, deletion_acked_sig, \
+     (deletion_acked_day - DATE '1970-01-01')::int4, deletion_acked_counter FROM candor.intake_meta";
+/// Record a verified Z-CORE head (AUD-RM2-STO-21/24) with a newer attestation
+/// counter; the trigger checks that it is part of the local chain and that
+/// counter and day never decrease.
 const SQL_DEL_ACK: &str = "UPDATE candor.intake_meta SET deletion_acked_seq = $1, deletion_acked_hash = $2, \
-     deletion_acked_sig = $3 WHERE deletion_acked_seq < $1";
+     deletion_acked_sig = $3, deletion_acked_day = DATE '1970-01-01' + $4::int4, deletion_acked_counter = $5 \
+     WHERE deletion_acked_counter < $5";
 const SQL_DEL_AT: &str = "SELECT d.seq, d.kind::text, d.del_hash, (d.del_day - DATE '1970-01-01')::int4, \
      d.prev_hash, d.sig, d.relayed FROM candor.deletion_list d WHERE d.seq BETWEEN $1 AND $1 + 1 ORDER BY d.seq";
 /// Flag entries up to the head the maintenance process verified itself.
@@ -327,15 +380,51 @@ const SQL_RECREATE_REPLY: &str =
     "UPDATE candor.reply SET reply_ct = reply_ct || ''::bytea WHERE reply_ref = $1";
 const SQL_RECREATE_SNAPSHOT: &str = "UPDATE candor.directory_snapshot SET body = body || ''::bytea, \
      signatures = signatures || ''::bytea WHERE version = $1";
-/// Post-rewrite VACUUM (not FULL) as the table owner (AUD-RM2-STO-18): makes
-/// the dead pre-rewrite heap and TOAST tuples reclaimable.
-const SQL_VACUUM_ROLE: &str = "SET ROLE candor_intake_migrator";
-const SQL_VACUUM: &str = "VACUUM candor.source_account, candor.envelope, candor.envelope_part, candor.reply, \
-     candor.deletion_list, candor.counter_month, candor.directory_snapshot, candor.intake_meta";
+/// Identity check of the VACUUM login (AUD-RM2-STO-24(a)): it must own the
+/// database (PostgreSQL 16 lets the database owner VACUUM every table in it)
+/// and must not be a superuser, BYPASSRLS, the schema owner or a member of any
+/// role owning a `candor` table (it could then disable RLS or the guard
+/// triggers), nor a member of a service role.
+const SQL_VACUUM_ROLE_CHECK: &str = "SELECT r.rolsuper OR r.rolbypassrls \
+     OR EXISTS (SELECT 1 FROM pg_catalog.pg_tables t WHERE t.schemaname = 'candor' \
+                AND pg_catalog.pg_has_role(current_user, t.tableowner, 'MEMBER')) \
+     OR EXISTS (SELECT 1 FROM pg_catalog.pg_namespace n WHERE n.nspname = 'candor' \
+                AND pg_catalog.pg_has_role(current_user, n.nspowner, 'MEMBER')) \
+     OR pg_catalog.pg_has_role(current_user, 'candor_istore', 'MEMBER') \
+     OR pg_catalog.pg_has_role(current_user, 'candor_intake_maint', 'MEMBER') \
+     OR pg_catalog.pg_has_role(current_user, 'candor_intake_backup', 'MEMBER'), \
+     (SELECT d.datdba FROM pg_catalog.pg_database d WHERE d.datname = pg_catalog.current_database()) = r.oid \
+     FROM pg_catalog.pg_roles r WHERE r.rolname = current_user";
+/// The source-linkable tables (with their TOAST tables and indexes).
+/// Slot VACUUM (AUD-RM2-STO-11/18): autovacuum is off on the intake cluster,
+/// so this is the only routine VACUUM; it makes the dead pre-rewrite heap and
+/// TOAST tuples reclaimable (their bytes stay in page free space until the
+/// daily VACUUM FULL, AUD-RM2-STO-23). Never `ANALYZE`: `pg_statistic` would
+/// copy column values (sampled locator hashes, days) outside the rows.
+const SQL_VACUUM: &str = "VACUUM (ANALYZE false) candor.source_account, candor.envelope, \
+     candor.envelope_part, candor.reply, candor.deletion_list, candor.counter_month, \
+     candor.directory_snapshot, candor.intake_meta";
+/// Daily maintenance-window rewrite (AUD-RM2-STO-23): writes fresh relation
+/// files for every source-linkable table, its TOAST table and indexes, so no
+/// pre-rewrite tuple image (old `xmin`, old TOAST `chunk_id`) survives in page
+/// free space; the old files are truncated at commit and unlinked at the next
+/// checkpoint. ACCESS EXCLUSIVE lock per table (intake serving is paused).
+const SQL_VACUUM_FULL: &str = "VACUUM (FULL, ANALYZE false) candor.source_account, candor.envelope, \
+     candor.envelope_part, candor.reply, candor.deletion_list, candor.counter_month, \
+     candor.directory_snapshot, candor.intake_meta";
+const SQL_CHECKPOINT: &str = "CHECKPOINT";
+/// Session limits of the VACUUM login (a daily VACUUM FULL may take minutes).
+const VACUUM_SESSION_OPTIONS: [(&str, &str); 4] = [
+    ("statement_timeout", "30min"),
+    ("lock_timeout", "60s"),
+    ("idle_in_transaction_session_timeout", "60s"),
+    ("synchronous_commit", "on"),
+];
 
 const SQL_META_FULL: &str = "SELECT tenant_id, kdf_salt, relay_req_counter, last_batch_no, kd_tree_size_hwm, \
      (kd_checkpoint_day_hwm - DATE '1970-01-01')::int4, directory_version, \
-     deletion_acked_seq, deletion_acked_hash, deletion_acked_sig FROM candor.intake_meta";
+     deletion_acked_seq, deletion_acked_hash, deletion_acked_sig, \
+     (deletion_acked_day - DATE '1970-01-01')::int4, deletion_acked_counter FROM candor.intake_meta";
 const SQL_META_SALT: &str = "SELECT kdf_salt FROM candor.intake_meta FOR UPDATE";
 const SQL_NONEMPTY: &str = "SELECT EXISTS (SELECT 1 FROM candor.source_account) OR EXISTS (SELECT 1 FROM candor.envelope) \
      OR EXISTS (SELECT 1 FROM candor.reply) OR EXISTS (SELECT 1 FROM candor.deletion_list)";
@@ -348,12 +437,18 @@ const SQL_META_RESTORE_INSERT: &str = "INSERT INTO candor.intake_meta (tenant_id
      relay_req_counter, last_batch_no, kd_tree_size_hwm, kd_checkpoint_day_hwm, directory_version, restore_pending) \
      VALUES ($1, $2, $3, $4, $5, $6, DATE '1970-01-01' + $7::int4, $8, true) ON CONFLICT DO NOTHING";
 
-/// Re-assert the per-session limits on every connection (the role defaults can be
-/// changed by the role itself, AUD-RM2-STO-08).
-const SESSION_OPTIONS: [(&str, &str); 3] = [
+/// Re-assert the per-session settings on every connection as startup options,
+/// which take precedence over role and database defaults (a role can rewrite
+/// its own defaults, AUD-RM2-STO-08). `temp_file_limit` is superuser-only and
+/// cannot be set (or changed) by the role; it is checked instead.
+const SESSION_OPTIONS: [(&str, &str); 7] = [
     ("statement_timeout", "30s"),
     ("idle_in_transaction_session_timeout", "60s"),
     ("lock_timeout", "10s"),
+    ("search_path", "candor"),
+    ("synchronous_commit", "on"),
+    ("row_security", "on"),
+    ("default_transaction_read_only", "off"),
 ];
 
 /// Run all pending embedded migrations, each in its own transaction with lock and
@@ -405,23 +500,42 @@ pub async fn migrate(opts: &PgConnectOptions) -> Result<()> {
     conn.close().await.map_err(db)
 }
 
-/// Post-rewrite VACUUM (AUD-RM2-STO-18): run right after each slot's
-/// [`IntakeStore::uniform_rewrite`] commits, so that the dead pre-rewrite heap
-/// and TOAST tuples (with their old `xmin` and creation-ordered `chunk_id`) are
-/// reclaimable. PostgreSQL 16 lets only the table owner vacuum, so this connects
-/// with the migration login (`candor-migrate`, a member of
-/// `candor_intake_migrator`, ADR-052(9)), never with the service roles;
-/// autovacuum (scale factor 0.01) is the backstop. Plain VACUUM, not FULL: no
-/// exclusive lock, but freed space is reused rather than returned (residual,
-/// SPEC-NOTES).
-pub async fn vacuum_after_rewrite(owner_opts: &PgConnectOptions) -> Result<()> {
-    let mut conn = PgConnection::connect_with(&owner_opts.clone().disable_statement_logging())
+/// Connect as the VACUUM login and verify its identity (see
+/// `SQL_VACUUM_ROLE_CHECK`; fail closed).
+async fn vacuum_conn(vacuum_opts: &PgConnectOptions) -> Result<PgConnection> {
+    let mut conn = PgConnection::connect_with(
+        &vacuum_opts
+            .clone()
+            .disable_statement_logging()
+            .options(VACUUM_SESSION_OPTIONS),
+    )
+    .await
+    .map_err(db)?;
+    let row = sqlx::query(SQL_VACUUM_ROLE_CHECK)
+        .fetch_one(&mut conn)
         .await
         .map_err(db)?;
-    sqlx::raw_sql(SQL_VACUUM_ROLE)
-        .execute(&mut conn)
-        .await
-        .map_err(db)?;
+    let privileged: bool = row.try_get(0).map_err(db)?;
+    let db_owner: bool = row.try_get(1).map_err(db)?;
+    if privileged || !db_owner {
+        return Err(StoreError::Integrity(
+            "vacuum login must own the database and nothing else",
+        ));
+    }
+    Ok(conn)
+}
+
+/// Slot VACUUM (AUD-RM2-STO-11/18/24): run right after each slot's
+/// [`IntakeStore::uniform_rewrite`] commits. Autovacuum is off on the intake
+/// cluster (`autovacuum = off`, `track_counts = off`, and per table), so this
+/// scheduled run is the routine VACUUM; it follows the fixed slot schedule,
+/// never source activity. It makes the dead pre-rewrite heap and TOAST tuples
+/// reclaimable. It connects with the dedicated VACUUM login
+/// (`candor_intake_vacuum`, OS user `candor-vacuum`), which owns the database
+/// but no table (PostgreSQL 16 lets the database owner vacuum), never with the
+/// schema owner or a service role; the identity is checked first.
+pub async fn vacuum_after_rewrite(vacuum_opts: &PgConnectOptions) -> Result<()> {
+    let mut conn = vacuum_conn(vacuum_opts).await?;
     sqlx::raw_sql(SQL_VACUUM)
         .execute(&mut conn)
         .await
@@ -429,18 +543,48 @@ pub async fn vacuum_after_rewrite(owner_opts: &PgConnectOptions) -> Result<()> {
     conn.close().await.map_err(db)
 }
 
-/// Read the acknowledged head columns (`seq, hash, sig` at `i..i+3`).
+/// Daily maintenance-window `VACUUM FULL` (AUD-RM2-STO-23), at a fixed time
+/// after the day's last slot, with the same VACUUM login: rewrites every
+/// source-linkable table with its TOAST table and indexes into new files, so
+/// no pre-rewrite tuple image (old `xmin`, old TOAST `chunk_id`) survives in
+/// page free space, then `CHECKPOINT`s so that the old files are unlinked
+/// (needs `pg_checkpoint`, granted at provisioning). Each table is locked
+/// ACCESS EXCLUSIVE while it is rewritten: the intake daemon pauses serving
+/// for the window (requests would otherwise wait up to `lock_timeout` and
+/// fail). An error leaves the remaining tables for the next run; the job
+/// retries within the window.
+pub async fn vacuum_full_daily(vacuum_opts: &PgConnectOptions) -> Result<()> {
+    let mut conn = vacuum_conn(vacuum_opts).await?;
+    sqlx::raw_sql(SQL_VACUUM_FULL)
+        .execute(&mut conn)
+        .await
+        .map_err(db)?;
+    sqlx::raw_sql(SQL_CHECKPOINT)
+        .execute(&mut conn)
+        .await
+        .map_err(db)?;
+    conn.close().await.map_err(db)
+}
+
+/// Read the acknowledged head columns (`seq, hash, sig, day, counter` at
+/// `i..i+5`).
 fn acked_from_row(r: &PgRow, i: usize) -> Result<Option<SignedDeletionHead>> {
     let seq = get_u64(r, i)?;
     let hash: Option<Vec<u8>> = r.try_get(i.saturating_add(1)).map_err(db)?;
     let sig: Option<Vec<u8>> = r.try_get(i.saturating_add(2)).map_err(db)?;
-    match (seq, hash, sig) {
-        (0, None, None) => Ok(None),
-        (s, Some(h), Some(g)) if s > 0 => Ok(Some(SignedDeletionHead {
+    let day: Option<i32> = r.try_get(i.saturating_add(3)).map_err(db)?;
+    let counter = get_u64(r, i.saturating_add(4))?;
+    match (seq, hash, sig, day, counter) {
+        (0, None, None, None, 0) => Ok(None),
+        (s, Some(h), Some(g), Some(d), c) if s > 0 && c > 0 => Ok(Some(SignedDeletionHead {
             seq: s,
             head_hash: h
                 .try_into()
                 .map_err(|_| StoreError::Integrity("column length"))?,
+            day: u32::try_from(d)
+                .map(Day)
+                .map_err(|_| StoreError::Integrity("day"))?,
+            counter: c,
             sig: g
                 .try_into()
                 .map_err(|_| StoreError::Integrity("column length"))?,
@@ -461,23 +605,44 @@ async fn store_acked(tx: &mut PgConnection, h: &SignedDeletionHead) -> Result<()
         .bind(i64_of(h.seq)?)
         .bind(h.head_hash.as_slice())
         .bind(h.sig.as_slice())
+        .bind(day_i32(h.day)?)
+        .bind(i64_of(h.counter)?)
         .execute(tx)
         .await
         .map_err(db_classified)?;
     Ok(())
 }
 
-/// Open a pool for an intake role and verify its privileges and the live guards
-/// (`other` = the intake role this one must not be a member of).
+/// Session hardening check of one connection (AUD-RM2-STO-08, see
+/// `SQL_SESSION_CHECK`).
+async fn session_ok(conn: &mut PgConnection) -> std::result::Result<bool, sqlx::Error> {
+    let row = sqlx::query(SQL_SESSION_CHECK).fetch_one(conn).await?;
+    let stored: Vec<String> = row.try_get(0)?;
+    if stored.iter().map(String::as_str).ne(EXPECTED_ROLE_SETTINGS) {
+        return Ok(false);
+    }
+    for (i, want) in EXPECTED_SESSION.iter().enumerate() {
+        let got: String = row.try_get(i.saturating_add(1))?;
+        if got != *want {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Open a pool for an intake role and verify its privileges, its session
+/// settings and the live guards (`other` = the intake role this one must not
+/// be a member of). Every later pool connection re-runs the session check.
 async fn open_pool(opts: PgConnectOptions, max_connections: u32, other: &str) -> Result<PgPool> {
-    let pool = PgPoolOptions::new()
-        .max_connections(max_connections.max(1))
-        .connect_with(opts.disable_statement_logging().options(SESSION_OPTIONS))
+    let opts = opts.options(SESSION_OPTIONS);
+    // Checked on a dedicated connection first, so that a refusal is a typed
+    // `Integrity` error rather than a pool connection failure.
+    let mut conn = PgConnection::connect_with(&opts.clone().disable_statement_logging())
         .await
         .map_err(db)?;
     let row = sqlx::query(SQL_ROLE_CHECK)
         .bind(other)
-        .fetch_one(&pool)
+        .fetch_one(&mut conn)
         .await
         .map_err(db)?;
     let sup: bool = row.try_get(0).map_err(db)?;
@@ -486,16 +651,25 @@ async fn open_pool(opts: PgConnectOptions, max_connections: u32, other: &str) ->
     let other_member: bool = row.try_get(3).map_err(db)?;
     let unforced: i64 = row.try_get(4).map_err(db)?;
     let triggers: i64 = row.try_get(5).map_err(db)?;
+    let policies: i64 = row.try_get(6).map_err(db)?;
+    let tenant_policies: i64 = row.try_get(7).map_err(db)?;
     if sup || bypass || owner_member || other_member {
         return Err(StoreError::Integrity(
             "intake role is privileged or a member of an owning role",
         ));
     }
-    if unforced != 0 || triggers != EXPECTED_GUARD_TRIGGERS {
+    if unforced != 0
+        || triggers != EXPECTED_GUARD_TRIGGERS
+        || policies != EXPECTED_POLICIES
+        || tenant_policies != EXPECTED_POLICIES
+    {
         return Err(StoreError::Integrity("schema guards disabled"));
     }
+    if !session_ok(&mut conn).await.map_err(db)? {
+        return Err(StoreError::Integrity("session settings differ"));
+    }
     let applied = sqlx::query(SQL_LEDGER_ALL)
-        .fetch_all(&pool)
+        .fetch_all(&mut conn)
         .await
         .map_err(db)?;
     if applied.len() != MIGRATIONS.len() {
@@ -508,7 +682,21 @@ async fn open_pool(opts: PgConnectOptions, max_connections: u32, other: &str) ->
             return Err(StoreError::Integrity("schema version mismatch"));
         }
     }
-    Ok(pool)
+    conn.close().await.map_err(db)?;
+    PgPoolOptions::new()
+        .max_connections(max_connections.max(1))
+        .after_connect(|conn, _meta| {
+            Box::pin(async move {
+                if session_ok(conn).await? {
+                    Ok(())
+                } else {
+                    Err(sqlx::Error::Protocol("session settings differ".into()))
+                }
+            })
+        })
+        .connect_with(opts.disable_statement_logging())
+        .await
+        .map_err(db)
 }
 
 async fn begin_tenant(pool: &PgPool, tenant: &TenantId) -> Result<Transaction<'static, Postgres>> {
@@ -722,7 +910,7 @@ impl PgIntakeStore {
         }
         // The verified head is part of the merged chain: it becomes the
         // acknowledged head (monotonic; AUD-RM2-STO-22).
-        if verified.map_or(0, |v| v.seq) < zhead.seq {
+        if zhead.seq > 0 && verified.is_none_or(|v| v.counter < zhead.counter) {
             store_acked(&mut tx, zhead).await?;
         }
         let acct: HashSet<[u8; 32]> = local
@@ -1746,10 +1934,11 @@ impl IntakeStore for PgIntakeStore {
         core_pk: &[u8; 32],
         k31_pk: &[u8; 32],
         hasher: &dyn ReplyObjectHasher,
+        today: Day,
     ) -> Result<u64> {
-        // Head and entry signatures are verified before taking the row lock
-        // (AUD-RM2-STO-12/22).
-        let r = match validate::verify_pushed(entries, k31_pk, head, &self.tenant, core_pk) {
+        // Head and entry signatures and the head's freshness are verified
+        // before taking the row lock (AUD-RM2-STO-12/22/24).
+        let r = match validate::verify_pushed(entries, k31_pk, head, &self.tenant, core_pk, today) {
             Ok(()) => self.merge_and_apply(entries, head, hasher).await,
             Err(e) => Err(e),
         };

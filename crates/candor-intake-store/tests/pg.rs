@@ -573,14 +573,22 @@ async fn pg_durability_and_guards() {
             &h3,
             &common::core_pk(),
             &pk,
-            &common::PrefixHasher
+            &common::PrefixHasher,
+            common::TODAY
         )
         .await
         .is_err()
     );
     assert!(!s.serving_allowed().await.unwrap());
     assert_eq!(
-        s.apply_pushed_deletion_list(&list, &h3, &common::core_pk(), &pk, &common::PrefixHasher)
+        s.apply_pushed_deletion_list(
+            &list,
+            &h3,
+            &common::core_pk(),
+            &pk,
+            &common::PrefixHasher,
+            common::TODAY,
+        )
             .await
             .unwrap(),
         3
@@ -1272,11 +1280,11 @@ async fn pg_dummy_rows_indistinguishable() {
     let mut reals: Vec<Vec<u8>> = Vec::new();
     for _ in 0..28 {
         day = day.plus(1).unwrap();
+        // Real replies follow the configured profile (the calibration duty).
         let batch: Vec<IncomingReply> = (0..2)
             .map(|_| {
-                let mut r = [0u8; 1];
-                getrandom::fill(&mut r).unwrap();
-                common::reply_bucket(None, 0x33, 1 + (r[0] % 4))
+                let k = common::TEST_DEADDROP.draw_dummy_bucket().unwrap();
+                common::reply_bucket(None, 0x33, k)
             })
             .collect();
         reals.extend(batch.iter().map(|r| r.reply_ct.clone()));
@@ -1294,7 +1302,7 @@ async fn pg_dummy_rows_indistinguishable() {
     .fetch_all(&mut c)
     .await
     .unwrap();
-    let (mut hr, mut hd) = ([0usize; 4], [0usize; 4]);
+    let (mut hr, mut hd) = ([0usize; 16], [0usize; 16]);
     let mut xmins = HashSet::new();
     let mut seen_real = 0;
     for r in &rows {
@@ -1327,9 +1335,9 @@ async fn pg_dummy_rows_indistinguishable() {
     }
     assert_eq!(seen_real, reals.len());
     assert_eq!(xmins.len(), 1);
-    let chi = common::chi2_two_sample(&hr, &hd);
+    let chi = common::chi2_two_sample(&common::grouped(&hr), &common::grouped(&hd));
     assert!(
-        chi < common::CHI2_3DOF_P1E4,
+        chi < common::CHI2_4DOF_P1E4,
         "real vs dummy buckets separable: chi2 {chi} {hr:?} {hd:?}"
     );
 }

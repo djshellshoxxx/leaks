@@ -29,14 +29,23 @@ use crate::types::{
     REPLY_PAGE_LEN, REPLY_WINDOW_DAYS, ReplyIndex, reply_bucket_of_len, reply_ct_len,
 };
 
-/// Default public distribution of dummy REPLY buckets (weights for k = 1..=16,
-/// AUD-RM2-STO-19). Text-only replies (≤ 60 KiB body, 04 §13.5) are mostly short,
-/// so small buckets dominate. Implementation decision: deployments should set
-/// [`DeadDropConfig::dummy_bucket_weights`] to the long-run bucket distribution
-/// of their real replies (a public, slowly changing profile constant); every
-/// dummy's bucket is drawn independently from it and never from a real reply.
-pub const DEFAULT_DUMMY_BUCKET_WEIGHTS: [u16; REPLY_BUCKETS as usize] =
-    [400, 200, 120, 80, 50, 35, 25, 20, 15, 12, 10, 8, 7, 6, 6, 6];
+/// Default public distribution of dummy REPLY buckets (probabilities for
+/// k = 1..=16, summing to 1; AUD-RM2-STO-19/25). Text-only replies (≤ 60 KiB
+/// body, 04 §13.5) are mostly short, so small buckets dominate. Implementation
+/// decision: deployments should set [`DeadDropConfig::dummy_bucket_weights`] to
+/// the long-run bucket distribution of their real replies (a public, slowly
+/// changing profile constant); every dummy's bucket is drawn independently from
+/// it and never from a real reply.
+pub const DEFAULT_DUMMY_BUCKET_WEIGHTS: [f64; REPLY_BUCKETS as usize] = [
+    0.400, 0.200, 0.120, 0.080, 0.050, 0.035, 0.025, 0.020, 0.015, 0.012, 0.010, 0.008, 0.007,
+    0.006, 0.006, 0.006,
+];
+/// Smallest probability of any canonical REPLY bucket in the dummy distribution
+/// (AUD-RM2-STO-25): every bucket a real reply can have must also be drawn for
+/// dummies, so no bucket is "real only".
+pub const MIN_DUMMY_BUCKET_WEIGHT: f64 = 0.005;
+/// Tolerance of the weight sum (`|Σ − 1| ≤ tolerance`).
+pub const DUMMY_WEIGHT_SUM_TOLERANCE: f64 = 1e-6;
 /// Hard upper bound on the published page count (08 SA-19 EE figure: 128 pages ≈
 /// 573 MB). With the double buffer during a rebuild, peak RAM is bounded by
 /// 2 × 128 × 4.48 MB (AUD-RM2-STO-07).
@@ -73,7 +82,7 @@ impl DummyReplies for RandomDummyReplies {
 }
 
 /// Deployment configuration of the published set.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct DeadDropConfig {
     /// Fixed import slots per day (ADR-038(1): 4 by default, 1 for HIGH/GOV).
     pub slots_per_day: u8,
@@ -82,10 +91,12 @@ pub struct DeadDropConfig {
     /// Largest backlog of real replies awaiting publication; further pushes are
     /// rejected (the relay keeps them and retries, like a full mailbox).
     pub max_pending: u32,
-    /// Public distribution of dummy REPLY buckets: relative weight of bucket
-    /// `k = index + 1` (AUD-RM2-STO-19). Each dummy's bucket is drawn
-    /// independently from it with the CSPRNG.
-    pub dummy_bucket_weights: [u16; REPLY_BUCKETS as usize],
+    /// Public distribution of dummy REPLY buckets: probability of canonical
+    /// bucket `k = index + 1` (AUD-RM2-STO-19/25). Each dummy's bucket is drawn
+    /// independently from it with the CSPRNG. Validated at startup: every
+    /// weight finite and ≥ [`MIN_DUMMY_BUCKET_WEIGHT`], sum 1 within
+    /// [`DUMMY_WEIGHT_SUM_TOLERANCE`], one weight per canonical bucket.
+    pub dummy_bucket_weights: [f64; REPLY_BUCKETS as usize],
 }
 
 impl DeadDropConfig {
@@ -100,9 +111,7 @@ impl DeadDropConfig {
         if self.max_pending < u32::from(self.per_slot) || self.max_pending > HARD_MAX_PENDING {
             return Err(StoreError::InvalidInput("max_pending"));
         }
-        if self.dummy_bucket_weights.iter().all(|w| *w == 0) {
-            return Err(StoreError::InvalidInput("dummy bucket weights"));
-        }
+        validate_bucket_weights(&self.dummy_bucket_weights)?;
         let pages = self.pages_needed()?;
         if pages > usize::from(HARD_MAX_PAGES) {
             return Err(StoreError::Capacity);
@@ -199,21 +208,72 @@ pub(crate) fn generations_to_publish(
     (start..=current).collect()
 }
 
-/// Weighted draw of a bucket `k = index + 1` (uniform over the total weight).
-pub(crate) fn draw_bucket(weights: &[u16; REPLY_BUCKETS as usize]) -> Result<u8> {
-    let total: usize = weights.iter().map(|w| usize::from(*w)).sum();
-    let mut x = uniform_below(total)?;
+/// Startup validation of the dummy bucket distribution (AUD-RM2-STO-25), fail
+/// closed: one weight per canonical REPLY bucket (each index `i` must be the
+/// canonical bucket `k = i + 1`, whose ciphertext length maps back to `k` and
+/// fits an entry), every weight finite and at least
+/// [`MIN_DUMMY_BUCKET_WEIGHT`] (so every canonical bucket is covered and
+/// non-negative), and the weights sum to 1 within
+/// [`DUMMY_WEIGHT_SUM_TOLERANCE`].
+pub fn validate_bucket_weights(weights: &[f64; REPLY_BUCKETS as usize]) -> Result<()> {
+    const BAD: StoreError = StoreError::InvalidInput("dummy bucket weights");
+    let mut sum = 0.0f64;
     for (i, w) in weights.iter().enumerate() {
-        let w = usize::from(*w);
-        if x < w {
-            return u8::try_from(i)
-                .ok()
-                .and_then(|i| i.checked_add(1))
-                .ok_or(StoreError::InvalidInput("bucket"));
+        let k = u8::try_from(i)
+            .ok()
+            .and_then(|i| i.checked_add(1))
+            .ok_or(BAD)?;
+        let len = reply_ct_len(k).ok_or(BAD)?;
+        if len > MAX_REPLY_CT || reply_bucket_of_len(len) != Some(k) {
+            return Err(BAD);
         }
-        x = x.saturating_sub(w);
+        if !w.is_finite() || w.is_sign_negative() || *w < MIN_DUMMY_BUCKET_WEIGHT {
+            return Err(BAD);
+        }
+        sum += *w;
     }
-    Err(StoreError::InvalidInput("dummy bucket weights"))
+    if !sum.is_finite() || (sum - 1.0).abs() > DUMMY_WEIGHT_SUM_TOLERANCE {
+        return Err(BAD);
+    }
+    Ok(())
+}
+
+/// Uniform `f64` in `[0, 1)` from the CSPRNG (64 random bits; a rounded 1.0 is
+/// redrawn).
+fn unit_interval() -> Result<f64> {
+    const TWO_POW_32: f64 = 4_294_967_296.0;
+    loop {
+        let r = random_u64()?;
+        let hi = u32::try_from(r >> 32).map_err(|_| StoreError::Rng)?;
+        let lo = u32::try_from(r & 0xffff_ffff).map_err(|_| StoreError::Rng)?;
+        let x = (f64::from(hi) * TWO_POW_32 + f64::from(lo)) / (TWO_POW_32 * TWO_POW_32);
+        if x < 1.0 {
+            return Ok(x);
+        }
+    }
+}
+
+/// Weighted draw of a bucket `k = index + 1` (inverse CDF over validated
+/// weights; the total is renormalised so rounding cannot leave a gap).
+pub(crate) fn draw_bucket(weights: &[f64; REPLY_BUCKETS as usize]) -> Result<u8> {
+    validate_bucket_weights(weights)?;
+    let total: f64 = weights.iter().sum();
+    let x = unit_interval()? * total;
+    let mut acc = 0.0f64;
+    let mut last = None;
+    for (i, w) in weights.iter().enumerate() {
+        let k = u8::try_from(i)
+            .ok()
+            .and_then(|i| i.checked_add(1))
+            .ok_or(StoreError::InvalidInput("bucket"))?;
+        acc += *w;
+        last = Some(k);
+        if x < acc {
+            return Ok(k);
+        }
+    }
+    // x < total = acc up to rounding: the last bucket.
+    last.ok_or(StoreError::InvalidInput("dummy bucket weights"))
 }
 
 /// A dummy row (AUD-RM2-STO-19/20): its bucket drawn from the configured public
@@ -603,15 +663,17 @@ mod tests {
 
     /// AUD-RM2-STO-19: dummy buckets follow the configured distribution
     /// (χ² goodness of fit) and every dummy has the canonical length of its
-    /// bucket; zero-weight buckets never occur; all-zero weights are refused.
+    /// bucket.
     #[test]
     fn dummy_buckets_follow_distribution() {
         let mut c = cfg(1, 1);
-        c.dummy_bucket_weights = [0; 16];
-        assert!(c.validate().is_err());
-        c.dummy_bucket_weights[0] = 1;
-        c.dummy_bucket_weights[3] = 2;
-        c.dummy_bucket_weights[15] = 1;
+        // Buckets 1, 4 and 16 carry most weight; the 13 others the floor.
+        let floor = MIN_DUMMY_BUCKET_WEIGHT;
+        c.dummy_bucket_weights = [floor; 16];
+        c.dummy_bucket_weights[0] = 0.3;
+        c.dummy_bucket_weights[3] = 0.4;
+        c.dummy_bucket_weights[15] = 1.0 - 0.7 - 13.0 * floor;
+        c.validate().unwrap();
         let n = 4000usize;
         let mut hist = [0usize; 16];
         for _ in 0..n {
@@ -619,20 +681,73 @@ mod tests {
             assert_eq!(Some(body.len()), reply_ct_len(k));
             hist[usize::from(k) - 1] += 1;
         }
-        let exp = [(0usize, 0.25f64), (3, 0.5), (15, 0.25)];
-        assert_eq!(
-            hist.iter().sum::<usize>(),
-            exp.iter().map(|(i, _)| hist[*i]).sum::<usize>()
-        );
-        let chi2: f64 = exp
+        let rest: usize = hist.iter().sum::<usize>() - hist[0] - hist[3] - hist[15];
+        let obs = [hist[0], hist[3], hist[15], rest];
+        let p = [0.3, 0.4, c.dummy_bucket_weights[15], 13.0 * floor];
+        let chi2: f64 = obs
             .iter()
-            .map(|(i, p)| {
+            .zip(p)
+            .map(|(o, p)| {
                 let e = p * n as f64;
-                (hist[*i] as f64 - e).powi(2) / e
+                (*o as f64 - e).powi(2) / e
             })
             .sum();
-        // 2 degrees of freedom, p = 1e-4.
-        assert!(chi2 < 18.42, "chi2 = {chi2}, hist = {hist:?}");
+        // 3 degrees of freedom, p = 1e-4.
+        assert!(chi2 < 21.11, "chi2 = {chi2}, hist = {hist:?}");
+    }
+
+    /// AUD-RM2-STO-25: the weights are validated at startup against the
+    /// canonical REPLY buckets, fail closed: non-finite, negative, zero or
+    /// below-floor (an uncovered bucket), and a sum other than 1 are refused,
+    /// by the configuration, by the draw and by both store constructors.
+    #[test]
+    fn bucket_weights_validated() {
+        validate_bucket_weights(&DEFAULT_DUMMY_BUCKET_WEIGHTS).unwrap();
+        let base = DEFAULT_DUMMY_BUCKET_WEIGHTS;
+        let mut cases: Vec<(&str, [f64; 16])> = Vec::new();
+        for (why, i, v) in [
+            ("NaN", 3usize, f64::NAN),
+            ("+inf", 0, f64::INFINITY),
+            ("-inf", 15, f64::NEG_INFINITY),
+            ("negative", 15, -0.006),
+            ("negative zero", 15, -0.0),
+            ("zero (bucket not covered)", 15, 0.0),
+            ("below floor", 15, MIN_DUMMY_BUCKET_WEIGHT / 2.0),
+        ] {
+            let mut w = base;
+            w[i] = v;
+            cases.push((why, w));
+        }
+        let mut heavy = base;
+        heavy[0] += 0.01;
+        cases.push(("sum > 1", heavy));
+        let mut light = base;
+        light[0] -= 0.01;
+        cases.push(("sum < 1", light));
+        // Tampered profile (audit example): all weight on bucket 1.
+        let mut one = [0.0; 16];
+        one[0] = 1.0;
+        cases.push(("all on bucket 1", one));
+        cases.push(("relative (unnormalised) weights", base.map(|w| w * 1000.0)));
+        for (why, w) in cases {
+            assert!(validate_bucket_weights(&w).is_err(), "{why}");
+            assert!(draw_bucket(&w).is_err(), "{why}");
+            let mut c = cfg(1, 1);
+            c.dummy_bucket_weights = w;
+            assert_eq!(
+                c.validate(),
+                Err(StoreError::InvalidInput("dummy bucket weights")),
+                "{why}"
+            );
+            assert!(
+                crate::MemoryStore::with_config(c, Box::new(RandomDummyReplies)).is_err(),
+                "{why}"
+            );
+        }
+        // Within tolerance is accepted.
+        let mut near = base;
+        near[0] += DUMMY_WEIGHT_SUM_TOLERANCE / 2.0;
+        validate_bucket_weights(&near).unwrap();
     }
 
     /// A dummy source returning a non-canonical length is refused.

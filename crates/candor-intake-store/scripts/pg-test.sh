@@ -10,19 +10,26 @@
 # ''), authenticates ONLY by peer with an ident map (no host lines, no passwords),
 # applies the intake profile settings of 09 §10 and ADR-052(14) (wal_level =
 # minimal, max_wal_senders = 0, archive_mode = off, track_commit_timestamp = off,
-# log_min_messages = panic, no SQL text or bind parameters in logs), exports
+# log_min_messages = panic, no SQL text or bind parameters in logs; and, in the
+# default "intake" profile, track_counts = off and autovacuum = off,
+# AUD-RM2-STO-11), exports
 # CANDOR_TEST_PG=<socket dir> and CANDOR_TEST_PG_LOG=<0600 server log>, runs the
 # command (default: cargo test -p candor-intake-store) and always stops and
 # deletes the cluster (and an OS user it created) afterwards. The server log is
 # captured only so that a test can prove that no ERROR line is written
 # (AUD-RM2-STO-02); production discards it. Test-only: production provisioning
 # is 18/32. Do not run on shared hosts (it creates a system account as root).
+#
+# CANDOR_TEST_PG_PROFILE=intake (default) runs the deployment profile
+# (track_counts = off, autovacuum = off); =stock keeps PostgreSQL's defaults
+# (both on) to show the store does not depend on them either way.
 set -euo pipefail
 umask 077
 
 PGBIN="${PGBIN:-/usr/lib/postgresql/16/bin}"
 PGUSER_OS="${PGUSER_OS:-pgtest}"
 PORT="${CANDOR_TEST_PG_PORT:-5432}"
+PROFILE="${CANDOR_TEST_PG_PROFILE:-intake}"
 
 # Validate caller-supplied values before they reach useradd or postgresql.conf
 # (AUD-RM2-STO-13).
@@ -34,6 +41,15 @@ if [[ ! "$PORT" =~ ^[0-9]{1,5}$ ]] || (( 10#$PORT < 1024 || 10#$PORT > 65535 ));
   echo "pg-test: invalid CANDOR_TEST_PG_PORT" >&2
   exit 2
 fi
+
+case "$PROFILE" in
+  intake) STATS="off" ;;
+  stock) STATS="on" ;;
+  *)
+    echo "pg-test: invalid CANDOR_TEST_PG_PROFILE (intake|stock)" >&2
+    exit 2
+    ;;
+esac
 
 if [[ ! -x "$PGBIN/initdb" ]]; then
   echo "pg-test: PostgreSQL binaries not found in $PGBIN" >&2
@@ -85,6 +101,7 @@ candor $CLIENT_OS $PGUSER_OS
 candor $CLIENT_OS candor_istore
 candor $CLIENT_OS candor_intake_backup
 candor $CLIENT_OS candor_intake_maint
+candor $CLIENT_OS candor_intake_vacuum
 candor $CLIENT_OS candor_probe
 candor $PGUSER_OS $PGUSER_OS
 EOF
@@ -117,6 +134,8 @@ log_disconnections = off
 log_error_verbosity = terse
 log_line_prefix = '%m %e '
 track_io_timing = off
+track_counts = $STATS
+autovacuum = $STATS
 EOF
 
 "${RUN[@]}" "$PGBIN/pg_ctl" -D "$DATA" -l "$LOG" -w -s start
@@ -125,6 +144,7 @@ export CANDOR_TEST_PG="$SOCK"
 export CANDOR_TEST_PG_PORT="$PORT"
 export CANDOR_TEST_PG_SUPERUSER="$PGUSER_OS"
 export CANDOR_TEST_PG_LOG="$LOG"
+export CANDOR_TEST_PG_PROFILE="$PROFILE"
 
 if [[ $# -eq 0 ]]; then
   set -- cargo test -p candor-intake-store

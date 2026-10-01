@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! RAM-only session state (04 §9.13, ADR-034, 07 §4.4 and §5.2 state machine).
 //!
-//! Every secret-bearing field zeroizes on drop (`Secret32`, `Zeroizing`,
+//! Every secret-bearing field zeroizes on drop (`SessionKey`, `Zeroizing`,
 //! `SourceKeys`, `Passphrase`). Dropping a session also unlinks its staged
 //! ciphertext files, whose content is unreadable once K36 is gone.
 
 use crate::proto::{Coi, Mode, SecretText};
 use candor_core::hash::{EvidenceHasher, EvidenceHashes};
 use candor_core::passphrase::{Passphrase, SourceKeys};
-use candor_core::secret::Secret32;
+use candor_core::secret::SessionKey;
 use candor_safefs::{ObjectId, PendingObject, SafeRoot, SlotTime};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -101,7 +101,7 @@ pub(crate) struct Upload {
 pub(crate) struct Session {
     pub phase: Phase,
     /// K36: per-session part key (§9.13). Replaced after each successful submit.
-    pub k36: Secret32,
+    pub k36: SessionKey,
     pub channel_id: Option<[u8; 16]>,
     pub draft: Draft,
     pub parts: Vec<StagedPart>,
@@ -117,7 +117,7 @@ pub(crate) struct Session {
 }
 
 impl Session {
-    pub(crate) fn new(phase: Phase, k36: Secret32) -> Self {
+    pub(crate) fn new(phase: Phase, k36: SessionKey) -> Self {
         Self {
             phase,
             k36,
@@ -136,7 +136,7 @@ impl Session {
 
     /// Drop the draft, staged parts, upload and K36 (SEAL_ABORT, successful
     /// submit). Login keys and prefs are kept.
-    pub(crate) fn clear_draft(&mut self, fresh_k36: Secret32) {
+    pub(crate) fn clear_draft(&mut self, fresh_k36: SessionKey) {
         self.clear_draft_contents();
         self.k36 = fresh_k36;
     }

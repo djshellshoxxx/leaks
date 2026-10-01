@@ -46,11 +46,12 @@ pub(crate) enum MessageKind {
 }
 
 fn entries_value(entries: &[RecipientListEntry]) -> Value {
-    let mut v: Vec<[u8; candor_core::slots::RECIPIENT_ENTRY_LEN]> =
+    // Entries are CK-equivalent: keep the wire forms `Zeroizing` (AUD-RM1-CORE-01).
+    let mut v: Vec<zeroize::Zeroizing<[u8; candor_core::slots::RECIPIENT_ENTRY_LEN]>> =
         entries.iter().map(RecipientListEntry::to_bytes).collect();
     // §13.4 key 16.2: sorted (by key_id, which follows the 1-byte slot index).
     v.sort_by(|a, b| a.get(1..33).cmp(&b.get(1..33)));
-    Value::A(v.iter().map(|e| Value::bytes(e)).collect())
+    Value::A(v.iter().map(|e| Value::bytes(e.as_slice())).collect())
 }
 
 /// The signed Recipient List (§13.4 key 16 / key 8; ADR-033(1), ADR-050(3)).

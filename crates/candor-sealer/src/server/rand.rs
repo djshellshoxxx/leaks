@@ -94,12 +94,6 @@ pub(crate) fn weighted<T: Copy>(table: &[(T, u32)]) -> Result<T, Error> {
     Err(Error::Internal)
 }
 
-/// 16 random bytes.
-pub(crate) fn random16() -> Result<[u8; 16], Error> {
-    let mut b = [0u8; 16];
-    fill_random(&mut b)?;
-    Ok(b)
-}
 
 #[cfg(test)]
 mod tests {
