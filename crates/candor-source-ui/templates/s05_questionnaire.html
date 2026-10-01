@@ -1,3 +1,4 @@
+{#- SPDX-License-Identifier: AGPL-3.0-or-later -#}
 {% extends "layout.html" %}
 {#- S05 Questionnaire step: POST /q with step in the body; Back is a submit that also saves. -#}
 {% block main %}
@@ -11,7 +12,7 @@
 {%- endfor %}
 <div class="actions">
 <button type="submit" name="nav" value="next" class="btn-primary">{{ p.t("sui-btn-save-continue") }}</button>
-<button type="submit" name="nav" value="back">{{ p.t("sui-btn-back") }}</button>
+<button type="submit" name="nav" value="back" formnovalidate>{{ p.t("sui-btn-back") }}</button>
 </div>
 </form>
 {% endblock %}

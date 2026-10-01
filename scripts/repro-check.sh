@@ -85,7 +85,7 @@ build() {
     tgt="$WORK/target-$n"
     log "build $n: src=$src target=$tgt SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH"
     copy_tree "$src"
-    RUSTFLAGS="--remap-path-prefix=$src=/build/candor --remap-path-prefix=$CARGO_HOME=/cargo" \
+    RUSTFLAGS="--remap-path-prefix=$src=/build/candor --remap-path-prefix=$tgt=/build/target --remap-path-prefix=$CARGO_HOME=/cargo" \
         CARGO_TARGET_DIR="$tgt" \
         "$CARGO" build --manifest-path "$src/Cargo.toml" \
             --release --locked --offline --workspace --all-features

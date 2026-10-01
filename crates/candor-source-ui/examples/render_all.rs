@@ -3,7 +3,7 @@
 //! `target/source-ui-preview/` for manual review. Run with
 //! `cargo run -p candor-source-ui --example render_all`.
 
-use std::fs;
+use std::fs; // safefs-lint: allow(dev-only preview example writing to target/, never shipped)
 use std::path::PathBuf;
 
 use candor_source_ui::preview::sample_view_model;
@@ -13,8 +13,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"));
-    let out = target.join("source-ui-preview");
-    fs::create_dir_all(&out)?;
+    let out = target.join("source-ui-preview"); // safefs-lint: allow(dev-only preview example writing to target/, never shipped)
+    fs::create_dir_all(&out)?; // safefs-lint: allow(dev-only preview example writing to target/, never shipped)
     let mut index = String::from(
         "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Candor source UI preview</title></head><body><h1>Candor source UI preview</h1><ul>\n",
     );
@@ -40,7 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     mode,
                     if errors { "_error" } else { "" }
                 );
-                fs::write(out.join(&name), &page.body[..])?;
+                fs::write(out.join(&name), &page.body[..])?; // safefs-lint: allow(dev-only preview example writing to target/, never shipped)
                 index.push_str(&format!(
                     "<li><a href=\"{name}\">{name}</a> ({} bytes unpadded, class {:?}, status {})</li>\n",
                     page.unpadded_len, page.class, page.status
@@ -50,7 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     index.push_str("</ul></body></html>\n");
-    fs::write(out.join("index.html"), index)?;
+    fs::write(out.join("index.html"), index)?; // safefs-lint: allow(dev-only preview example writing to target/, never shipped)
     println!("wrote {count} pages to {}", out.display());
     Ok(())
 }

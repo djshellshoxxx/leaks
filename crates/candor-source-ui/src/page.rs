@@ -11,8 +11,34 @@ use zeroize::Zeroizing;
 
 use crate::model::Method;
 
-/// The single inline stylesheet (SUI-003). Hash-pinned in the CSP.
-pub const STYLESHEET: &str = include_str!("../static/source.css");
+/// Source of the single inline stylesheet (`static/source.css`).
+const STYLESHEET_SOURCE: &str = include_str!("../static/source.css");
+
+/// The served inline stylesheet (SUI-003): the source with comments and line breaks removed,
+/// to save bytes in the P1 budget. Hash-pinned in the CSP.
+pub fn stylesheet() -> &'static str {
+    static CSS: LazyLock<String> = LazyLock::new(|| minify_css(STYLESHEET_SOURCE));
+    CSS.as_str()
+}
+
+/// Removes `/* … */` comments and line breaks. The stylesheet contains no strings that could
+/// hold comment markers, so this is a plain scan.
+fn minify_css(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    let mut rest = src;
+    while let Some(start) = rest.find("/*") {
+        out.push_str(rest.get(..start).unwrap_or(""));
+        rest = rest
+            .get(start..)
+            .and_then(|r| r.find("*/").and_then(|e| r.get(e.saturating_add(2)..)))
+            .unwrap_or("");
+    }
+    out.push_str(rest);
+    out.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect()
+}
 
 /// Maximum inline CSS size (11 §5.4 P1 row).
 pub const MAX_CSS_BYTES: usize = 20_480;
@@ -63,7 +89,7 @@ impl SizeClass {
 /// `sha256-…` source for the stylesheet.
 pub fn stylesheet_hash() -> &'static str {
     static HASH: LazyLock<String> = LazyLock::new(|| {
-        let digest = Sha256::digest(STYLESHEET.as_bytes());
+        let digest = Sha256::digest(stylesheet().as_bytes());
         format!(
             "sha256-{}",
             base64::engine::general_purpose::STANDARD.encode(digest.as_slice())
@@ -266,7 +292,12 @@ mod tests {
 
     #[test]
     fn css_budget() {
-        assert!(STYLESHEET.len() <= MAX_CSS_BYTES, "{}", STYLESHEET.len());
+        assert!(
+            stylesheet().len() <= MAX_CSS_BYTES,
+            "{}",
+            stylesheet().len()
+        );
+        assert!(!stylesheet().contains("/*") && !stylesheet().contains('\n'));
     }
 
     #[test]

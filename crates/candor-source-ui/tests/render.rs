@@ -394,7 +394,7 @@ fn response_headers() {
         // The CSP hash covers exactly the bytes inside <style>.
         let start = b.find("<style>").unwrap() + "<style>".len();
         let end = b.find("</style>").unwrap();
-        assert_eq!(&b[start..end], STYLESHEET);
+        assert_eq!(&b[start..end], stylesheet());
         assert!(csp.contains(stylesheet_hash()));
         assert_eq!(p.header("Clear-Site-Data").is_some(), s.clears_site_data());
         assert_eq!(p.status, s.status());
@@ -799,7 +799,7 @@ fn rtl_locale() {
     let h = Html::parse_document(&b);
     assert_eq!(h.select(&sel("html[dir=rtl][lang=ar-XB]")).count(), 1);
     assert!(h.select(&sel("p.ut[dir=auto]")).next().is_some());
-    let css = STYLESHEET;
+    let css = stylesheet();
     for physical in [
         "margin-left",
         "margin-right",
@@ -818,7 +818,7 @@ fn rtl_locale() {
 // ST: A11Y-009 / A11Y-018 / 11 §12 — stylesheet obligations.
 #[test]
 fn stylesheet_obligations() {
-    let css = STYLESHEET;
+    let css = stylesheet();
     assert!(css.len() <= MAX_CSS_BYTES);
     assert!(css.contains(":focus-visible{outline:3px solid"));
     assert!(css.contains("outline-offset:2px"));
@@ -842,9 +842,10 @@ fn stylesheet_obligations() {
 #[test]
 fn templates_have_no_hard_coded_text() {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/templates");
-    for entry in std::fs::read_dir(dir).unwrap() {
+    let entries = std::fs::read_dir(dir); // safefs-lint: allow(test reads crate's own template sources)
+    for entry in entries.unwrap() {
         let path = entry.unwrap().path();
-        let src = std::fs::read_to_string(&path).unwrap();
+        let src = std::fs::read_to_string(&path).unwrap(); // safefs-lint: allow(test reads crate's own template sources)
         let mut s = String::new();
         let mut rest = src.as_str();
         // Strip template blocks/expressions/comments, then tags.

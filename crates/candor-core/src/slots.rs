@@ -2,8 +2,11 @@
 //! RecipientSlotBlock (§13.2, ADR-033 item 1, CRYPTO-058/059/060).
 //!
 //! 16 anonymous HPKE slots: real slots are HPKE SealBase of CK to each recipient's
-//! key; the remaining slots are *verifiable dummies* derived from CK, so any holder of
-//! CK can recompute them and detect hidden extra recipients (THR-046).
+//! key with CSPRNG-drawn encapsulation randomness `enc_rand` that is disclosed in the
+//! signed Recipient List (ADR-050(3)); the remaining slots are *verifiable dummies*
+//! derived from CK. Any holder of CK re-derives all 16 slots
+//! ([`RecipientSlotBlock::verify_slot_block`]) and so detects hidden extra recipients
+//! and listed recipients swapped for other keys (THR-046).
 //!
 //! Dummy slot at position `i` (Implementation decision, SPEC-NOTES "dummy index"):
 //! ```text

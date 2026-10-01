@@ -21,7 +21,7 @@ Licence: Apache-2.0 OR MIT (ADR-031). No `unsafe`. Secrets zeroize on drop and a
 | `labels` | §10 | the registry of every `candor/...` label (tests reject duplicates and unregistered literals) |
 | `passphrase` | §11.1–11.3 | EFF wordlist, `generate`, `normalize` (NFKC/lowercase/separators), `SourceKeys::derive`: Argon2id m=64 MiB t=3 p=1 → `lookup_id`/`lookup_tag`, Ed25519 auth/sign keys, X-Wing `src_sk`/`src_pk`, `mailbox_id(i)`, `K_prefs` |
 | `header` | §13.1 | `CoreHeader` 128-byte encode/decode/validate, `header_mac`, `object_hash` |
-| `slots` | §13.2 | `RecipientSlotBlock`: 16 anonymous slots, verifiable dummies, `trial_open`, `verify` |
+| `slots` | §13.2, ADR-050 | `RecipientSlotBlock`: 16 anonymous slots, verifiable dummies, `RecipientListEntry {slot_index, key_id, enc_rand}`, `trial_open`, `verify_slot_block` (re-derives all 16 slots) |
 | `stanza` | §13.2 | `WrapStanza`: HPKE_BASE (all §9.9 contexts), CASE_AEAD, CASEKEY_EK |
 | `stream` | §13.3 | `encrypt`, buffered `decrypt`, `StreamDecryptor`/`ChunkReader` with explicit `finish()` |
 | `padding` | §13.6 | buckets, `pad` |
@@ -29,7 +29,7 @@ Licence: Apache-2.0 OR MIT (ADR-031). No `unsafe`. Secrets zeroize on drop and a
 | `hash` | §13.2, ADR-012 | `key_id`, `lookup_tag`, bound hashes, `EvidenceHasher` (SHA-256 + BLAKE3) |
 | `kdf` | §10 | named derivations (payload, header-mac, case record/wrap, EK layer/meta, COI, stage part) |
 | `kem`, `sig` | §4 | X-Wing keys, `seal_base`/`open_base`, Ed25519 strict |
-| `object` | §13.1–13.3 | `seal` / `parse` → `open` / `open_stream` (validate → length → MAC → payload) |
+| `object` | §13.1–13.3 | `seal` (payload builder receives header and Recipient List) / `seal_bytes` (non-intake) / `parse` → `open` / `open_stream` (validate → length → MAC → payload) |
 | `selftest` | §22.2 | `self_test()`: start-up KATs; call it at process start and refuse to start on error |
 
 ## Example
@@ -39,20 +39,26 @@ use candor_core::{Suite, header::ObjectType, kem::KemKeyPair, object, padding, s
 
 let member = KemKeyPair::generate(Suite::CandorStd1)?;
 let ctx = SlotContext::MemberEpoch { tenant_id: [1; 16], channel_id: [2; 16], epoch_id: 7 };
-let pt = padding::pad(ObjectType::Submission, b"...inner CBOR with u32 length prefix...")?;
 let pks = [member.public.clone()];
-let (_ck, sealed) = object::seal(&object::SealRequest {
+let req = object::SealRequest {
     suite: Suite::CandorStd1, object_type: ObjectType::Submission,
     tenant_id: [1; 16], channel_id: [2; 16], epoch_id: 7, day_stamp: 0,
-    recipients: Some((ctx.clone(), &pks)), padded_plaintext: &pt,
+    recipients: Some((ctx.clone(), &pks)), padded_len: 4096,
+};
+// The builder sees the final header and the Recipient List entries (ADR-050(3))
+// and returns the padded inner plaintext that embeds the signed Recipient List.
+let (_ck, sealed) = object::seal(&req, |pc| {
+    let inner = build_inner_cbor(pc.header, pc.recipient_list); // caller's §13.4 encoder
+    padding::pad(ObjectType::Submission, &inner)
 })?;
 // Recipient side:
 let parsed = object::parse(&sealed.bytes)?;
 let block = sealed.slot_block.as_ref().unwrap();
 parsed.check_slot_block(block)?;
-let (ck, pos) = block.trial_open(&member.private, &parsed.slot_binding(ctx.clone()))?;
-block.verify(&ck, &parsed.slot_binding(ctx), /* Recipient List length */ 1, Some(pos))?;
+let (ck, _pos) = block.trial_open(&member.private, &parsed.slot_binding(ctx.clone()))?;
 let plaintext = parsed.open(&ck)?;
+let list = /* Recipient List entries parsed from the verified plaintext */;
+block.verify_slot_block(&ck, &parsed.slot_binding(ctx), &list, |key_id| key_directory.lookup(key_id))?;
 ```
 
 ## Tests and vectors

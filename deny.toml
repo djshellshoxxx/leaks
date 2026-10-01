@@ -113,10 +113,10 @@ deny = [
     { crate = "aws-lc-rs", deny-multiple-versions = true },
 ]
 skip = [
-    # PROPOSED exception, NOT enabled (27 §13.2 needs Security Lead + Trust-Path
+    # Exception ENABLED per ADR-051 (owner approval; 27 §13.2 interim, expires 2026-12-30)
     # Maintainer approval and an expiry <= 90 days): hpke =0.14.1 (mandated by the
     # build brief) depends on sha3 0.12 directly and on sha3 0.11 via ml-kem 0.3.2.
-    # { crate = "sha3@0.11.0", reason = "hpke 0.14.1 -> ml-kem 0.3.2; remove when ml-kem moves to sha3 0.12; expires YYYY-MM-DD; approved by <SL>+<TPM>" },
+    { crate = "sha3@0.11.0", reason = "hpke 0.14.1 -> ml-kem 0.3.2 pulls sha3 0.11 while hpke uses 0.12 directly; both RustCrypto, no advisory. Approved by project owner as interim exception (ADR-051). Expires 2026-12-30: remove when ml-kem moves to sha3 0.12." },
 ]
 skip-tree = []
 

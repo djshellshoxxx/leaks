@@ -21,13 +21,25 @@ CANDOR-STD-1 is implemented in full. CANDOR-FIPS-1 (`0x0002`) is recognised on t
    **Implementation decision:** `(src_sk, src_pk) = HPKE DeriveKeyPair(kem_seed)` for KEM 0x647a, matching the FIPS wording and the dummy-slot keys, as the build brief directs. Published in `tests/vectors/passphrase.json`.
 4. **Dummy slot index `i`.** §13.2 does not say whether `i` is the slot position or a dummy counter.
    **Implementation decision:** `i` = the slot's position (0..15) in the final permuted block. This makes dummies position-bound: a verifier recomputes one dummy per position and compares in constant time.
-5. **The strength of slot verification is count-based.** Real slots use fresh randomness, so a CK holder cannot tell *which* listed recipient a non-dummy slot belongs to.
-   `RecipientSlotBlock::verify` checks three things:
-   - every slot is either the verifiable dummy for its position or non-dummy;
-   - the number of non-dummy slots equals the signed Recipient List length;
-   - the verifier's own opened slot is non-dummy.
+5. **Full recipient-set verification: resolved by ADR-050(3).**
+   The first version verified slots only by counting, which caught extra recipients but not a listed recipient swapped for an attacker key. This is now replaced.
+   - Every real slot is encapsulated with 64 bytes of `enc_rand` drawn from the CSPRNG at sealing time.
+   - The builder returns one `RecipientListEntry {slot_index (u8), key_id (32), enc_rand (64)}` per real slot. The wire form is 97 bytes: `u8 ‖ key_id ‖ enc_rand`.
+   - `object::seal` hands these entries, together with the final header, to a payload-builder closure. That way they can be embedded in the signed, AEAD-protected Recipient List. `seal_bytes`, which takes no builder, is refused for intake types.
+   - `RecipientSlotBlock::verify_slot_block(ck, binding, list, resolve_pk)` re-derives **all 16 slots** and requires byte equality for each one. Listed slots are re-derived by HPKE SealBase of CK to the resolved key with `enc_rand`. The resolved key's `key_id` must equal the entry's. Every other slot is re-derived as the dummy for its position.
+   - These cases are all rejected: a duplicate or out-of-range `slot_index`, a key that cannot be resolved, or any mismatch.
 
-   It therefore detects *extra* recipients (THR-046) but not the *substitution* of a listed recipient by a hidden one. Substitution is covered only by recipients noticing they did not receive. This should be stated in §13.2/§27.
+   **Implementation decisions:**
+   - `key_id` uses kind 1 (MEK) for the member-epoch context and kind 3 (custodian) for IDENTITY slots.
+   - The binding (`object_id`, `payload_nonce`, context, suite) is passed as a `SlotBinding`.
+   - Entries are returned in the order of the input recipient list.
+   - The old count-based `verify` was removed so that no weaker check remains in the API.
+
+   **Tests:**
+   - `slots::tests::swapped_recipient_detected`
+   - `hidden_recipient_detected`
+   - `build_open_verify` (honest envelope)
+   - the vectors `hidden_recipient` and `swapped_recipient` in `sealed_object.json`
 
 ## Implementation decisions (safest reasonable reading)
 
@@ -111,7 +123,7 @@ The files are generated deterministically by `src/vectors.rs` (cfg(test), seeded
 |---|---|
 | `passphrase.json` | full-parameter derivations |
 | `stream.json` | positive cases, plus `truncated`, `no_final`, `reordered`, `duplicated`, `trailing`, `bitflip_last` |
-| `sealed_object.json` | SUBMISSION with 2 of 3 members; dummy-slot KAT; `header_tamper`, `wrong_suite` (unknown and FIPS), `tampered_slot_block_hash`, salamander/other-CK, `hidden_recipient` |
+| `sealed_object.json` | SUBMISSION with 2 of 3 members, plus Recipient List entries; dummy-slot KAT; `header_tamper`, `wrong_suite` (unknown and FIPS), `tampered_slot_block_hash`, salamander/other-CK, `hidden_recipient`, `swapped_recipient` |
 | `stanza.json` | HPKE_BASE reply, CASE_AEAD, CASEKEY_EK and inner; `ek_direct_wrap`, bound to another object |
 | `record.json` | case record, stale `row_version` |
 | `misc.json` | buckets, `key_id`, `lookup_tag`, evidence hashes |

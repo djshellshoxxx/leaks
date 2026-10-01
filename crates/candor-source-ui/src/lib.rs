@@ -29,7 +29,7 @@ pub use locale::{CatalogError, Dir, Locale, StringClass, catalog_keys, string_cl
 pub use model::*;
 pub use page::{
     MAX_CSS_BYTES, MAX_SVG_BYTES, OverBudget, PERMISSIONS_POLICY, PROHIBITED_HEADERS, Page,
-    STYLESHEET, SizeClass, content_security_policy, pad_html, robots_txt, stylesheet_hash,
+    SizeClass, content_security_policy, pad_html, robots_txt, stylesheet, stylesheet_hash,
 };
 pub use routes::Route;
 pub use screens::Screen;
@@ -138,7 +138,7 @@ fn validate(screen: Screen, vm: &ViewModel) -> Result<(), RenderError> {
 pub fn render(screen: Screen, vm: &ViewModel, locale: &Locale) -> Result<Page, RenderError> {
     let cat = locale::catalog().map_err(RenderError::Catalog)?;
     validate(screen, vm)?;
-    let mut pv = view::PageView::new(*locale, vm, screen, cat, STYLESHEET);
+    let mut pv = view::PageView::new(*locale, vm, screen, cat, stylesheet());
     pv.title = build_title(&pv, screen, vm);
     let html = Zeroizing::new(
         screens::render_template(&pv).map_err(|e| RenderError::Template(e.to_string()))?,
