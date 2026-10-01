@@ -505,8 +505,11 @@ async fn staged_commit_failure_refused_and_swept() {
     assert_clean(&e, "commit failure");
 }
 
-/// STO-27(4): a duplicate group commits nothing for the second copy, which
-/// is swept; the first, committed copy stays.
+/// AUD-RM2-SEA-01 (supersedes the STO-27(4) duplicate case): re-handing over
+/// the same bundle of an already committed group is an idempotent success.
+/// Nothing is committed twice, `0x01 ‖ h` is sent, and the second copy is
+/// swept while the first, committed copy stays. A different bundle for the
+/// same (remembered) group is refused.
 #[tokio::test]
 async fn staged_duplicate_envelope_orphan_swept() {
     let e = env();
@@ -517,21 +520,46 @@ async fn staged_duplicate_envelope_orphan_swept() {
     send_staged_bundle(&sealer, &header(&data), file.as_fd()).unwrap();
     let b1 = e.rx.receive(store_sock.as_fd(), slot()).unwrap();
     let keep = ObjectId::from_bytes(b1.blob_id().0);
+    let keep_id = b1.blob_id();
     let env1 = envelope_for(&b1);
     let c = e.rx.commit_staged(&s, env1.clone(), b1).await.unwrap();
+    assert!(!c.replayed());
+    let first_ref = c.envelope_ref();
     e.rx.acknowledge(store_sock.as_fd(), c).unwrap();
     assert_eq!(try_recv_byte(&sealer), Some(STAGED_ACK_COMMITTED));
+    // The sealer gave up and hands the same bundle over again.
     send_staged_bundle(&sealer, &header(&data), file.as_fd()).unwrap();
     let b2 = e.rx.receive(store_sock.as_fd(), slot()).unwrap();
-    let mut env2 = env1;
+    let mut env2 = env1.clone();
     env2.objects[STAGED_BUNDLE_INDEX].blob.blob_id = b2.blob_id();
-    assert_eq!(
-        e.rx.commit_staged(&s, env2, b2).await.unwrap_err(),
-        StoreError::DuplicateEnvelope
-    );
+    let c2 = e.rx.commit_staged(&s, env2, b2).await.unwrap();
+    assert!(c2.replayed());
+    assert_eq!(c2.envelope_ref(), first_ref);
+    assert_eq!(c2.blob_id(), Some(keep_id));
+    e.rx.acknowledge(store_sock.as_fd(), c2).unwrap();
+    assert_eq!(try_recv_byte(&sealer), Some(STAGED_ACK_COMMITTED));
+    assert_eq!(s.pending_count().await.unwrap(), 1, "exactly one envelope");
     assert_eq!(e.rx.sweep(&s, next_slot()).await.unwrap(), 1);
     assert_eq!(e.rx.blobs().list().unwrap(), vec![keep]);
     assert_eq!(e.rx.in_flight(), 0);
+    // A different bundle claiming the same committed group: refused.
+    let other = bundle(5000)
+        .into_iter()
+        .map(|b| b ^ 0x5a)
+        .collect::<Vec<u8>>();
+    let ofile = memfile(&other);
+    send_staged_bundle(&sealer, &header(&other), ofile.as_fd()).unwrap();
+    let b3 = e.rx.receive(store_sock.as_fd(), slot()).unwrap();
+    let mut env3 = env1;
+    env3.objects[STAGED_BUNDLE_INDEX].blob = PartRef {
+        blob_id: b3.blob_id(),
+        padded_size: b3.len(),
+    };
+    assert!(matches!(
+        e.rx.commit_staged(&s, env3, b3).await.unwrap_err(),
+        StoreError::Integrity(_)
+    ));
+    assert_eq!(s.pending_count().await.unwrap(), 1);
 }
 
 /// STO-27(4): a received blob dropped without a commit attempt (e.g. the
@@ -644,7 +672,7 @@ async fn staged_backend_error_retry_commits() {
         Some(Ok(EnvelopeRef([9; 16]))),
     ]);
     let c = e.rx.commit_staged(&s, env_in, b).await.unwrap();
-    assert_eq!(c.envelope_ref(), EnvelopeRef([9; 16]));
+    assert_eq!(c.envelope_ref(), Some(EnvelopeRef([9; 16])));
     assert_eq!(s.calls(), 2);
     assert_eq!(e.rx.in_flight(), 0);
     assert_eq!(e.rx.uncertain_count(), 0);
@@ -673,10 +701,13 @@ async fn staged_unknown_outcome_keeps_blob() {
             m.commit_envelope(env_in.clone()).await.unwrap();
         }
         let s = Scripted::new(vec![Some(Err(StoreError::Backend)), Some(Err(second))]);
-        assert_eq!(
-            e.rx.commit_staged(&s, env_in, b).await.unwrap_err(),
-            StoreError::Backend
-        );
+        let r = e.rx.commit_staged(&s, env_in, b).await;
+        if committed {
+            // AUD-RM2-SEA-01: the group is committed, which is success.
+            assert!(r.unwrap().replayed());
+        } else {
+            assert_eq!(r.unwrap_err(), StoreError::Backend);
+        }
         assert_eq!(e.rx.uncertain_count(), 1);
         assert_eq!(e.rx.in_flight(), 1, "registered until resolved");
         // Protected for one sweep even though unreferenced.

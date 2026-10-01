@@ -111,21 +111,37 @@ impl Bucket {
         }
     }
 
-    fn take(&mut self, cap: u64, period: Duration, now: Instant) -> bool {
-        let max = cap.saturating_mul(1000);
-        let el =
-            u64::try_from(now.saturating_duration_since(self.at).as_millis()).unwrap_or(u64::MAX);
-        let per = u64::try_from(period.as_millis()).unwrap_or(u64::MAX).max(1);
-        // refill = elapsed_ms × cap × 1000 / period_ms (saturating).
+    /// Add the tokens earned since `at`. AUD-RM2-WEB-05: `at` advances only
+    /// by the time actually converted into whole milli-tokens, so the
+    /// remainder is carried and a trickle of calls cannot hold the bucket
+    /// empty (the old code reset `at = now` and dropped the fraction).
+    fn refill(&mut self, cap: u64, period: Duration, now: Instant) {
+        let max = u128::from(cap.saturating_mul(1000));
+        let el = now.saturating_duration_since(self.at).as_nanos();
+        let per = period.as_nanos().max(1);
         let refill = el.saturating_mul(max).checked_div(per).unwrap_or(max);
-        self.milli = self.milli.saturating_add(refill).min(max);
-        self.at = now;
-        if self.milli >= 1000 {
-            self.milli = self.milli.saturating_sub(1000);
-            true
+        let have = u128::from(self.milli);
+        if have.saturating_add(refill) >= max {
+            self.milli = u64::try_from(max).unwrap_or(u64::MAX);
+            self.at = now;
         } else {
-            false
+            self.milli = u64::try_from(have.saturating_add(refill)).unwrap_or(u64::MAX);
+            // Time worth exactly `refill` milli-tokens (≤ el).
+            let used = refill
+                .saturating_mul(per)
+                .checked_div(max.max(1))
+                .unwrap_or(0);
+            let used = Duration::from_nanos(u64::try_from(used).unwrap_or(u64::MAX));
+            self.at = self.at.checked_add(used).unwrap_or(now).min(now);
         }
+    }
+
+    fn has_token(&self) -> bool {
+        self.milli >= 1000
+    }
+
+    fn spend(&mut self) {
+        self.milli = self.milli.saturating_sub(1000);
     }
 }
 
@@ -217,30 +233,39 @@ impl Limiter {
                 .retain(|_, e| now.saturating_duration_since(e.last) < CIRCUIT_IDLE);
             g.last_sweep = now;
         }
-        match class {
+        // AUD-RM2-WEB-05: refill first, spend only when both the global
+        // and the circuit bucket have a token (a refused request costs
+        // nothing anywhere).
+        let inner = &mut *g;
+        let global = match class {
             Class::Request => {
                 let cap = self.global.requests_per_sec;
-                if !g.global_requests.take(cap, Duration::from_secs(1), now) {
-                    return false;
-                }
+                inner
+                    .global_requests
+                    .refill(cap, Duration::from_secs(1), now);
+                Some(&mut inner.global_requests)
             }
             Class::NewSession => {
                 let cap = self.global.sessions_per_hour;
-                if !g.global_sessions.take(cap, Duration::from_secs(3600), now) {
-                    return false;
-                }
+                inner
+                    .global_sessions
+                    .refill(cap, Duration::from_secs(3600), now);
+                Some(&mut inner.global_sessions)
             }
-            _ => {}
+            _ => None,
+        };
+        if global.as_ref().is_some_and(|b| !b.has_token()) {
+            return false;
         }
-        if !g.circuits.contains_key(&circuit) {
-            if g.circuits.len() >= MAX_CIRCUITS {
-                g.circuits
-                    .retain(|_, e| now.saturating_duration_since(e.last) < CIRCUIT_IDLE);
-                if g.circuits.len() >= MAX_CIRCUITS {
+        let circuits = &mut inner.circuits;
+        if !circuits.contains_key(&circuit) {
+            if circuits.len() >= MAX_CIRCUITS {
+                circuits.retain(|_, e| now.saturating_duration_since(e.last) < CIRCUIT_IDLE);
+                if circuits.len() >= MAX_CIRCUITS {
                     return false;
                 }
             }
-            g.circuits.insert(
+            circuits.insert(
                 circuit,
                 Entry {
                     buckets: [None; CLASSES],
@@ -248,7 +273,7 @@ impl Limiter {
                 },
             );
         }
-        let Some(e) = g.circuits.get_mut(&circuit) else {
+        let Some(e) = circuits.get_mut(&circuit) else {
             return false;
         };
         // An entry idle for the eviction period starts afresh (NET-013).
@@ -261,7 +286,15 @@ impl Limiter {
             return false;
         };
         let b = slot.get_or_insert_with(|| Bucket::full(cap, now));
-        b.take(cap, period, now)
+        b.refill(cap, period, now);
+        if !b.has_token() {
+            return false;
+        }
+        b.spend();
+        if let Some(gb) = global {
+            gb.spend();
+        }
+        true
     }
 
     /// Circuits currently tracked (tests and coarse health).
@@ -322,6 +355,60 @@ mod tests {
         assert!(!l.allow(l.token(99), Class::Request, t0));
         assert!(l.allow(l.token(1), Class::NewSession, t0));
         assert!(!l.allow(l.token(2), Class::NewSession, t0));
+    }
+
+    /// AUD-RM2-WEB-05 (auditor PoC): after the burst, attempts every 5 ms
+    /// on many circuits for 10 minutes are granted at the nominal rate of
+    /// the global session bucket (600/h → about 100 in 10 min), not 0.
+    #[test]
+    fn trickle_does_not_starve_refill() {
+        let t0 = Instant::now();
+        let l = Limiter::new(GlobalLimits::default(), t0).unwrap();
+        // Drain the burst.
+        let mut c = 0u32;
+        while l.allow(l.token(c), Class::NewSession, t0) {
+            c += 1;
+        }
+        assert_eq!(c, 600);
+        let mut granted = 0;
+        let mut t = t0;
+        let end = t0 + Duration::from_secs(600);
+        while t < end {
+            t += Duration::from_millis(5);
+            c = c.wrapping_add(1);
+            // A fresh circuit each time: only the global bucket limits.
+            if l.allow(l.token(c % 60_000), Class::NewSession, t) {
+                granted += 1;
+            }
+        }
+        assert!((99..=101).contains(&granted), "granted {granted}");
+    }
+
+    /// A refused per-circuit request does not spend a global token.
+    #[test]
+    fn refusal_spends_nothing_globally() {
+        let t0 = Instant::now();
+        let l = Limiter::new(
+            GlobalLimits {
+                requests_per_sec: 600,
+                sessions_per_hour: 7,
+            },
+            t0,
+        )
+        .unwrap();
+        let a = l.token(1);
+        for _ in 0..6 {
+            assert!(l.allow(a, Class::NewSession, t0));
+        }
+        // Circuit `a` is out (6 / 10 min); its refusals cost nothing.
+        for _ in 0..50 {
+            assert!(!l.allow(a, Class::NewSession, t0));
+        }
+        assert!(
+            l.allow(l.token(2), Class::NewSession, t0),
+            "7th global token kept"
+        );
+        assert!(!l.allow(l.token(3), Class::NewSession, t0));
     }
 
     /// NET-013: idle circuits are forgotten after 10 minutes.

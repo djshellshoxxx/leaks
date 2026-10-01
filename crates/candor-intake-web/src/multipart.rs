@@ -41,6 +41,8 @@ pub enum MultipartError {
     TooManyParts,
     /// A non-file value or a header block over its limit.
     TooLarge,
+    /// The per-request parsing budget was exceeded (AUD-RM2-WEB-02).
+    Budget,
 }
 
 /// One part's header.
@@ -106,6 +108,15 @@ pub struct Multipart {
     parts: usize,
     value_len: usize,
     pending_end: bool,
+    /// No match of the current search pattern (the delimiter in a body, the
+    /// blank line in a header block) starts before this index of `buf`:
+    /// every search resumes here, so per-feed cost is linear in the new
+    /// bytes, not in the buffer (AUD-RM2-WEB-02).
+    scan: usize,
+    /// Bytes fed so far.
+    fed: u64,
+    /// Window positions examined so far (the CPU budget's meter).
+    work: u64,
 }
 
 impl core::fmt::Debug for Multipart {
@@ -121,6 +132,14 @@ impl core::fmt::Debug for Multipart {
 /// and room for a header block. [`Multipart::feed`] callers must not feed more
 /// than [`Multipart::room`] at once.
 const BUF_CAP: usize = UPLOAD_CHUNK + MAX_BOUNDARY + 8 + MAX_PART_HEADER;
+
+/// CPU budget (AUD-RM2-WEB-02): window positions a request may make the
+/// parser examine per fed byte. With the carried scan offset each byte is
+/// examined about once per pattern (header and body searches), so 4 leaves
+/// ample headroom while any regression to rescanning fails closed.
+const WORK_PER_BYTE: u64 = 4;
+/// Fixed allowance on top of [`WORK_PER_BYTE`] (per request).
+const WORK_SLACK: u64 = 64 * 1024;
 
 fn bchar(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b"'()+_,-./:=? ".contains(&b)
@@ -165,6 +184,9 @@ impl Multipart {
             parts: 0,
             value_len: 0,
             pending_end: false,
+            scan: 0,
+            fed: 0,
+            work: 0,
         }
     }
 
@@ -195,7 +217,46 @@ impl Multipart {
             return Err(MultipartError::Malformed);
         }
         self.buf.extend_from_slice(input);
+        self.fed = self
+            .fed
+            .saturating_add(u64::try_from(input.len()).unwrap_or(u64::MAX));
         Ok(())
+    }
+
+    /// Find `pat` in `buf[scan..]`, advancing `scan` past every position that
+    /// cannot start a match, and charge the examined positions to the
+    /// budget: at most [`WORK_PER_BYTE`] per fed byte plus [`WORK_SLACK`].
+    fn search(&mut self, pat_len: usize, pat: &[u8]) -> Result<Option<usize>, MultipartError> {
+        let len = self.buf.len();
+        let from = self.scan.min(len);
+        let tail = self.buf.get(from..).unwrap_or_default();
+        let found = tail.windows(pat_len).position(|w| w == pat);
+        let examined = found.map_or_else(
+            || tail.len().saturating_sub(pat_len.saturating_sub(1)),
+            |r| r.saturating_add(1),
+        );
+        self.work = self
+            .work
+            .saturating_add(u64::try_from(examined).unwrap_or(u64::MAX));
+        if self.work
+            > self
+                .fed
+                .saturating_mul(WORK_PER_BYTE)
+                .saturating_add(WORK_SLACK)
+        {
+            return self.fail(MultipartError::Budget);
+        }
+        Ok(match found {
+            Some(r) => {
+                let at = from.saturating_add(r);
+                self.scan = at;
+                Some(at)
+            }
+            None => {
+                self.scan = from.max(len.saturating_sub(pat_len.saturating_sub(1)));
+                None
+            }
+        })
     }
 
     /// Input is complete (`Content-Length` reached): anything but a finished
@@ -222,6 +283,12 @@ impl Multipart {
     fn consume(&mut self, n: usize) {
         let n = n.min(self.buf.len());
         self.buf.drain(..n);
+        self.scan = self.scan.saturating_sub(n);
+    }
+
+    fn enter(&mut self, state: State) {
+        self.state = state;
+        self.scan = 0;
     }
 
     /// The next event, `Ok(None)` when more input is needed (or the body is
@@ -255,10 +322,10 @@ impl Multipart {
                         return self.fail(MultipartError::Malformed);
                     }
                     self.consume(need);
-                    self.state = State::Headers;
+                    self.enter(State::Headers);
                 }
                 State::Headers => {
-                    let Some(end) = self.buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+                    let Some(end) = self.search(4, b"\r\n\r\n")? else {
                         if self.buf.len() > MAX_PART_HEADER {
                             return self.fail(MultipartError::TooLarge);
                         }
@@ -278,24 +345,23 @@ impl Multipart {
                     };
                     self.consume(end.saturating_add(4));
                     self.value_len = 0;
-                    self.state = State::Body {
+                    self.enter(State::Body {
                         file: header.filename.is_some(),
-                    };
+                    });
                     return Ok(Some(Event::Part(header)));
                 }
                 State::Body { file } => {
                     let dl = self.delim.len();
-                    if let Some(at) = self
-                        .buf
-                        .windows(dl)
-                        .position(|w| w == self.delim.as_slice())
-                    {
+                    let delim = core::mem::take(&mut self.delim);
+                    let hit = self.search(dl, &delim);
+                    self.delim = delim;
+                    if let Some(at) = hit? {
                         if at > 0 {
                             let n = at.min(UPLOAD_CHUNK);
                             return self.emit(n, file).map(Some);
                         }
                         self.consume(dl);
-                        self.state = State::AfterDelimiter;
+                        self.enter(State::AfterDelimiter);
                         self.pending_end = true;
                         continue;
                     }
@@ -319,11 +385,11 @@ impl Multipart {
                     match two {
                         b"\r\n" => {
                             self.consume(2);
-                            self.state = State::Headers;
+                            self.enter(State::Headers);
                         }
                         b"--" => {
                             self.consume(2);
-                            self.state = State::Epilogue;
+                            self.enter(State::Epilogue);
                             return Ok(Some(Event::End));
                         }
                         _ => return self.fail(MultipartError::Malformed),
@@ -681,6 +747,74 @@ mod tests {
         p.finish().unwrap();
         assert!(max_chunk <= UPLOAD_CHUNK);
         assert_eq!(total, data.len() + 1);
+    }
+
+    /// AUD-RM2-WEB-02 (auditor PoC): 33 KB of near-delimiter file content
+    /// with a 70-byte boundary, fed one byte at a time. Before the fix this
+    /// took ≈ 13 s (debug); now each byte is examined about once.
+    #[test]
+    fn one_byte_feeds_are_linear() {
+        let boundary = "B".repeat(70);
+        let near = format!("\r\n--{}", "B".repeat(69));
+        let mut content = Vec::new();
+        while content.len() < 33_000 {
+            content.extend_from_slice(near.as_bytes());
+            content.push(b'x');
+        }
+        let mut b = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"f\"\r\n\r\n"
+        )
+        .into_bytes();
+        b.extend_from_slice(&content);
+        b.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        let mut p = Multipart::new(&boundary);
+        let mut got = 0usize;
+        let t0 = std::time::Instant::now();
+        for byte in &b {
+            p.feed(core::slice::from_ref(byte)).unwrap();
+            while let Some(ev) = p.next_event().unwrap() {
+                if let Event::Data(d) = ev {
+                    got += d.len();
+                }
+            }
+        }
+        p.finish().unwrap();
+        let took = t0.elapsed();
+        assert_eq!(got, content.len());
+        // Deterministic: about one window per fed byte.
+        assert!(
+            p.work <= 2 * b.len() as u64,
+            "examined {} windows for {} bytes",
+            p.work,
+            b.len()
+        );
+        // Wall clock, generous for unoptimised CI builds (was ≈ 13 s).
+        eprintln!(
+            "one-byte feeds: {} bytes, {} windows, {took:?}",
+            b.len(),
+            p.work
+        );
+        assert!(took < std::time::Duration::from_millis(250), "{took:?}");
+    }
+
+    /// The per-request CPU budget fails closed if the parser ever examines
+    /// far more positions than bytes were fed.
+    #[test]
+    fn work_budget_fails_closed() {
+        let mut p = Multipart::new(B);
+        p.feed(
+            format!(
+                "--{B}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"f\"\r\n\r\nabc"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        while p.next_event().unwrap().is_some() {}
+        p.work = u64::MAX / 2;
+        p.scan = 0;
+        p.feed(b"d").unwrap();
+        assert_eq!(p.next_event().unwrap_err(), MultipartError::Budget);
+        assert_eq!(p.next_event().unwrap_err(), MultipartError::Malformed);
     }
 
     proptest::proptest! {

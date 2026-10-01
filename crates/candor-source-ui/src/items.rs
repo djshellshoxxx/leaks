@@ -237,7 +237,7 @@ pub(crate) fn build(
             for q in &vm.questionnaire.questions {
                 let text_kind = matches!(q.kind, QuestionKind::ShortText | QuestionKind::LongText);
                 let value = if text_kind {
-                    q.value.first().map_or("", String::as_str)
+                    q.value.first().map_or("", |v| v.as_str())
                 } else {
                     ""
                 };

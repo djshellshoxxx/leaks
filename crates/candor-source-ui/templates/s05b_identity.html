@@ -11,13 +11,13 @@
 {%- let fid = "full_name" %}
 <label for="f-full_name">{{ p.t("sui-id-name") }} {{ p.t("sui-required") }}</label>
 {% include "field_error.html" %}
-<input type="text" id="f-full_name" name="full_name" autocomplete="name" maxlength="200" dir="auto" required value="{{ p.vm.identity.full_name }}"{% if p.has_field_error(fid) %} aria-invalid="true" aria-describedby="e-full_name"{% endif %}>
+<input type="text" id="f-full_name" name="full_name" autocomplete="name" maxlength="200" dir="auto" required value="{{ p.vm.identity.full_name.as_str() }}"{% if p.has_field_error(fid) %} aria-invalid="true" aria-describedby="e-full_name"{% endif %}>
 </div>
 <div class="field">
 {%- let fid = "role_dept" %}
 <label for="f-role_dept">{{ p.t("sui-id-role") }}</label>
 {% include "field_error.html" %}
-<input type="text" id="f-role_dept" name="role_dept" autocomplete="organization-title" maxlength="200" dir="auto" value="{{ p.vm.identity.role }}"{% if p.has_field_error(fid) %} aria-invalid="true" aria-describedby="e-role_dept"{% endif %}>
+<input type="text" id="f-role_dept" name="role_dept" autocomplete="organization-title" maxlength="200" dir="auto" value="{{ p.vm.identity.role.as_str() }}"{% if p.has_field_error(fid) %} aria-invalid="true" aria-describedby="e-role_dept"{% endif %}>
 </div>
 <fieldset>
 <legend>{{ p.t("sui-id-contact") }}</legend>
@@ -30,7 +30,7 @@
 <label for="f-contact_other">{{ p.t("sui-id-contact-other-label") }}</label>
 <p class="hint warn" id="h-contact_other">{{ p.t("sui-id-contact-warning") }}</p>
 {% include "field_error.html" %}
-<input type="text" id="f-contact_other" name="contact_other" maxlength="500" dir="auto" value="{{ p.vm.identity.contact_other_value }}" aria-describedby="{{ p.describedby(fid, true) }}"{% if p.has_field_error(fid) %} aria-invalid="true"{% endif %}>
+<input type="text" id="f-contact_other" name="contact_other" maxlength="500" dir="auto" value="{{ p.vm.identity.contact_other_value.as_str() }}" aria-describedby="{{ p.describedby(fid, true) }}"{% if p.has_field_error(fid) %} aria-invalid="true"{% endif %}>
 </div>
 {%- endif %}
 <div class="actions">

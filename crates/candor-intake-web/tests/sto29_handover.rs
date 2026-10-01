@@ -123,9 +123,11 @@ async fn sealer_hand_over_reaches_the_store() {
     assert_eq!(s.pending_count().await.unwrap(), 1);
 }
 
-/// A commit refused after the copy (duplicate group): the store answers
-/// `0x00`, the sealer reports failure and closes the connection; the orphan
-/// copy is swept at the next slot.
+/// A commit refused after the copy (a different bundle claiming an already
+/// committed group): the store answers `0x00`, the sealer reports failure
+/// and closes the connection; the orphan copy is swept at the next slot.
+/// (Re-sending the *same* bundle is an idempotent success, see
+/// `late_commit_then_retry_is_one_envelope_and_success`.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn refused_commit_fails_the_hand_over() {
     let tmp = tempfile::tempdir().unwrap();
@@ -141,9 +143,9 @@ async fn refused_commit_fails_the_hand_over() {
     let c = rx.commit_staged(&s, env.clone(), blob).await.unwrap();
     rx.acknowledge(b.as_fd(), c).unwrap();
     assert_eq!(t.join().unwrap(), Ok(()));
-    // The same group again: duplicate → refused.
+    // The same group with different bundle bytes: refused.
     let (a, b) = pair();
-    let bundle = StagedBundle::from_bytes(&data).unwrap();
+    let bundle = StagedBundle::from_bytes(&vec![2u8; 262_144]).unwrap();
     let t = std::thread::spawn(move || {
         let mut conn = StoreConnection::new(a);
         let r = conn.hand_over(&bundle);
@@ -169,4 +171,52 @@ async fn refused_commit_fails_the_hand_over() {
 fn one_cap_on_both_sides() {
     assert_eq!(MAX_BUNDLE_LEN, STAGED_MAX_BUNDLE_LEN);
     assert!(StagedBundle::from_bytes(&[]).is_err());
+}
+
+/// AUD-RM2-SEA-01: the store commits after the sealer gave up (the commit
+/// lands just past the sealer's deadline). The sealer's retry on a fresh
+/// connection hands the same bundle over again; the store recognises the
+/// committed group and answers `0x02 ‖ h`, `0x01 ‖ h`. Result: exactly one
+/// envelope, and success; the duplicate copy is swept.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn late_commit_then_retry_is_one_envelope_and_success() {
+    let tmp = tempfile::tempdir().unwrap();
+    let rx = receiver(&tmp);
+    let s = store().await;
+    let data: Vec<u8> = (0..131_072u32).map(|i| (i % 251) as u8).collect();
+    let bundle = StagedBundle::from_bytes(&data).unwrap();
+    let (a1, b1) = pair();
+    let (a2, b2) = pair();
+    let deadline = Duration::from_millis(300);
+    let sealer = std::thread::spawn(move || {
+        let mut conn = StoreConnection::with_ack_timeout(a1, deadline);
+        conn.hand_over_with_retry(&bundle, move || Ok(a2))
+    });
+    // First hand-over: copied (0x02), then the commit is slow.
+    let blob = rx.receive(b1.as_fd(), slot()).unwrap();
+    let env = envelope(blob.blob_id(), blob.len(), 21);
+    tokio::time::sleep(deadline * 2).await;
+    // The commit lands after the sealer's deadline; its ack finds the
+    // sealer gone (an error or a write into a dead socket).
+    let c = rx.commit_staged(&s, env.clone(), blob).await.unwrap();
+    let _ = rx.acknowledge(b1.as_fd(), c);
+    assert_eq!(s.pending_count().await.unwrap(), 1);
+    // The retry: same bundle, fresh connection.
+    let blob2 = rx.receive(b2.as_fd(), slot()).unwrap();
+    let mut env2 = env;
+    env2.objects[STAGED_BUNDLE_INDEX].blob = PartRef {
+        blob_id: blob2.blob_id(),
+        padded_size: blob2.len(),
+    };
+    let c2 = rx.commit_staged(&s, env2, blob2).await.unwrap();
+    assert!(c2.replayed(), "recognised as the committed group");
+    rx.acknowledge(b2.as_fd(), c2).unwrap();
+    assert_eq!(sealer.join().unwrap(), Ok(()), "reported as success");
+    assert_eq!(s.pending_count().await.unwrap(), 1, "no double commit");
+    let next = SlotTime::from_unix_secs(1_790_000_100 + 3600).unwrap();
+    assert_eq!(
+        rx.sweep(&s, next).await.unwrap(),
+        1,
+        "the retry's copy is swept"
+    );
 }

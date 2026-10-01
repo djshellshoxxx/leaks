@@ -764,3 +764,129 @@ async fn cookieless_leave_needs_the_leave_token() {
     assert_eq!(r.status, 500);
     assert_eq!(h.sealer.ops().len(), ops, "the leave token reached nothing");
 }
+
+/// AUD-RM2-WEB-03: Leave with a stale session cookie (expired or ended
+/// session, forged value) is always the Leave page with Clear-Site-Data,
+/// whatever token the page carried; never an error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn leave_with_stale_cookie_is_the_leave_page() {
+    let h = harness().await;
+    let (cs, tok) = h.start("anonymous").await;
+    // End the session: the cookie is now stale.
+    let r = h
+        .post("/en/end", &[&cs], &format!("csrf={tok}&action=discard"))
+        .await;
+    let leave_tok = r.csrf();
+    let (pre, pre_tok) = h.pre().await;
+    let forged = format!("__Host-cs={}", "ab".repeat(32));
+    for cookie in [cs.as_str(), forged.as_str()] {
+        for (why, cookies, body) in [
+            ("old session token", vec![cookie], format!("csrf={tok}")),
+            ("leave token", vec![cookie], format!("csrf={leave_tok}")),
+            ("no token", vec![cookie], String::new()),
+            (
+                "zero token",
+                vec![cookie],
+                format!("csrf={}", "0".repeat(64)),
+            ),
+            (
+                "with cpre, wrong token",
+                vec![cookie, pre.as_str()],
+                format!("csrf={tok}"),
+            ),
+            (
+                "with cpre, its token",
+                vec![cookie, pre.as_str()],
+                format!("csrf={pre_tok}"),
+            ),
+        ] {
+            let r = h.post("/en/leave", &cookies, &body).await;
+            assert_eq!(r.status, 200, "{why}");
+            assert!(r.header("Clear-Site-Data").is_some(), "{why}");
+        }
+    }
+}
+
+/// AUD-RM2-WEB-06: the login floor runs from the end of the full request,
+/// not from accept: a client that sends its head and body slowly still
+/// waits the whole floor after its last byte.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn login_floor_from_full_request() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let h = harness().await;
+    let (pre, tok) = h.pre().await;
+    let body = format!("csrf={tok}&action=login&passphrase=zoom+zoom+zoom+zoom+zoom+zoom+zoom");
+    let head = format!(
+        "POST /en/login HTTP/1.1\r\nHost: {HOST}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nOrigin: null\r\nSec-Fetch-Site: same-origin\r\nCookie: {pre}\r\n\r\n",
+        body.len()
+    );
+    let mut s = tokio::net::UnixStream::connect(&h.web_sock).await.unwrap();
+    s.write_all(proxy_line(5).as_bytes()).await.unwrap();
+    // Half the head, a pause, the rest of the head, a pause, the body.
+    let (a, b) = head.split_at(head.len() / 2);
+    s.write_all(a.as_bytes()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    s.write_all(b.as_bytes()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    s.write_all(body.as_bytes()).await.unwrap();
+    let sent = Instant::now();
+    let mut first = [0u8; 1];
+    s.read_exact(&mut first).await.unwrap();
+    let waited = sent.elapsed();
+    assert!(
+        waited >= Duration::from_secs(3),
+        "floor runs from the full request ({waited:?})"
+    );
+    assert!(waited < Duration::from_millis(3600), "{waited:?}");
+}
+
+/// AUD-RM2-WEB-07: one upload at a time per session; the slot is released
+/// when the upload ends, also when it fails.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_upload_per_session() {
+    use tokio::io::AsyncWriteExt;
+    let h = harness().await;
+    let (cs, tok) = h.start("anonymous").await;
+    let full = multipart(&tok, "a.pdf", &[7u8; 1000], "upload");
+    // Upload A: head and the token part only, then it stalls.
+    let req = multipart_req("/en/files", &cs, &full);
+    let cut = req.len() - 900;
+    let mut a = tokio::net::UnixStream::connect(&h.web_sock).await.unwrap();
+    a.write_all(proxy_line(11).as_bytes()).await.unwrap();
+    a.write_all(&req[..cut]).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Upload B on the same session while A is in progress: busy.
+    let r = parse(&raw(&h.web_sock, 12, &multipart_req("/en/files", &cs, &full)).await);
+    assert_eq!(r.status, 429, "second concurrent upload of a session");
+    // A goes away: its slot is released.
+    drop(a);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let r = parse(&raw(&h.web_sock, 13, &multipart_req("/en/files", &cs, &full)).await);
+    assert_eq!(r.status, 200, "{}", r.text());
+    assert!(r.text().contains("#1"), "the upload landed");
+}
+
+/// AUD-RM2-WEB-08: an over-size upload is reported only after the token
+/// part was checked; with a wrong token it is the uniform error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn oversize_upload_reported_after_csrf() {
+    let h = harness().await;
+    let (cs, tok) = h.start("anonymous").await;
+    for (t, want) in [("0".repeat(64), 500), (tok.clone(), 200)] {
+        let csrf_part =
+            format!("--{SEP}\r\nContent-Disposition: form-data; name=\"csrf\"\r\n\r\n{t}\r\n");
+        let req = format!(
+            "POST /en/files HTTP/1.1\r\nHost: {HOST}\r\nContent-Type: multipart/form-data; boundary={SEP}\r\nContent-Length: {}\r\nOrigin: null\r\nSec-Fetch-Site: same-origin\r\nCookie: {cs}\r\n\r\n{csrf_part}--{SEP}\r\n",
+            5_000_000
+        );
+        let r = parse(&raw(&h.web_sock, 21, req.as_bytes()).await);
+        assert_eq!(r.status, want);
+        if want == 200 {
+            assert!(
+                r.text().contains("aria-invalid=\"true\""),
+                "inline size error"
+            );
+        }
+    }
+    assert_eq!(h.sealer.count(Op::PartBegin), 0);
+}

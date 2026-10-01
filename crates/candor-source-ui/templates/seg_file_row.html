@@ -2,5 +2,5 @@
 {#- One S06 file row. The description field belongs to `desc-form`; descriptions of files on
     other parts are not posted and stay as they are. -#}
 <tr><td><bdi class="mono">{{ name }}</bdi></td><td>{{ p.file_size(f) }}</td>
-<td><label class="vh" for="f-desc_{{ index }}">{{ p.t1("sui-files-describe-label", "name", name) }}</label><input type="text" id="f-desc_{{ index }}" name="desc_{{ index }}" form="desc-form" maxlength="500" dir="auto" value="{{ f.description }}"></td>
+<td><label class="vh" for="f-desc_{{ index }}">{{ p.t1("sui-files-describe-label", "name", name) }}</label><input type="text" id="f-desc_{{ index }}" name="desc_{{ index }}" form="desc-form" maxlength="500" dir="auto" value="{{ f.description.as_str() }}"></td>
 <td><form method="post" action="{{ p.href(Route::Files) }}">{% include "ft.html" %}<input type="hidden" name="action" value="remove"><input type="hidden" name="part_index" value="{{ index }}"><button type="submit">{{ p.t1("sui-files-remove", "name", name) }}</button></form></td></tr>

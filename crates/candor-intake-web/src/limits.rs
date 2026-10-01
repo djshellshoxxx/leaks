@@ -57,8 +57,21 @@ pub const MAX_FILES_CEILING: u32 = 32;
 pub const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
 /// Body idle timeout between reads (07 §11: 60 s, Tor-friendly).
 pub const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
-/// Total time for one Tier W upload request (07 §11: 4 h).
+/// Total time for one Tier W upload request (07 §11: 4 h). The effective
+/// deadline is shorter for smaller bodies: [`UPLOAD_GRACE`] plus
+/// `Content-Length` / [`MIN_UPLOAD_RATE`] (AUD-RM2-WEB-07).
 pub const UPLOAD_TOTAL_TIMEOUT: Duration = Duration::from_secs(4 * 3600);
+/// Upload start-up allowance before the minimum rate applies (Tor circuit
+/// warm-up, file picker latency in the browser is before the request).
+pub const UPLOAD_GRACE: Duration = Duration::from_secs(30);
+/// Minimum average upload rate after [`UPLOAD_GRACE`], in bytes per second
+/// (AUD-RM2-WEB-07: a slot cannot be held for less than this bandwidth;
+/// Tor circuits sustain well over 50 KB/s, so 1 KiB/s only cuts trickles).
+pub const MIN_UPLOAD_RATE: u64 = 1024;
+/// Uploads in progress at once, service-wide (AUD-RM2-WEB-07): uploads can
+/// hold at most this many of the [`MAX_CONNECTIONS`] serving slots. One per
+/// session on top (`WebSession::uploading`).
+pub const MAX_CONCURRENT_UPLOADS: usize = 128;
 /// Total time for a URL-encoded body (112 KiB over Tor at 256 kbit/s takes
 /// about 4 s; this bounds slow-POST abuse, ST-101).
 pub const FORM_TOTAL_TIMEOUT: Duration = Duration::from_secs(120);

@@ -16,6 +16,10 @@
 //!   `Sec-Fetch-Site`: absent or `same-origin` (IMPL-RM2 tightening). Both are
 //!   checked on every POST before the body is read.
 
+use std::collections::{HashSet, VecDeque};
+use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
+
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
@@ -115,7 +119,6 @@ pub fn token_eq(posted: &str, expected: &str) -> bool {
 }
 
 const PRE_LABEL: &[u8] = b"candor/web/pre";
-const LEAVE_LABEL: &[u8] = b"candor/web/leave";
 
 /// Pre-session token key (per process, random; a restart invalidates every
 /// pre-session form, which only costs a reload).
@@ -164,26 +167,6 @@ impl PreSessionKey {
         self.verify_label(PRE_LABEL, cpre, posted, secs)
     }
 
-    /// The token of the Leave form on the cookie-clearing screens (S10s,
-    /// Leave, discarded, closed, signed out): those screens send
-    /// `Clear-Site-Data`, so the Leave POST carries no cookie to bind to.
-    /// Domain-separated from the pre-session token, same epochs. It
-    /// authorises nothing but the Leave page (which changes no state).
-    #[must_use]
-    pub fn leave_token(&self, secs: u64) -> Zeroizing<String> {
-        self.mac(
-            LEAVE_LABEL,
-            "",
-            secs.checked_div(PRE_SESSION_EPOCH_SECS).unwrap_or(0),
-        )
-    }
-
-    /// Check a leave token (current and two previous epochs, constant work).
-    #[must_use]
-    pub fn verify_leave(&self, posted: &str, secs: u64) -> bool {
-        self.verify_label(LEAVE_LABEL, "", posted, secs)
-    }
-
     fn verify_label(&self, label: &[u8], cpre: &str, posted: &str, secs: u64) -> bool {
         let now = secs.checked_div(PRE_SESSION_EPOCH_SECS).unwrap_or(0);
         let mut ok = false;
@@ -193,6 +176,135 @@ impl PreSessionKey {
             ok |= valid_epoch && token_eq(posted, &self.mac(label, cpre, e));
         }
         ok
+    }
+}
+
+/// Label of the leave-token MAC.
+const LEAVE_LABEL: &[u8] = b"candor/web/leave";
+/// Random bytes in a leave token.
+const LEAVE_NONCE: usize = 16;
+/// MAC bytes in a leave token (64 hex characters in total, the length of
+/// every other form token, so page sizes do not change).
+const LEAVE_TAG: usize = 16;
+/// How long an issued leave token stays valid (the `__Host-cpre` lifetime).
+pub const LEAVE_TOKEN_TTL: Duration = Duration::from_secs(PRE_SESSION_LIFETIME_SECS);
+/// Issued leave tokens remembered at once; the oldest is forgotten first.
+pub const LEAVE_TOKEN_CAP: usize = 65_536;
+
+/// Leave tokens for the Leave form of the cookie-clearing screens (S10s,
+/// discarded, closed, signed out): those screens send `Clear-Site-Data`,
+/// so the Leave POST carries no cookie to bind to (SPEC-NOTES decision 5).
+///
+/// AUD-RM2-WEB-04: a token is `nonce ‖ HMAC-SHA256(K, label ‖ nonce)[..16]`
+/// with a fresh 128-bit nonce per render. It carries no time and no epoch,
+/// so it can neither be enumerated nor mapped to when a page was shown.
+/// Validity is bounded by remembering issued nonces in a bounded set for
+/// [`LEAVE_TOKEN_TTL`] (monotonic clock, server RAM only), not by a
+/// timestamp in the token. It authorises nothing but the Leave page, which
+/// changes no state.
+pub struct LeaveTokens {
+    key: Zeroizing<[u8; 32]>,
+    issued: Mutex<LeaveSet>,
+}
+
+#[derive(Default)]
+struct LeaveSet {
+    order: VecDeque<([u8; LEAVE_NONCE], Instant)>,
+    live: HashSet<[u8; LEAVE_NONCE]>,
+}
+
+impl LeaveSet {
+    fn expire(&mut self, now: Instant) {
+        while let Some((n, t)) = self.order.front().copied() {
+            let old = now.checked_duration_since(t).unwrap_or_default() >= LEAVE_TOKEN_TTL;
+            if !old && self.order.len() <= LEAVE_TOKEN_CAP {
+                break;
+            }
+            self.order.pop_front();
+            self.live.remove(&n);
+        }
+    }
+}
+
+impl core::fmt::Debug for LeaveTokens {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("LeaveTokens(<redacted>)")
+    }
+}
+
+impl LeaveTokens {
+    /// A fresh random key and an empty set.
+    pub fn generate() -> Result<Self, RngError> {
+        let mut k = Zeroizing::new([0u8; 32]);
+        random(k.as_mut())?;
+        Ok(Self {
+            key: k,
+            issued: Mutex::new(LeaveSet::default()),
+        })
+    }
+
+    fn lock(&self) -> MutexGuard<'_, LeaveSet> {
+        // Never held across an await and no code panics under it.
+        self.issued.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn tag(&self, nonce: &[u8; LEAVE_NONCE]) -> Option<[u8; LEAVE_TAG]> {
+        let mut m = <Hmac<Sha256> as KeyInit>::new_from_slice(self.key.as_ref()).ok()?;
+        m.update(LEAVE_LABEL);
+        m.update(nonce);
+        let full: [u8; 32] = m.finalize().into_bytes().into();
+        let mut t = [0u8; LEAVE_TAG];
+        t.copy_from_slice(full.get(..LEAVE_TAG)?);
+        Some(t)
+    }
+
+    /// Issue a new token (64 hex) and remember its nonce.
+    pub fn issue(&self, now: Instant) -> Result<Zeroizing<String>, RngError> {
+        let mut nonce = [0u8; LEAVE_NONCE];
+        random(&mut nonce)?;
+        let tag = self.tag(&nonce).ok_or(RngError)?;
+        let mut raw = Zeroizing::new([0u8; LEAVE_NONCE + LEAVE_TAG]);
+        raw.get_mut(..LEAVE_NONCE)
+            .ok_or(RngError)?
+            .copy_from_slice(&nonce);
+        raw.get_mut(LEAVE_NONCE..)
+            .ok_or(RngError)?
+            .copy_from_slice(&tag);
+        let mut set = self.lock();
+        if set.live.insert(nonce) {
+            set.order.push_back((nonce, now));
+        }
+        set.expire(now);
+        Ok(hex(raw.as_ref()))
+    }
+
+    /// Check a posted token: the MAC (constant time) and a remembered,
+    /// unexpired nonce.
+    #[must_use]
+    pub fn verify(&self, posted: &str, now: Instant) -> bool {
+        let Some(raw) = unhex32(posted) else {
+            return false;
+        };
+        let mut nonce = [0u8; LEAVE_NONCE];
+        let mut tag = [0u8; LEAVE_TAG];
+        let (Some(n), Some(t)) = (raw.get(..LEAVE_NONCE), raw.get(LEAVE_NONCE..)) else {
+            return false;
+        };
+        nonce.copy_from_slice(n);
+        tag.copy_from_slice(t);
+        let Some(want) = self.tag(&nonce) else {
+            return false;
+        };
+        let mac_ok = bool::from(want.ct_eq(&tag));
+        let mut set = self.lock();
+        set.expire(now);
+        mac_ok && set.live.contains(&nonce)
+    }
+
+    /// Remembered tokens (tests).
+    #[must_use]
+    pub fn remembered(&self) -> usize {
+        self.lock().live.len()
     }
 }
 
@@ -293,6 +405,40 @@ mod tests {
         assert!(!origin_ok(&v("https://x.onion"), FetchSite::Absent, o));
         assert!(!origin_ok(&v("http://x.onion:80"), FetchSite::Absent, o));
         assert!(!origin_ok(&OriginHeader::Absent, FetchSite::Other, o));
+    }
+
+    /// AUD-RM2-WEB-04: leave tokens are random per render (no epoch, no
+    /// time), unforgeable, bounded by a TTL and a capped set.
+    #[test]
+    fn leave_tokens_are_unlinkable() {
+        let lt = LeaveTokens::generate().unwrap();
+        let t0 = Instant::now();
+        let a = lt.issue(t0).unwrap();
+        let b = lt.issue(t0).unwrap();
+        assert_ne!(a, b, "two renders at the same instant differ");
+        assert_eq!(a.len(), 64);
+        assert!(lt.verify(&a, t0) && lt.verify(&b, t0));
+        // A different key never accepts them (no shared structure).
+        let other = LeaveTokens::generate().unwrap();
+        assert!(!other.verify(&a, t0));
+        // Forged tag, unknown nonce, garbage.
+        let mut forged = a.as_str().to_owned();
+        let last = if forged.ends_with('0') { "1" } else { "0" };
+        forged.replace_range(63.., last);
+        assert!(!lt.verify(&forged, t0));
+        assert!(!lt.verify(&"ab".repeat(32), t0));
+        assert!(!lt.verify("zz", t0));
+        // Expiry by the server-side set, not by anything in the token.
+        let later = t0 + LEAVE_TOKEN_TTL + Duration::from_secs(1);
+        assert!(!lt.verify(&a, later));
+        assert_eq!(lt.remembered(), 0);
+        // The set is capped; the oldest token is forgotten first.
+        let first = lt.issue(later).unwrap();
+        for _ in 0..LEAVE_TOKEN_CAP {
+            let _ = lt.issue(later).unwrap();
+        }
+        assert_eq!(lt.remembered(), LEAVE_TOKEN_CAP);
+        assert!(!lt.verify(&first, later));
     }
 
     #[test]

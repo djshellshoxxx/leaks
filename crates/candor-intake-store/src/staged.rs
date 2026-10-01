@@ -50,7 +50,7 @@
 //! Receive, acknowledge, refuse and sweep block (run them on a blocking
 //! thread); [`StagedReceiver::commit_staged`] is async.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::io::{IoSlice, IoSliceMut, Write};
 use std::mem::MaybeUninit;
@@ -71,7 +71,7 @@ use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 use crate::error::{Result, StoreError};
-use crate::types::{BlobId, CommitEnvelope, EnvelopeRef, GROUP_OBJECTS};
+use crate::types::{BlobId, CommitEnvelope, EnvelopeRef, GROUP_OBJECTS, group_digest};
 use crate::{IntakeMaintenance, IntakeStore};
 
 const _: () = assert!(STAGED_BUNDLE_INDEX < GROUP_OBJECTS);
@@ -105,6 +105,8 @@ pub const STAGED_MAX_TIMEOUT: Duration = Duration::from_secs(60);
 /// Blobs received but not yet committed or swept, per receiver; more are
 /// refused with [`StoreError::Capacity`] (bounded memory and disk).
 pub const STAGED_MAX_IN_FLIGHT: usize = 64;
+/// Recent commits remembered for idempotent re-hand-overs (AUD-RM2-SEA-01).
+pub const STAGED_COMMITTED_MEMORY: usize = 4096;
 /// Required seals (ADR-055(1), plus `F_SEAL_EXEC`: the sealer creates its
 /// memfds with `MFD_NOEXEC_SEAL`).
 const REQUIRED_SEALS: SealFlags = SealFlags::WRITE
@@ -211,6 +213,19 @@ struct Registry {
     map: Mutex<HashMap<BlobId, State>>,
     /// Blobs whose envelope commit outcome was unknown (health counter).
     uncertain: AtomicU64,
+    /// Idempotency records of recent commits (AUD-RM2-SEA-01): group digest
+    /// → (bundle SHA-256, committed blob, envelope). RAM only, bounded to
+    /// [`STAGED_COMMITTED_MEMORY`] entries (oldest forgotten). Hashes and
+    /// opaque ids only.
+    committed: Mutex<VecDeque<Committed>>,
+}
+
+#[derive(Clone, Copy)]
+struct Committed {
+    digest: [u8; 32],
+    sha256: [u8; 32],
+    blob_id: BlobId,
+    envelope_ref: EnvelopeRef,
 }
 
 impl Registry {
@@ -231,6 +246,28 @@ impl Registry {
     fn uncertain(&self, id: BlobId) {
         self.set(id, State::Uncertain(false));
         self.uncertain.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn committed(&self) -> MutexGuard<'_, VecDeque<Committed>> {
+        self.committed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn remember(&self, c: Committed) {
+        let mut q = self.committed();
+        if q.len() >= STAGED_COMMITTED_MEMORY {
+            q.pop_front();
+        }
+        q.push_back(c);
+    }
+
+    fn recall(&self, digest: &[u8; 32]) -> Option<Committed> {
+        self.committed()
+            .iter()
+            .rev()
+            .find(|c| bool::from(c.digest.ct_eq(digest)))
+            .copied()
     }
 }
 
@@ -325,22 +362,32 @@ impl core::fmt::Debug for StagedBlob {
 /// [`StagedReceiver::acknowledge`].
 #[must_use = "acknowledge the hand-over"]
 pub struct CommittedStaged {
-    blob_id: BlobId,
-    envelope_ref: EnvelopeRef,
+    blob_id: Option<BlobId>,
+    envelope_ref: Option<EnvelopeRef>,
     sha256: [u8; 32],
+    replayed: bool,
 }
 
 impl CommittedStaged {
-    /// The committed blob.
+    /// The committed blob (`None` for a replay whose first commit is not
+    /// remembered, e.g. across a restart).
     #[must_use]
-    pub fn blob_id(&self) -> BlobId {
+    pub fn blob_id(&self) -> Option<BlobId> {
         self.blob_id
     }
 
-    /// The committed envelope.
+    /// The committed envelope (`None` as for [`Self::blob_id`]).
     #[must_use]
-    pub fn envelope_ref(&self) -> EnvelopeRef {
+    pub fn envelope_ref(&self) -> Option<EnvelopeRef> {
         self.envelope_ref
+    }
+
+    /// The group had already been committed by an earlier hand-over of the
+    /// same bundle (AUD-RM2-SEA-01): this hand-over committed nothing new;
+    /// its copy is an orphan for the sweep.
+    #[must_use]
+    pub fn replayed(&self) -> bool {
+        self.replayed
     }
 }
 
@@ -535,13 +582,24 @@ impl StagedReceiver {
     ///
     /// Outcomes: `Ok` → the token for [`Self::acknowledge`]. A rejection
     /// before the transaction or a capped wait that expired (validation,
-    /// duplicate, not initialised, [`StoreError::Timeout`], …) →
-    /// the blob is an orphan (swept). A backend error has an unknown outcome:
-    /// the commit is retried once (a group that did commit is then reported
-    /// as a duplicate); if that does not succeed, or the future is dropped
-    /// mid-commit, no token is issued, the blob is counted in
+    /// not initialised, [`StoreError::Timeout`], …) → the blob is an orphan
+    /// (swept). A backend error has an unknown outcome: the commit is retried
+    /// once; if that fails other than as a duplicate, or the future is
+    /// dropped mid-commit, no token is issued, the blob is counted in
     /// [`Self::uncertain_count`] and protected for one sweep, after which the
     /// database reference check decides. On `Err` call [`Self::refuse`].
+    ///
+    /// **Idempotent re-hand-over (AUD-RM2-SEA-01).** `DuplicateEnvelope`
+    /// means the group is already committed: the store finished after the
+    /// sealer gave up and the sealer handed the same bundle over again (or
+    /// the retry above found the first attempt committed). That is success:
+    /// a token with [`CommittedStaged::replayed`] is returned, nothing is
+    /// committed twice, and this copy is left to the sweep (an orphan, or
+    /// uncertain after a backend error since the first attempt may reference
+    /// it). The group digest is unique in the store and covers all three
+    /// object hashes (the idempotency key); when the first commit is still
+    /// remembered ([`STAGED_COMMITTED_MEMORY`]) the bundle's SHA-256 must
+    /// match it as well, else `Integrity` and nothing is acknowledged.
     pub async fn commit_staged<C: StagedCommit + ?Sized>(
         &self,
         store: &C,
@@ -559,11 +617,18 @@ impl StagedReceiver {
             id: blob_id,
             armed: true,
         };
+        let digest = group_digest(&env.objects.clone().map(|o| o.object_hash));
         let first = store.commit_staged_envelope(env.clone()).await;
+        let mut after_backend = false;
         let r = match first {
-            Ok(r) => Ok(r),
             Err(StoreError::Backend) => match store.commit_staged_envelope(env).await {
                 Ok(r) => Ok(r),
+                // The group is committed: by the first attempt (then this
+                // blob is referenced) or by an earlier hand-over.
+                Err(StoreError::DuplicateEnvelope) => {
+                    after_backend = true;
+                    Err(StoreError::DuplicateEnvelope)
+                }
                 // Unknown outcome (possibly committed): keep the blob.
                 Err(_) => {
                     guard.armed = false;
@@ -571,16 +636,51 @@ impl StagedReceiver {
                     return Err(StoreError::Backend);
                 }
             },
-            Err(e) => Err(e),
+            other => other,
         };
         guard.armed = false;
         match r {
             Ok(envelope_ref) => {
                 reg.forget(blob_id);
-                Ok(CommittedStaged {
+                reg.remember(Committed {
+                    digest,
+                    sha256,
                     blob_id,
                     envelope_ref,
+                });
+                Ok(CommittedStaged {
+                    blob_id: Some(blob_id),
+                    envelope_ref: Some(envelope_ref),
                     sha256,
+                    replayed: false,
+                })
+            }
+            // AUD-RM2-SEA-01: the group is already committed (the store
+            // finished after the sealer gave up, and the sealer re-handed
+            // the same bundle over). The group digest is unique in the store
+            // and covers the three object hashes, so this is the same group;
+            // when the first commit is remembered, the bundle hash must match
+            // too. Idempotent success: nothing new is committed, this copy
+            // is an orphan for the sweep, and `0x01 ‖ h` may be sent.
+            Err(StoreError::DuplicateEnvelope) => {
+                if after_backend {
+                    // Possibly referenced by the first attempt: protected for
+                    // one sweep, then the database reference check decides.
+                    reg.uncertain(blob_id);
+                } else {
+                    reg.set(blob_id, State::Orphan);
+                }
+                let seen = reg.recall(&digest);
+                if seen.is_some_and(|c| !bool::from(c.sha256.ct_eq(&sha256))) {
+                    return Err(StoreError::Integrity(
+                        "re-handed bundle differs from the committed group",
+                    ));
+                }
+                Ok(CommittedStaged {
+                    blob_id: seen.map(|c| c.blob_id),
+                    envelope_ref: seen.map(|c| c.envelope_ref),
+                    sha256,
+                    replayed: true,
                 })
             }
             Err(e) => {

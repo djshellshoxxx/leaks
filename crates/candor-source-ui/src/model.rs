@@ -330,7 +330,7 @@ pub struct PageContext {
     /// error pages) carry a pre-session token that C-06 binds to a short-lived pre-session
     /// cookie (AUD-RM1-SUI-06). Rendering a page that contains a form fails closed with
     /// `RenderError::MissingData("form token")` when this is `None`.
-    pub form_token: Option<String>,
+    pub form_token: Option<Zeroizing<String>>,
     /// Per-session key binding `piece` fields of long values to the stored value
     /// (AUD-RM1-SUI-11). Required when a long draft or answer is split into pieces; the render
     /// fails closed with `RenderError::MissingData("piece key")` otherwise.
@@ -535,7 +535,7 @@ pub struct Question {
     /// Required.
     pub required: bool,
     /// Current value(s): text, selected choice values, or `[month, year, flags...]`.
-    pub value: Vec<String>,
+    pub value: Vec<Zeroizing<String>>,
 }
 
 /// S05 Questionnaire data.
@@ -553,24 +553,24 @@ pub struct IdentityData {
     /// The mode being chosen (CONFIDENTIAL or IDENTIFIED).
     pub target: Mode,
     /// Current name value (re-render).
-    pub full_name: String,
+    pub full_name: Zeroizing<String>,
     /// Current role value.
-    pub role: String,
+    pub role: Zeroizing<String>,
     /// "Also by another way" was chosen: show the extra field.
     pub contact_other: bool,
     /// Current other-contact value.
-    pub contact_other_value: String,
+    pub contact_other_value: Zeroizing<String>,
 }
 
 /// An attached file (S06/S07/S08).
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct AttachedFile {
     /// Neutral (or opted-in original) display name.
-    pub name: String,
+    pub name: Zeroizing<String>,
     /// Size in bytes (shown rounded to MB).
     pub size_bytes: u64,
     /// Optional description.
-    pub description: String,
+    pub description: Zeroizing<String>,
 }
 
 /// S06 data.
@@ -596,7 +596,7 @@ pub struct ReviewAnswer {
     /// Step to edit.
     pub step: u8,
     /// The answer as plain text (escaped; `white-space: pre-wrap`).
-    pub answer: String,
+    pub answer: Zeroizing<String>,
 }
 
 /// The kind of an identity hint (05 §8.5).
@@ -744,11 +744,11 @@ impl CaseStatus {
 #[derive(Clone, PartialEq, Eq)]
 pub struct InboxMessage {
     /// Sender label (team or display name).
-    pub sender: String,
+    pub sender: Zeroizing<String>,
     /// Day (UTC).
     pub date: Day,
     /// Plain text.
-    pub text: String,
+    pub text: Zeroizing<String>,
 }
 
 /// S11 login data.
@@ -777,7 +777,7 @@ pub struct ConversationData {
     /// Thread page (newest first).
     pub messages: Vec<InboxMessage>,
     /// Unsent text (restored after re-authentication or error).
-    pub draft_text: String,
+    pub draft_text: Zeroizing<String>,
     /// Delayed delivery selected.
     pub delayed_delivery: bool,
     /// "Your message was sent" notice.

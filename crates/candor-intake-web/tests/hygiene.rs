@@ -90,3 +90,39 @@ async fn debug_is_redacted() {
     assert!(!format!("{f:?}").contains("abc"));
     assert!(!format!("{:?}", h.web.health()).contains(&cookie));
 }
+
+/// AUD-RM2-WEB-01: source text, identity data and team replies leave the
+/// sealer's `SecretText` only into zeroizing buffers. Any copy of an exposed
+/// secret (`to_owned`, `to_string`, `String::from`, `format!`) in the crate
+/// sources must sit directly inside `Zeroizing::new(..)`.
+#[test]
+fn exposed_secrets_are_copied_only_into_zeroizing_buffers() {
+    let files = [
+        ("app.rs", include_str!("../src/app.rs")),
+        ("flows.rs", include_str!("../src/flows.rs")),
+        ("form.rs", include_str!("../src/form.rs")),
+        ("multipart.rs", include_str!("../src/multipart.rs")),
+        ("sealer.rs", include_str!("../src/sealer.rs")),
+        ("server.rs", include_str!("../src/server.rs")),
+        ("session.rs", include_str!("../src/session.rs")),
+    ];
+    let mut checked = 0;
+    for (name, src) in files {
+        for (n, line) in src.lines().enumerate() {
+            if !line.contains(".expose()") {
+                continue;
+            }
+            checked += 1;
+            let copies = line.contains("to_owned()")
+                || line.contains("to_string()")
+                || line.contains("String::from")
+                || line.contains("format!");
+            assert!(
+                !copies || line.contains("Zeroizing::new("),
+                "{name}:{}: plain copy of an exposed secret: {line}",
+                n + 1
+            );
+        }
+    }
+    assert!(checked >= 4, "the lint sees the expose() calls");
+}

@@ -136,9 +136,13 @@ pub struct Web<S: StoreReads> {
     pub(crate) sessions: Sessions,
     pub(crate) limiter: Limiter,
     pub(crate) pre: PreSessionKey,
+    /// Leave tokens of the cookie-clearing screens (AUD-RM2-WEB-04).
+    pub(crate) leave: crate::token::LeaveTokens,
     pub(crate) started: Instant,
     pub(crate) serving: Arc<Semaphore>,
     pub(crate) overflow: Arc<Semaphore>,
+    /// Uploads in progress (AUD-RM2-WEB-07).
+    pub(crate) uploads: Arc<Semaphore>,
     fallback_p1: Arc<[u8]>,
     fallback_p2: Arc<[u8]>,
     sealer_up: AtomicBool,
@@ -170,6 +174,7 @@ impl<S: StoreReads + 'static> Web<S> {
         let now = Instant::now();
         let limiter = Limiter::new(cfg.global, now).map_err(|_| ConfigError("rng"))?;
         let pre = PreSessionKey::generate().map_err(|_| ConfigError("rng"))?;
+        let leave = crate::token::LeaveTokens::generate().map_err(|_| ConfigError("rng"))?;
         let origin = cfg.origin();
         let mut web = Self {
             cfg,
@@ -180,9 +185,11 @@ impl<S: StoreReads + 'static> Web<S> {
             sessions: Sessions::new(),
             limiter,
             pre,
+            leave,
             started: now,
             serving: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
             overflow: Arc::new(Semaphore::new(MAX_OVERFLOW_CONNECTIONS)),
+            uploads: Arc::new(Semaphore::new(crate::limits::MAX_CONCURRENT_UPLOADS)),
             fallback_p1: Arc::from(Vec::new()),
             fallback_p2: Arc::from(Vec::new()),
             sealer_up: AtomicBool::new(true),
@@ -206,7 +213,7 @@ impl<S: StoreReads + 'static> Web<S> {
         ] {
             let mut vm = web.base_vm(ui::Method::Get, false, Locale::En, None);
             web.fill_static(screen, &mut vm);
-            vm.ctx.form_token = Some(FALLBACK_TOKEN.to_owned());
+            vm.ctx.form_token = Some(Zeroizing::new(FALLBACK_TOKEN.to_owned()));
             ui::render(screen, &vm, &Locale::En).map_err(|_| ConfigError("site content"))?;
         }
         Ok(Arc::new(web))
@@ -239,7 +246,7 @@ impl<S: StoreReads + 'static> Web<S> {
 
     fn fallback_page(&self, method: ui::Method, cookie: bool) -> Option<Arc<[u8]>> {
         let mut vm = self.base_vm(method, cookie, Locale::En, None);
-        vm.ctx.form_token = Some(FALLBACK_TOKEN.to_owned());
+        vm.ctx.form_token = Some(Zeroizing::new(FALLBACK_TOKEN.to_owned()));
         let mut page = ui::render(Screen::ServerError, &vm, &Locale::En).ok()?;
         ui::finalize_headers(&mut page, None).ok()?;
         let head = serialize_head(&page)?;
@@ -286,7 +293,7 @@ impl<S: StoreReads + 'static> Web<S> {
         vm.deployment = self.cfg.site.deployment.clone();
         if let Some(o) = out {
             vm.ctx.mode = o.mode;
-            vm.ctx.form_token = Some(o.token.as_str().to_owned());
+            vm.ctx.form_token = Some(o.token.clone());
             vm.ctx.piece_key = o.piece.map(ui::PieceKey::new);
             vm.ctx.session = o.timers;
         }
@@ -379,7 +386,15 @@ impl<S: StoreReads + 'static> Web<S> {
             // The cookies are gone after this response: the only form that
             // can still be posted (Leave) carries the leave token instead of
             // a session or pre-session token (same length, same size).
-            out.token = self.pre.leave_token(self.secs());
+            // The Leave page itself has no form: nothing to issue.
+            if screen != Screen::Leave {
+                match self.leave.issue(Instant::now()) {
+                    Ok(t) => out.token = t,
+                    Err(_) => {
+                        return self.fallback(rq.method == ui::Method::Post || rq.has_cookie());
+                    }
+                }
+            }
         }
         let cookie = rq.has_cookie() || (out.has_session && rq.method == ui::Method::Post);
         let mut vm = self.base_vm(rq.method, cookie, rq.locale, Some(&out));
@@ -530,8 +545,12 @@ impl<S: StoreReads + 'static> Web<S> {
                 Route::Login | Route::Inbox | Route::RotateConfirm
             )
         {
+            // AUD-RM2-WEB-06: the floor runs from the end of the full
+            // request (head and body), not from accept.
+            body.buffer_all(crate::limits::MAX_FORM_BODY).await;
+            let complete = Instant::now().max(received);
             let reply = self.dispatch_route(&rq, decl, now, body).await;
-            self.login_floor(received).await;
+            self.login_floor(complete).await;
             return reply;
         }
         self.dispatch_route(&rq, decl, now, body).await
@@ -664,8 +683,14 @@ impl<S: StoreReads + 'static> Web<S> {
                     Err(Fail::Error)
                 }
             }
-            PostAuth::Leave if !rq.has_cookie() && rq.head.pre_cookie.is_none() => {
-                if self.pre.verify_leave(posted, self.secs()) {
+            // AUD-RM2-WEB-03: a stale session cookie (idle expiry, an
+            // unhonoured Clear-Site-Data) must never turn the Leave panic
+            // button into an error. Without a live session Leave changes no
+            // state, so the Leave page is rendered whatever token the page
+            // the source was on carried (its session token is gone).
+            PostAuth::Leave if rq.has_cookie() => Ok(()),
+            PostAuth::Leave if rq.head.pre_cookie.is_none() => {
+                if self.leave.verify(posted, Instant::now()) {
                     Ok(())
                 } else {
                     Err(Fail::Error)
@@ -730,9 +755,13 @@ impl<S: StoreReads + 'static> Web<S> {
         ))
     }
 
-    /// Wait for the login floor: `max(elapsed, floor) + U(0, 250 ms)` from
-    /// the request's arrival (07 §11; 11 §5.4 rule 7), on every outcome.
-    pub(crate) async fn login_floor(&self, received: Instant) {
+    /// Wait for the login floor: release at `max(complete + floor, now) +
+    /// U(0, 250 ms)`, where `complete` is when the full request was received
+    /// and `now` is when the work finished (07 §11; 11 §5.4 rule 7;
+    /// AUD-RM2-WEB-06). The jitter is always added, also when the work ran
+    /// past the floor, so the release time never shows the work's duration
+    /// exactly.
+    pub(crate) async fn login_floor(&self, complete: Instant) {
         let mut b = [0u8; 2];
         let jitter = if random(&mut b).is_ok() {
             u64::from(u16::from_le_bytes(b))
@@ -741,12 +770,45 @@ impl<S: StoreReads + 'static> Web<S> {
         } else {
             crate::limits::LOGIN_JITTER_MS
         };
-        let release = received
-            .checked_add(self.cfg.login_floor)
-            .and_then(|t| t.checked_add(Duration::from_millis(jitter)));
+        let release = floor_release(complete, self.cfg.login_floor, Instant::now(), jitter);
         if let Some(t) = release {
             tokio::time::sleep_until(t.into()).await;
         }
+    }
+}
+
+/// Release time of a floored response (AUD-RM2-WEB-06):
+/// `max(complete + floor, done) + jitter_ms`; the jitter is added in both
+/// cases, so a release never equals the end of the work exactly.
+pub(crate) fn floor_release(
+    complete: Instant,
+    floor: Duration,
+    done: Instant,
+    jitter_ms: u64,
+) -> Option<Instant> {
+    complete
+        .checked_add(floor)
+        .map(|f| f.max(done))
+        .and_then(|t| t.checked_add(Duration::from_millis(jitter_ms)))
+}
+
+#[cfg(test)]
+mod floor_tests {
+    #![allow(clippy::unwrap_used, clippy::arithmetic_side_effects)]
+    use super::*;
+
+    #[test]
+    fn floor_then_jitter_on_every_path() {
+        let t0 = Instant::now();
+        let floor = Duration::from_secs(3);
+        // Work inside the floor: floor + jitter from the complete request.
+        let r = floor_release(t0, floor, t0 + Duration::from_secs(1), 120).unwrap();
+        assert_eq!(r, t0 + floor + Duration::from_millis(120));
+        // Work past the floor: the jitter still follows the work.
+        let done = t0 + Duration::from_secs(5);
+        let r = floor_release(t0, floor, done, 80).unwrap();
+        assert_eq!(r, done + Duration::from_millis(80));
+        assert!(r > done);
     }
 }
 

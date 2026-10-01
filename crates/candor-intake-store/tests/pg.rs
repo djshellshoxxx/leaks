@@ -2050,17 +2050,18 @@ async fn pg_staged_ack_after_commit() {
         assert_eq!(n, 1);
         rx.acknowledge(store_sock.as_fd(), c).unwrap();
         ack(0x01);
-        // Same group again: DuplicateEnvelope, nothing committed.
+        // Same group and bundle again (AUD-RM2-SEA-01: the sealer's retry
+        // after an unconfirmed commit): idempotent success, nothing
+        // committed twice, the second copy is an orphan.
         send_staged_bundle(&sealer, &h, fd.as_fd()).unwrap();
         let dup = rx.receive(store_sock.as_fd(), slot).unwrap();
         let mut env1 = env0.clone();
         env1.objects[STAGED_BUNDLE_INDEX].blob.blob_id = dup.blob_id();
-        assert_eq!(
-            rx.commit_staged(&s, env1, dup).await.unwrap_err(),
-            StoreError::DuplicateEnvelope
-        );
-        rx.refuse(store_sock.as_fd()).unwrap();
-        ack(0x00);
+        let c1 = rx.commit_staged(&s, env1, dup).await.unwrap();
+        assert!(c1.replayed());
+        rx.acknowledge(store_sock.as_fd(), c1).unwrap();
+        ack(0x01);
+        assert_eq!(s.pending_count().await.unwrap(), 1, "one envelope in PostgreSQL");
         assert_eq!(rx.sweep(&s, next).await.unwrap(), 1);
         assert_eq!(
             rx.blobs().list().unwrap(),

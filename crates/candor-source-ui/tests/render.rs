@@ -20,6 +20,7 @@
 mod preview;
 
 use std::collections::HashSet;
+use zeroize::Zeroizing;
 
 use candor_source_ui::*;
 use preview::{all_cases, sample_view_model};
@@ -353,9 +354,9 @@ fn size_independent_of_content() {
     let mut b = a.clone();
     for i in 0..20u8 {
         b.inbox.messages.push(InboxMessage {
-            sender: "Team".into(),
+            sender: Zeroizing::new("Team".into()),
             date: Day::new(2026, 10, 1 + i).unwrap(),
-            text: "x".repeat(2000),
+            text: Zeroizing::new("x".repeat(2000)),
         });
     }
     let pa = render(Screen::Inbox, &a, &l).unwrap();
@@ -700,15 +701,15 @@ fn hostile_content_is_escaped() {
         vm.ctx.org = evil.into();
         vm.landing.purpose = evil.into();
         vm.deployment.custodian_label = evil.into();
-        vm.inbox.messages[0].text = evil.into();
-        vm.inbox.messages[0].sender = evil.into();
-        vm.conversation.messages[0].text = evil.into();
-        vm.conversation.draft_text = evil.into();
-        vm.files.files[0].name = evil.into();
-        vm.review.answers[0].answer = evil.into();
+        vm.inbox.messages[0].text = Zeroizing::new(evil.into());
+        vm.inbox.messages[0].sender = Zeroizing::new(evil.into());
+        vm.conversation.messages[0].text = Zeroizing::new(evil.into());
+        vm.conversation.draft_text = Zeroizing::new(evil.into());
+        vm.files.files[0].name = Zeroizing::new(evil.into());
+        vm.review.answers[0].answer = Zeroizing::new(evil.into());
         vm.review.channel = evil.into();
         vm.concerns.roles[0] = evil.into();
-        vm.identity.full_name = evil.into();
+        vm.identity.full_name = Zeroizing::new(evil.into());
         vm.status.channels[0].triage[0] = evil.into();
         let b = body(&render(s, &vm, &Locale::En).unwrap());
         let lower = b.to_ascii_lowercase();
@@ -978,7 +979,7 @@ fn invalid_ids_rejected() {
         Err(RenderError::InvalidId(_))
     ));
     let mut vm = sample_view_model(Screen::Landing, Mode::Anonymous, false);
-    vm.ctx.form_token = Some("<x>".into());
+    vm.ctx.form_token = Some(Zeroizing::new("<x>".into()));
     assert!(matches!(
         render(Screen::Landing, &vm, &Locale::En),
         Err(RenderError::InvalidId(_))
@@ -1048,9 +1049,9 @@ mod prop {
         #[test]
         fn arbitrary_text_is_inert(text in any::<String>(), sender in "[^\u{0}]{0,40}") {
             let mut vm = sample_view_model(Screen::Conversation, Mode::Anonymous, false);
-            vm.conversation.messages[0].text = text.clone();
-            vm.conversation.messages[0].sender = sender;
-            vm.conversation.draft_text = text;
+            vm.conversation.messages[0].text = Zeroizing::new(text.clone());
+            vm.conversation.messages[0].sender = Zeroizing::new(sender);
+            vm.conversation.draft_text = Zeroizing::new(text);
             let p = render(Screen::Conversation, &vm, &Locale::En).unwrap();
             prop_assert_eq!(p.body.len(), SizeClass::P2.bytes());
             let b = body(&p);
@@ -1104,8 +1105,8 @@ fn passphrase_copy_warning() {
 #[test]
 fn team_message_bidi_neutralised() {
     let mut vm = sample_view_model(Screen::Inbox, Mode::Anonymous, false);
-    vm.inbox.messages[0].text = "a\u{202E}b\u{2066}c\u{202A}d".into();
-    vm.inbox.messages[0].sender = "Team\u{202E}\u{2069}".into();
+    vm.inbox.messages[0].text = Zeroizing::new("a\u{202E}b\u{2066}c\u{202A}d".into());
+    vm.inbox.messages[0].sender = Zeroizing::new("Team\u{202E}\u{2069}".into());
     let b = body(&render(Screen::Inbox, &vm, &Locale::En).unwrap());
     let h = Html::parse_document(&b);
     let arts: Vec<_> = h.select(&sel("article.msg")).collect();
@@ -1270,7 +1271,7 @@ fn m_token(s: &Screen) -> Option<&'static str> {
 #[test]
 fn s12_navigation_never_posts_a_file() {
     let mut vm = sample_view_model(Screen::Conversation, Mode::Anonymous, false);
-    vm.conversation.draft_text = "&".repeat(60_000);
+    vm.conversation.draft_text = Zeroizing::new("&".repeat(60_000));
     vm.ctx.part = 0;
     let first = render(Screen::Conversation, &vm, &Locale::En).unwrap();
     assert!(first.parts >= 2);

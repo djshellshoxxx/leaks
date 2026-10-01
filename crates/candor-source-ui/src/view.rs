@@ -77,8 +77,13 @@ pub(crate) const LABEL_MAX_CHARS: usize = 256;
 /// [`LABEL_MAX_CHARS`] replaced by a visible "…" so that one label can never fill a page.
 /// Only labels are shortened; message, answer and draft text are never shortened (they are
 /// split into parts instead).
-pub(crate) fn label(s: &str) -> String {
-    let mut out = String::with_capacity(s.len().min(LABEL_MAX_CHARS.saturating_mul(4)));
+pub(crate) fn label(s: &str) -> Zeroizing<String> {
+    // Sender labels and file names are source/team data: zeroized on drop (AUD-RM2-WEB-01).
+    let mut out = Zeroizing::new(String::with_capacity(
+        s.len()
+            .min(LABEL_MAX_CHARS.saturating_mul(4))
+            .saturating_add(3),
+    ));
     for (n, c) in s.chars().enumerate() {
         if n >= LABEL_MAX_CHARS {
             out.push('…');
@@ -569,7 +574,7 @@ impl<'a> PageView<'a> {
     }
 
     pub(crate) fn form_token(&self) -> Option<&str> {
-        self.vm.ctx.form_token.as_deref()
+        self.vm.ctx.form_token.as_ref().map(|t| t.as_str())
     }
 
     // ---- paging (AUD-RM1-SUI-01) ------------------------------------------------------
@@ -685,17 +690,17 @@ impl<'a> PageView<'a> {
     }
 
     pub(crate) fn q_selected(&self, q: &Question, value: &str) -> bool {
-        q.value.iter().any(|v| v == value)
+        q.value.iter().any(|v| v.as_str() == value)
     }
 
     /// Month/year selected values and flags for a MonthYear question:
     /// value = [month, year, "ongoing"?, "unsure"?].
-    pub(crate) fn q_month(&self, q: &Question) -> String {
-        q.value.first().cloned().unwrap_or_default()
+    pub(crate) fn q_month<'q>(&self, q: &'q Question) -> &'q str {
+        q.value.first().map_or("", |v| v.as_str())
     }
 
-    pub(crate) fn q_year(&self, q: &Question) -> String {
-        q.value.get(1).cloned().unwrap_or_default()
+    pub(crate) fn q_year<'q>(&self, q: &'q Question) -> &'q str {
+        q.value.get(1).map_or("", |v| v.as_str())
     }
 
     pub(crate) fn months(&self) -> Vec<(String, String)> {

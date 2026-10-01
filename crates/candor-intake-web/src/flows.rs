@@ -6,6 +6,7 @@
 //! (zeroizing buffers, dropped with the response).
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use candor_core::passphrase::{Wordlist, normalize};
@@ -201,6 +202,37 @@ fn identity_block(full_name: &str, role: &str, contact_other: Option<&str>) -> Z
     s
 }
 
+/// Clears `WebSession::uploading` when an upload ends, on every path
+/// (AUD-RM2-WEB-07).
+struct UploadFlag<'a> {
+    sessions: &'a crate::session::Sessions,
+    table: [u8; 32],
+}
+
+impl Drop for UploadFlag<'_> {
+    fn drop(&mut self) {
+        let _ = self
+            .sessions
+            .with(&self.table, Instant::now(), false, |s| s.uploading = false);
+    }
+}
+
+/// Space-joined answer values, built once in an exactly sized zeroizing
+/// buffer (AUD-RM2-WEB-01: no plain `String` copies of source text).
+fn join_z(values: &[Zeroizing<String>]) -> Zeroizing<String> {
+    let len = values
+        .iter()
+        .fold(0usize, |a, v| a.saturating_add(v.len()).saturating_add(1));
+    let mut out = Zeroizing::new(String::with_capacity(len));
+    for (i, v) in values.iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        out.push_str(v);
+    }
+    out
+}
+
 fn identity_data(block: Option<&SecretText>, target: ui::Mode) -> IdentityData {
     let mut d = IdentityData {
         target,
@@ -208,10 +240,11 @@ fn identity_data(block: Option<&SecretText>, target: ui::Mode) -> IdentityData {
     };
     if let Some(b) = block {
         let mut it = b.expose().split('\n');
-        d.full_name = it.next().unwrap_or_default().to_owned();
-        d.role = it.next().unwrap_or_default().to_owned();
+        // AUD-RM2-WEB-01: straight into zeroizing buffers.
+        d.full_name = Zeroizing::new(it.next().unwrap_or_default().to_owned());
+        d.role = Zeroizing::new(it.next().unwrap_or_default().to_owned());
         d.contact_other = it.next() == Some("other");
-        d.contact_other_value = it.next().unwrap_or_default().to_owned();
+        d.contact_other_value = Zeroizing::new(it.next().unwrap_or_default().to_owned());
     }
     d
 }
@@ -313,10 +346,11 @@ impl<S: StoreReads + 'static> Web<S> {
             };
             let Some(v) = f.get(&id) else { continue };
             q.value = match q.kind {
-                QuestionKind::MultiChoice(_) | QuestionKind::MonthYear { .. } => {
-                    v.split('\n').map(str::to_owned).collect()
-                }
-                _ => vec![v.as_str().to_owned()],
+                QuestionKind::MultiChoice(_) | QuestionKind::MonthYear { .. } => v
+                    .split('\n')
+                    .map(|s| Zeroizing::new(s.to_owned()))
+                    .collect(),
+                _ => vec![Zeroizing::new(v.as_str().to_owned())],
             };
         }
         qs
@@ -330,11 +364,11 @@ impl<S: StoreReads + 'static> Web<S> {
                 let n = u16::try_from(i).unwrap_or(u16::MAX);
                 AttachedFile {
                     // The web never sees file names (sealer RAM only).
-                    name: format!("#{}", i.saturating_add(1)),
+                    name: Zeroizing::new(format!("#{}", i.saturating_add(1))),
                     size_bytes: p.size_bucket,
                     description: f
                         .get(&DESC_BASE.saturating_add(n))
-                        .map(|s| s.as_str().to_owned())
+                        .map(|s| Zeroizing::new(s.as_str().to_owned()))
                         .unwrap_or_default(),
                 }
             })
@@ -378,13 +412,13 @@ impl<S: StoreReads + 'static> Web<S> {
         }
         for step in FIRST_STEP..=LAST_STEP {
             for q in self.step_questions(ch, step, &f) {
-                if q.value.iter().all(String::is_empty) {
+                if q.value.iter().all(|v| v.is_empty()) {
                     continue;
                 }
                 vm.review.answers.push(ReviewAnswer {
                     question: q.label.clone(),
                     step,
-                    answer: q.value.join(" "),
+                    answer: join_z(&q.value),
                 });
             }
         }
@@ -637,9 +671,9 @@ impl<S: StoreReads + 'static> Web<S> {
             .into_iter()
             .filter_map(|v| {
                 Some(InboxMessage {
-                    sender: v.role_label.expose().to_owned(),
+                    sender: Zeroizing::new(v.role_label.expose().to_owned()),
                     date: ui_day(v.day)?,
-                    text: v.body.expose().to_owned(),
+                    text: Zeroizing::new(v.body.expose().to_owned()),
                 })
             })
             .collect())
@@ -1958,7 +1992,7 @@ impl<S: StoreReads + 'static> Web<S> {
                         Ok(s) => Some(Zeroizing::new(s.as_str().to_owned())),
                         Err(_) => {
                             let err = Self::field_error("text", "sui-conv-err-empty");
-                            let kept = t.to_owned();
+                            let kept = Zeroizing::new(t.to_owned());
                             return self
                                 .conversation(rq, k, |vm| {
                                     vm.ctx.errors.push(err);
@@ -1991,7 +2025,7 @@ impl<S: StoreReads + 'static> Web<S> {
                             .iter()
                             .find(|c| Some(c.id) == alt || c.option.independent_route)
                             .map(|c| c.option.name.clone());
-                        let kept = t.as_str().to_owned();
+                        let kept = t.clone();
                         self.conversation(rq, k, |vm| {
                             vm.conversation.refused_route = label;
                             vm.conversation.draft_text = kept;
@@ -2004,7 +2038,7 @@ impl<S: StoreReads + 'static> Web<S> {
                             field: "text".to_owned(),
                             message: Msg::new("sui-q-err-too-long").arg("max", 40_960u32),
                         };
-                        let kept = t.as_str().to_owned();
+                        let kept = t.clone();
                         self.conversation(rq, k, |vm| {
                             vm.ctx.errors.push(err);
                             vm.conversation.draft_text = kept;
@@ -2038,7 +2072,7 @@ impl<S: StoreReads + 'static> Web<S> {
                 }
                 let part = parse_u16(form.get("part")).unwrap_or(0);
                 let draft = match self.draft(k.sealer).await {
-                    Ok(v) => v.message.expose().to_owned(),
+                    Ok(v) => Zeroizing::new(v.message.expose().to_owned()),
                     Err(e) => return self.seal_fail(rq, e),
                 };
                 self.conversation(rq, k, |vm| {
@@ -2080,6 +2114,20 @@ impl<S: StoreReads + 'static> Web<S> {
         {
             return self.fail(rq, Fail::Busy);
         }
+        // AUD-RM2-WEB-07: a bounded number of uploads service-wide, and one
+        // at a time per session; both are released when this returns.
+        let Ok(_slot) = Arc::clone(&self.uploads).try_acquire_owned() else {
+            return self.fail(rq, Fail::Busy);
+        };
+        match self.with_session(&k, |s| core::mem::replace(&mut s.uploading, true)) {
+            Ok(false) => {}
+            Ok(true) => return self.fail(rq, Fail::Busy),
+            Err(f) => return self.fail(rq, f),
+        }
+        let _one = UploadFlag {
+            sessions: &self.sessions,
+            table: k.table,
+        };
         body.allow_upload_time();
         let declared = body.content_length();
         let r = self.upload_inner(rq, k, boundary, body, declared).await;
@@ -2121,13 +2169,11 @@ impl<S: StoreReads + 'static> Web<S> {
         body: &mut BodyReader,
         declared: u64,
     ) -> Result<(), UploadFail> {
-        // Size first (from Content-Length, before reading anything).
+        // Size from Content-Length; reported only after the token part has
+        // been checked (AUD-RM2-WEB-08: no session-dependent output before
+        // CSRF), and before any file byte is read or forwarded.
         let overhead: u64 = 64 * 1024;
-        if declared > self.cfg.max_file_bytes.saturating_add(overhead) {
-            // CSRF unverified yet: render nothing session-specific beyond
-            // the page the source is on; nothing changes.
-            return Err(UploadFail::Field("sui-files-err-too-large"));
-        }
+        let too_large = declared > self.cfg.max_file_bytes.saturating_add(overhead);
         let mut mp = Multipart::new(boundary);
         let mut state = UpState::ExpectCsrf;
         let mut csrf = Zeroizing::new(String::new());
@@ -2206,6 +2252,9 @@ impl<S: StoreReads + 'static> Web<S> {
                                 // The token gates everything after it.
                                 self.check_csrf(rq, PostAuth::Session, Some(&csrf))
                                     .map_err(UploadFail::Page)?;
+                                if too_large {
+                                    return Err(UploadFail::Field("sui-files-err-too-large"));
+                                }
                                 state = UpState::AfterCsrf;
                             } else if cur == "file" {
                                 match held.take() {
@@ -2330,7 +2379,7 @@ mod tests {
         let d = identity_data(Some(&SecretText::new(&b)), ui::Mode::Confidential);
         assert_eq!((d.full_name.as_str(), d.role.as_str()), ("A Name", "Role"));
         assert!(d.contact_other);
-        assert_eq!(d.contact_other_value, "Signal");
+        assert_eq!(d.contact_other_value.as_str(), "Signal");
     }
 
     #[test]

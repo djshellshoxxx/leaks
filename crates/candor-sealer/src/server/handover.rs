@@ -420,6 +420,48 @@ impl StoreConnection {
         r
     }
 
+    /// AUD-RM2-SEA-01: [`Self::hand_over`], and if that fails for any reason
+    /// (a deadline, a closed or refused connection), reconnect once with
+    /// `reconnect` and hand the **same** sealed bundle over again. The store
+    /// treats a re-hand-over of an already committed group as an idempotent
+    /// success (`0x02 ‖ h`, then `0x01 ‖ h`, nothing committed twice;
+    /// `candor_intake_store::staged`), so a commit that landed after this
+    /// side gave up is reported as success, and a commit that did not land
+    /// is made now. `Err` only if the retry fails as well (then nothing is
+    /// known to be committed and the caller reports "not confirmed").
+    pub fn hand_over_with_retry(
+        &mut self,
+        b: &StagedBundle,
+        reconnect: impl FnOnce() -> std::io::Result<OwnedFd>,
+    ) -> Result<(), SinkError> {
+        if self.hand_over(b).is_ok() {
+            return Ok(());
+        }
+        if b.len() > MAX_BUNDLE_LEN || b.is_empty() {
+            // Refused before sending: a retry cannot help.
+            return Err(SinkError);
+        }
+        let sock = reconnect().map_err(|_| SinkError)?;
+        self.sock = Some(sock);
+        self.hand_over(b)
+    }
+
+    /// [`Self::hand_over_group_bundle`] with the retry of
+    /// [`Self::hand_over_with_retry`] (the seal-path call).
+    pub fn hand_over_group_bundle_with_retry(
+        &mut self,
+        group: &super::sink::EnvelopeGroup,
+        reconnect: impl FnOnce() -> std::io::Result<OwnedFd>,
+    ) -> Result<(), SinkError> {
+        match &group.bundle.blob {
+            super::sink::Blob::Staged(b) => self.hand_over_with_retry(b, reconnect),
+            super::sink::Blob::Inline(_) => {
+                self.sock = None;
+                Err(SinkError)
+            }
+        }
+    }
+
     /// C-5 seal-path wiring: hand over the ATTACHMENT_BUNDLE of `group`
     /// (ADR-052(1): every group has exactly one, real or chaff). Only a
     /// [`super::sink::Blob::Staged`] bundle can be handed over; an inline

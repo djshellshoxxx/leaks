@@ -78,6 +78,9 @@ pub struct WebSession {
     pub lookup_tag: Option<Zeroizing<[u8; 32]>>,
     /// Day of the successful send (S10s), and whether it was delayed.
     pub sent: Option<(u32, bool)>,
+    /// An upload of this session is in progress (one at a time,
+    /// AUD-RM2-WEB-07).
+    pub uploading: bool,
 }
 
 impl core::fmt::Debug for WebSession {
@@ -109,6 +112,7 @@ impl WebSession {
             account: None,
             lookup_tag: None,
             sent: None,
+            uploading: false,
         })
     }
 

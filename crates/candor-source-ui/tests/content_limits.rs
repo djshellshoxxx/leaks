@@ -20,6 +20,7 @@
 mod preview;
 
 use std::collections::HashSet;
+use zeroize::Zeroizing;
 
 use candor_source_ui::*;
 use preview::sample_view_model;
@@ -224,8 +225,8 @@ fn s05_vm(c: char) -> (ViewModel, String, String, String) {
     qs.retain(|q| q.id != "when");
     for q in qs.iter_mut() {
         match q.id.as_str() {
-            "what" => q.value = vec![what.clone()],
-            "where" => q.value = vec![where_.clone()],
+            "what" => q.value = vec![Zeroizing::new(what.clone())],
+            "where" => q.value = vec![Zeroizing::new(where_.clone())],
             _ => {}
         }
     }
@@ -235,7 +236,7 @@ fn s05_vm(c: char) -> (ViewModel, String, String, String) {
         hint: None,
         kind: QuestionKind::LongText,
         required: false,
-        value: vec![who.clone()],
+        value: vec![Zeroizing::new(who.clone())],
     });
     (vm, what, who, where_)
 }
@@ -249,21 +250,21 @@ fn s08_vm(c: char) -> (ViewModel, Vec<String>) {
         ReviewAnswer {
             question: Text::Key("sui-q-what"),
             step: 4,
-            answer: a.clone(),
+            answer: Zeroizing::new(a.clone()),
         },
         ReviewAnswer {
             question: Text::Key("sui-q-where"),
             step: 4,
-            answer: w.clone(),
+            answer: Zeroizing::new(w.clone()),
         },
         ReviewAnswer {
             question: Text::Key("sui-q-who"),
             step: 5,
-            answer: b.clone(),
+            answer: Zeroizing::new(b.clone()),
         },
     ];
     for f in &mut vm.review.files {
-        f.name = rep(c, 1_000);
+        f.name = Zeroizing::new(rep(c, 1_000));
     }
     vm.review.hints = (0..300)
         .map(|i| IdentityHint {
@@ -280,18 +281,18 @@ fn thread(c: char) -> (Vec<InboxMessage>, String) {
     let big = mixed(c, LONG_BYTES);
     let mut msgs: Vec<InboxMessage> = (1..=6)
         .map(|i| InboxMessage {
-            sender: "Audit Committee team".into(),
+            sender: Zeroizing::new("Audit Committee team".into()),
             date: Day::new(2026, 10, i).unwrap(),
-            text: format!("Ordinary reply {i}."),
+            text: Zeroizing::new(format!("Ordinary reply {i}.")),
         })
         .collect();
     // A hostile staff message: maximum size, worst escaping, bidi overrides, huge sender.
     msgs.insert(
         2,
         InboxMessage {
-            sender: format!("\u{202E}{}", rep(c, 5_000)),
+            sender: Zeroizing::new(format!("\u{202E}{}", rep(c, 5_000))),
             date: Day::new(2026, 10, 9).unwrap(),
-            text: big.clone(),
+            text: Zeroizing::new(big.clone()),
         },
     );
     (msgs, big)
@@ -351,7 +352,7 @@ fn s08_audit_cases() {
     for t in [text, rep('"', REPORT_BYTES), rep('&', REPORT_BYTES)] {
         let mut vm = sample_view_model(Screen::Review, Mode::Anonymous, false);
         vm.review.answers.truncate(1);
-        vm.review.answers[0].answer = t.clone();
+        vm.review.answers[0].answer = Zeroizing::new(t.clone());
         let bodies = all_parts(Screen::Review, &vm, Locale::En);
         assert_eq!(nl(&texts(&bodies, "dd p.ut").concat()), nl(&t));
     }
@@ -369,7 +370,7 @@ fn inbox_and_conversation_survive_hostile_message() {
             vm.inbox.messages = msgs.clone();
             let bodies = all_parts(Screen::Inbox, &vm, l);
             let shown = texts(&bodies, "article.msg p.ut");
-            let expect: Vec<String> = msgs.iter().map(|m| m.text.clone()).collect();
+            let expect: Vec<String> = msgs.iter().map(|m| m.text.to_string()).collect();
             assert_eq!(nl(&shown.concat()), nl(&expect.concat()), "inbox complete");
             assert!(shown.iter().any(|t| t == "Ordinary reply 6."));
             if l != Locale::ArXB {
@@ -382,7 +383,7 @@ fn inbox_and_conversation_survive_hostile_message() {
             let mut vm = sample_view_model(Screen::Conversation, Mode::Anonymous, false);
             vm.conversation.messages = msgs;
             let draft = mixed(c, LONG_BYTES);
-            vm.conversation.draft_text = draft.clone();
+            vm.conversation.draft_text = Zeroizing::new(draft.clone());
             let bodies = all_parts(Screen::Conversation, &vm, l);
             assert_eq!(
                 nl(&texts(&bodies, "article.msg p.ut").concat()),
@@ -402,7 +403,7 @@ fn conversation_draft_audit_cases() {
     for c in WORST {
         let mut vm = sample_view_model(Screen::Conversation, Mode::Anonymous, false);
         let draft = rep(c, LONG_CHARS);
-        vm.conversation.draft_text = draft.clone();
+        vm.conversation.draft_text = Zeroizing::new(draft.clone());
         let bodies = all_parts(Screen::Conversation, &vm, Locale::En);
         rebuild(&bodies, "text", &draft);
     }
@@ -417,9 +418,9 @@ fn files_worst_case() {
                 let mut vm = sample_view_model(screen, Mode::Anonymous, false);
                 vm.files.files = (0..60)
                     .map(|i| AttachedFile {
-                        name: format!("{}{i}.pdf", rep(c, 300)),
+                        name: Zeroizing::new(format!("{}{i}.pdf", rep(c, 300))),
                         size_bytes: 1_000_000,
-                        description: rep(c, SHORT_CHARS),
+                        description: Zeroizing::new(rep(c, SHORT_CHARS)),
                     })
                     .collect();
                 let bodies = all_parts(screen, &vm, l);
@@ -447,24 +448,24 @@ fn worst_everything(s: Screen, c: char) -> ViewModel {
     let mut vm = sample_view_model(s, Mode::Confidential, false);
     for q in &mut vm.questionnaire.questions {
         match q.kind {
-            QuestionKind::LongText => q.value = vec![rep(c, LONG_BYTES)],
-            QuestionKind::ShortText => q.value = vec![rep(c, SHORT_CHARS)],
+            QuestionKind::LongText => q.value = vec![Zeroizing::new(rep(c, LONG_BYTES))],
+            QuestionKind::ShortText => q.value = vec![Zeroizing::new(rep(c, SHORT_CHARS))],
             _ => {}
         }
     }
-    vm.identity.full_name = rep(c, 200);
-    vm.identity.role = rep(c, 200);
-    vm.identity.contact_other_value = rep(c, SHORT_CHARS);
+    vm.identity.full_name = Zeroizing::new(rep(c, 200));
+    vm.identity.role = Zeroizing::new(rep(c, 200));
+    vm.identity.contact_other_value = Zeroizing::new(rep(c, SHORT_CHARS));
     for f in vm.files.files.iter_mut().chain(vm.review.files.iter_mut()) {
-        f.name = rep(c, 255);
-        f.description = rep(c, SHORT_CHARS);
+        f.name = Zeroizing::new(rep(c, 255));
+        f.description = Zeroizing::new(rep(c, SHORT_CHARS));
     }
     let (s08, _) = s08_vm(c);
     vm.review.answers = s08.review.answers;
     let (msgs, _) = thread(c);
     vm.inbox.messages = msgs.clone();
     vm.conversation.messages = msgs;
-    vm.conversation.draft_text = rep(c, LONG_CHARS);
+    vm.conversation.draft_text = Zeroizing::new(rep(c, LONG_CHARS));
     vm
 }
 
@@ -487,7 +488,7 @@ fn every_screen_every_locale_worst_case() {
 #[test]
 fn far_over_limit_still_paged() {
     let mut vm = sample_view_model(Screen::Inbox, Mode::Anonymous, false);
-    vm.inbox.messages[0].text = rep('&', 1 << 20);
+    vm.inbox.messages[0].text = Zeroizing::new(rep('&', 1 << 20));
     let bodies = all_parts(Screen::Inbox, &vm, Locale::En);
     assert!(bodies.len() >= 40);
     let total: usize = texts(&bodies, "article.msg p.ut")

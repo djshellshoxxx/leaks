@@ -56,7 +56,7 @@ pub fn sample_view_model(screen: Screen, mode: Mode, with_errors: bool) -> ViewM
         has_session_cookie: session,
         mode,
         org: "Example Org".to_owned(),
-        form_token: Some("Zm9ybS10b2tlbi1zYW1wbGU".to_owned()),
+        form_token: Some(Zeroizing::new("Zm9ybS10b2tlbi1zYW1wbGU".to_owned())),
         piece_key: Some(sample_piece_key()),
         session: session.then_some(SessionTimers {
             abs_remaining_secs: 5_400,
@@ -168,21 +168,21 @@ pub fn sample_view_model(screen: Screen, mode: Mode, with_errors: bool) -> ViewM
         } else {
             Mode::Confidential
         },
-        full_name: String::new(),
-        role: String::new(),
+        full_name: Zeroizing::new(String::new()),
+        role: Zeroizing::new(String::new()),
         contact_other: true,
-        contact_other_value: String::new(),
+        contact_other_value: Zeroizing::new(String::new()),
     };
     let files = vec![
         AttachedFile {
-            name: "file-01.pdf".to_owned(),
+            name: Zeroizing::new("file-01.pdf".to_owned()),
             size_bytes: 2_100_000,
-            description: String::new(),
+            description: Zeroizing::new(String::new()),
         },
         AttachedFile {
-            name: "file-02.jpg".to_owned(),
+            name: Zeroizing::new("file-02.jpg".to_owned()),
             size_bytes: 3_400_000,
-            description: "Photo of the notice board".to_owned(),
+            description: Zeroizing::new("Photo of the notice board".to_owned()),
         },
     ];
     vm.files = FilesData {
@@ -202,12 +202,12 @@ pub fn sample_view_model(screen: Screen, mode: Mode, with_errors: bool) -> ViewM
             ReviewAnswer {
                 question: Text::Key("sui-q-what"),
                 step: 4,
-                answer: "In March the quarterly figures were changed.\nThe old version is on the shared drive. <b>not bold</b>".to_owned(),
+                answer: Zeroizing::new("In March the quarterly figures were changed.\nThe old version is on the shared drive. <b>not bold</b>".to_owned()),
             },
             ReviewAnswer {
                 question: Text::Key("sui-q-where"),
                 step: 4,
-                answer: String::new(),
+                answer: Zeroizing::new(String::new()),
             },
         ],
         files,
@@ -241,14 +241,14 @@ pub fn sample_view_model(screen: Screen, mode: Mode, with_errors: bool) -> ViewM
     });
     let msgs = vec![
         InboxMessage {
-            sender: "Audit Committee team".to_owned(),
+            sender: Zeroizing::new("Audit Committee team".to_owned()),
             date: day(2026, 10, 4),
-            text: "Thank you. We have received your report and will look into it.\nhttps://example.org is shown as text.".to_owned(),
+            text: Zeroizing::new("Thank you. We have received your report and will look into it.\nhttps://example.org is shown as text.".to_owned()),
         },
         InboxMessage {
-            sender: "Audit Committee team".to_owned(),
+            sender: Zeroizing::new("Audit Committee team".to_owned()),
             date: day(2026, 10, 1),
-            text: "Your report was received.".to_owned(),
+            text: Zeroizing::new("Your report was received.".to_owned()),
         },
     ];
     vm.inbox = InboxData {
@@ -258,7 +258,7 @@ pub fn sample_view_model(screen: Screen, mode: Mode, with_errors: bool) -> ViewM
     };
     vm.conversation = ConversationData {
         messages: msgs,
-        draft_text: String::new(),
+        draft_text: Zeroizing::new(String::new()),
         delayed_delivery: false,
         just_sent: false,
         refused_route: None,
@@ -273,7 +273,7 @@ pub fn sample_view_model(screen: Screen, mode: Mode, with_errors: bool) -> ViewM
     if !session {
         // Session-less pages carry a pre-session token bound to a pre-session cookie
         // (AUD-RM1-SUI-06; every form has a token).
-        vm.ctx.form_token = Some("cHJlLXNlc3Npb24tdG9rZW4".to_owned());
+        vm.ctx.form_token = Some(Zeroizing::new("cHJlLXNlc3Npb24tdG9rZW4".to_owned()));
     }
     // Responses to POST-only routes.
     if matches!(

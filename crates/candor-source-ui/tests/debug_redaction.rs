@@ -11,6 +11,7 @@ mod preview;
 
 use candor_source_ui::*;
 use preview::sample_view_model;
+use zeroize::Zeroizing;
 
 const MODEL_SRC: &str = include_str!("../src/model.rs");
 
@@ -78,20 +79,20 @@ fn sensitive_types_do_not_derive_debug() {
 fn debug_output_has_no_content() {
     const S: &str = "SENTINEL-7f3a";
     let mut vm = sample_view_model(Screen::Review, Mode::Confidential, true);
-    vm.ctx.form_token = Some(S.into());
-    vm.identity.full_name = S.into();
-    vm.identity.role = S.into();
-    vm.identity.contact_other_value = S.into();
-    vm.files.files[0].name = S.into();
-    vm.files.files[0].description = S.into();
-    vm.review.answers[0].answer = S.into();
-    vm.review.files[0].name = S.into();
+    vm.ctx.form_token = Some(Zeroizing::new(S.into()));
+    vm.identity.full_name = Zeroizing::new(S.into());
+    vm.identity.role = Zeroizing::new(S.into());
+    vm.identity.contact_other_value = Zeroizing::new(S.into());
+    vm.files.files[0].name = Zeroizing::new(S.into());
+    vm.files.files[0].description = Zeroizing::new(S.into());
+    vm.review.answers[0].answer = Zeroizing::new(S.into());
+    vm.review.files[0].name = Zeroizing::new(S.into());
     vm.review.kept_out = vec![S.into()];
-    vm.inbox.messages[0].text = S.into();
-    vm.inbox.messages[0].sender = S.into();
-    vm.conversation.messages[0].text = S.into();
-    vm.conversation.draft_text = S.into();
-    vm.questionnaire.questions[0].value = vec![S.into()];
+    vm.inbox.messages[0].text = Zeroizing::new(S.into());
+    vm.inbox.messages[0].sender = Zeroizing::new(S.into());
+    vm.conversation.messages[0].text = Zeroizing::new(S.into());
+    vm.conversation.draft_text = Zeroizing::new(S.into());
+    vm.questionnaire.questions[0].value = vec![Zeroizing::new(S.into())];
     vm.concerns.ticked = vec![7];
     vm.new_report.selected_channel = Some(S.into());
     vm.ctx.errors = vec![FieldError {
