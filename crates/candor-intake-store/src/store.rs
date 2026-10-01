@@ -16,7 +16,8 @@ use crate::error::Result;
 use crate::types::{
     AccountId, AckResult, ApplyRepliesResult, BackupSnapshot, ClaimLimits, ClaimedBatch,
     CommitEnvelope, CounterCell, CounterDelta, Day, EnvelopeRef, ImportSlot, IncomingReply,
-    InstallOutcome, KdHighWater, LookupTag, MailboxId, ObjectData, PartSelector, ReplyIndex,
+    InstallOutcome, KdHighWater, LookupTag, MailboxId, NewAccount, ObjectData, PartSelector,
+    ReplyIndex,
     ReplyRef, SourceAccount, StoredReply, TenantId, VerifiedSnapshot,
 };
 
@@ -61,8 +62,30 @@ pub trait IntakeStore: Send + Sync {
         tag: &LookupTag,
     ) -> impl Future<Output = Result<Option<SourceAccount>>> + Send;
 
-    /// Delete an account, its replies and its envelope links, appending a signed
-    /// `account` deletion-list entry in the same transaction (SW-15, BE-074).
+    /// Create a Tier W account (ADR-052(2): separate from envelope commit; chaff
+    /// creates dummy accounts through the same call). `AccountExists` if the
+    /// `lookup_tag` is taken; `activity_month` = month of `today`.
+    fn create_account(
+        &self,
+        account: NewAccount,
+        today: Day,
+    ) -> impl Future<Output = Result<AccountId>> + Send;
+
+    /// Replace an account's `lookup_tag`, keys and `prefs_ct` (passphrase
+    /// rotation, ADR-046(7)). `NotFound` / `AccountExists` (tag of another account).
+    fn update_account(
+        &self,
+        account: AccountId,
+        new: NewAccount,
+    ) -> impl Future<Output = Result<()>> + Send;
+
+    /// Daily `inactive_purge` (09 §5.1, DB-033): delete accounts (and their
+    /// replies) whose `activity_month` started 365 or more days before `today`.
+    /// Abandoned real accounts and chaff dummy accounts expire alike.
+    fn purge_inactive_accounts(&self, today: Day) -> impl Future<Output = Result<u64>> + Send;
+
+    /// Delete an account and its replies, appending a signed `account`
+    /// deletion-list entry in the same transaction (SW-15, BE-074).
     fn delete_account(
         &self,
         account: AccountId,
@@ -75,9 +98,10 @@ pub trait IntakeStore: Send + Sync {
 
     // ----- envelopes / relay export -----
 
-    /// `COMMIT_ENVELOPE`: insert the envelope (and, for `AccountLink::New`, its
-    /// account) atomically; returns only after the database commit (`fsync`,
-    /// ADR-046(1)). Blob files must be durable before this call.
+    /// `COMMIT_ENVELOPE`: insert one fixed-shape envelope group (ADR-052(1)) with
+    /// no account reference (ADR-052(2)); returns only after the database commit
+    /// (`fsync`, ADR-046(1)). Blob files must be durable before this call. A
+    /// repeated group (same digest) is `DuplicateEnvelope` without a server error.
     fn commit_envelope(
         &self,
         env: CommitEnvelope,
@@ -94,7 +118,7 @@ pub trait IntakeStore: Send + Sync {
         limits: ClaimLimits,
     ) -> impl Future<Output = Result<ClaimedBatch>> + Send;
 
-    /// RL-03: header, manifest or part reference of an envelope in a batch.
+    /// RL-03: a group object's slot block or blob reference.
     fn batch_object(
         &self,
         batch_no: u64,
@@ -102,11 +126,9 @@ pub trait IntakeStore: Send + Sync {
         part: PartSelector,
     ) -> impl Future<Output = Result<ObjectData>> + Send;
 
-    /// RL-04: delete exactly the envelopes whose `header_sha256` is listed (all must
+    /// RL-04: delete exactly the envelopes whose group digest is listed (all must
     /// belong to the batch, else nothing changes); the rest of the batch returns to
-    /// the claimable pool (BE-014). The linked accounts' `activity_month` is folded
-    /// in inside the same transaction, which also rewrites every source-linkable
-    /// row (import slot only, AUD-RM2-STO-01).
+    /// the claimable pool (BE-014).
     fn ack_batch(
         &self,
         batch_no: u64,
@@ -234,16 +256,18 @@ pub trait IntakeStore: Send + Sync {
 
     // ----- import-slot rewrite and monthly counters (ADR-046(5)) -----
 
-    /// Run at every fixed import slot, after the slot's relay work (AUD-RM2-STO-01):
-    /// in one transaction, add the RAM-accumulated monthly counter deltas, fold
-    /// each account's `activity_month` from its stored envelopes and replies (never
-    /// beyond `slot.day`), and rewrite **every** row of every source-linkable table,
-    /// so that row `xmin` reveals only the slot. All deltas are validated before
-    /// anything is written.
+    /// Run at every fixed import slot, after the slot's relay work (AUD-RM2-STO-01,
+    /// ADR-052(14)): in one transaction, add the RAM-accumulated monthly counter
+    /// deltas, set `activity_month` to the slot's month for the accounts the web
+    /// recorded as active since the last slot (RAM-held, like quota) and fold it
+    /// from stored replies (never beyond `slot.day`), and rewrite **every** row of
+    /// every source-linkable table, so that row `xmin` reveals only the slot.
+    /// Everything is validated before anything is written.
     fn uniform_rewrite(
         &self,
         slot: ImportSlot,
         counters: &[CounterDelta],
+        active_accounts: &[AccountId],
     ) -> impl Future<Output = Result<()>> + Send;
 
     /// RL-09 raw cells of a month (suppression per 24 §TEL is the exporter's job).

@@ -19,13 +19,13 @@ use crate::deletion::{
 use crate::error::{Result, StoreError};
 use crate::store::{IntakeMaintenance, IntakeStore};
 use crate::types::{
-    AccountId, AccountLink, AckResult, ApplyRepliesResult, BackupSnapshot, BlobId, ChannelId,
-    ClaimLimits, ClaimedBatch, ClaimedObject, CommitEnvelope, CounterCell, CounterDelta,
-    CounterName, DELETION_LIST_RETENTION_DAYS, Day, EnvelopeRef, ImportSlot, IncomingReply,
-    InstallOutcome, KdHighWater, LookupTag, MAILBOX_SLOTS, MAX_DELETION_LIST_PAGE,
-    MAX_REPLIES_PER_PUSH, MailboxId, MetaSnapshot, ObjectData, PartRef, PartSelector,
-    REPLY_WINDOW_DAYS, ReplyIndex, ReplyRef, SourceAccount, StoredReply, TenantId,
-    VerifiedSnapshot, random_id16,
+    AccountId, AckResult, ApplyRepliesResult, BackupSnapshot, BlobId, ChannelId, ClaimLimits,
+    ClaimedBatch, ClaimedObject, CommitEnvelope, CounterCell, CounterDelta, CounterName,
+    DELETION_LIST_RETENTION_DAYS, Day, EnvelopeRef, GROUP_OBJECTS, GroupObject, ImportSlot,
+    INACTIVE_PURGE_DAYS, IncomingReply, InstallOutcome, KdHighWater, LookupTag, MAILBOX_SLOTS,
+    MAX_DELETION_LIST_PAGE, MAX_REPLIES_PER_PUSH, MAX_SLOT_ACTIVE_ACCOUNTS, MailboxId,
+    MetaSnapshot, NewAccount, ObjectData, PartSelector, REPLY_WINDOW_DAYS, ReplyIndex, ReplyRef,
+    SourceAccount, StoredReply, TenantId, VerifiedSnapshot, group_digest, random_id16,
 };
 use crate::validate::{self, SnapshotDecision, has_duplicates};
 
@@ -51,16 +51,12 @@ struct Meta {
 #[derive(Clone)]
 struct EnvRow {
     channel_id: ChannelId,
-    account: Option<AccountId>,
-    header_ct: Vec<u8>,
-    manifest_ct: Vec<u8>,
-    header_sha256: [u8; 32],
+    objects: [GroupObject; GROUP_OBJECTS],
+    group_sha256: [u8; 32],
     disposition_ct: Vec<u8>,
     epoch_index: u32,
-    received_date: Day,
     release_day: Day,
     batch_no: Option<u64>,
-    parts: Vec<PartRef>,
 }
 
 #[derive(Clone)]
@@ -174,30 +170,33 @@ fn delete_replies_where(st: &mut State, pred: impl Fn(&ReplyRow) -> bool) -> u64
     u64::try_from(before.saturating_sub(st.replies.len())).unwrap_or(u64::MAX)
 }
 
-/// Fold `activity_month` from the account's stored envelopes and replies (never
-/// beyond `limit`). Called only at import-slot operations (AUD-RM2-STO-01).
-fn fold_activity(st: &mut State, limit: Day, only: Option<&HashSet<AccountId>>) {
+/// Fold `activity_month` at an import slot (AUD-RM2-STO-01): the slot's month
+/// for the accounts recorded active, and the month of each stored reply dated
+/// no later than the slot.
+fn fold_activity(st: &mut State, slot_day: Day, active: &HashSet<AccountId>) {
     let mut best: HashMap<AccountId, Day> = HashMap::new();
-    let mut note = |a: Option<AccountId>, d: Day| {
-        if let Some(a) = a
-            && d <= limit
-            && only.is_none_or(|o| o.contains(&a))
-        {
-            let m = d.month_start();
-            best.entry(a).and_modify(|x| *x = (*x).max(m)).or_insert(m);
-        }
-    };
-    for e in st.envelopes.values() {
-        note(e.account, e.received_date);
+    let slot_month = slot_day.month_start();
+    for a in active {
+        best.insert(*a, slot_month);
     }
     for r in st.replies.values() {
-        note(r.account, r.available_day);
+        if let Some(a) = r.account
+            && r.available_day <= slot_day
+        {
+            let m = r.available_day.month_start();
+            best.entry(a).and_modify(|x| *x = (*x).max(m)).or_insert(m);
+        }
     }
     for (a, m) in best {
         if let Some(acc) = st.accounts.get_mut(&a) {
             acc.activity_month = acc.activity_month.max(m);
         }
     }
+}
+
+fn remove_account(st: &mut State, account: AccountId) {
+    st.accounts.remove(&account);
+    delete_replies_where(st, |r| r.account == Some(account));
 }
 
 impl IntakeStore for MemoryStore {
@@ -271,77 +270,103 @@ impl IntakeStore for MemoryStore {
             today,
             signer,
         )?;
-        st.accounts.remove(&account);
-        delete_replies_where(&mut st, |r| r.account == Some(account));
-        for e in st.envelopes.values_mut() {
-            if e.account == Some(account) {
-                e.account = None;
-            }
-        }
+        remove_account(&mut st, account);
         Ok(())
+    }
+
+    async fn create_account(&self, account: NewAccount, today: Day) -> Result<AccountId> {
+        validate::new_account(&account)?;
+        validate::day_i32(today)?;
+        let mut st = self.state.lock().await;
+        st.serving()?;
+        if st
+            .accounts
+            .values()
+            .any(|a| a.lookup_tag == account.lookup_tag)
+        {
+            return Err(StoreError::AccountExists);
+        }
+        let id = AccountId(random_id16()?);
+        st.accounts.insert(
+            id,
+            SourceAccount {
+                account_id: id,
+                lookup_tag: account.lookup_tag,
+                auth_pk: account.auth_pk,
+                xwing_pk: account.xwing_pk,
+                prefs_ct: account.prefs_ct,
+                activity_month: today.month_start(),
+            },
+        );
+        Ok(id)
+    }
+
+    async fn update_account(&self, account: AccountId, new: NewAccount) -> Result<()> {
+        validate::new_account(&new)?;
+        let mut st = self.state.lock().await;
+        st.serving()?;
+        if !st.accounts.contains_key(&account) {
+            return Err(StoreError::NotFound);
+        }
+        if st
+            .accounts
+            .values()
+            .any(|a| a.lookup_tag == new.lookup_tag && a.account_id != account)
+        {
+            return Err(StoreError::AccountExists);
+        }
+        let a = st.accounts.get_mut(&account).ok_or(StoreError::NotFound)?;
+        a.lookup_tag = new.lookup_tag;
+        a.auth_pk = new.auth_pk;
+        a.xwing_pk = new.xwing_pk;
+        a.prefs_ct = new.prefs_ct;
+        Ok(())
+    }
+
+    async fn purge_inactive_accounts(&self, today: Day) -> Result<u64> {
+        validate::day_i32(today)?;
+        let cutoff = today.saturating_minus(INACTIVE_PURGE_DAYS);
+        let mut st = self.state.lock().await;
+        st.meta()?;
+        let doomed: Vec<AccountId> = st
+            .accounts
+            .values()
+            .filter(|a| a.activity_month <= cutoff)
+            .map(|a| a.account_id)
+            .collect();
+        for a in &doomed {
+            remove_account(&mut st, *a);
+        }
+        Ok(u64::try_from(doomed.len()).unwrap_or(u64::MAX))
     }
 
     async fn commit_envelope(&self, env: CommitEnvelope) -> Result<EnvelopeRef> {
         validate::commit(&env)?;
         let mut st = self.state.lock().await;
         st.serving()?;
-        let digest = sha256(&env.header_ct);
-        if st.envelopes.values().any(|e| e.header_sha256 == digest) {
+        let digest = group_digest(&env.objects.clone().map(|o| o.object_hash));
+        if st.envelopes.values().any(|e| e.group_sha256 == digest) {
             return Err(StoreError::DuplicateEnvelope);
         }
         let blob_taken = |b: &BlobId| {
             st.envelopes
                 .values()
-                .any(|e| e.parts.iter().any(|p| p.blob_id == *b))
+                .any(|e| e.objects.iter().any(|o| o.blob.blob_id == *b))
         };
-        if env.parts.iter().any(|p| blob_taken(&p.blob_id)) {
+        if env.objects.iter().any(|o| blob_taken(&o.blob.blob_id)) {
             return Err(StoreError::InvalidInput("duplicate blob id"));
         }
-        let month = env.received_date.month_start();
-        let account = match env.account {
-            AccountLink::None => None,
-            // No account write per action (AUD-RM2-STO-01): activity is folded
-            // in at the next import-slot rewrite.
-            AccountLink::Existing(id) => {
-                if !st.accounts.contains_key(&id) {
-                    return Err(StoreError::NotFound);
-                }
-                Some(id)
-            }
-            AccountLink::New(n) => {
-                if st.accounts.values().any(|a| a.lookup_tag == n.lookup_tag) {
-                    return Err(StoreError::AccountExists);
-                }
-                let id = AccountId(random_id16()?);
-                st.accounts.insert(
-                    id,
-                    SourceAccount {
-                        account_id: id,
-                        lookup_tag: n.lookup_tag,
-                        auth_pk: n.auth_pk,
-                        xwing_pk: n.xwing_pk,
-                        prefs_ct: n.prefs_ct,
-                        activity_month: month,
-                    },
-                );
-                Some(id)
-            }
-        };
         let r = EnvelopeRef(random_id16()?);
         st.envelopes.insert(
             r,
             EnvRow {
                 channel_id: env.channel_id,
-                account,
-                header_ct: env.header_ct,
-                manifest_ct: env.manifest_ct,
-                header_sha256: digest,
+                group_sha256: digest,
                 disposition_ct: env.disposition_ct,
                 epoch_index: env.epoch_index,
-                received_date: env.received_date,
                 release_day: env.received_date.plus(u32::from(env.release_offset_days))?,
                 batch_no: None,
-                parts: env.parts,
+                objects: env.objects,
             },
         );
         Ok(r)
@@ -361,10 +386,9 @@ impl IntakeStore for MemoryStore {
             envelope_ref: *r,
             channel_id: e.channel_id,
             epoch_index: e.epoch_index,
-            header_len: u32::try_from(e.header_ct.len()).unwrap_or(u32::MAX),
-            manifest_len: u32::try_from(e.manifest_ct.len()).unwrap_or(u32::MAX),
-            parts: e.parts.iter().map(|p| p.padded_size).collect(),
-            sha256: e.header_sha256,
+            object_hashes: e.objects.clone().map(|o| o.object_hash),
+            parts: e.objects.clone().map(|o| o.blob.padded_size),
+            sha256: e.group_sha256,
             disposition_ct: e.disposition_ct.clone(),
         };
         if let Some(b) = st.envelopes.values().find_map(|e| e.batch_no) {
@@ -394,12 +418,8 @@ impl IntakeStore for MemoryStore {
             .take(usize::try_from(limits.max_objects).unwrap_or(usize::MAX))
             .filter_map(|(_, r)| st.envelopes.get(r).map(|e| (*r, e)))
             .map(|(r, e)| {
-                let parts: Vec<u64> = e.parts.iter().map(|p| p.padded_size).collect();
-                let len = |v: &Vec<u8>| u64::try_from(v.len()).unwrap_or(u64::MAX);
-                (
-                    r,
-                    validate::object_bytes(len(&e.header_ct), len(&e.manifest_ct), &parts),
-                )
+                let parts: Vec<u64> = e.objects.iter().map(|o| o.blob.padded_size).collect();
+                (r, validate::group_bytes(&parts))
             })
             .collect();
         let sizes: Vec<u64> = cands.iter().map(|c| c.1).collect();
@@ -449,11 +469,19 @@ impl IntakeStore for MemoryStore {
             .filter(|e| e.batch_no == Some(batch_no))
             .ok_or(StoreError::NotFound)?;
         Ok(match part {
-            PartSelector::Header => ObjectData::Bytes(e.header_ct.clone()),
-            PartSelector::Manifest => ObjectData::Bytes(e.manifest_ct.clone()),
-            PartSelector::Part(i) => {
-                ObjectData::Blob(*e.parts.get(usize::from(i)).ok_or(StoreError::NotFound)?)
-            }
+            PartSelector::SlotBlock(i) => ObjectData::Bytes(
+                e.objects
+                    .get(usize::from(i))
+                    .ok_or(StoreError::NotFound)?
+                    .slot_block
+                    .clone(),
+            ),
+            PartSelector::Object(i) => ObjectData::Blob(
+                e.objects
+                    .get(usize::from(i))
+                    .ok_or(StoreError::NotFound)?
+                    .blob,
+            ),
         })
     }
 
@@ -472,25 +500,11 @@ impl IntakeStore for MemoryStore {
         for d in committed {
             if !in_batch
                 .iter()
-                .any(|r| st.envelopes.get(r).is_some_and(|e| &e.header_sha256 == d))
+                .any(|r| st.envelopes.get(r).is_some_and(|e| &e.group_sha256 == d))
             {
                 return Err(StoreError::InvalidInput("digest not in batch"));
             }
         }
-        // Fold the acked envelopes' activity before their rows disappear.
-        let acked_accounts: HashSet<AccountId> = in_batch
-            .iter()
-            .filter_map(|r| st.envelopes.get(r))
-            .filter(|e| committed.contains(&e.header_sha256))
-            .filter_map(|e| e.account)
-            .collect();
-        let limit = in_batch
-            .iter()
-            .filter_map(|r| st.envelopes.get(r))
-            .map(|e| e.received_date)
-            .max()
-            .unwrap_or(Day(0));
-        fold_activity(&mut st, limit, Some(&acked_accounts));
         let mut res = AckResult {
             deleted: 0,
             blobs_to_delete: Vec::new(),
@@ -499,11 +513,11 @@ impl IntakeStore for MemoryStore {
             let acked = st
                 .envelopes
                 .get(&r)
-                .is_some_and(|e| committed.contains(&e.header_sha256));
+                .is_some_and(|e| committed.contains(&e.group_sha256));
             if acked {
                 if let Some(e) = st.envelopes.remove(&r) {
                     res.blobs_to_delete
-                        .extend(e.parts.iter().map(|p| p.blob_id));
+                        .extend(e.objects.iter().map(|o| o.blob.blob_id));
                     res.deleted = res.deleted.saturating_add(1);
                 }
             } else if let Some(e) = st.envelopes.get_mut(&r) {
@@ -878,13 +892,7 @@ impl IntakeStore for MemoryStore {
             .map(|a| a.account_id)
             .collect();
         for a in &doomed {
-            st.accounts.remove(a);
-            delete_replies_where(&mut st, |r| r.account == Some(*a));
-            for e in st.envelopes.values_mut() {
-                if e.account == Some(*a) {
-                    e.account = None;
-                }
-            }
+            remove_account(&mut st, *a);
         }
         delete_replies_where(&mut st, |r| {
             hasher
@@ -944,8 +952,17 @@ impl IntakeStore for MemoryStore {
             .map(|(b, s, _)| (v, b.clone(), s.clone())))
     }
 
-    async fn uniform_rewrite(&self, slot: ImportSlot, counters: &[CounterDelta]) -> Result<()> {
+    async fn uniform_rewrite(
+        &self,
+        slot: ImportSlot,
+        counters: &[CounterDelta],
+        active_accounts: &[AccountId],
+    ) -> Result<()> {
         validate::day_i32(slot.day)?;
+        if active_accounts.len() > MAX_SLOT_ACTIVE_ACCOUNTS {
+            return Err(StoreError::InvalidInput("too many active accounts"));
+        }
+        let active: HashSet<AccountId> = active_accounts.iter().copied().collect();
         let mut st = self.state.lock().await;
         st.meta()?;
         // Validate every delta (including the accumulated value) before writing.
@@ -964,7 +981,7 @@ impl IntakeStore for MemoryStore {
             next.insert(key, v);
         }
         st.counters.extend(next);
-        fold_activity(&mut st, slot.day, None);
+        fold_activity(&mut st, slot.day, &active);
         Ok(())
     }
 

@@ -151,14 +151,13 @@ CREATE TABLE candor.source_account (
   activity_month date     NOT NULL CHECK (EXTRACT(DAY FROM activity_month) = 1)
 );
 
--- envelope — CT/SS. Real and chaff rows are identical (ADR-047(3)); no kind, no tier.
+-- envelope — CT/SS. One fixed-shape group per row (ADR-052(1): main object,
+-- ATTACHMENT_BUNDLE, IDENTITY). No account reference (ADR-052(2)); real and
+-- chaff rows are identical (ADR-047(3)); no kind, no tier.
 CREATE TABLE candor.envelope (
   envelope_ref      uuid                  PRIMARY KEY,
   channel_id        uuid                  NOT NULL,
-  source_account_id uuid                  NULL REFERENCES candor.source_account (account_id) ON DELETE SET NULL,
-  header_ct         bytea                 NOT NULL CHECK (octet_length(header_ct) BETWEEN 1 AND 8192),
-  manifest_ct       bytea                 NOT NULL CHECK (octet_length(manifest_ct) BETWEEN 1 AND 65536),
-  header_sha256     bytea                 NOT NULL UNIQUE CHECK (octet_length(header_sha256) = 32),
+  group_sha256      bytea                 NOT NULL UNIQUE CHECK (octet_length(group_sha256) = 32),
   disposition_ct    bytea                 NOT NULL CHECK (octet_length(disposition_ct) BETWEEN 1 AND 4096),
   epoch_index       integer               NOT NULL CHECK (epoch_index >= 0),
   received_date     date                  NOT NULL,
@@ -170,12 +169,14 @@ CREATE TABLE candor.envelope (
 );
 CREATE INDEX envelope_claimable ON candor.envelope (state, release_day);
 CREATE INDEX envelope_batch ON candor.envelope (batch_no) WHERE batch_no IS NOT NULL;
-CREATE INDEX envelope_account ON candor.envelope (source_account_id) WHERE source_account_id IS NOT NULL;
 
--- envelope_part — CT.
+-- envelope_part — CT. Exactly the three group objects (part_no 0..2), each with
+-- its object_hash, RecipientSlotBlock (STD: 4 + 16 x 1168 bytes) and blob.
 CREATE TABLE candor.envelope_part (
   envelope_ref uuid     NOT NULL REFERENCES candor.envelope (envelope_ref) ON DELETE CASCADE,
-  part_no      smallint NOT NULL CHECK (part_no BETWEEN 0 AND 31),
+  part_no      smallint NOT NULL CHECK (part_no BETWEEN 0 AND 2),
+  object_hash  bytea    NOT NULL CHECK (octet_length(object_hash) = 32),
+  slot_block   bytea    NOT NULL CHECK (octet_length(slot_block) = 18692),
   blob_id      uuid     NOT NULL UNIQUE,
   padded_size  bigint   NOT NULL CHECK (padded_size > 0 AND padded_size <= 17179869184),
   PRIMARY KEY (envelope_ref, part_no)

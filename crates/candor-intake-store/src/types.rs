@@ -9,12 +9,14 @@ use core::fmt;
 
 use crate::error::StoreError;
 
-/// Maximum `header_ct` length (09 §5.1, 07 §5.4).
-pub const MAX_HEADER_CT: usize = 8 * 1024;
-/// Maximum `manifest_ct` length (09 §5.1, 07 §5.4).
-pub const MAX_MANIFEST_CT: usize = 64 * 1024;
-/// Maximum number of parts per envelope (07 §5.4).
-pub const MAX_PARTS: usize = 32;
+/// Objects per envelope group (ADR-052(1)): main object (SUBMISSION or
+/// SOURCE_MESSAGE), ATTACHMENT_BUNDLE, IDENTITY — always all three, with dummy
+/// objects where the source supplied none.
+pub const GROUP_OBJECTS: usize = 3;
+/// Encoded RecipientSlotBlock length for CANDOR-STD-1: `4 + 16 × 1168` (04 §13.2).
+pub const SLOT_BLOCK_LEN_STD: usize = 4 + 16 * 1168;
+/// Domain label of the group digest (relay ack digest).
+pub const GROUP_DIGEST_LABEL: &[u8] = b"candor/v1/intake/group";
 /// Upper bound for one part's padded size: 16 GiB, the EE per-file cap (ADR-046(4)).
 pub const MAX_PART_PADDED_SIZE: u64 = 16 * 1024 * 1024 * 1024;
 /// `disposition_ct` length for CANDOR-STD-1: X-Wing `Nenc` (1120) + 48 (04 §12.7).
@@ -52,6 +54,11 @@ pub const DELETION_LIST_RETENTION_DAYS: u32 = 35;
 pub const MAX_SNAPSHOT_BODY: usize = 32 * 1024 * 1024;
 /// Largest accepted Key Directory snapshot signature block (implementation decision).
 pub const MAX_SNAPSHOT_SIGNATURES: usize = 1024 * 1024;
+/// `inactive_purge` horizon (09 §5.1: 365 days after the start of the last
+/// `activity_month`).
+pub const INACTIVE_PURGE_DAYS: u32 = 365;
+/// Largest number of active accounts flushed at one import slot.
+pub const MAX_SLOT_ACTIVE_ACCOUNTS: usize = 1_000_000;
 /// Largest number of entries a pushed deletion list (RL-12) may carry: the
 /// 35-day retained list at well above EE deletion rates (AUD-RM2-STO-12).
 pub const MAX_PUSHED_DELETION_LIST: usize = 200_000;
@@ -245,19 +252,7 @@ impl fmt::Debug for NewAccount {
     }
 }
 
-/// Which account (if any) an envelope belongs to.
-#[derive(Clone, Debug)]
-pub enum AccountLink {
-    /// Tier V envelopes and chaff: no account link (ADR-039, ADR-047(3)).
-    None,
-    /// Follow-up by an existing Tier W account.
-    Existing(AccountId),
-    /// First envelope of a new Tier W account; the account is created in the same
-    /// transaction (ADR-034, 07 BE-056).
-    New(NewAccount),
-}
-
-/// One stored part of an envelope (09 §5.1 `envelope_part`).
+/// One stored blob reference (09 §5.1 `envelope_part`).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct PartRef {
     /// Blob object id (blob written and fsynced by the caller before commit).
@@ -266,17 +261,34 @@ pub struct PartRef {
     pub padded_size: u64,
 }
 
-/// `COMMIT_ENVELOPE` request (07 §5.3). Real and chaff envelopes are identical.
+/// One sealed object of an envelope group: its `object_hash` (04 §13.1), its
+/// RecipientSlotBlock and the blob holding the SealedObject (written and fsynced
+/// by the caller before commit).
+#[derive(Clone, PartialEq, Eq)]
+pub struct GroupObject {
+    /// `object_hash`.
+    pub object_hash: [u8; 32],
+    /// Encoded RecipientSlotBlock (exactly [`SLOT_BLOCK_LEN_STD`] bytes).
+    pub slot_block: Vec<u8>,
+    /// Blob.
+    pub blob: PartRef,
+}
+
+impl fmt::Debug for GroupObject {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("GroupObject(<redacted>)")
+    }
+}
+
+/// `COMMIT_ENVELOPE` request (07 §5.3, amended by ADR-052(1)/(2)): exactly one
+/// fixed-shape group and no account reference. Real and chaff envelopes are
+/// identical.
 #[derive(Clone)]
 pub struct CommitEnvelope {
-    /// Account link.
-    pub account: AccountLink,
     /// Channel.
     pub channel_id: ChannelId,
-    /// Header ciphertext (≤ 8 KiB).
-    pub header_ct: Vec<u8>,
-    /// Manifest ciphertext (≤ 64 KiB).
-    pub manifest_ct: Vec<u8>,
+    /// `[main, bundle, identity]` (ADR-052(1)).
+    pub objects: [GroupObject; GROUP_OBJECTS],
     /// Disposition marker (fixed size, opaque to the intake).
     pub disposition_ct: Vec<u8>,
     /// Sealing epoch reported to the relay (RL-02 `epoch_index`).
@@ -285,8 +297,19 @@ pub struct CommitEnvelope {
     pub received_date: Day,
     /// `release_day - received_date` (0..=21; ADR-038(4), BE-078).
     pub release_offset_days: u8,
-    /// Ordered parts (≤ 32).
-    pub parts: Vec<PartRef>,
+}
+
+/// Group digest = relay ack digest (RL-02 `sha256`):
+/// `SHA-256("candor/v1/intake/group" ‖ object_hash₀ ‖ object_hash₁ ‖ object_hash₂)`.
+#[must_use]
+pub fn group_digest(object_hashes: &[[u8; 32]; GROUP_OBJECTS]) -> [u8; 32] {
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    h.update(GROUP_DIGEST_LABEL);
+    for o in object_hashes {
+        h.update(o);
+    }
+    h.finalize().into()
 }
 
 impl fmt::Debug for CommitEnvelope {
@@ -304,8 +327,9 @@ pub struct ClaimLimits {
     pub max_bytes: u64,
 }
 
-/// One RL-02 object descriptor. Carries neither `received_date`, `release_day`,
-/// account link nor any kind/tier marker (ADR-038(3), API-047, API-057).
+/// One RL-02 envelope-group descriptor. Carries neither `received_date`,
+/// `release_day`, account link nor any kind/tier marker (ADR-038(3), API-047,
+/// API-057, ADR-052(2)).
 #[derive(Clone, PartialEq, Eq)]
 pub struct ClaimedObject {
     /// Intake-local ref.
@@ -314,13 +338,11 @@ pub struct ClaimedObject {
     pub channel_id: ChannelId,
     /// Sealing epoch.
     pub epoch_index: u32,
-    /// `header_ct` length.
-    pub header_len: u32,
-    /// `manifest_ct` length.
-    pub manifest_len: u32,
-    /// Padded part sizes in part order.
-    pub parts: Vec<u64>,
-    /// SHA-256 of `header_ct` (relay ack digest).
+    /// `object_hash` of each group object, in group order.
+    pub object_hashes: [[u8; 32]; GROUP_OBJECTS],
+    /// Padded blob sizes, in group order.
+    pub parts: [u64; GROUP_OBJECTS],
+    /// Group digest (relay ack digest, [`group_digest`]).
     pub sha256: [u8; 32],
     /// Opaque disposition marker.
     pub disposition_ct: Vec<u8>,
@@ -337,21 +359,19 @@ pub struct ClaimedBatch {
     pub objects: Vec<ClaimedObject>,
 }
 
-/// RL-03 part selector.
+/// RL-03 part selector (group object index 0..=2).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PartSelector {
-    /// `header_ct`.
-    Header,
-    /// `manifest_ct`.
-    Manifest,
-    /// Blob part by index.
-    Part(u16),
+    /// The object's RecipientSlotBlock.
+    SlotBlock(u8),
+    /// The object's SealedObject blob.
+    Object(u8),
 }
 
 /// RL-03 result.
 #[derive(Clone, PartialEq, Eq)]
 pub enum ObjectData {
-    /// Inline ciphertext (header or manifest).
+    /// Inline bytes (a slot block).
     Bytes(Vec<u8>),
     /// A blob the caller streams from the blob directory.
     Blob(PartRef),

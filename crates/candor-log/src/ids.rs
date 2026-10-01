@@ -60,6 +60,7 @@ macro_rules! opaque_id {
             /// samples): callers derive identifiers with a keyed hash
             /// ([`AuditIdKey`]) so no raw caller data can be laundered into an
             /// identifier field (AUD-RM1-LOG-03).
+            #[allow(dead_code)]
             pub(crate) const fn from_bytes(b: [u8; $len]) -> Self {
                 Self(b)
             }

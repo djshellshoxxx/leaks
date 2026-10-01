@@ -9,11 +9,22 @@
 //! * Release applies k = 10 (configurable upward only), primary and
 //!   complementary suppression with marginals withheld where needed, the
 //!   per-channel rule (≥ 3 cases and declared population ≥ 50, otherwise
-//!   folded into a channel group of ≥ 2 channels), and an exact
-//!   linear-algebra + bound-propagation disclosure audit across every
-//!   table released for the same period (differencing defence, 24 §9.6).
-//! * Magnitude statistics only for n ≥ k; ratios only for denominator ≥ k
-//!   and numerator ∉ {0, denominator}.
+//!   folded into a channel group of ≥ 2 channels), and an exact rational
+//!   linear-programming disclosure audit (AUD-RM1-LOG-05) across every
+//!   table released for the same period. The attacker model includes the
+//!   published cells and margins **and** the knowledge that every
+//!   primary-suppressed cell is < k and every complementary cell is ≥ k;
+//!   every protected quantity must keep a feasible range at least k − 1
+//!   wide (a primary cell stays anywhere in `[0, k-1]`).
+//! * Release history (facts, attacker priors, protections, magnitude
+//!   populations) is persisted through a caller-provided
+//!   [`ReleaseHistory`], so the differencing defence survives restarts
+//!   (AUD-RM1-LOG-06); a history that cannot be read or written fails the
+//!   release closed.
+//! * Magnitude statistics only through the registry, only when every
+//!   contributing cell is ≥ k; percentiles only for p ∈ [10, 90]; a
+//!   population differing from an earlier one of the same period by fewer
+//!   than k members is refused (mean/median differencing).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -241,19 +252,21 @@ pub struct Table {
 pub enum Published {
     /// Value.
     Value(u64),
-    /// Primary or complementary suppressed cell ("<10"; M2/M3 "0–9").
+    /// Primary or complementary suppressed cell.
     Suppressed,
     /// Marginal withheld to prevent recovery.
     Withheld,
 }
 
 impl Published {
-    /// Display string for audience M2/M3.
+    /// Display string for audience M2/M3. Every hidden figure renders as
+    /// `"suppressed"`: never a range such as "0–9", which would be false for
+    /// complementary cells and would tell primary and complementary cells
+    /// apart (AUD-RM1-LOG-05).
     pub fn display(&self) -> String {
         match self {
             Self::Value(v) => v.to_string(),
-            Self::Suppressed => "0\u{2013}9".to_owned(),
-            Self::Withheld => "\u{2014}".to_owned(),
+            Self::Suppressed | Self::Withheld => "suppressed".to_owned(),
         }
     }
 }
@@ -286,6 +299,14 @@ pub enum ReleaseError {
     AlreadyReleased,
     /// Channel group configuration invalid (< 2 channels, unknown channel).
     BadGroups,
+    /// Even full suppression would make a protected quantity derivable
+    /// together with earlier releases of the period (fail closed).
+    DisclosureRisk,
+    /// The release history could not be read, decoded or written (fail
+    /// closed: nothing is released).
+    History,
+    /// Statistic parameters out of range (e.g. percentile outside 10..=90).
+    BadStatistic,
 }
 
 struct Lines {
@@ -322,9 +343,9 @@ struct Plan {
     grand_pub: bool,
 }
 
-/// Greedy primary + complementary suppression (24 §9.3).
-fn greedy(values: &[u64], ln: &Lines, k: u64) -> Plan {
-    let mut sup: Vec<bool> = values.iter().map(|v| *v < k).collect();
+/// Greedy primary + complementary suppression (24 §9.3), starting from
+/// `sup` (primary cells and any extra complementary choices).
+fn greedy(values: &[u64], ln: &Lines, k: u64, mut sup: Vec<bool>) -> Plan {
     let mut row_pub = vec![true; ln.rows.len()];
     let mut col_pub = vec![true; ln.cols.len()];
     loop {
@@ -379,7 +400,7 @@ fn greedy(values: &[u64], ln: &Lines, k: u64) -> Plan {
 }
 
 // ---------------------------------------------------------------------
-// Disclosure audit (exact rational elimination)
+// Disclosure audit (exact rational linear programming)
 // ---------------------------------------------------------------------
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -401,6 +422,7 @@ fn gcd(mut a: i128, mut b: i128) -> i128 {
 
 impl Q {
     const ZERO: Self = Self { n: 0, d: 1 };
+    const ONE: Self = Self { n: 1, d: 1 };
     fn int(n: i128) -> Self {
         Self { n, d: 1 }
     }
@@ -419,6 +441,20 @@ impl Q {
     fn is_zero(self) -> bool {
         self.n == 0
     }
+    fn is_neg(self) -> bool {
+        self.n < 0
+    }
+    fn is_pos(self) -> bool {
+        self.n > 0
+    }
+    fn add(self, o: Self) -> Option<Self> {
+        Self::norm(
+            self.n
+                .checked_mul(o.d)?
+                .checked_add(o.n.checked_mul(self.d)?)?,
+            self.d.checked_mul(o.d)?,
+        )
+    }
     fn sub(self, o: Self) -> Option<Self> {
         Self::norm(
             self.n
@@ -433,66 +469,16 @@ impl Q {
     fn div(self, o: Self) -> Option<Self> {
         Self::norm(self.n.checked_mul(o.d)?, self.d.checked_mul(o.n)?)
     }
-}
-
-/// Reduced row-echelon basis of published functionals.
-struct Rref {
-    rows: Vec<Vec<Q>>,
-    pivots: Vec<usize>,
-}
-
-fn rref(mut m: Vec<Vec<Q>>, ncols: usize) -> Option<Rref> {
-    let mut pivots = Vec::new();
-    let mut r: usize = 0;
-    for c in 0..ncols {
-        let Some(p) = (r..m.len()).find(|&i| {
-            m.get(i)
-                .and_then(|row| row.get(c))
-                .is_some_and(|q| !q.is_zero())
-        }) else {
-            continue;
-        };
-        m.swap(r, p);
-        let pv = *m.get(r)?.get(c)?;
-        let prow: Vec<Q> = m.get(r)?.iter().map(|q| q.div(pv)).collect::<Option<_>>()?;
-        for (i, row) in m.iter_mut().enumerate() {
-            if i == r {
-                continue;
-            }
-            let f = *row.get(c)?;
-            if f.is_zero() {
-                continue;
-            }
-            for (x, y) in row.iter_mut().zip(prow.iter()) {
-                *x = x.sub(f.mul(*y)?)?;
-            }
-        }
-        if let Some(slot) = m.get_mut(r) {
-            *slot = prow;
-        }
-        pivots.push(c);
-        r = r.checked_add(1)?;
-        if r >= m.len() {
-            break;
-        }
+    fn neg(self) -> Option<Self> {
+        Some(Self {
+            n: self.n.checked_neg()?,
+            d: self.d,
+        })
     }
-    m.truncate(r);
-    Some(Rref { rows: m, pivots })
-}
-
-/// `Some(true)` if `v` is in the row space.
-fn in_row_space(b: &Rref, v: &[Q]) -> Option<bool> {
-    let mut v = v.to_vec();
-    for (row, &pc) in b.rows.iter().zip(b.pivots.iter()) {
-        let f = *v.get(pc)?;
-        if f.is_zero() {
-            continue;
-        }
-        for (x, y) in v.iter_mut().zip(row.iter()) {
-            *x = x.sub(f.mul(*y)?)?;
-        }
+    /// `self < o`.
+    fn lt(self, o: Self) -> Option<bool> {
+        Some(self.sub(o)?.is_neg())
     }
-    Some(v.iter().all(|q| q.is_zero()))
 }
 
 /// A published linear fact: sum of micro-cells = value.
@@ -504,107 +490,275 @@ pub struct Fact {
     pub value: u64,
 }
 
-/// Exact disclosure audit: returns `true` iff no protected functional is
-/// linearly derivable from `facts` and none is pinned by non-negativity
-/// bound propagation. Arithmetic overflow ⇒ `false` (fail closed).
-pub fn audit(facts: &[Fact], protected: &[BTreeSet<MicroKey>]) -> bool {
-    audit_inner(facts, protected).unwrap_or(false)
+/// Attacker prior knowledge: `lo ≤ Σ members ≤ hi` (`hi = None`: no upper
+/// bound). A primary-suppressed cell gives `[0, k-1]`, a complementary
+/// cell `[k, ∞)`.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Prior {
+    /// Micro-cells summed.
+    pub members: BTreeSet<MicroKey>,
+    /// Lower bound.
+    pub lo: u64,
+    /// Upper bound.
+    pub hi: Option<u64>,
 }
 
-fn audit_inner(facts: &[Fact], protected: &[BTreeSet<MicroKey>]) -> Option<bool> {
+/// Dense simplex tableau in standard form `A x = b, x ≥ 0`, rows in
+/// canonical form for `basis`. Exact rationals; any overflow yields `None`
+/// (callers fail closed).
+#[derive(Clone)]
+struct Tableau {
+    rows: Vec<Vec<Q>>,
+    rhs: Vec<Q>,
+    basis: Vec<usize>,
+    ncols: usize,
+}
+
+const MAX_PIVOTS: usize = 20_000;
+
+impl Tableau {
+    fn pivot(&mut self, r: usize, c: usize) -> Option<()> {
+        let pv = *self.rows.get(r)?.get(c)?;
+        let prow: Vec<Q> = self.rows.get(r)?.iter().map(|q| q.div(pv)).collect::<Option<_>>()?;
+        let prhs = self.rhs.get(r)?.div(pv)?;
+        for i in 0..self.rows.len() {
+            if i == r {
+                continue;
+            }
+            let f = *self.rows.get(i)?.get(c)?;
+            if f.is_zero() {
+                continue;
+            }
+            let row = self.rows.get_mut(i)?;
+            for (x, y) in row.iter_mut().zip(prow.iter()) {
+                *x = x.sub(f.mul(*y)?)?;
+            }
+            let rr = self.rhs.get_mut(i)?;
+            *rr = rr.sub(f.mul(prhs)?)?;
+        }
+        *self.rows.get_mut(r)? = prow;
+        *self.rhs.get_mut(r)? = prhs;
+        *self.basis.get_mut(r)? = c;
+        Some(())
+    }
+
+    /// Minimise `cost · x` over columns `< allowed` (Bland's rule). Returns
+    /// `Some(None)` if unbounded below.
+    fn minimise(&mut self, cost: &[Q], allowed: usize) -> Option<Option<Q>> {
+        for _ in 0..MAX_PIVOTS {
+            // Reduced costs r_j = c_j − Σ_i c_{B_i} T_ij.
+            let mut entering = None;
+            for j in 0..allowed {
+                if self.basis.contains(&j) {
+                    continue;
+                }
+                let mut r = cost.get(j).copied().unwrap_or(Q::ZERO);
+                for (i, &b) in self.basis.iter().enumerate() {
+                    let cb = cost.get(b).copied().unwrap_or(Q::ZERO);
+                    if cb.is_zero() {
+                        continue;
+                    }
+                    r = r.sub(cb.mul(*self.rows.get(i)?.get(j)?)?)?;
+                }
+                if r.is_neg() {
+                    entering = Some(j);
+                    break;
+                }
+            }
+            let Some(c) = entering else {
+                let mut v = Q::ZERO;
+                for (i, &b) in self.basis.iter().enumerate() {
+                    let cb = cost.get(b).copied().unwrap_or(Q::ZERO);
+                    v = v.add(cb.mul(*self.rhs.get(i)?)?)?;
+                }
+                return Some(Some(v));
+            };
+            let mut best: Option<(usize, Q)> = None;
+            for i in 0..self.rows.len() {
+                let a = *self.rows.get(i)?.get(c)?;
+                if !a.is_pos() {
+                    continue;
+                }
+                let ratio = self.rhs.get(i)?.div(a)?;
+                best = match best {
+                    None => Some((i, ratio)),
+                    Some((bi, br)) => {
+                        let better = ratio.lt(br)?
+                            || (ratio == br && self.basis.get(i)? < self.basis.get(bi)?);
+                        Some(if better { (i, ratio) } else { (bi, br) })
+                    }
+                };
+            }
+            let (r, _) = match best {
+                Some(b) => b,
+                None => return Some(None),
+            };
+            self.pivot(r, c)?;
+        }
+        None
+    }
+}
+
+/// Feasible region of the attacker's knowledge, ready for range queries.
+struct Region {
+    t: Tableau,
+    nstruct: usize,
+    index: BTreeMap<MicroKey, usize>,
+}
+
+impl Region {
+    /// Phase 1 of the two-phase simplex. `None` on overflow or if the
+    /// system is infeasible (cannot happen for true data; fail closed).
+    fn new(facts: &[Fact], priors: &[Prior], keys: &BTreeSet<MicroKey>) -> Option<Self> {
+        let index: BTreeMap<MicroKey, usize> =
+            keys.iter().copied().enumerate().map(|(i, k)| (k, i)).collect();
+        let n = index.len();
+        // Constraint list: (members, kind, rhs) with kind 0 '=', 1 '≤', 2 '≥'.
+        let mut cons: Vec<(Vec<usize>, u8, u64)> = Vec::new();
+        let idx = |m: &BTreeSet<MicroKey>| -> Vec<usize> {
+            m.iter().filter_map(|k| index.get(k).copied()).collect()
+        };
+        for f in facts {
+            cons.push((idx(&f.members), 0, f.value));
+        }
+        for p in priors {
+            if p.lo > 0 {
+                cons.push((idx(&p.members), 2, p.lo));
+            }
+            if let Some(h) = p.hi {
+                cons.push((idx(&p.members), 1, h));
+            }
+        }
+        let m = cons.len();
+        let nslack = cons.iter().filter(|c| c.1 != 0).count();
+        let ncols = n.checked_add(nslack)?.checked_add(m)?;
+        let mut rows = Vec::with_capacity(m);
+        let mut rhs = Vec::with_capacity(m);
+        let mut basis = Vec::with_capacity(m);
+        let mut slack = n;
+        for (i, (members, kind, v)) in cons.iter().enumerate() {
+            let mut row = vec![Q::ZERO; ncols];
+            for &j in members {
+                *row.get_mut(j)? = Q::ONE;
+            }
+            match kind {
+                1 => {
+                    *row.get_mut(slack)? = Q::ONE;
+                    slack = slack.checked_add(1)?;
+                }
+                2 => {
+                    *row.get_mut(slack)? = Q::int(-1);
+                    slack = slack.checked_add(1)?;
+                }
+                _ => {}
+            }
+            let art = n.checked_add(nslack)?.checked_add(i)?;
+            *row.get_mut(art)? = Q::ONE;
+            rows.push(row);
+            rhs.push(Q::int(i128::from(*v)));
+            basis.push(art);
+        }
+        let mut t = Tableau {
+            rows,
+            rhs,
+            basis,
+            ncols,
+        };
+        let art0 = n.checked_add(nslack)?;
+        let mut cost = vec![Q::ZERO; ncols];
+        for c in cost.iter_mut().skip(art0) {
+            *c = Q::ONE;
+        }
+        let v = t.minimise(&cost, ncols)??;
+        if !v.is_zero() {
+            return None;
+        }
+        // Drive artificial variables out of the basis; drop redundant rows.
+        let mut i = 0;
+        while i < t.rows.len() {
+            if *t.basis.get(i)? >= art0 {
+                let col = (0..art0).find(|&j| t.rows.get(i).and_then(|r| r.get(j)).is_some_and(|q| !q.is_zero()));
+                match col {
+                    Some(j) => t.pivot(i, j)?,
+                    None => {
+                        t.rows.remove(i);
+                        t.rhs.remove(i);
+                        t.basis.remove(i);
+                        continue;
+                    }
+                }
+            }
+            i = i.checked_add(1)?;
+        }
+        for r in &mut t.rows {
+            r.truncate(art0);
+        }
+        t.ncols = art0;
+        Some(Self {
+            t,
+            nstruct: n,
+            index,
+        })
+    }
+
+    /// `(min, max)` of `Σ members`; `max = None` means unbounded.
+    fn range(&self, members: &BTreeSet<MicroKey>) -> Option<(Q, Option<Q>)> {
+        let mut c = vec![Q::ZERO; self.t.ncols];
+        for k in members {
+            let j = *self.index.get(k)?;
+            if j < self.nstruct {
+                *c.get_mut(j)? = Q::ONE;
+            }
+        }
+        let lo = self.t.clone().minimise(&c, self.t.ncols)??;
+        let neg: Vec<Q> = c.iter().map(|q| q.neg()).collect::<Option<_>>()?;
+        let hi = match self.t.clone().minimise(&neg, self.t.ncols)? {
+            Some(v) => Some(v.neg()?),
+            None => None,
+        };
+        Some((lo, hi))
+    }
+}
+
+/// Exact disclosure audit: `true` iff every protected functional keeps a
+/// feasible range at least `width` wide given the published `facts` and
+/// the attacker's `priors`. Arithmetic overflow ⇒ `false` (fail closed).
+pub fn audit(facts: &[Fact], priors: &[Prior], protected: &[BTreeSet<MicroKey>], width: u64) -> bool {
+    first_failure(facts, priors, protected, width) == Some(None)
+}
+
+/// `Some(None)` if safe, `Some(Some(i))` with the index of the first
+/// unprotected functional, `None` on overflow.
+fn first_failure(
+    facts: &[Fact],
+    priors: &[Prior],
+    protected: &[BTreeSet<MicroKey>],
+    width: u64,
+) -> Option<Option<usize>> {
     let mut keys: BTreeSet<MicroKey> = BTreeSet::new();
     for f in facts {
         keys.extend(f.members.iter().copied());
     }
+    for p in priors {
+        keys.extend(p.members.iter().copied());
+    }
     for p in protected {
         keys.extend(p.iter().copied());
     }
-    let index: BTreeMap<MicroKey, usize> = keys
-        .iter()
-        .copied()
-        .enumerate()
-        .map(|(i, k)| (k, i))
-        .collect();
-    let n = index.len();
-    let vec_of = |s: &BTreeSet<MicroKey>| -> Vec<Q> {
-        let mut v = vec![Q::ZERO; n];
-        for k in s {
-            if let Some(slot) = index.get(k).and_then(|&i| v.get_mut(i)) {
-                *slot = Q::int(1);
-            }
-        }
-        v
-    };
-    let basis = rref(facts.iter().map(|f| vec_of(&f.members)).collect(), n)?;
-    for p in protected {
+    let region = Region::new(facts, priors, &keys)?;
+    let w = Q::int(i128::from(width));
+    for (i, p) in protected.iter().enumerate() {
         if p.is_empty() {
             continue;
         }
-        if in_row_space(&basis, &vec_of(p))? {
-            return Some(false);
+        let (lo, hi) = region.range(p)?;
+        if let Some(hi) = hi
+            && hi.sub(lo)?.lt(w)?
+        {
+            return Some(Some(i));
         }
     }
-    // Non-negativity bound propagation (catches e.g. a zero remainder).
-    let mut lo = vec![0u128; n];
-    let mut hi = vec![u128::MAX; n];
-    let fidx: Vec<(Vec<usize>, u128)> = facts
-        .iter()
-        .map(|f| {
-            (
-                f.members
-                    .iter()
-                    .filter_map(|k| index.get(k).copied())
-                    .collect(),
-                u128::from(f.value),
-            )
-        })
-        .collect();
-    for _ in 0..n.saturating_add(2).min(64) {
-        let mut changed = false;
-        for (members, v) in &fidx {
-            let sum_lo: u128 = members
-                .iter()
-                .map(|&i| lo.get(i).copied().unwrap_or(0))
-                .fold(0, u128::saturating_add);
-            let sum_hi: u128 = members
-                .iter()
-                .map(|&i| hi.get(i).copied().unwrap_or(u128::MAX))
-                .fold(0, u128::saturating_add);
-            for &i in members {
-                let (l, h) = (lo.get(i).copied()?, hi.get(i).copied()?);
-                let others_lo = sum_lo.saturating_sub(l);
-                let new_h = v.saturating_sub(others_lo).min(h);
-                let new_l = if sum_hi == u128::MAX {
-                    l
-                } else {
-                    v.saturating_sub(sum_hi.saturating_sub(h)).max(l)
-                };
-                if new_h != h || new_l != l {
-                    *hi.get_mut(i)? = new_h;
-                    *lo.get_mut(i)? = new_l;
-                    changed = true;
-                }
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-    for p in protected {
-        if p.is_empty() {
-            continue;
-        }
-        let (mut l, mut h) = (0u128, 0u128);
-        for k in p {
-            let i = *index.get(k)?;
-            l = l.saturating_add(*lo.get(i)?);
-            h = h.saturating_add(*hi.get(i)?);
-        }
-        if l == h {
-            return Some(false);
-        }
-    }
-    Some(true)
+    Some(None)
 }
 
 fn facts_of(table: &Table, plan: &Plan, ln: &Lines) -> Vec<Fact> {
@@ -652,11 +806,37 @@ fn facts_of(table: &Table, plan: &Plan, ln: &Lines) -> Vec<Fact> {
     out
 }
 
+/// Attacker priors from the suppression pattern (worst case: the attacker
+/// knows which suppressed cells are primary and which complementary).
+fn priors_of(table: &Table, plan: &Plan, k: u64) -> Vec<Prior> {
+    let mut out = Vec::new();
+    for (i, c) in table.cells.iter().enumerate() {
+        if !plan.sup.get(i).copied().unwrap_or(false) {
+            continue;
+        }
+        let members: BTreeSet<MicroKey> = c.members.iter().copied().collect();
+        out.push(if c.value < k {
+            Prior {
+                members,
+                lo: 0,
+                hi: Some(k.saturating_sub(1)),
+            }
+        } else {
+            Prior {
+                members,
+                lo: k,
+                hi: None,
+            }
+        });
+    }
+    out
+}
+
 fn protected_of(table: &Table, plan: &Plan, ln: &Lines, k: u64) -> Vec<BTreeSet<MicroKey>> {
     let mut out: Vec<BTreeSet<MicroKey>> = Vec::new();
-    // Every suppressed cell.
+    // Every primary-suppressed cell (complementary cells are ≥ k).
     for (i, c) in table.cells.iter().enumerate() {
-        if plan.sup.get(i).copied().unwrap_or(false) {
+        if plan.sup.get(i).copied().unwrap_or(false) && c.value < k {
             out.push(c.members.iter().copied().collect());
         }
     }
@@ -698,34 +878,25 @@ fn finish(table: &Table, plan: &Plan, ln: &Lines) -> Released {
             .fold(0, u64::saturating_add)
     };
     let all: Vec<usize> = (0..table.cells.len()).collect();
+    let marg = |lines: &[Vec<usize>], pubs: &[bool]| -> Vec<Published> {
+        lines
+            .iter()
+            .zip(pubs)
+            .map(|(l, p)| {
+                if *p {
+                    Published::Value(total(l))
+                } else {
+                    Published::Withheld
+                }
+            })
+            .collect()
+    };
     Released {
         rows: table.rows,
         cols: table.cols,
         cells: (0..table.cells.len()).map(cell).collect(),
-        row_totals: ln
-            .rows
-            .iter()
-            .zip(&plan.row_pub)
-            .map(|(l, p)| {
-                if *p {
-                    Published::Value(total(l))
-                } else {
-                    Published::Withheld
-                }
-            })
-            .collect(),
-        col_totals: ln
-            .cols
-            .iter()
-            .zip(&plan.col_pub)
-            .map(|(l, p)| {
-                if *p {
-                    Published::Value(total(l))
-                } else {
-                    Published::Withheld
-                }
-            })
-            .collect(),
+        row_totals: marg(&ln.rows, &plan.row_pub),
+        col_totals: marg(&ln.cols, &plan.col_pub),
         grand_total: if plan.grand_pub {
             Published::Value(total(&all))
         } else {
@@ -744,31 +915,89 @@ fn check_shape(table: &Table) -> Result<Lines, ReleaseError> {
     lines(table.rows, table.cols).ok_or(ReleaseError::Shape)
 }
 
-/// Result of suppressing one table: release, its facts, its protections.
-type Suppressed = (Released, Vec<Fact>, Vec<BTreeSet<MicroKey>>);
+/// Everything one release adds to the period's history.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Disclosed {
+    facts: Vec<Fact>,
+    priors: Vec<Prior>,
+    protected: Vec<BTreeSet<MicroKey>>,
+}
 
-/// Suppress and audit one table against `prior` facts/protections of the
-/// same period. Escalates (withhold grand total → withhold all marginals
-/// → suppress everything) until the audit passes.
+/// Choose an extra complementary cell for the first unprotected functional
+/// `failing`: the smallest unsuppressed cell of a line with a published
+/// marginal that contains a suppressed cell overlapping it.
+fn extra_complementary(
+    table: &Table,
+    plan: &Plan,
+    ln: &Lines,
+    failing: &BTreeSet<MicroKey>,
+) -> Option<usize> {
+    let touches = |i: usize| {
+        plan.sup.get(i).copied().unwrap_or(false)
+            && table
+                .cells
+                .get(i)
+                .is_some_and(|c| c.members.iter().any(|m| failing.contains(m)))
+    };
+    ln.rows
+        .iter()
+        .zip(&plan.row_pub)
+        .chain(ln.cols.iter().zip(&plan.col_pub))
+        .filter(|(line, p)| **p && line.iter().any(|&i| touches(i)))
+        .flat_map(|(line, _)| line.iter().copied())
+        .filter(|&i| !plan.sup.get(i).copied().unwrap_or(true))
+        .min_by_key(|&i| (table.cells.get(i).map_or(u64::MAX, |c| c.value), i))
+}
+
+/// Suppress and audit one table against `prior` releases of the same
+/// period. Adds complementary cells while that helps, then escalates
+/// (withhold grand total → withhold all marginals → suppress everything);
+/// if even that is unsafe with the earlier releases, refuses.
 fn suppress_with(
     table: &Table,
     k: KThreshold,
-    prior_facts: &[Fact],
-    prior_protected: &[BTreeSet<MicroKey>],
-) -> Result<Suppressed, ReleaseError> {
+    prior: &Disclosed,
+) -> Result<(Released, Disclosed), ReleaseError> {
     let ln = check_shape(table)?;
+    let kv = k.get();
+    let width = kv.saturating_sub(1);
     let values: Vec<u64> = table.cells.iter().map(|c| c.value).collect();
-    let mut plan = greedy(&values, &ln, k.get());
+    let primary: Vec<bool> = values.iter().map(|v| *v < kv).collect();
+    let mut plan = greedy(&values, &ln, kv, primary);
     let mut stage = 0u8;
+    let mut extra_rounds = values.len();
     loop {
-        let facts = facts_of(table, &plan, &ln);
-        let protected = protected_of(table, &plan, &ln, k.get());
-        let mut all_f = prior_facts.to_vec();
-        all_f.extend(facts.iter().cloned());
-        let mut all_p = prior_protected.to_vec();
-        all_p.extend(protected.iter().cloned());
-        if audit(&all_f, &all_p) {
-            return Ok((finish(table, &plan, &ln), facts, protected));
+        let mine = Disclosed {
+            facts: facts_of(table, &plan, &ln),
+            priors: priors_of(table, &plan, kv),
+            protected: protected_of(table, &plan, &ln, kv),
+        };
+        let mut f = prior.facts.clone();
+        f.extend(mine.facts.iter().cloned());
+        let mut pr = prior.priors.clone();
+        pr.extend(mine.priors.iter().cloned());
+        let mut pt = prior.protected.clone();
+        pt.extend(mine.protected.iter().cloned());
+        let failing = match first_failure(&f, &pr, &pt, width) {
+            Some(None) => return Ok((finish(table, &plan, &ln), mine)),
+            Some(Some(i)) => pt.get(i).cloned(),
+            None => None,
+        };
+        if stage == 3 {
+            return Err(ReleaseError::DisclosureRisk);
+        }
+        if stage == 0 && extra_rounds > 0 {
+            extra_rounds = extra_rounds.saturating_sub(1);
+            if let Some(i) = failing.and_then(|fs| extra_complementary(table, &plan, &ln, &fs)) {
+                let mut sup = plan.sup.clone();
+                if let Some(s) = sup.get_mut(i) {
+                    *s = true;
+                }
+                let grand = plan.grand_pub;
+                plan = greedy(&values, &ln, kv, sup);
+                plan.grand_pub = grand;
+                continue;
+            }
         }
         match stage {
             0 => plan.grand_pub = false,
@@ -781,9 +1010,6 @@ fn suppress_with(
                 plan.row_pub.iter_mut().for_each(|p| *p = false);
                 plan.col_pub.iter_mut().for_each(|p| *p = false);
                 plan.grand_pub = false;
-                let facts = Vec::new();
-                let protected = protected_of(table, &plan, &ln, k.get());
-                return Ok((finish(table, &plan, &ln), facts, protected));
             }
         }
         stage = stage.saturating_add(1);
@@ -792,32 +1018,257 @@ fn suppress_with(
 
 /// Suppress a single table in isolation (no prior releases).
 pub fn suppress(table: &Table, k: KThreshold) -> Result<Released, ReleaseError> {
-    suppress_with(table, k, &[], &[]).map(|(r, _, _)| r)
+    suppress_with(table, k, &Disclosed::default()).map(|(r, _)| r)
 }
 
-#[derive(Default, Debug)]
+// ---------------------------------------------------------------------
+// Persistent release history (differencing defence across restarts)
+// ---------------------------------------------------------------------
+
+/// Release-history store error (no data echoed).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct HistoryError;
+
+/// Durable per-period release history, provided by the caller (C-10 DB in
+/// production). `store` must be durable before returning `Ok`. The
+/// registry treats every error as fatal for the release (fail closed).
+pub trait ReleaseHistory {
+    /// The stored state of `period`, if any.
+    fn load(&self, period: MonthStamp) -> Result<Option<Vec<u8>>, HistoryError>;
+    /// Replace the stored state of `period`.
+    fn store(&mut self, period: MonthStamp, state: &[u8]) -> Result<(), HistoryError>;
+}
+
+/// In-memory [`ReleaseHistory`] (tests; cloning it simulates a restart
+/// with the same durable store).
+#[derive(Clone, Debug, Default)]
+pub struct MemoryReleaseHistory {
+    periods: BTreeMap<MonthStamp, Vec<u8>>,
+}
+
+impl MemoryReleaseHistory {
+    /// Empty history.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl ReleaseHistory for MemoryReleaseHistory {
+    fn load(&self, period: MonthStamp) -> Result<Option<Vec<u8>>, HistoryError> {
+        Ok(self.periods.get(&period).cloned())
+    }
+    fn store(&mut self, period: MonthStamp, state: &[u8]) -> Result<(), HistoryError> {
+        self.periods.insert(period, state.to_vec());
+        Ok(())
+    }
+}
+
+/// Everything released for one period.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct PeriodState {
-    reports: BTreeSet<&'static str>,
-    facts: Vec<Fact>,
-    protected: Vec<BTreeSet<MicroKey>>,
+    reports: BTreeSet<String>,
+    disclosed: Disclosed,
+    /// Populations of released magnitude statistics.
+    magnitudes: Vec<BTreeSet<MicroKey>>,
+}
+
+mod state_codec {
+    //! Canonical CBOR encoding of [`PeriodState`] (strict, bounded decode).
+    use super::*;
+    use crate::cbor::{self, MapBuilder, Value};
+
+    const MAX_ITEMS: usize = 1 << 16;
+
+    fn key_v(k: &MicroKey) -> Value {
+        Value::Array(vec![Value::Bytes(k.0.to_vec()), Value::Uint(u64::from(k.1))])
+    }
+    fn set_v(s: &BTreeSet<MicroKey>) -> Value {
+        Value::Array(s.iter().map(key_v).collect())
+    }
+    fn arr(v: &Value) -> Option<&[Value]> {
+        match v {
+            Value::Array(a) if a.len() <= MAX_ITEMS => Some(a),
+            _ => None,
+        }
+    }
+    fn key_of(v: &Value) -> Option<MicroKey> {
+        match arr(v)? {
+            [b, n] => Some(MicroKey(
+                b.as_bytes()?.try_into().ok()?,
+                u16::try_from(n.as_u64()?).ok()?,
+            )),
+            _ => None,
+        }
+    }
+    fn set_of(v: &Value) -> Option<BTreeSet<MicroKey>> {
+        arr(v)?.iter().map(key_of).collect()
+    }
+
+    pub(super) fn encode(s: &PeriodState) -> Option<Vec<u8>> {
+        let mut m = MapBuilder::new();
+        m.put("v", Value::Uint(1))
+            .put(
+                "reports",
+                Value::Array(s.reports.iter().map(|r| Value::Text(r.clone())).collect()),
+            )
+            .put(
+                "facts",
+                Value::Array(
+                    s.disclosed
+                        .facts
+                        .iter()
+                        .map(|f| Value::Array(vec![set_v(&f.members), Value::Uint(f.value)]))
+                        .collect(),
+                ),
+            )
+            .put(
+                "priors",
+                Value::Array(
+                    s.disclosed
+                        .priors
+                        .iter()
+                        .map(|p| {
+                            Value::Array(vec![
+                                set_v(&p.members),
+                                Value::Uint(p.lo),
+                                p.hi.map_or(Value::Null, Value::Uint),
+                            ])
+                        })
+                        .collect(),
+                ),
+            )
+            .put(
+                "protected",
+                Value::Array(s.disclosed.protected.iter().map(set_v).collect()),
+            )
+            .put(
+                "magnitudes",
+                Value::Array(s.magnitudes.iter().map(set_v).collect()),
+            );
+        cbor::encode(&m.build()).ok()
+    }
+
+    pub(super) fn decode(b: &[u8]) -> Option<PeriodState> {
+        let v = cbor::decode(b).ok()?;
+        if v.get("v")?.as_u64()? != 1 || !matches!(&v, Value::Map(m) if m.len() == 6) {
+            return None;
+        }
+        let reports = arr(v.get("reports")?)?
+            .iter()
+            .map(|r| r.as_text().map(str::to_owned))
+            .collect::<Option<BTreeSet<_>>>()?;
+        let facts = arr(v.get("facts")?)?
+            .iter()
+            .map(|f| match arr(f)? {
+                [m, x] => Some(Fact {
+                    members: set_of(m)?,
+                    value: x.as_u64()?,
+                }),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let priors = arr(v.get("priors")?)?
+            .iter()
+            .map(|p| match arr(p)? {
+                [m, lo, hi] => Some(Prior {
+                    members: set_of(m)?,
+                    lo: lo.as_u64()?,
+                    hi: match hi {
+                        Value::Null => None,
+                        h => Some(h.as_u64()?),
+                    },
+                }),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let protected = arr(v.get("protected")?)?
+            .iter()
+            .map(set_of)
+            .collect::<Option<Vec<_>>>()?;
+        let magnitudes = arr(v.get("magnitudes")?)?
+            .iter()
+            .map(set_of)
+            .collect::<Option<Vec<_>>>()?;
+        Some(PeriodState {
+            reports,
+            disclosed: Disclosed {
+                facts,
+                priors,
+                protected,
+            },
+            magnitudes,
+        })
+    }
+}
+
+/// A magnitude statistic (TEL-015).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Magnitude {
+    /// Median (nearest rank).
+    Median,
+    /// Nearest-rank percentile `p`, only for `p ∈ 10..=90` (a 0th/100th
+    /// percentile would be one case's exact minimum/maximum).
+    Percentile(u8),
+    /// Mean (floor).
+    Mean,
+    /// Median duration in whole weeks (input in days, half up).
+    MedianDurationWeeks,
 }
 
 /// Registry of releases per tumbling monthly period: refuses open periods
 /// and re-releases (frozen periods), and audits every new table jointly
-/// with everything already released for the period (24 §9.5 differencing).
-#[derive(Default, Debug)]
-pub struct PeriodRegistry {
-    periods: BTreeMap<MonthStamp, PeriodState>,
+/// with everything already released for the period (24 §9.5
+/// differencing). State lives in the caller's [`ReleaseHistory`].
+#[derive(Debug)]
+pub struct PeriodRegistry<H: ReleaseHistory> {
+    history: H,
 }
 
-impl PeriodRegistry {
-    /// Empty registry.
-    pub fn new() -> Self {
-        Self::default()
+impl<H: ReleaseHistory> PeriodRegistry<H> {
+    /// Registry over a durable history (a restarted process passes the
+    /// same store and keeps every earlier release's protection).
+    pub fn new(history: H) -> Self {
+        Self { history }
+    }
+
+    /// The underlying history.
+    pub fn history(&self) -> &H {
+        &self.history
+    }
+
+    fn load(&self, period: MonthStamp) -> Result<PeriodState, ReleaseError> {
+        match self.history.load(period).map_err(|_| ReleaseError::History)? {
+            None => Ok(PeriodState::default()),
+            Some(b) => state_codec::decode(&b).ok_or(ReleaseError::History),
+        }
+    }
+
+    fn save(&mut self, period: MonthStamp, st: &PeriodState) -> Result<(), ReleaseError> {
+        let b = state_codec::encode(st).ok_or(ReleaseError::History)?;
+        self.history
+            .store(period, &b)
+            .map_err(|_| ReleaseError::History)
+    }
+
+    fn open(
+        &self,
+        period: MonthStamp,
+        current: MonthStamp,
+        report: &str,
+    ) -> Result<PeriodState, ReleaseError> {
+        if period >= current {
+            return Err(ReleaseError::PeriodNotClosed);
+        }
+        let st = self.load(period)?;
+        if st.reports.contains(report) {
+            return Err(ReleaseError::AlreadyReleased);
+        }
+        Ok(st)
     }
 
     /// Release `table` as catalog report `report` for `period`, given the
-    /// current month (`period` must be strictly earlier).
+    /// current month (`period` must be strictly earlier). The history is
+    /// written before the release is returned.
     pub fn release(
         &mut self,
         period: MonthStamp,
@@ -826,18 +1277,83 @@ impl PeriodRegistry {
         table: &Table,
         k: KThreshold,
     ) -> Result<Released, ReleaseError> {
-        if period >= current {
-            return Err(ReleaseError::PeriodNotClosed);
-        }
-        let st = self.periods.entry(period).or_default();
-        if st.reports.contains(report) {
-            return Err(ReleaseError::AlreadyReleased);
-        }
-        let (rel, facts, protected) = suppress_with(table, k, &st.facts, &st.protected)?;
-        st.reports.insert(report);
-        st.facts.extend(facts);
-        st.protected.extend(protected);
+        let mut st = self.open(period, current, report)?;
+        let (rel, mine) = suppress_with(table, k, &st.disclosed)?;
+        st.reports.insert(report.to_owned());
+        st.disclosed.facts.extend(mine.facts);
+        st.disclosed.priors.extend(mine.priors);
+        st.disclosed.protected.extend(mine.protected);
+        self.save(period, &st)?;
         Ok(rel)
+    }
+
+    /// Release a magnitude statistic over `population` (one value per
+    /// contributing case, keyed consistently across reports). `Ok(None)`
+    /// ("suppressed") unless n ≥ k and the population differs from every
+    /// earlier magnitude population of the period by 0 or ≥ k members
+    /// (blocks mean/median differencing such as n = 10 vs n = 11).
+    pub fn release_magnitude(
+        &mut self,
+        period: MonthStamp,
+        current: MonthStamp,
+        report: &'static str,
+        stat: Magnitude,
+        population: &[(MicroKey, u64)],
+        k: KThreshold,
+    ) -> Result<Option<u64>, ReleaseError> {
+        if let Magnitude::Percentile(p) = stat
+            && !(10..=90).contains(&p)
+        {
+            return Err(ReleaseError::BadStatistic);
+        }
+        let mut st = self.open(period, current, report)?;
+        let keys: BTreeSet<MicroKey> = population.iter().map(|(k, _)| *k).collect();
+        let n = u64::try_from(keys.len()).map_err(|_| ReleaseError::Shape)?;
+        if keys.len() != population.len() {
+            return Err(ReleaseError::Shape);
+        }
+        let kv = k.get();
+        let differs_safely = st.magnitudes.iter().all(|prev| {
+            let d = u64::try_from(prev.symmetric_difference(&keys).count()).unwrap_or(u64::MAX);
+            d == 0 || d >= kv
+        });
+        let values: Vec<u64> = population.iter().map(|(_, v)| *v).collect();
+        let out = if n >= kv && differs_safely {
+            match stat {
+                Magnitude::Median => percentile(&values, 50),
+                Magnitude::Percentile(p) => percentile(&values, p),
+                Magnitude::Mean => mean(&values),
+                Magnitude::MedianDurationWeeks => {
+                    percentile(&values, 50).map(|d| d.saturating_add(3) / 7)
+                }
+            }
+        } else {
+            None
+        };
+        st.reports.insert(report.to_owned());
+        if out.is_some() {
+            st.magnitudes.push(keys);
+        }
+        self.save(period, &st)?;
+        Ok(out)
+    }
+
+    /// Release a ratio `num/den` as per-mille: only if both contributing
+    /// cells (`num` and `den − num`) are ≥ k (TEL-015, AUD-RM1-LOG-06).
+    pub fn release_ratio(
+        &mut self,
+        period: MonthStamp,
+        current: MonthStamp,
+        report: &'static str,
+        num: u64,
+        den: u64,
+        k: KThreshold,
+    ) -> Result<Option<u64>, ReleaseError> {
+        let mut st = self.open(period, current, report)?;
+        let out = ratio_permille(num, den, k);
+        st.reports.insert(report.to_owned());
+        self.save(period, &st)?;
+        Ok(out)
     }
 }
 
@@ -970,10 +1486,10 @@ pub fn counter_table(
 }
 
 /// Release a closed month's counters (RL-09 → AS-13) through `registry`.
-pub fn release_counters(
+pub fn release_counters<H: ReleaseHistory>(
     closed: ClosedMonth,
     groups: &ChannelGroups,
-    registry: &mut PeriodRegistry,
+    registry: &mut PeriodRegistry<H>,
     current: MonthStamp,
     k: KThreshold,
 ) -> Result<CounterReport, ReleaseError> {
@@ -991,8 +1507,8 @@ pub fn release_counters(
 }
 
 /// Release the instance-wide `intake.coi_exhausted` monthly total (M2).
-pub fn release_scalar(
-    registry: &mut PeriodRegistry,
+pub fn release_scalar<H: ReleaseHistory>(
+    registry: &mut PeriodRegistry<H>,
     period: MonthStamp,
     current: MonthStamp,
     report: &'static str,
@@ -1034,15 +1550,10 @@ pub fn round_m3(p: Published) -> Published {
 // Magnitude statistics (TEL-015)
 // ---------------------------------------------------------------------
 
-/// Median, only for n ≥ k (otherwise `None`, displayed "—").
-pub fn median(values: &[u64], k: KThreshold) -> Option<u64> {
-    percentile(values, 50, k)
-}
-
-/// Nearest-rank percentile `p` (0..=100), only for n ≥ k.
-pub fn percentile(values: &[u64], p: u8, k: KThreshold) -> Option<u64> {
+/// Nearest-rank percentile `p` (0..=100) of a non-empty slice.
+fn percentile(values: &[u64], p: u8) -> Option<u64> {
     let n = u64::try_from(values.len()).ok()?;
-    if n < k.get() || p > 100 {
+    if n == 0 || p > 100 {
         return None;
     }
     let mut v = values.to_vec();
@@ -1052,24 +1563,18 @@ pub fn percentile(values: &[u64], p: u8, k: KThreshold) -> Option<u64> {
     v.get(usize::try_from(rank.checked_sub(1)?).ok()?).copied()
 }
 
-/// Mean (floor), only for n ≥ k.
-pub fn mean(values: &[u64], k: KThreshold) -> Option<u64> {
+/// Mean (floor) of a non-empty slice.
+fn mean(values: &[u64]) -> Option<u64> {
     let n = u64::try_from(values.len()).ok()?;
-    if n < k.get() {
-        return None;
-    }
     let s = values.iter().try_fold(0u64, |a, b| a.checked_add(*b))?;
     s.checked_div(n)
 }
 
-/// Median duration in whole weeks (rounded half up), only for n ≥ k.
-pub fn median_duration_weeks(durations_days: &[u64], k: KThreshold) -> Option<u64> {
-    median(durations_days, k).map(|d| d.saturating_add(3) / 7)
-}
-
-/// Ratio `num/den` as per-mille, only if `den ≥ k` and `num ∉ {0, den}`.
-pub fn ratio_permille(num: u64, den: u64, k: KThreshold) -> Option<u64> {
-    if den < k.get() || num == 0 || num >= den {
+/// Ratio `num/den` as per-mille, only if `num ≥ k` and `den − num ≥ k`
+/// (every contributing cell ≥ k).
+fn ratio_permille(num: u64, den: u64, k: KThreshold) -> Option<u64> {
+    let rest = den.checked_sub(num)?;
+    if num < k.get() || rest < k.get() {
         return None;
     }
     num.checked_mul(1000)?.checked_div(den)

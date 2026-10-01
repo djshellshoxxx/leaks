@@ -37,7 +37,7 @@
 {%- for s in p.region(Region::Composer) %}
 {{ s|safe }}
 {%- endfor %}
-<form id="reply" method="post" action="{{ p.href(Route::Conversation) }}" enctype="multipart/form-data">
+<form id="reply-form" method="post" action="{{ p.href(Route::Conversation) }}" enctype="multipart/form-data">
 {% include "ft.html" %}
 {%- if p.part_nav().is_some() %}<input type="hidden" name="page" value="{{ p.vm.conversation.page }}">{% endif %}
 {%- if p.is_last_part() %}

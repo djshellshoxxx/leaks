@@ -6,8 +6,10 @@
 
 /// Expected columns per table: 09 §5.1 plus the documented additions
 /// (`envelope.epoch_index`, `intake_meta.restore_pending`,
-/// `intake_meta.deletion_acked_seq`, `reply.pub_gen`, `schema_migration`) and
-/// without `source_account.quota_bucket` (quota is RAM-only, AUD-RM2-STO-01).
+/// `intake_meta.deletion_acked_seq`, `reply.pub_gen`, `schema_migration`),
+/// without `source_account.quota_bucket` (quota is RAM-only, AUD-RM2-STO-01) and
+/// with the fixed-shape envelope group of ADR-052(1)/(2): no account reference,
+/// three parts each with `object_hash` and `slot_block`.
 pub const EXPECTED: &[(&str, &[&str])] = &[
     (
         "intake_meta",
@@ -41,10 +43,7 @@ pub const EXPECTED: &[(&str, &[&str])] = &[
         &[
             "envelope_ref",
             "channel_id",
-            "source_account_id",
-            "header_ct",
-            "manifest_ct",
-            "header_sha256",
+            "group_sha256",
             "disposition_ct",
             "epoch_index",
             "received_date",
@@ -55,7 +54,14 @@ pub const EXPECTED: &[(&str, &[&str])] = &[
     ),
     (
         "envelope_part",
-        &["envelope_ref", "part_no", "blob_id", "padded_size"],
+        &[
+            "envelope_ref",
+            "part_no",
+            "object_hash",
+            "slot_block",
+            "blob_id",
+            "padded_size",
+        ],
     ),
     (
         "reply",

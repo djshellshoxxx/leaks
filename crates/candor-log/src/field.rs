@@ -263,9 +263,6 @@ impl AuditField for Count {
 pub struct Seq(u64);
 
 impl Seq {
-    pub(crate) fn internal(v: u64) -> Self {
-        Self(v)
-    }
     /// One past the last sequence number covered by a checkpoint.
     pub fn checkpoint_end(cp: &crate::chain::SignedCheckpoint) -> Self {
         Self(cp.body().end_seq)

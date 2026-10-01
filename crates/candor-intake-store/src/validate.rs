@@ -9,10 +9,10 @@ use subtle::ConstantTimeEq;
 use crate::deletion::{DeletionEntry, verify_chain};
 use crate::error::{Result, StoreError};
 use crate::types::{
-    AccountLink, BackupSnapshot, ClaimLimits, CounterDelta, CommitEnvelope, DISPOSITION_CT_LEN_STD, IncomingReply,
-    InstallOutcome, KdHighWater, MAX_CLAIM_BYTES, MAX_CLAIM_OBJECTS, MAX_HEADER_CT,
-    MAX_MANIFEST_CT, MAX_PART_PADDED_SIZE, MAX_PARTS, MAX_PREFS_CT, MAX_PUSHED_DELETION_LIST,
-    MAX_RELEASE_OFFSET_DAYS, MAX_REPLY_CT, MAX_SNAPSHOT_BODY, MAX_SNAPSHOT_SIGNATURES, NewAccount,
+    BackupSnapshot, ClaimLimits, CommitEnvelope, CounterDelta, DISPOSITION_CT_LEN_STD,
+    GROUP_OBJECTS, IncomingReply, InstallOutcome, KdHighWater, MAX_CLAIM_BYTES, MAX_CLAIM_OBJECTS,
+    MAX_PART_PADDED_SIZE, MAX_PREFS_CT, MAX_PUSHED_DELETION_LIST, MAX_RELEASE_OFFSET_DAYS,
+    MAX_REPLY_CT, MAX_SNAPSHOT_BODY, MAX_SNAPSHOT_SIGNATURES, NewAccount, SLOT_BLOCK_LEN_STD,
     VerifiedSnapshot, XWING_PK_LEN,
 };
 
@@ -22,43 +22,40 @@ pub(crate) fn has_duplicates<T: PartialEq>(v: &[T]) -> bool {
         .any(|(i, a)| v.iter().skip(i.saturating_add(1)).any(|b| a == b))
 }
 
-/// Validate a `COMMIT_ENVELOPE` request.
+/// Validate a `COMMIT_ENVELOPE` request: one fixed-shape group (ADR-052(1)).
 pub(crate) fn commit(env: &CommitEnvelope) -> Result<()> {
-    if env.header_ct.is_empty() || env.header_ct.len() > MAX_HEADER_CT {
-        return Err(StoreError::InvalidInput("header_ct size"));
-    }
-    if env.manifest_ct.is_empty() || env.manifest_ct.len() > MAX_MANIFEST_CT {
-        return Err(StoreError::InvalidInput("manifest_ct size"));
-    }
     if env.disposition_ct.len() != DISPOSITION_CT_LEN_STD {
         return Err(StoreError::InvalidInput("disposition_ct size"));
     }
     if env.release_offset_days > MAX_RELEASE_OFFSET_DAYS {
         return Err(StoreError::InvalidInput("release offset"));
     }
-    if env.parts.len() > MAX_PARTS {
-        return Err(StoreError::InvalidInput("too many parts"));
-    }
-    for (i, p) in env.parts.iter().enumerate() {
-        if p.padded_size == 0 || p.padded_size > MAX_PART_PADDED_SIZE {
+    for (i, o) in env.objects.iter().enumerate() {
+        if o.slot_block.len() != SLOT_BLOCK_LEN_STD {
+            return Err(StoreError::InvalidInput("slot block size"));
+        }
+        if o.blob.padded_size == 0 || o.blob.padded_size > MAX_PART_PADDED_SIZE {
             return Err(StoreError::InvalidInput("part size"));
         }
-        if env
-            .parts
-            .iter()
-            .skip(i.saturating_add(1))
-            .any(|q| q.blob_id == p.blob_id)
-        {
-            return Err(StoreError::InvalidInput("duplicate blob id"));
+        for q in env.objects.iter().skip(i.saturating_add(1)) {
+            if q.blob.blob_id == o.blob.blob_id {
+                return Err(StoreError::InvalidInput("duplicate blob id"));
+            }
+            if q.object_hash == o.object_hash {
+                return Err(StoreError::InvalidInput("duplicate object hash"));
+            }
         }
     }
     i32::try_from(env.epoch_index).map_err(|_| StoreError::InvalidInput("epoch index"))?;
     day_i32(env.received_date)?;
     day_i32(env.received_date.plus(u32::from(env.release_offset_days))?)?;
-    if let AccountLink::New(a) = &env.account {
-        new_account(a)?;
-    }
     Ok(())
+}
+
+/// Bytes a group contributes to `max_bytes`: three slot blocks and three blobs.
+pub(crate) fn group_bytes(parts: &[u64]) -> u64 {
+    let slots = u64::try_from(SLOT_BLOCK_LEN_STD.saturating_mul(GROUP_OBJECTS)).unwrap_or(u64::MAX);
+    parts.iter().fold(slots, |a, p| a.saturating_add(*p))
 }
 
 pub(crate) fn new_account(a: &NewAccount) -> Result<()> {
@@ -145,15 +142,6 @@ pub(crate) fn claim_limits(l: ClaimLimits) -> Result<()> {
         return Err(StoreError::InvalidInput("max_bytes"));
     }
     Ok(())
-}
-
-/// Bytes an object contributes to `max_bytes`.
-pub(crate) fn object_bytes(header_len: u64, manifest_len: u64, parts: &[u64]) -> u64 {
-    parts
-        .iter()
-        .fold(header_len.saturating_add(manifest_len), |a, p| {
-            a.saturating_add(*p)
-        })
 }
 
 /// Greedy batch fill: take objects in the given (random) order while within
