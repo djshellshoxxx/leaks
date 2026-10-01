@@ -2,6 +2,9 @@
 //! Strict HTTP/1.1 request-head parser and response-head serializer
 //! (07 §5.1, IMPL-00 §7, IMPL-RM2 §2.6; ST-044, ST-075).
 //!
+//! Request heads are tokenized by `httparse` (lead decision, SPEC-NOTES
+//! decision 1); the policy below is applied on top of it.
+//!
 //! The service speaks the smallest HTTP/1.1 subset Tor Browser needs: one
 //! request per connection (the connection is closed after the response, so
 //! there is no pipelining and no request smuggling across requests), origin-
@@ -16,7 +19,8 @@
 //!   line over [`MAX_REQUEST_LINE`];
 //! * a version other than `HTTP/1.1`, a missing or foreign `Host`;
 //! * a second `Host`, `Content-Length`, `Content-Type`, `Cookie`, `Origin` or
-//!   `Sec-Fetch-Site`, and a second `__Host-cs` / `__Host-cpre` cookie.
+//!   `Sec-Fetch-Site`, and a second `__Host-cs` / `__Host-cpre` cookie;
+//! * a POST without `Content-Length`.
 //!
 //! Only these headers are interpreted. `User-Agent`, `Accept-Language` and
 //! every other header are syntax-checked and dropped unread (A1: nothing about
@@ -137,10 +141,6 @@ pub fn find_head_end(buf: &[u8]) -> Option<usize> {
         .and_then(|i| i.checked_add(4))
 }
 
-fn is_tchar(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
-}
-
 fn is_field_vchar(b: u8) -> bool {
     // VCHAR, SP, HTAB, obs-text. No CTL, no DEL.
     b == b'\t' || b == b' ' || (0x21..=0x7e).contains(&b) || b >= 0x80
@@ -223,49 +223,79 @@ fn parse_cookies(v: &[u8]) -> Result<Cookies, ()> {
     Ok(out)
 }
 
+/// Best-effort size class of a refused head (11 §5.4: method and session
+/// cookie presence). Used only to pick the error page's class when the head
+/// is too broken to tokenize; never to accept anything.
+fn rough_class(buf: &[u8]) -> HeadError {
+    let cookie_marker = b"__Host-cs=";
+    HeadError {
+        kind: HeadErrorKind::Malformed,
+        head: buf.starts_with(b"HEAD "),
+        post: buf.starts_with(b"POST "),
+        cookie: buf.windows(cookie_marker.len()).any(|w| w == cookie_marker),
+    }
+}
+
+/// Policy checks over the raw bytes that httparse is more lenient about:
+/// every line ends in CRLF (no bare CR or LF anywhere, httparse accepts bare
+/// LF), no empty line before the request line (httparse skips those), no
+/// obsolete line folding, and a bounded request line.
+fn raw_line_discipline(buf: &[u8]) -> bool {
+    if !buf.ends_with(b"\r\n\r\n") || buf.starts_with(b"\r\n") {
+        return false;
+    }
+    for (i, b) in buf.iter().enumerate() {
+        let next = buf.get(i.saturating_add(1)).copied();
+        let prev = i.checked_sub(1).and_then(|j| buf.get(j)).copied();
+        match b {
+            b'\r' if next != Some(b'\n') => return false,
+            b'\n' if prev != Some(b'\r') => return false,
+            // obs-fold: a line that starts with SP or HTAB.
+            b'\n' if matches!(next, Some(b' ' | b'\t')) => return false,
+            _ => {}
+        }
+    }
+    buf.windows(2)
+        .position(|w| w == b"\r\n")
+        .is_some_and(|n| n <= MAX_REQUEST_LINE)
+}
+
 /// Parse a complete request head (`buf` ends with the blank line, as found by
 /// [`find_head_end`]). `host` is the onion host name the `Host` header must
 /// equal (ASCII case-insensitive, no port).
+///
+/// Tokenization is httparse's (lead decision, SPEC-NOTES decision 1); the
+/// strict-subset policy is applied on top: raw CRLF discipline, HTTP/1.1
+/// only, origin-form targets, at most [`MAX_HEADERS`] fields, refused
+/// framing headers, no duplicates of the interpreted headers, and a
+/// `Content-Length` on every POST.
 pub fn parse_head(buf: &[u8], host: &str) -> Result<RequestHead, HeadError> {
-    let mut err = HeadError {
-        kind: HeadErrorKind::Malformed,
-        head: false,
-        post: false,
-        cookie: false,
-    };
-    if buf.len() > MAX_HEAD_BYTES {
+    let mut err = rough_class(buf);
+    if buf.len() > MAX_HEAD_BYTES || !raw_line_discipline(buf) {
         return Err(err);
     }
-    // Every line ends with CRLF; no bare CR or LF anywhere. After removing
-    // the blank line's CRLF, splitting on LF leaves one empty tail element.
-    if !buf.ends_with(b"\r\n\r\n") {
-        return Err(err);
+    let mut fields = [httparse::EMPTY_HEADER; MAX_HEADERS];
+    let mut req = httparse::Request::new(&mut fields);
+    // Default config: single SPs in the request line, no obs-fold, invalid
+    // header lines are errors (not skipped).
+    match httparse::ParserConfig::default().parse_request(&mut req, buf) {
+        Ok(httparse::Status::Complete(n)) if n == buf.len() => {}
+        _ => return Err(err),
     }
-    let body = buf.strip_suffix(b"\r\n").ok_or(err)?;
-    let mut lines = body.split(|b| *b == b'\n');
-    let line = lines.next().ok_or(err)?;
-    let line = line.strip_suffix(b"\r").ok_or(err)?;
-    if line.len() > MAX_REQUEST_LINE || line.contains(&b'\r') {
-        return Err(err);
-    }
-    // request-line = method SP request-target SP HTTP-version (single SPs).
-    let mut parts = line.split(|b| *b == b' ');
-    let (Some(m), Some(target), Some(version), None) =
-        (parts.next(), parts.next(), parts.next(), parts.next())
-    else {
+    let (Some(m), Some(target), Some(version)) = (req.method, req.path, req.version) else {
         return Err(err);
     };
-    if m.is_empty() || !m.iter().all(|b| is_tchar(*b)) {
-        return Err(err);
-    }
+    let target = target.as_bytes();
+    // Cookie presence is re-derived below from the parsed field.
+    err.cookie = false;
     let method = match m {
-        b"GET" => Method::Get,
-        b"HEAD" => Method::Head,
-        b"POST" => Method::Post,
+        "GET" => Method::Get,
+        "HEAD" => Method::Head,
+        "POST" => Method::Post,
         _ => {
-            // Still a syntactically valid token: 405 (SUI-056), but only for
+            // A valid token (httparse checked it): 405 (SUI-056), but only for
             // an otherwise sane request line.
-            if version == b"HTTP/1.1" && target.first() == Some(&b'/') {
+            if version == 1 && target.first() == Some(&b'/') {
                 err.kind = HeadErrorKind::MethodNotAllowed;
             }
             return Err(err);
@@ -273,14 +303,12 @@ pub fn parse_head(buf: &[u8], host: &str) -> Result<RequestHead, HeadError> {
     };
     err.post = method == Method::Post;
     err.head = method == Method::Head;
-    if version != b"HTTP/1.1" {
+    if version != 1 {
         return Err(err);
     }
-    if target.is_empty() || !target.iter().all(|b| (0x21..=0x7e).contains(b)) {
-        return Err(err);
-    }
-    // Origin-form only (no absolute-form, authority-form or `*`).
-    if target.first() != Some(&b'/') {
+    // Origin-form only (no absolute-form, authority-form or `*`), visible
+    // ASCII only.
+    if target.first() != Some(&b'/') || !target.iter().all(|b| (0x21..=0x7e).contains(b)) {
         return Err(err);
     }
     let path = if path_ok(target) {
@@ -289,7 +317,6 @@ pub fn parse_head(buf: &[u8], host: &str) -> Result<RequestHead, HeadError> {
         None
     };
 
-    let mut count = 0usize;
     let mut host_seen = false;
     let mut content_length: Option<u64> = None;
     let mut content_type: Option<String> = None;
@@ -299,51 +326,20 @@ pub fn parse_head(buf: &[u8], host: &str) -> Result<RequestHead, HeadError> {
     let mut fetch_seen = false;
     let mut cookies: Option<Cookies> = None;
     let mut bad = false;
-    let mut ended = false;
-    for raw in lines {
-        if ended {
+    for field in req.headers.iter() {
+        let value = trim_ows(field.value);
+        if field.name.is_empty() || !value.iter().all(|b| is_field_vchar(*b)) {
             return Err(err);
         }
-        if raw.is_empty() {
-            // The tail after the last CRLF (must be the last element).
-            ended = true;
-            continue;
-        }
-        // Each remaining line must end in CR (we split on LF).
-        let Some(l) = raw.strip_suffix(b"\r") else {
-            return Err(err);
-        };
-        if l.is_empty() || l.contains(&b'\r') {
-            return Err(err);
-        }
-        count = count.saturating_add(1);
-        if count > MAX_HEADERS {
-            return Err(err);
-        }
-        // Obsolete line folding.
-        if matches!(l.first(), Some(b' ' | b'\t')) {
-            return Err(err);
-        }
-        let Some(colon) = l.iter().position(|b| *b == b':') else {
-            return Err(err);
-        };
-        let (name, rest) = l.split_at(colon);
-        let value = trim_ows(rest.get(1..).unwrap_or_default());
-        if name.is_empty() || !name.iter().all(|b| is_tchar(*b)) {
-            return Err(err);
-        }
-        if !value.iter().all(|b| is_field_vchar(*b)) {
-            return Err(err);
-        }
-        let lower = name.to_ascii_lowercase();
-        match lower.as_slice() {
-            b"host" => {
+        let lower = field.name.to_ascii_lowercase();
+        match lower.as_str() {
+            "host" => {
                 if host_seen || !value.eq_ignore_ascii_case(host.as_bytes()) {
                     bad = true;
                 }
                 host_seen = true;
             }
-            b"content-length" => {
+            "content-length" => {
                 if content_length.is_some()
                     || value.is_empty()
                     || value.len() > 19
@@ -355,7 +351,7 @@ pub fn parse_head(buf: &[u8], host: &str) -> Result<RequestHead, HeadError> {
                     content_length = Some(s.parse::<u64>().map_err(|_| err)?);
                 }
             }
-            b"content-type" => {
+            "content-type" => {
                 if content_type.is_some() {
                     bad = true;
                 }
@@ -364,7 +360,7 @@ pub fn parse_head(buf: &[u8], host: &str) -> Result<RequestHead, HeadError> {
                     bad = true;
                 }
             }
-            b"origin" => {
+            "origin" => {
                 if origin_seen {
                     bad = true;
                 }
@@ -380,7 +376,7 @@ pub fn parse_head(buf: &[u8], host: &str) -> Result<RequestHead, HeadError> {
                     },
                 };
             }
-            b"sec-fetch-site" => {
+            "sec-fetch-site" => {
                 if fetch_seen {
                     bad = true;
                 }
@@ -391,7 +387,7 @@ pub fn parse_head(buf: &[u8], host: &str) -> Result<RequestHead, HeadError> {
                     FetchSite::Other
                 };
             }
-            b"cookie" => {
+            "cookie" => {
                 if cookies.is_some() {
                     bad = true;
                     continue;
@@ -408,12 +404,17 @@ pub fn parse_head(buf: &[u8], host: &str) -> Result<RequestHead, HeadError> {
                 }
             }
             // Ambiguous framing, compression and protocol switches.
-            b"transfer-encoding" | b"content-encoding" | b"expect" | b"upgrade" | b"te"
-            | b"http2-settings" | b"trailer" => bad = true,
+            "transfer-encoding" | "content-encoding" | "expect" | "upgrade" | "te"
+            | "http2-settings" | "trailer" => bad = true,
             _ => {}
         }
     }
-    if bad || !host_seen || !ended {
+    // Content-Length framing is mandatory for POST (no chunked, no
+    // read-until-close).
+    if method == Method::Post && content_length.is_none() {
+        bad = true;
+    }
+    if bad || !host_seen {
         return Err(err);
     }
     let cookies = cookies.unwrap_or(Cookies {

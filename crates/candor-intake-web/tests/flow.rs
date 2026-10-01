@@ -478,6 +478,13 @@ async fn extend_identity_and_discard() {
         )
         .await;
     assert_eq!(r.status, 200);
+    // Mode changed: the CSRF token rotated (lead decision 3); the old one is
+    // dead, the page carries the new one.
+    let old = tok.clone();
+    let tok = r.csrf();
+    assert_ne!(tok, old);
+    let r = h.post("/en/extend", &c, &format!("csrf={old}")).await;
+    assert_eq!(r.status, 500, "old token refused after the mode change");
     assert!(
         h.sealer
             .sessions
@@ -490,8 +497,10 @@ async fn extend_identity_and_discard() {
             .is_some()
     );
     // Decline: back to ANONYMOUS, the identity block is gone.
-    h.post("/en/identity", &c, &format!("csrf={tok}&nav=decline"))
+    let r = h
+        .post("/en/identity", &c, &format!("csrf={tok}&nav=decline"))
         .await;
+    let tok = r.csrf();
     assert!(
         h.sealer
             .sessions
@@ -629,4 +638,130 @@ async fn confirmation_attempt_limit() {
     let r = h.post("/en/submit", &c, &right).await;
     assert!(r.text().contains("2026-10-01"));
     assert_eq!(h.sealer.sealed.load(Ordering::SeqCst), 1);
+}
+
+/// Lead decision 3: the per-session token rotates at login: the pre-login
+/// token is dead afterwards (with or without the old pre-session cookie),
+/// the signed-in token is bound to its session, and no token ever appears
+/// in a URL.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pre_login_token_invalid_after_login() {
+    let h = harness().await;
+    let words = passphrase_words().join(" ");
+    h.store.add_account(&words);
+    let (pre, pre_tok) = h.pre().await;
+    let r = h
+        .post(
+            "/en/login",
+            &[&pre],
+            &format!("csrf={pre_tok}&action=login&passphrase={}", enc(&words)),
+        )
+        .await;
+    let cs = r.cookie().unwrap();
+    let tok = r.csrf();
+    assert_ne!(tok, pre_tok, "rotated at login");
+    for t in [&tok] {
+        let page = r.text();
+        assert!(!page.contains(&format!("csrf={t}")) && !page.contains("?csrf"));
+    }
+    let before = h.sealer.ops().len();
+    for cookies in [vec![cs.as_str()], vec![cs.as_str(), pre.as_str()]] {
+        let r = h
+            .post(
+                "/en/conversation",
+                &cookies,
+                &format!("csrf={pre_tok}&action=send&text=x"),
+            )
+            .await;
+        assert_eq!(r.status, 500, "pre-login token refused after login");
+        let r = h
+            .post("/en/leave", &cookies, &format!("csrf={pre_tok}"))
+            .await;
+        assert_eq!(r.status, 500);
+    }
+    assert_eq!(h.sealer.ops().len(), before, "nothing reached the sealer");
+    // Another session's token is not this session's.
+    let (_cs2, tok2) = h.start("anonymous").await;
+    let r = h
+        .post(
+            "/en/conversation",
+            &[&cs],
+            &format!("csrf={tok2}&action=send&text=x"),
+        )
+        .await;
+    assert_eq!(r.status, 500);
+    // The signed-in token works; logout ends it.
+    let r = h
+        .post(
+            "/en/conversation",
+            &[&cs],
+            &format!("csrf={tok}&action=send&text=x"),
+        )
+        .await;
+    assert_eq!(r.status, 200);
+    let sealed = h.sealer.sealed.load(Ordering::SeqCst);
+    let r = h.post("/en/leave", &[&cs], &format!("csrf={tok}")).await;
+    assert!(r.header("Clear-Site-Data").is_some());
+    let r = h
+        .post(
+            "/en/conversation",
+            &[&cs],
+            &format!("csrf={tok}&action=send&text=x"),
+        )
+        .await;
+    assert!(
+        r.header("Clear-Site-Data").is_some(),
+        "token dead after logout: signed-out page (S94)"
+    );
+    assert_eq!(h.sealer.sealed.load(Ordering::SeqCst), sealed);
+}
+
+/// SPEC-NOTES decision 5 (lead decision 2: a valid token is always
+/// required): a Leave POST with no cookie at all needs the leave token that
+/// the cookie-clearing screens render; without it, the uniform error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cookieless_leave_needs_the_leave_token() {
+    let h = harness().await;
+    let r = h.post("/en/leave", &[], "").await;
+    assert_eq!(r.status, 500, "no token");
+    let r = h
+        .post("/en/leave", &[], &format!("csrf={}", "0".repeat(64)))
+        .await;
+    assert_eq!(r.status, 500, "zero token");
+    let (pre, pre_tok) = h.pre().await;
+    let r = h.post("/en/leave", &[], &format!("csrf={pre_tok}")).await;
+    assert_eq!(r.status, 500, "a pre-session token without its cookie");
+    assert!(h.sealer.ops().is_empty());
+    // A pre-session Leave works (and changes nothing).
+    let r = h
+        .post("/en/leave", &[&pre], &format!("csrf={pre_tok}"))
+        .await;
+    assert_eq!(r.status, 200);
+    assert!(r.header("Clear-Site-Data").is_some());
+    // A cookie-clearing screen with a Leave form (discarded) carries the
+    // leave token, which works without any cookie.
+    let (cs, tok) = h.start("anonymous").await;
+    let r = h
+        .post("/en/end", &[&cs], &format!("csrf={tok}&action=discard"))
+        .await;
+    assert!(r.header("Clear-Site-Data").is_some());
+    let leave_tok = r.csrf();
+    assert_ne!(leave_tok, tok);
+    let ops = h.sealer.ops().len();
+    let r = h.post("/en/leave", &[], &format!("csrf={leave_tok}")).await;
+    assert_eq!(r.status, 200);
+    assert!(r.header("Clear-Site-Data").is_some());
+    // The leave token authorises nothing else.
+    let r = h
+        .post(
+            "/en/new",
+            &[],
+            &format!(
+                "csrf={leave_tok}&channel_id={}&mode=anonymous",
+                "c1".repeat(16)
+            ),
+        )
+        .await;
+    assert_eq!(r.status, 500);
+    assert_eq!(h.sealer.ops().len(), ops, "the leave token reached nothing");
 }

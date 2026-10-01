@@ -67,9 +67,25 @@ rt.block_on(async {
 
 The integrator supplies four things:
 - `Clock` (16 §14.3): the independent day clock, built from the Tor consensus and Roughtime.
-- `EnvelopeSink`: the store client. `commit_envelope_group` (no account reference) hands the sealed bundle (`Blob::Staged`, a sealed memfd) to the store with `handover::StoreConnection::hand_over` over `istore.sock` (closed on any error or timeout) (`SCM_RIGHTS`, deploy D-33) and returns only after the store's commit acknowledgement; `upsert_account` is called from the shuffled account batches (`flush_accounts`, every `account_flush_interval`; ADR-052(2), SEA-21).
+- `EnvelopeSink`: the store client. `commit_envelope_group` (no account reference) hands the sealed bundle (`Blob::Staged`, a sealed memfd) to the store with `handover::StoreConnection::hand_over` (or `hand_over_group_bundle(&EnvelopeGroup)`) over `istore.sock` (`SCM_RIGHTS`, deploy D-33; the connection is closed on any error or timeout) and returns only after the store's commit acknowledgement (hand-over protocol 2, below); `upsert_account` is called from the shuffled account batches (`flush_accounts`, every `account_flush_interval`; ADR-052(2), SEA-21).
 - `SnapshotBundle`s (the signed checkpoint, the consistency proof from the high-water mark and **every** SignedKDEntry of the log), refreshed hourly; the pinned `DirectoryTrust` (K01, epoch origin, cosignature floors) in the config. The sealer verifies every entry itself (`kd`, AUD-RM2-SEA-19).
 - K35, loaded from a systemd credential.
+
+### Hand-over protocol 2 (AUD-RM2-STO-29, C-5)
+
+The sealer sends one 41-byte message `u8 version = 2 ‖ u64be len ‖ sha256(bundle)` with the bundle memfd attached (`SCM_RIGHTS`). Every answer from the store is 33 bytes, `u8 code ‖ 32 bytes`:
+
+| Code | Meaning | Hash field |
+|---|---|---|
+| `0x02` | copied: the bundle is durable in the store's blob root | `sha256(bundle)` |
+| `0x01` | committed: the envelope that names the blob is committed | `sha256(bundle)` |
+| `0x00` | refused: nothing committed | all zero |
+
+`hand_over` returns `Ok` only after `0x02 ‖ h` and then `0x01 ‖ h`, both with the hash of the bundle it sent:
+- `0x02` must arrive within `copy_deadline(len) = 10 s + ⌈len / 50 MB/s⌉` (`COPY_DEADLINE_BASE`, `MIN_COPY_RATE`).
+- `0x01` must then arrive within `ACK_TIMEOUT` (60 s).
+
+A refusal, a wrong hash, a short or long answer (including the protocol-1 one-byte ack), any other code, a returned descriptor, EOF or a missed deadline is an error and closes the `StoreConnection`, so a late answer can never be credited to the next bundle. Bundles above `MAX_BUNDLE_LEN` (4 GiB, the same value as the store's `STAGED_MAX_BUNDLE_LEN`) are refused before anything is sent. Deploy requirement: the blob volume sustains at least `MIN_COPY_RATE` (50 MB/s); nothing checks this yet (deploy-owner open item).
 
 ## systemd unit (07 §4.2/4.3, BE-003; R7 §B)
 

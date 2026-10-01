@@ -79,6 +79,12 @@ async fn csrf_matrix() {
             vec!["Origin: null", "Sec-Fetch-Site: same-site"],
         ),
         ("none", vec!["Origin: null", "Sec-Fetch-Site: none"]),
+        // Lead decision 2: `null` needs `Sec-Fetch-Site: same-origin`.
+        ("null without Sec-Fetch-Site", vec!["Origin: null"]),
+        (
+            "foreign origin, no Sec-Fetch-Site",
+            vec!["Origin: http://evil.onion"],
+        ),
         ("two origins", vec!["Origin: null", "Origin: null"]),
     ];
     for (why, extra) in bad_headers {
@@ -99,6 +105,25 @@ async fn csrf_matrix() {
         h.sealer.ops().is_empty(),
         "no rejected request reached the sealer"
     );
+    // Lead decision 2: `null` + same-origin is accepted only with a valid
+    // token (the harness default sends exactly these two headers).
+    let r = h
+        .post_on(
+            4,
+            "/en/new",
+            &[&pre],
+            &format!(
+                "csrf={}&channel_id={}&mode=anonymous",
+                "b".repeat(64),
+                "c1".repeat(16)
+            ),
+        )
+        .await;
+    assert_eq!(r.status, 500, "null + same-origin + wrong token");
+    assert!(h.sealer.ops().is_empty());
+    let r = h.post_on(4, "/en/new", &[&pre], &body).await;
+    assert_eq!(r.status, 200, "null + same-origin + valid token");
+    assert!(r.cookie().is_some_and(|c| c.starts_with("__Host-cs=")));
     // The exact onion origin and the absent headers are accepted.
     let s = String::from_utf8(post_req("/en/new", &[&pre], &body, &[])).unwrap();
     let s = s.replace("Origin: null", &format!("Origin: {ORIGIN}"));

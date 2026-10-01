@@ -425,6 +425,11 @@ version = "0.39.0"
 criteria = "safe-to-run"
 notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
+[[exemptions.httparse]]
+version = "1.10.1"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2); lead decision C-06 (SPEC-NOTES decision 1)"
+
 [[exemptions.hybrid-array]]
 version = "0.4.15"
 criteria = "safe-to-deploy"

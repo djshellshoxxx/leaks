@@ -147,6 +147,12 @@ allow-build-scripts = [
     { crate = "generic-array@0.14.9" },
     { crate = "getrandom@0.3.4" },
     { crate = "getrandom@0.4.3" },
+    # Lead decision (C-06 build step, 2026-10-01; candor-intake-web SPEC-NOTES
+    # decision 1): request-head tokenizer for the Source Web Service. build.rs
+    # only runs `$RUSTC --version` and reads CARGO_CFG_* to emit SIMD cfgs; it
+    # fetches, writes and executes nothing else (built default-features off,
+    # i.e. no_std, so the SIMD path is disabled anyway).
+    { crate = "httparse@1.10.1" },
     { crate = "icu_normalizer_data@2.3.0" },
     { crate = "icu_properties_data@2.3.0" },
     { crate = "io-extras@0.18.4" },

@@ -374,6 +374,13 @@ impl<S: StoreReads + 'static> Web<S> {
         screen: Screen,
         fill: impl FnOnce(&mut ViewModel),
     ) -> Reply {
+        let mut out = out;
+        if screen.clears_site_data() {
+            // The cookies are gone after this response: the only form that
+            // can still be posted (Leave) carries the leave token instead of
+            // a session or pre-session token (same length, same size).
+            out.token = self.pre.leave_token(self.secs());
+        }
         let cookie = rq.has_cookie() || (out.has_session && rq.method == ui::Method::Post);
         let mut vm = self.base_vm(rq.method, cookie, rq.locale, Some(&out));
         self.fill_static(screen, &mut vm);
@@ -657,7 +664,14 @@ impl<S: StoreReads + 'static> Web<S> {
                     Err(Fail::Error)
                 }
             }
-            PostAuth::PreOrSession => {
+            PostAuth::Leave if !rq.has_cookie() && rq.head.pre_cookie.is_none() => {
+                if self.pre.verify_leave(posted, self.secs()) {
+                    Ok(())
+                } else {
+                    Err(Fail::Error)
+                }
+            }
+            PostAuth::PreOrSession | PostAuth::Leave => {
                 let Some(cpre) = rq.head.pre_cookie.as_ref() else {
                     return Err(Fail::Error);
                 };

@@ -114,6 +114,9 @@ pub fn token_eq(posted: &str, expected: &str) -> bool {
     posted.len() == expected.len() && bool::from(posted.as_bytes().ct_eq(expected.as_bytes()))
 }
 
+const PRE_LABEL: &[u8] = b"candor/web/pre";
+const LEAVE_LABEL: &[u8] = b"candor/web/leave";
+
 /// Pre-session token key (per process, random; a restart invalidates every
 /// pre-session form, which only costs a reload).
 pub struct PreSessionKey(Zeroizing<[u8; 32]>);
@@ -132,11 +135,11 @@ impl PreSessionKey {
         Ok(Self(k))
     }
 
-    fn mac(&self, cpre: &str, epoch: u64) -> Zeroizing<String> {
+    fn mac(&self, label: &[u8], cpre: &str, epoch: u64) -> Zeroizing<String> {
         let Ok(mut m) = <Hmac<Sha256> as KeyInit>::new_from_slice(self.0.as_ref()) else {
             return Zeroizing::new(String::new());
         };
-        m.update(b"candor/web/pre");
+        m.update(label);
         m.update(cpre.as_bytes());
         m.update(&epoch.to_be_bytes());
         let tag: [u8; 32] = m.finalize().into_bytes().into();
@@ -147,19 +150,47 @@ impl PreSessionKey {
     /// process start).
     #[must_use]
     pub fn token(&self, cpre: &str, secs: u64) -> Zeroizing<String> {
-        self.mac(cpre, secs.checked_div(PRE_SESSION_EPOCH_SECS).unwrap_or(0))
+        self.mac(
+            PRE_LABEL,
+            cpre,
+            secs.checked_div(PRE_SESSION_EPOCH_SECS).unwrap_or(0),
+        )
     }
 
     /// Check `posted` against `cpre` for the current and the two previous
     /// epochs (all three are computed, constant work).
     #[must_use]
     pub fn verify(&self, cpre: &str, posted: &str, secs: u64) -> bool {
+        self.verify_label(PRE_LABEL, cpre, posted, secs)
+    }
+
+    /// The token of the Leave form on the cookie-clearing screens (S10s,
+    /// Leave, discarded, closed, signed out): those screens send
+    /// `Clear-Site-Data`, so the Leave POST carries no cookie to bind to.
+    /// Domain-separated from the pre-session token, same epochs. It
+    /// authorises nothing but the Leave page (which changes no state).
+    #[must_use]
+    pub fn leave_token(&self, secs: u64) -> Zeroizing<String> {
+        self.mac(
+            LEAVE_LABEL,
+            "",
+            secs.checked_div(PRE_SESSION_EPOCH_SECS).unwrap_or(0),
+        )
+    }
+
+    /// Check a leave token (current and two previous epochs, constant work).
+    #[must_use]
+    pub fn verify_leave(&self, posted: &str, secs: u64) -> bool {
+        self.verify_label(LEAVE_LABEL, "", posted, secs)
+    }
+
+    fn verify_label(&self, label: &[u8], cpre: &str, posted: &str, secs: u64) -> bool {
         let now = secs.checked_div(PRE_SESSION_EPOCH_SECS).unwrap_or(0);
         let mut ok = false;
         for back in 0..3u64 {
             let e = now.saturating_sub(back);
             let valid_epoch = now >= back;
-            ok |= valid_epoch && token_eq(posted, &self.mac(cpre, e));
+            ok |= valid_epoch && token_eq(posted, &self.mac(label, cpre, e));
         }
         ok
     }
@@ -193,12 +224,16 @@ pub fn pre_set_cookie(cpre_hex: &str) -> Zeroizing<String> {
 /// absent or `same-origin`.
 #[must_use]
 pub fn origin_ok(origin: &OriginHeader, fetch: FetchSite, onion_origin: &str) -> bool {
-    let o = match origin {
-        OriginHeader::Absent | OriginHeader::Null => true,
-        OriginHeader::Value(v) => v == onion_origin,
-    };
-    let f = matches!(fetch, FetchSite::Absent | FetchSite::SameOrigin);
-    o && f
+    match origin {
+        // Lead decision 2: `null` only together with `Sec-Fetch-Site:
+        // same-origin` (08 §3.7 does not allow `none`; a missing header is
+        // not enough to vouch for an opaque origin).
+        OriginHeader::Null => fetch == FetchSite::SameOrigin,
+        OriginHeader::Absent => matches!(fetch, FetchSite::Absent | FetchSite::SameOrigin),
+        OriginHeader::Value(v) => {
+            v == onion_origin && matches!(fetch, FetchSite::Absent | FetchSite::SameOrigin)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -249,7 +284,10 @@ mod tests {
         let o = "http://x.onion";
         let v = |s: &str| OriginHeader::Value(s.to_owned());
         assert!(origin_ok(&OriginHeader::Absent, FetchSite::Absent, o));
+        // `null`: only with same-origin (lead decision 2).
         assert!(origin_ok(&OriginHeader::Null, FetchSite::SameOrigin, o));
+        assert!(!origin_ok(&OriginHeader::Null, FetchSite::Absent, o));
+        assert!(!origin_ok(&OriginHeader::Null, FetchSite::Other, o));
         assert!(origin_ok(&v(o), FetchSite::SameOrigin, o));
         assert!(!origin_ok(&v("http://y.onion"), FetchSite::SameOrigin, o));
         assert!(!origin_ok(&v("https://x.onion"), FetchSite::Absent, o));

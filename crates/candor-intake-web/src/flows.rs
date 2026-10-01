@@ -31,7 +31,7 @@ use crate::multipart::{Event, Multipart, boundary_from_content_type};
 use crate::ratelimit::Class;
 use crate::routes::{PostAuth, RouteDecl, desc_index};
 use crate::server::BodyReader;
-use crate::session::{Confirm, Phase};
+use crate::session::{Confirm, Phase, WebSession};
 use crate::token::{random, token_eq};
 
 /// Questionnaire field ids in the sealer draft (sorted ascending).
@@ -705,11 +705,6 @@ impl<S: StoreReads + 'static> Web<S> {
         {
             return self.upload(rq, decl.route, &boundary, body).await;
         }
-        // Leave without any session or cookie: nothing to end (SPEC-NOTES).
-        if decl.route == Route::Leave && !rq.has_cookie() && rq.head.pre_cookie.is_none() {
-            let _ = body.read_all(crate::limits::MAX_FORM_BODY).await;
-            return self.leave(rq, None).await;
-        }
         let form = match self.read_form(rq, decl, auth, body).await {
             Ok(f) => f,
             Err(FormFail::Page(f)) => return self.fail(rq, f),
@@ -1239,6 +1234,10 @@ impl<S: StoreReads + 'static> Web<S> {
                     return self.seal_fail(rq, e);
                 }
                 let _ = self.with_session(&k, |s| s.mode = target);
+                // Disclosure mode changed: new CSRF token (lead decision 3).
+                if let Err(f) = self.rotate_token(&k) {
+                    return self.fail(rq, f);
+                }
                 self.draft_screen(rq, k, Screen::IdentityConfirm, |_| ())
                     .await
             }
@@ -1259,6 +1258,9 @@ impl<S: StoreReads + 'static> Web<S> {
                     return self.seal_fail(rq, e);
                 }
                 let _ = self.with_session(&k, |s| s.mode = ui::Mode::Anonymous);
+                if let Err(f) = self.rotate_token(&k) {
+                    return self.fail(rq, f);
+                }
                 let next = if form.get("nav") == Some("remove") {
                     Screen::Review
                 } else {
@@ -1744,9 +1746,27 @@ impl<S: StoreReads + 'static> Web<S> {
             s.phase = Phase::Submitted;
             s.sent = Some((today, delayed));
         });
+        // No token rotation here: `Submitted` grants the session nothing new
+        // (it can only re-render S10s; the inbox needs a login, which makes a
+        // new session and token), and the unchanged token keeps a retried
+        // submit after a lost response idempotent (SPEC-NOTES decision 4).
         // Nothing more to do in the sealer for this session.
         self.zeroize(k.sealer).await;
         self.sent_page(rq, k)
+    }
+
+    /// Rotate the session's CSRF token on an authority or privilege change
+    /// (lead decision 3). A CSPRNG failure ends the session (fail closed: the
+    /// old token must not stay valid).
+    fn rotate_token(&self, k: &SessionKeysRef) -> Result<(), Fail> {
+        match self.with_session(k, WebSession::rotate_csrf) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_)) => {
+                self.sessions.remove(&k.table);
+                Err(Fail::Error)
+            }
+            Err(f) => Err(f),
+        }
     }
 
     fn busy_at_submit(&self, rq: &Rq<'_>) -> Reply {
@@ -1875,13 +1895,15 @@ impl<S: StoreReads + 'static> Web<S> {
             Err(SealFail::NoReader(alt)) => return self.no_reader(rq, alt),
             Err(e) => return self.seal_fail(rq, e),
         };
-        let Ok(out) = self.with_session(&k, |s| {
+        let _ = self.with_session(&k, |s| {
             s.lookup_tag = Some(tag);
             s.phase = Phase::SignedIn;
-            // New authority: new CSRF token.
-            let _ = s.rotate_csrf();
-            Self::out_session(s, Instant::now())
-        }) else {
+        });
+        // New authority: new CSRF token (fail closed).
+        if let Err(f) = self.rotate_token(&k) {
+            return self.fail(rq, f);
+        }
+        let Ok(out) = self.with_session(&k, |s| Self::out_session(s, Instant::now())) else {
             return self.fail(rq, Fail::Gone);
         };
         self.page(rq, out, Screen::RotateDone, |_| ())

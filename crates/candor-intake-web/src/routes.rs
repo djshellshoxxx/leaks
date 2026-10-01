@@ -26,6 +26,9 @@ pub enum PostAuth {
     Session,
     /// A live session, or the pre-session token bound to `__Host-cpre`.
     PreOrSession,
+    /// Leave: as [`PostAuth::PreOrSession`]; with no cookie at all (the
+    /// cookie-clearing screens' Leave form), the stateless leave token.
+    Leave,
 }
 
 /// POST declaration.
@@ -118,8 +121,9 @@ pub const REGISTRY: [RouteDecl; 22] = [
     d(Route::Rotate, true, None),
     d(Route::RotateConfirm, false, p(S, Some(Class::Rotate))),
     d(Route::End, true, p(S, Some(Class::End))),
-    // Leave: also without any session (nothing to end; SPEC-NOTES).
-    d(Route::Leave, false, p(PostAuth::PreOrSession, None)),
+    // Leave: also without any cookie (nothing to end), but always with a
+    // valid token (SPEC-NOTES decision 5).
+    d(Route::Leave, false, p(PostAuth::Leave, None)),
     d(Route::Extend, false, p(S, Some(Class::Extend))),
 ];
 

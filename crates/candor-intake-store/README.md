@@ -21,6 +21,11 @@ Specs: `specs/09-DATABASE.md` §5.1/§8/§10/§11, `specs/07-BACKEND.md` §5.3/�
 - The Key Directory snapshot high-water mark never decreases. The store checks this, and a DB trigger enforces it as well.
 - The fetch-all reply set is served as fixed 64 × 70,000-byte pages. The page count is a power of two fixed by the configuration, every requester gets byte-identical pages, and each import slot adds exactly K persistent entries (real replies topped up with dummies), so diffs between rebuilds reveal nothing about reply volume. Dummy sizes are drawn from a configured public bucket distribution, never copied from real replies, and every stored reply (real or dummy) has the canonical length of its bucket.
 - Errors and `Debug` output are content-free.
+- Sealed attachment bundles arrive from the sealer as sealed memfds over `istore.sock` (`staged::StagedReceiver`, hand-over protocol 2, AUD-RM2-STO-29). The store answers with 33-byte acknowledgements `u8 code ‖ sha256(bundle)`:
+  - `0x02 ‖ h` once its copy is durable in the blob root;
+  - then `0x01 ‖ h` after the envelope naming the blob is committed, or `0x00 ‖ 0³²` on refusal.
+
+  The sealer accepts nothing else. Both sides cap a bundle at 4 GiB (`STAGED_MAX_BUNDLE_LEN`). Details are in SPEC-NOTES decisions 31–33.
 
 ## API sketch
 

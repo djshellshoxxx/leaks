@@ -69,27 +69,59 @@ It also covers the C-5 wiring and AUD-RM2-STO-29 in `candor-sealer::server::hand
 | CSPRNG failure | S92 |
 
 **Secrets and their lifetime.**
-- **Session CSRF token.** Lives in a zeroizing string for the session's lifetime and is rotated at login and rotation.
+- **Session CSRF token.** Lives in a zeroizing string for the session's lifetime. It is rotated at login, passphrase rotation and disclosure-mode changes, and removed at logout, Leave and discard (decision 4).
 - **Piece key.** Lives for the session's lifetime.
-- **Pre-session MAC key and limiter key.** Random per process.
+- **Pre-session MAC key and limiter key.** Random per process. The MAC key also derives the leave token (decision 5).
 - **Login passphrase.** Lives in zeroizing buffers for the duration of one request and is forwarded to the sealer.
 - **S10 words.** Live in zeroizing strings for one render.
 
 ## Implementation decisions
 
-1. **No HTTP framework: a strict, in-crate HTTP/1.1 subset instead of hyper.** 07 §5.1 / IMPL-RM2 §2.6 name hyper. The assignment allows "for example hyper". This is a **lead decision**. Reasons:
-   - `hyper` needs `httparse`, whose `build.rs` runs `rustc`. `deny.toml [bans.build] allow-build-scripts` does not list it, so `cargo deny check` fails, and this crate may not edit `deny.toml`.
-   - hyper 1.8 writes `Date` unless it is disabled. It inserts `connection: close` / `keep-alive` itself, and it answers HTTP/1.0 requests with HTTP/1.0 status lines. Each of these breaks the source-ui contract item 7 (a fixed 2,048-byte head, nothing added; AUD-RM1-SUI-05).
-   - The subset Tor Browser needs is small: GET/HEAD/POST, origin-form, `Content-Length` only, one request per connection. With one request per connection, pipelining and request smuggling (INC-116, RUSTSEC-2020-0008/-2021-0020/0078/0079 class) cannot happen by construction.
-   - The parser is a pure function. It is fuzzed (`fuzz_http_request`), property-tested, and covered by a smuggling corpus. If the lead prefers hyper, `httparse` must be added to `allow-build-scripts`, and a `Date`/`Connection`-free head must be re-verified by `tests/wire_bytes.rs`.
-2. **`Origin: null` is accepted.** 08 §3.7 and the IMPL-RM2 resolution allow absent, `null` or the exact onion origin. 11 §5.7 and the assignment wording ("equal the onion origin or be absent") would reject `null`. **Lead decision.**
-   - Reason: under `Referrer-Policy: no-referrer`, which 11 §5.3 requires, browsers serialize the request origin as `null` for every non-GET request (Fetch, "append a request `Origin` header"). Rejecting `null` would reject every form.
-   - Compensating controls: the CSRF token, `Sec-Fetch-Site`, `SameSite=Strict` and `__Host-` cookies.
-3. **`Sec-Fetch-Site` must be absent or `same-origin`.** `none`, `same-site`, `cross-site` and any other value are rejected (the IMPL-RM2 tightening, stricter than "reject cross-site/same-site").
-4. **CSRF tokens.**
-   - A session's token is a 256-bit value per session. It is rotated at login (new session) and at passphrase rotation, and compared in constant time. It is not single-use per form, as 11 §5.7 asks, because single-use breaks the back button and a second tab without JavaScript. Idempotency comes from the sealer's state machine and the `Submitted` phase: a repeated `/submit` re-renders S10s and nothing is sealed twice.
-   - Pre-session tokens (S01–S04, login, leave, error pages) are stateless: `HMAC-SHA256(K_pre, "candor/web/pre" ‖ cpre ‖ epoch5min)`, valid for the current and the two previous epochs (10–15 min, within the 15-min `__Host-cpre` lifetime, AUD-RM1-SUI-06). A replay within that window needs the victim's `__Host-cpre`.
-5. **Leave needs no token when the request carries no cookie at all.** There is nothing to end. S10s sends `Clear-Site-Data` before its Leave form is used. `Origin` and `Sec-Fetch-Site` are still checked. With a cookie, the normal token rules apply.
+1. **Request heads are parsed with `httparse`; responses use the in-crate fixed-size writer** (lead decision, 2026-10-01). hyper is not used.
+   - `httparse =1.10.1`, `default-features = false` (no_std, no SIMD, no dependencies) tokenizes the request line and fields (`http::parse_head`). Its `build.rs` only runs `$RUSTC --version` and reads `CARGO_CFG_*`. It is in `deny.toml` `allow-build-scripts` with a comment citing this decision, and has a cargo-vet exemption (expires 2027-03-30).
+   - The strict-subset policy sits on top:
+     - raw-byte checks before httparse, which tolerates bare LF and leading empty lines: CRLF only, no bare CR or LF, no empty line before the request line, no obs-fold, request line ≤ 4 KiB, head ≤ 16 KiB;
+     - httparse's default config: single spaces in the request line, invalid field lines are errors, obs-fold refused, at most 50 fields (`TooManyHeaders`);
+     - the whole buffer must be exactly one complete head;
+     - HTTP/1.1 only, origin-form visible-ASCII targets;
+     - `Transfer-Encoding`, `Content-Encoding`, `Expect`, `Upgrade`, `TE`, `HTTP2-Settings` and `Trailer` are refused;
+     - duplicate `Host`, `Content-Length`, `Content-Type`, `Cookie`, `Origin`, `Sec-Fetch-Site` and duplicate own cookies are refused;
+     - `Content-Length` is digits only and **required on every POST**;
+     - one request per connection, and bytes beyond `Content-Length` are refused (`server.rs`).
+   - Responses keep the fixed-size writer (`serialize_head`): hyper would add `Date` and `Connection` and answer HTTP/1.0 with HTTP/1.0 status lines, which breaks the 2,048-byte head contract (AUD-RM1-SUI-05 item 7).
+   - When a head is too broken to tokenize, the size class of the error page is a best-effort guess (`POST `/`HEAD ` prefix, `__Host-cs=` present) and is never used to accept anything.
+   - Unchanged tests: the unit and proptest suite, the smuggling corpus, `oversize_heads` and the three fuzz targets.
+2. **`Origin: null` only with `Sec-Fetch-Site: same-origin`** (lead decision, 2026-10-01). Browsers send `null` for every POST under `Referrer-Policy: no-referrer` (11 §5.3), so `null` cannot be refused outright.
+   - `token::origin_ok` rules:
+
+     | `Origin` | Accepted `Sec-Fetch-Site` |
+     |---|---|
+     | `null` | `same-origin` only |
+     | absent | absent or `same-origin` |
+     | the exact onion origin | absent or `same-origin` |
+
+     Everything else is refused, including `null` without `Sec-Fetch-Site`.
+   - 08 §3.7 says nothing about `Sec-Fetch-Site`, so `none` is not allowed (it is refused with any `Origin`).
+   - A valid CSRF token is always required as well (decisions 4 and 5). Tor Browser sends `Origin: null` with `Sec-Fetch-Site: same-origin` for these forms.
+   - Tests: `token::tests::origin_matrix`; `http_security::csrf_matrix` covers null with cross-site, same-site or none, null without `Sec-Fetch-Site`, a foreign origin without `Sec-Fetch-Site`, null and same-origin with a wrong token (refused), and null and same-origin with a valid token (accepted).
+3. **`Sec-Fetch-Site` must be absent or `same-origin`**, and must be `same-origin` with `Origin: null`. `none`, `same-site`, `cross-site` and any other value are refused (the IMPL-RM2 tightening).
+4. **CSRF tokens: one per session** (lead decision, 2026-10-01: accepted in place of 11 §5.7's single-use tokens, with the conditions below).
+   - A session token is 256 bits from the CSPRNG and is stored only in the session's `WebSession` (bound to that session). It is compared in constant time (`subtle`) and travels only as a hidden form field in POST bodies, never in a URL.
+   - It is **rotated** at:
+     - login (a new session and a new token);
+     - logout, Leave and discard (the session and its token are removed);
+     - passphrase rotation (new authority);
+     - a disclosure-mode change in either direction (S05b identity added, declined or removed).
+
+     A CSPRNG failure while rotating ends the session (fail closed: the old token never stays valid).
+   - It is **not** rotated when a report is submitted. `Submitted` grants the session nothing new: it can only re-render S10s, and the inbox needs a login, which makes a new session. Keeping the token keeps a retried `/submit` after a lost response idempotent: it re-renders S10s and nothing is sealed twice.
+   - Pre-session tokens (S01–S04, login, error pages) are stateless: `HMAC-SHA256(K_pre, "candor/web/pre" ‖ cpre ‖ epoch5min)`, valid for the current and the two previous epochs (10–15 min, within the 15-min `__Host-cpre` lifetime, AUD-RM1-SUI-06). They are bound to `__Host-cpre`. Once a live session exists only the session token is accepted, so the pre-login token is dead after login.
+   - Tests: `flow::pre_login_token_invalid_after_login` (pre-login token refused with the session cookie, with and without the old `__Host-cpre`; another session's token refused; nothing in a URL; token dead after logout); `flow::extend_identity_and_discard` (rotation at a mode change); `passphrase_rotation`.
+5. **Leave always needs a valid token** (lead decision 2: "a valid csrf token is always required"; replaces the earlier no-token exception).
+   - With a live session, the session token is required. With only `__Host-cpre`, the pre-session token is required.
+   - With no cookie at all, the **leave token** is required: `HMAC-SHA256(K_pre, "candor/web/leave" ‖ epoch5min)`, domain-separated from pre-session tokens and on the same epochs. The cookie-clearing screens (S10s, Leave, discarded, closed, signed out) send `Clear-Site-Data`, so the Leave form they render can carry nothing but this token. `App::page` puts it in place of the page token on exactly those screens; it has the same length, so sizes do not change.
+   - The leave token authorises only `/leave`, which with no cookie changes no state. `Origin` and `Sec-Fetch-Site` are checked as for every POST.
+   - Test: `flow::cookieless_leave_needs_the_leave_token` (no, zero and cookie-less pre-session tokens refused; the token from a discarded page works without a cookie; it is refused by `/new`).
 6. **Error pages.** source-ui has no 400 or 413 screen, so the mapping is:
    - malformed request, CSRF failure or oversize: S92 (500);
    - unknown route: S91 (404);
@@ -156,25 +188,25 @@ It also covers the C-5 wiring and AUD-RM2-STO-29 in `candor-sealer::server::hand
     - **One cap.** `handover::MAX_BUNDLE_LEN` equals `staged::STAGED_MAX_BUNDLE_LEN` (4 GiB). The sealer refuses an oversize bundle before sending; the store clamps `max_len` to the cap.
     - **Group helper.** `StoreConnection::hand_over_group_bundle(&EnvelopeGroup)` hands over the ATTACHMENT_BUNDLE of a group, which is the seal-path call an `EnvelopeSink` makes.
     - **Test constructor.** `StagedBundle::from_bytes` seals bytes with the sealer's own writer, for tests and in-process tooling.
-    - **Deploy requirement.** The blob volume must sustain ≥ 50 MB/s (`MIN_COPY_RATE`), checked by `config-check`.
+    - **Deploy requirement.** The blob volume must sustain ≥ 50 MB/s (`MIN_COPY_RATE`). Nothing checks this yet (open item O-6).
 
 ## Spec feedback
 
-- 07 §5.1 says hyper. See decision 1; 07 should allow the strict subset, or deny.toml should approve httparse.
-- 11 §5.7 says a missing or `null` `Origin` is rejected, while 08 §3.7 says it is accepted. 11 must align with 08, because `no-referrer` forces `null` (decision 2).
-- 11 §5.7 says "128-bit single-use" and 08 §3.7 says "256-bit per session and per form". Align them on decision 4.
+- 07 §5.1 / IMPL-RM2 §2.6 say hyper. The lead chose httparse plus the fixed-size response writer (decision 1); 07 should say so.
+- 11 §5.7 says a missing or `null` `Origin` is rejected, while 08 §3.7 says it is accepted. 11 and 08 should both state the lead's rule: `null` only with `Sec-Fetch-Site: same-origin` (decision 2). 08 §3.7 should also name the `Sec-Fetch-Site` rule.
+- 11 §5.7 says "128-bit single-use" and 08 §3.7 says "256-bit per session and per form". Align both on the lead's per-session rule and its rotation points (decision 4).
 - IMPL-RM2 §2.6 says "PROXY-v2". tor emits v1 text (decision 9).
 - 07 §5.1 allows 3 multipart parts, but the 11 S06 form needs 4 (decision 16).
 - source-ui has no 400 or 413 screens. 07 §8 lists 400 and 413 pages (decision 6).
 - 08 SW-03 says pre-session tokens are valid for 10 min; 11 §5.6 gives the cookie 15 min. Implemented as 10–15 min (decision 4).
 - 16 §13 L4 says 20/min burst 40; 07 §11 / 08 §4 say 60/min burst 20. 07/08 is implemented.
 - NET-013's 10-minute eviction contradicts per-hour and per-day per-circuit limits (decision 10).
-- The `candor-intake-store` README/SPEC-NOTES still describe the one-byte acknowledgement. This step could edit only `staged.rs` and its tests; the store owner should update the prose to protocol 2.
 
 ## Dependencies
 
-All are already in the workspace lockfile; no new third-party crate was added.
+One new third-party crate, `httparse` (lead decision 1). Everything else was already in the workspace lockfile.
 - `candor-source-ui`, `candor-sealer` (no default features: `proto` only), `candor-intake-store` (trait and types), `candor-core` (CSPRNG, strict Ed25519 verify, wordlist, passphrase normalisation, object parsing), `candor-log` (`diag!` in the panic hook): path dependencies. The RM-2 addendum requires them.
+- `httparse =1.10.1` (`default-features = false`): the request-head tokenizer (decision 1). It has no dependencies, and its build script only probes `rustc --version`. It is in `deny.toml` `allow-build-scripts` and has a vet exemption (2027-03-30).
 - `tokio =1.48.0` (`rt`, `net`, `time`, `sync`, `io-util`): async Unix sockets and timers. It is the workspace pin, already used by the sealer and the store.
 - `zeroize =1.8.2`: zeroizing buffers for every request, page and secret (workspace pin).
 - `subtle =2.6.1`: constant-time token comparison (workspace pin).
@@ -190,10 +222,10 @@ All are already in the workspace lockfile; no new third-party crate was added.
 | ID | Tests |
 |---|---|
 | AUD-RM1-SUI-14, ST-074, IMPL-RM2-016 | `tests/wire_bytes.rs`: exact head bytes, header set and order, cookie forms, P1/P2, HEAD, robots, error, busy, leave |
-| ST-044, ST-075, IMPL-RM2-012 | `http::tests::*` (proptest), `tests/http_security.rs::smuggling_corpus`, `oversize_heads`; fuzz `fuzz_http_request` |
+| ST-044, ST-075, IMPL-RM2-012 | `http::tests::*` (proptest, httparse-backed parser), `tests/http_security.rs::smuggling_corpus`, `oversize_heads`; fuzz `fuzz_http_request` |
 | ST-054 | `form::tests::*` (proptest), fuzz `fuzz_form_urlencoded` |
 | ST-043, ST-082, IMPL-RM2-015 | `multipart::tests::*` (proptest), `tests/flow.rs::upload_attacks`, `full_report_flow`; fuzz `fuzz_multipart_intake` |
-| ST-071, IMPL-RM2-013 | `token::tests::origin_matrix`, `tests/http_security.rs::csrf_matrix` |
+| ST-071, IMPL-RM2-013 | `token::tests::origin_matrix`, `tests/http_security.rs::csrf_matrix` (incl. lead decision 2), `flow::pre_login_token_invalid_after_login`, `flow::cookieless_leave_needs_the_leave_token` |
 | ST-065, IMPL-RM2-013 | `routes::tests::registry_complete_and_consistent`, `unknown_paths_are_not_routes`, `field_allow_lists`; `route_registry_deny_by_default` |
 | ST-066, IMPL-RM2-014 | `session::tests::timers`, `capacity_evicts_longest_idle`; `token::tests::cookies_have_the_contract_attributes`; `wire_bytes::session_cookie_exact_wire_bytes` |
 | ST-079, IMPL-RM2-017 | `ratelimit::tests::*`, `http_security::login_rate_limit_per_circuit` |
@@ -280,7 +312,7 @@ The baseline `@system-service` minus the listed groups in the shipped unit cover
   - Timing: login, rotation and inbox POSTs use floor plus jitter on every outcome. Login does the same work for unknown accounts (dummy key). The inbox always opens 32 entries. All busy causes give the same page.
   - Existence: there is no account-existence branch before the floor.
   - **Residual:** GET `/inbox` and `/conversation` have no floor. Real versus dummy `OPEN_REPLY` work differs by HPKE decapsulation (tens of µs), which is far below Tor jitter.
-- **Dependencies.** None are new. All are workspace pins that cargo-vet already covers. A policy entry for this crate has been added.
+- **Dependencies.** One is new: `httparse =1.10.1`, approved by the lead, with no dependencies of its own. It is covered by a deny allow-list entry and a vet exemption. Everything else is a workspace pin. A vet policy entry for this crate has been added.
 - **IMPL-RM2 §4 checklist.**
 
   | Item | Status |
@@ -299,15 +331,20 @@ The baseline `@system-service` minus the listed groups in the shipped unit cover
 - **Residual risks.**
   1. Tier W trusts the server (ADR-004).
   2. Per-circuit windows longer than 10 minutes are approximate.
-  3. The pre-session token can be replayed within 15 min by someone holding the same `__Host-cpre`.
+  3. The pre-session token can be replayed within 15 min by someone holding the same `__Host-cpre`. A leave token can be replayed within 15 min, but it only renders the Leave page, without a cookie and without changing state.
   4. The fallback page has a fixed all-zero token, so its forms cannot succeed.
   5. A handler panic in a release build aborts the process, which systemd restarts. In-flight drafts survive in the sealer.
   6. A stalled upload holds one connection slot for at most the 60 s idle limit per read and 4 h in total. Each circuit is limited to 30 uploads/h.
 
-## Open items (for the lead)
+## Open items
 
+Deferred by the lead to the **next build step**:
 - **O-1.** SW-14 reply deletion and SW-15 close mailbox need `SEAL_SIGNAL` in the sealer and a store-side deletion op that holds K31 (an `istore` IPC op). Until both exist, both actions return the uniform error page and nothing is half-deleted.
-- **O-2.** The `istore` IPC client: a production `StoreReads` over `istore.sock`, and the sealer's `EnvelopeSink` that carries the inline objects and rows next to `hand_over_group_bundle`. The store crate owns the protocol. This crate depends only on the trait.
-- **O-3.** The binary and systemd glue: take the listener from `LISTEN_FDS` (needs `candor-memlock` or an approved crate), call `install_panic_hook`, `harden_process(Required)` and a periodic `reap()`.
+- **O-2.** The `istore` IPC client: a production `StoreReads` over `istore.sock`, and the sealer's `EnvelopeSink` that carries the inline objects and rows next to `hand_over_group_bundle`. The store crate owns the protocol; this crate depends only on the trait.
+- **O-3.** The systemd socket-activation binary: take the listener from `LISTEN_FDS` (needs `candor-memlock`, the only crate allowed `unsafe`), then call `install_panic_hook`, `harden_process(Required)` and a periodic `reap()`.
+
+Still open:
 - **O-4.** Not implemented: draft-preserving re-authentication (11 §5.6), S08 invisible-character normalisation, the HIGH-profile rotation offer per login, and pseudo-locales in production (only `en`).
-- **O-5.** Decisions 1, 2 and 4 need the lead's sign-off before the audit gate.
+- **O-6.** Deploy owner: nothing checks yet that the blob volume sustains `MIN_COPY_RATE` (50 MB/s), which the STO-29 copy deadline assumes (decision 25).
+
+Resolved: O-5 (decisions 1, 2 and 4 were decided by the lead on 2026-10-01 and are implemented as described above).

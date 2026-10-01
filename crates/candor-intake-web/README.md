@@ -10,8 +10,8 @@ Read `SPEC-NOTES.md` first. It covers the design, the implementation decisions (
 ## Guarantees
 
 - **No TCP.** The only listener type in the API is `tokio::net::UnixListener` (NET-002). Every stream must start with tor's `HiddenServiceExportCircuitID haproxy` line. A stream without it is closed with no response.
-- **A strict HTTP/1.1 subset.** There is one request per connection, so there is no pipelining and no smuggling between requests.
-  - Framing is `Content-Length` only. `Transfer-Encoding`, `Content-Encoding`, `Expect`, `Upgrade` and `TE` are refused, as are obsolete folding, bare CR/LF, duplicate framing headers and a foreign `Host`.
+- **A strict HTTP/1.1 subset.** `httparse` tokenizes the request head and the subset policy is applied on top (SPEC-NOTES decision 1). There is one request per connection, so there is no pipelining and no smuggling between requests.
+  - Framing is `Content-Length` only, and every POST must carry it. `Transfer-Encoding`, `Content-Encoding`, `Expect`, `Upgrade` and `TE` are refused, as are obsolete folding, bare CR/LF, duplicate framing headers and a foreign `Host`.
   - Limits: the head is at most 16 KiB with at most 50 fields, the request line at most 4 KiB, and a form body at most 112 KiB.
   - Timeouts: 10 s to read the head, 60 s body idle, 4 h total for an upload.
 - **Exact responses.** `candor-source-ui` renders every byte. The head is always exactly 2,048 bytes and carries the 11 §5.3 header set, at most one `Set-Cookie` and the `X-Pad` header. There is no `Date`, `Server`, `Connection` or `ETag`. The body is padded to P1 (65,536 B) or P2 (131,072 B), chosen only by the method and the presence of a session cookie. A test checks the bytes on the wire (AUD-RM1-SUI-14).
@@ -19,9 +19,15 @@ Read `SPEC-NOTES.md` first. It covers the design, the implementation decisions (
   - `__Host-cs` is the session cookie, session-only. The server keeps only `SHA-256(HKDF(cs))`, never `cs`.
   - `__Host-cpre` is the pre-session cookie, valid for 15 min, and binds the pre-session CSRF token.
 - **CSRF.** Every POST is checked, in this order, before any state changes:
-  1. `Origin` is absent, `null` or the exact onion origin.
-  2. `Sec-Fetch-Site` is absent or `same-origin`.
-  3. The `csrf` token is the session token, or a pre-session token bound to `__Host-cpre`. The comparison is constant-time.
+  1. `Origin` and `Sec-Fetch-Site`:
+     - `Origin: null` needs `Sec-Fetch-Site: same-origin`;
+     - an absent `Origin` or the exact onion origin needs `Sec-Fetch-Site` absent or `same-origin`.
+  2. A valid `csrf` token, always:
+     - the session's token (rotated at login, passphrase rotation and disclosure-mode changes; removed at logout);
+     - or, before login, a pre-session token bound to `__Host-cpre`;
+     - or, for a cookieless Leave, the leave token that the cookie-clearing screens render.
+
+     The comparison is constant-time and tokens never appear in a URL.
 
   In a multipart upload the token must be the first part, so no file byte is forwarded before it has been checked.
 - **Uniform responses.** Every outcome of POST `/login`, `/inbox` and `/rotate/confirm` is released at `max(elapsed, T_LOGIN_FLOOR) + U(0, 250 ms)`, whether the attempt succeeds, uses a wrong or unknown passphrase, is malformed, fails CSRF, is rate-limited or hits BUSY.
