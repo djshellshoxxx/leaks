@@ -141,7 +141,6 @@ fn sealed_object_vectors() -> Value {
     let mut inner = Vec::new();
     inner.extend_from_slice(&5u32.to_be_bytes());
     inner.extend_from_slice(b"hello");
-    let pt = pad(ObjectType::Submission, &inner).unwrap();
     let pks: Vec<_> = mems.iter().take(2).map(|m| m.public.clone()).collect();
     let req = SealRequest {
         suite: STD,
@@ -151,18 +150,41 @@ fn sealed_object_vectors() -> Value {
         epoch_id,
         day_stamp: 0,
         recipients: Some((ctx.clone(), &pks)),
-        padded_plaintext: &pt,
+        padded_len: 4096,
     };
-    let obj = seal_with_ck_rng(&mut rng, &ck, &req).unwrap();
+    // Toy inner layout (not the §13.4 CBOR): u32be(5) ‖ "hello" ‖ u8 n ‖ n × entry(97 B).
+    let build = |pc: &crate::object::PayloadContext<'_>| {
+        let mut v = inner.clone();
+        v.push(pc.recipient_list.len() as u8);
+        for e in pc.recipient_list {
+            v.extend_from_slice(&e.to_bytes());
+        }
+        pad(ObjectType::Submission, &v)
+    };
+    let obj = seal_with_ck_rng(&mut rng, &ck, &req, build).unwrap();
     let blk = obj.slot_block.clone().unwrap();
+    let list_hex = |l: &[crate::slots::RecipientListEntry]| {
+        l.iter().map(|e| h(&e.to_bytes())).collect::<Vec<_>>()
+    };
 
-    // Hidden-recipient negative: three real slots, Recipient List claims two.
+    // Hidden-recipient negative: three real slots, Recipient List names only two.
     let pks3: Vec<_> = mems.iter().map(|m| m.public.clone()).collect();
     let req3 = SealRequest {
         recipients: Some((ctx.clone(), &pks3)),
         ..req
     };
-    let obj3 = seal_with_ck_rng(&mut rng, &ck, &req3).unwrap();
+    let obj3 = seal_with_ck_rng(&mut rng, &ck, &req3, build).unwrap();
+
+    // Swapped-recipient negative (ADR-050(3)): slot sealed to member 2 ("attacker"),
+    // list names member 0's key id at that slot.
+    let attacker = [mems[2].public.clone()];
+    let req4 = SealRequest {
+        recipients: Some((ctx.clone(), &attacker)),
+        ..req
+    };
+    let obj4 = seal_with_ck_rng(&mut rng, &ck, &req4, build).unwrap();
+    let mut swapped_list = obj4.recipient_list.clone();
+    swapped_list[0].key_id = key_id(STD, KeyKind::Mek, &mems[0].public.to_bytes());
 
     // All-dummy block: fully deterministic from (CK, object_id, payload_nonce, context) — dummy-slot KAT.
     let dummy_binding = SlotBinding {
@@ -171,10 +193,11 @@ fn sealed_object_vectors() -> Value {
         payload_nonce: obj.header.payload_nonce,
         context: ctx.clone(),
     };
-    let dummy_block = RecipientSlotBlock::build_with(&mut rng, &ck, &dummy_binding, &[]).unwrap();
+    let (dummy_block, _) =
+        RecipientSlotBlock::build_with(&mut rng, &ck, &dummy_binding, &[]).unwrap();
 
     json!({
-        "description": "SUBMISSION Sealed Object (§13.1) with RecipientSlotBlock (§13.2). Member keys: X-Wing DeriveKeyPair(ikm).",
+        "description": "SUBMISSION Sealed Object (§13.1) with RecipientSlotBlock (§13.2) and ADR-050(3) Recipient List entries (u8 slot_index ‖ key_id ‖ enc_rand). Member keys: X-Wing DeriveKeyPair(ikm); key_id kind 1 (MEK). The Key Directory for verification contains members 0 and 1 only.",
         "suite": STD.id(),
         "tenant_id": h(&tenant_id),
         "channel_id": h(&channel_id),
@@ -182,8 +205,9 @@ fn sealed_object_vectors() -> Value {
         "member_ikm": ikms.iter().map(|i| h(i)).collect::<Vec<_>>(),
         "recipients": [0, 1],
         "ck": h(ck.expose()),
-        "padded_plaintext_sha256": h(&crate::hash::sha256(&[&pt])),
+        "inner_layout": "u32be(5) || 'hello' || u8 n || n x 97-byte Recipient List entries || zero padding",
         "inner_prefix": h(&inner),
+        "recipient_list": list_hex(&obj.recipient_list),
         "sealed_object": h(&obj.bytes),
         "object_hash": h(&obj.object_hash),
         "slot_block": h(&blk.encode()),
@@ -204,8 +228,14 @@ fn sealed_object_vectors() -> Value {
             "hidden_recipient": {
                 "sealed_object": h(&obj3.bytes),
                 "slot_block": h(&obj3.slot_block.unwrap().encode()),
-                "recipient_list_len": 2,
-                "expect": "slot verification failure (3 non-dummy slots)"
+                "recipient_list": list_hex(&obj3.recipient_list[..2]),
+                "expect": "slot verification failure (unlisted non-dummy slot)"
+            },
+            "swapped_recipient": {
+                "sealed_object": h(&obj4.bytes),
+                "slot_block": h(&obj4.slot_block.unwrap().encode()),
+                "recipient_list": list_hex(&swapped_list),
+                "expect": "slot verification failure (listed member's re-encapsulation differs)"
             },
         },
     })

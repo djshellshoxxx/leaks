@@ -459,7 +459,10 @@ mod tests {
     }
 
     /// A Key Directory stub: resolve key ids of the given public keys.
-    fn directory(pks: &[KemPublicKey], kind: KeyKind) -> impl Fn(&[u8; 32]) -> Option<KemPublicKey> + '_ {
+    fn directory(
+        pks: &[KemPublicKey],
+        kind: KeyKind,
+    ) -> impl Fn(&[u8; 32]) -> Option<KemPublicKey> + '_ {
         move |kid| {
             pks.iter()
                 .find(|pk| key_id(Suite::CandorStd1, kind, &pk.to_bytes()) == *kid)
@@ -479,7 +482,10 @@ mod tests {
         let (blk, list) = RecipientSlotBlock::build_with(&mut rng, &ck, &b, &pks).unwrap();
         assert_eq!(list.len(), 3);
         for (e, pk) in list.iter().zip(&pks) {
-            assert_eq!(e.key_id, key_id(Suite::CandorStd1, KeyKind::Mek, &pk.to_bytes()));
+            assert_eq!(
+                e.key_id,
+                key_id(Suite::CandorStd1, KeyKind::Mek, &pk.to_bytes())
+            );
             assert_eq!(RecipientListEntry::from_bytes(&e.to_bytes()).unwrap(), *e);
         }
         let enc = blk.encode();
@@ -509,13 +515,19 @@ mod tests {
             epoch_id: 6,
         };
         assert!(blk2.trial_open(&members[0].private, &wrong).is_err());
-        assert!(blk2.verify_slot_block(&ck, &wrong, &list, directory(&pks, KeyKind::Mek)).is_err());
+        assert!(
+            blk2.verify_slot_block(&ck, &wrong, &list, directory(&pks, KeyKind::Mek))
+                .is_err()
+        );
         let mut wrong = b.clone();
         wrong.payload_nonce[0] ^= 1;
         assert!(blk2.trial_open(&members[0].private, &wrong).is_err());
         // Wrong CK: nothing re-derives.
         let ck2 = ContentKey::from_bytes([0x12; 32]);
-        assert!(blk2.verify_slot_block(&ck2, &b, &list, directory(&pks, KeyKind::Mek)).is_err());
+        assert!(
+            blk2.verify_slot_block(&ck2, &b, &list, directory(&pks, KeyKind::Mek))
+                .is_err()
+        );
     }
 
     /// §22.2 negative vector: slot block with an unlisted non-dummy slot (hidden recipient).
@@ -593,8 +605,14 @@ mod tests {
         let k13 = KemKeyPair::generate_with(Suite::CandorStd1, &mut rng).unwrap();
         let pks = [k13.public.clone()];
         let (blk, list) = RecipientSlotBlock::build_with(&mut rng, &ck, &b, &pks).unwrap();
-        assert!(blk.verify_slot_block(&ck, &b, &list, directory(&pks, KeyKind::Custodian)).is_ok());
-        assert!(blk.verify_slot_block(&ck, &b, &list, directory(&pks, KeyKind::Mek)).is_err());
+        assert!(
+            blk.verify_slot_block(&ck, &b, &list, directory(&pks, KeyKind::Custodian))
+                .is_ok()
+        );
+        assert!(
+            blk.verify_slot_block(&ck, &b, &list, directory(&pks, KeyKind::Mek))
+                .is_err()
+        );
         // Dummy derivation is deterministic.
         assert_eq!(
             dummy_slot(&ck, &b, 3).unwrap(),

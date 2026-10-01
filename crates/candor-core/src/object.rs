@@ -94,9 +94,14 @@ where
 /// Convenience for objects without recipient slots (REPLY, CASE_*, EXPORT_PACKAGE):
 /// seal a ready padded plaintext. Intake-sealed types are refused because their
 /// payload must embed the Recipient List (use [`seal`]).
-pub fn seal_bytes(req: &SealRequest<'_>, padded_plaintext: &[u8]) -> Result<(ContentKey, SealedObject)> {
+pub fn seal_bytes(
+    req: &SealRequest<'_>,
+    padded_plaintext: &[u8],
+) -> Result<(ContentKey, SealedObject)> {
     if req.object_type.is_intake_sealed() {
-        return Err(Error::Malformed("intake objects must embed the Recipient List"));
+        return Err(Error::Malformed(
+            "intake objects must embed the Recipient List",
+        ));
     }
     seal(req, |_| Ok(padded_plaintext))
 }
@@ -310,7 +315,11 @@ mod tests {
             .unwrap();
         assert_eq!(usize::from(obj.recipient_list[0].slot_index), pos);
         let dir = |kid: &[u8; 32]| {
-            (crate::hash::key_id(Suite::CandorStd1, crate::hash::KeyKind::Mek, &m.public.to_bytes()) == *kid)
+            (crate::hash::key_id(
+                Suite::CandorStd1,
+                crate::hash::KeyKind::Mek,
+                &m.public.to_bytes(),
+            ) == *kid)
                 .then(|| m.public.clone())
         };
         blk.verify_slot_block(&ck2, &p.slot_binding(ctx), &obj.recipient_list, dir)
@@ -367,9 +376,15 @@ mod tests {
             padded_len: 100,
             ..req
         };
-        assert_eq!(seal_bytes(&bad, &pt[..100]).err(), Some(Error::IllegalBucket));
+        assert_eq!(
+            seal_bytes(&bad, &pt[..100]).err(),
+            Some(Error::IllegalBucket)
+        );
         // Builder output must match the declared length.
-        let req2 = SealRequest { padded_len: 4096, ..bad };
+        let req2 = SealRequest {
+            padded_len: 4096,
+            ..bad
+        };
         assert_eq!(seal_bytes(&req2, &pt[..100]).err(), Some(Error::Length));
     }
 

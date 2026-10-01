@@ -9,9 +9,10 @@
 )]
 
 use candor_core::Suite;
+use candor_core::hash::{KeyKind, key_id};
 use candor_core::header::ObjectType;
 use candor_core::kem::KemKeyPair;
-use candor_core::object::{SealRequest, parse, seal};
+use candor_core::object::{SealRequest, parse, seal, seal_bytes};
 use candor_core::padding::pad;
 use candor_core::slots::SlotContext;
 use proptest::prelude::*;
@@ -26,7 +27,7 @@ fn reply_req(pt: &[u8]) -> SealRequest<'_> {
         epoch_id: 0,
         day_stamp: 0,
         recipients: None,
-        padded_plaintext: pt,
+        padded_len: pt.len() as u64,
     }
 }
 
@@ -36,7 +37,7 @@ proptest! {
     #[test]
     fn reply_roundtrip_and_any_bitflip_rejected(content in proptest::collection::vec(any::<u8>(), 0..20_000), bit in any::<usize>()) {
         let pt = pad(ObjectType::Reply, &content).unwrap();
-        let (ck, obj) = seal(&reply_req(&pt)).unwrap();
+        let (ck, obj) = seal_bytes(&reply_req(&pt), &pt).unwrap();
         let back = parse(&obj.bytes).unwrap().open(&ck).unwrap();
         prop_assert_eq!(&back[..content.len()], content.as_slice());
         let mut bad = obj.bytes.clone();
@@ -50,7 +51,7 @@ proptest! {
     #[test]
     fn truncation_and_extension_rejected(cut in 1usize..200, ext in proptest::collection::vec(any::<u8>(), 1..20)) {
         let pt = pad(ObjectType::Reply, b"x").unwrap();
-        let (_ck, obj) = seal(&reply_req(&pt)).unwrap();
+        let (_ck, obj) = seal_bytes(&reply_req(&pt), &pt).unwrap();
         let cut = cut.min(obj.bytes.len());
         prop_assert!(parse(&obj.bytes[..obj.bytes.len() - cut]).is_err());
         let mut long = obj.bytes.clone();
@@ -88,13 +89,20 @@ proptest! {
             epoch_id: epoch,
             day_stamp: 0,
             recipients: Some((ctx.clone(), &pks)),
-            padded_plaintext: &pt,
+            padded_len: pt.len() as u64,
         };
-        let (_ck, obj) = seal(&req).unwrap();
+        prop_assert!(seal_bytes(&req, &pt).is_err(), "intake objects must use seal()");
+        let (_ck, obj) = seal(&req, |_| Ok(pt.clone())).unwrap();
         let p = parse(&obj.bytes).unwrap();
         let blk = obj.slot_block.unwrap();
         let (ck, pos) = blk.trial_open(&member().private, &p.slot_binding(ctx.clone())).unwrap();
-        blk.verify(&ck, &p.slot_binding(ctx), 1, Some(pos)).unwrap();
+        prop_assert_eq!(usize::from(obj.recipient_list[0].slot_index), pos);
+        let dir = |kid: &[u8; 32]| {
+            (key_id(Suite::CandorStd1, KeyKind::Mek, &member().public.to_bytes()) == *kid)
+                .then(|| member().public.clone())
+        };
+        blk.verify_slot_block(&ck, &p.slot_binding(ctx.clone()), &obj.recipient_list, dir)
+            .unwrap();
         let wrong = match which {
             0 => SlotContext::MemberEpoch { tenant_id: [9; 16], channel_id: [2; 16], epoch_id: epoch },
             1 => SlotContext::MemberEpoch { tenant_id: [1; 16], channel_id: [9; 16], epoch_id: epoch },

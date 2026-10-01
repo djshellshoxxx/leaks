@@ -6,27 +6,26 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn fixture(name: &str, src: &str, allow: Option<&str>) -> (PathBuf, std::process::Output) {
-    let root =
-        std::env::temp_dir().join(format!("candor-lint-logging-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    std::fs::create_dir_all(root.join("crates/x/src")).unwrap();
-    std::fs::write(
-        root.join("crates/x/Cargo.toml"),
-        "[package]\nname = \"x\"\n",
-    )
-    .unwrap();
-    std::fs::write(root.join("crates/x/src/lib.rs"), src).unwrap();
+    // Test-only fixture workspace for the lint self-test; not trust-path code.
+    use std::fs as f; // safefs-lint: allow(test fixture)
+    let tmp = std::env::temp_dir();
+    let root = tmp.join(format!("candor-lint-{name}-{}", std::process::id())); // safefs-lint: allow(test fixture)
+    let src_dir = root.join("crates/x/src"); // safefs-lint: allow(test fixture)
+    let manifest = root.join("crates/x/Cargo.toml"); // safefs-lint: allow(test fixture)
+    let lib = src_dir.join("lib.rs"); // safefs-lint: allow(test fixture)
+    let script_dir = root.join("tools"); // safefs-lint: allow(test fixture)
+    let script = script_dir.join("lint-logging.sh"); // safefs-lint: allow(test fixture)
+    let allow_path = script_dir.join("lint-logging.allow"); // safefs-lint: allow(test fixture)
+    let orig = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/lint-logging.sh");
+    let _ = f::remove_dir_all(&root);
+    f::create_dir_all(&src_dir).unwrap();
+    f::create_dir_all(&script_dir).unwrap();
+    f::write(&manifest, "[package]\nname = \"x\"\n").unwrap();
+    f::write(&lib, src).unwrap();
     // Copy the script so that its allow file can be replaced.
-    let script_dir = root.join("tools");
-    std::fs::create_dir_all(&script_dir).unwrap();
-    let script = script_dir.join("lint-logging.sh");
-    std::fs::copy(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/lint-logging.sh"),
-        &script,
-    )
-    .unwrap();
+    f::copy(orig, &script).unwrap();
     if let Some(a) = allow {
-        std::fs::write(script_dir.join("lint-logging.allow"), a).unwrap();
+        f::write(&allow_path, a).unwrap();
     }
     let out = Command::new("bash")
         .arg(&script)
@@ -51,7 +50,7 @@ fn flags_free_text_logging() {
     {
         let (root, out) = fixture(&format!("bad{i}"), src, None);
         assert_eq!(out.status.code(), Some(1), "{src}");
-        let _ = std::fs::remove_dir_all(root);
+        let _ = std::fs::remove_dir_all(root); // safefs-lint: allow(test fixture)
     }
 }
 
@@ -68,16 +67,16 @@ fn clean_and_allow_listed_pass() {
         "{}",
         String::from_utf8_lossy(&out.stdout)
     );
-    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(root); // safefs-lint: allow(test fixture)
     let (root, out) = fixture(
         "allowed",
         "pub fn f() { println!(\"x\"); }",
         Some("crates/x/src/lib.rs  non-trust-path dev tool\n"),
     );
     assert_eq!(out.status.code(), Some(0));
-    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(root); // safefs-lint: allow(test fixture)
     // An exception without a reason is a usage error.
     let (root, out) = fixture("noreason", "pub fn f() {}", Some("crates/x/src/lib.rs\n"));
     assert_eq!(out.status.code(), Some(2));
-    let _ = std::fs::remove_dir_all(root);
+    let _ = std::fs::remove_dir_all(root); // safefs-lint: allow(test fixture)
 }

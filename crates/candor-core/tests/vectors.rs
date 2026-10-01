@@ -11,12 +11,12 @@
 
 use candor_core::hash::{EvidenceHasher, KeyKind, key_id, lookup_tag};
 use candor_core::kdf::{derive_case_record_key, derive_payload_key};
-use candor_core::kem::KemKeyPair;
+use candor_core::kem::{KemKeyPair, KemPublicKey};
 use candor_core::object::parse;
 use candor_core::passphrase::{SourceKeys, Wordlist, normalize, source_salt};
 use candor_core::record::{RecordAad, open_record};
 use candor_core::secret::{AeadKey, CaseKey, ContentKey, ErasureKey};
-use candor_core::slots::{RecipientSlotBlock, SlotContext};
+use candor_core::slots::{RecipientListEntry, RecipientSlotBlock, SlotContext};
 use candor_core::stanza::{HpkeWrapContext, WrapStanza};
 use candor_core::{Error, Suite, padding, stream};
 use serde_json::Value;
@@ -154,12 +154,30 @@ fn sealed_object_vectors() {
     p.check_slot_block(&blk).unwrap();
     let b = p.slot_binding(ctx.clone());
     let ck_expected = hx(&v["ck"]);
+    // Key Directory stub: members 0 and 1 only.
+    let directory: Vec<KemPublicKey> = members[..2].iter().map(|m| m.public.clone()).collect();
+    let dir = |kid: &[u8; 32]| {
+        directory
+            .iter()
+            .find(|pk| key_id(STD, KeyKind::Mek, &pk.to_bytes()) == *kid)
+            .cloned()
+    };
+    let parse_list = |x: &Value| -> Vec<RecipientListEntry> {
+        x.as_array()
+            .unwrap()
+            .iter()
+            .map(|e| RecipientListEntry::from_bytes(&hx(e)).unwrap())
+            .collect()
+    };
+    let list = parse_list(&v["recipient_list"]);
+    assert_eq!(list.len(), 2);
     for (i, m) in members.iter().enumerate() {
         let r = blk.trial_open(&m.private, &b);
         if i < 2 {
             let (ck, pos) = r.unwrap();
             assert_eq!(ck.expose().to_vec(), ck_expected);
-            blk.verify(&ck, &b, 2, Some(pos)).unwrap();
+            assert!(list.iter().any(|e| usize::from(e.slot_index) == pos));
+            blk.verify_slot_block(&ck, &b, &list, &dir).unwrap();
         } else {
             assert_eq!(
                 r.err(),
@@ -171,17 +189,23 @@ fn sealed_object_vectors() {
     let ck = ContentKey::from_slice(&ck_expected).unwrap();
     let pt = p.open(&ck).unwrap();
     assert!(pt.starts_with(&hx(&v["inner_prefix"])));
+    // The Recipient List travels inside the payload (toy layout, see vector description).
+    let off = hx(&v["inner_prefix"]).len();
+    assert_eq!(usize::from(pt[off]), list.len());
+    for (i, e) in list.iter().enumerate() {
+        assert_eq!(pt[off + 1 + 97 * i..off + 1 + 97 * (i + 1)], e.to_bytes());
+    }
     assert_eq!(pt.len(), 4096);
 
     // Dummy-slot KAT: an all-dummy block is deterministic.
     let dk = &v["dummy_slot_kat"];
-    let dummy = RecipientSlotBlock::build(&ck, &b, &[]).unwrap();
+    let (dummy, _) = RecipientSlotBlock::build(&ck, &b, &[]).unwrap();
     assert_eq!(dummy.hash().to_vec(), hx(&dk["slot_block_sha256"]));
     assert_eq!(
         dummy.encode()[4..4 + candor_core::slots::SLOT_LEN].to_vec(),
         hx(&dk["slot_0"])
     );
-    dummy.verify(&ck, &b, 0, None).unwrap();
+    dummy.verify_slot_block(&ck, &b, &[], &dir).unwrap();
 
     let neg = &v["negative"];
     let mut t = bytes.clone();
@@ -203,23 +227,25 @@ fn sealed_object_vectors() {
     let other = ContentKey::from_slice(&hx(&neg["salamander_other_ck"]["ck"])).unwrap();
     assert_eq!(p.open(&other).err(), Some(Error::Authentication));
 
-    let hr = &neg["hidden_recipient"];
-    let hb = hx(&hr["sealed_object"]);
-    let hp = parse(&hb).unwrap();
-    let hblk = RecipientSlotBlock::decode(&hx(&hr["slot_block"])).unwrap();
-    hp.check_slot_block(&hblk).unwrap();
-    let hb2 = hp.slot_binding(ctx);
-    let (hck, pos) = hblk.trial_open(&members[0].private, &hb2).unwrap();
-    assert_eq!(
-        hblk.verify(
-            &hck,
-            &hb2,
-            hr["recipient_list_len"].as_u64().unwrap() as usize,
-            Some(pos)
-        )
-        .err(),
-        Some(Error::SlotVerification)
-    );
+    // ADR-050(3) negatives: hidden extra recipient; listed member swapped for another key.
+    for name in ["hidden_recipient", "swapped_recipient"] {
+        let n = &neg[name];
+        let nb = hx(&n["sealed_object"]);
+        let np = parse(&nb).unwrap();
+        let nblk = RecipientSlotBlock::decode(&hx(&n["slot_block"])).unwrap();
+        np.check_slot_block(&nblk).unwrap();
+        let nbind = np.slot_binding(ctx.clone());
+        let nlist = parse_list(&n["recipient_list"]);
+        assert!(
+            np.open(&ck).is_ok(),
+            "{name}: envelope itself is well-formed"
+        );
+        assert_eq!(
+            nblk.verify_slot_block(&ck, &nbind, &nlist, &dir).err(),
+            Some(Error::SlotVerification),
+            "{name}"
+        );
+    }
 }
 
 /// §13.2 stanza vectors incl. `ek_direct_wrap` and stanza bound to another object.
