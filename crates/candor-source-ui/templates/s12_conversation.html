@@ -3,7 +3,9 @@
 {#- S12 Secure Conversation. GC-36 warning (SUI-034), follow-up rule (SUI-074), delivery timing
     (SUI-067); the form follows the thread with its own skip link. A long thread or draft is
     split into parts (AUD-RM1-SUI-01); the reply form's send controls are on the last part and
-    the message text field is tied to the form with `form="reply"`. -#}
+    the message text field is tied to the form with `form="reply-form"`. The reply form is
+    url-encoded (08 SW-12) and holds the part navigation; adding a file is a separate multipart
+    form (08 SW-13), so moving between parts never uploads a chosen file (AUD-RM1-SUI-12). -#}
 {% block main %}
 {%- let reply_here = p.region_open(Region::Composer) || p.is_last_part() %}
 <h1>{{ p.t("sui-conv-h1") }}</h1>
@@ -37,17 +39,10 @@
 {%- for s in p.region(Region::Composer) %}
 {{ s|safe }}
 {%- endfor %}
-<form id="reply-form" method="post" action="{{ p.href(Route::Conversation) }}" enctype="multipart/form-data">
+<form id="reply-form" method="post" action="{{ p.href(Route::Conversation) }}">
 {% include "ft.html" %}
 {%- if p.part_nav().is_some() %}<input type="hidden" name="page" value="{{ p.vm.conversation.page }}">{% endif %}
 {%- if p.is_last_part() %}
-<div class="field">
-{%- let fid = "file" %}
-<label for="f-file">{{ p.t("sui-conv-file") }}</label>
-<p class="hint" id="h-file">{{ p.t("sui-files-one") }} {{ p.t("sui-files-size-visible") }}</p>
-{% include "field_error.html" %}
-<input type="file" id="f-file" name="file" aria-describedby="{{ p.describedby(fid, true) }}">
-</div>
 {%- let delayed = p.vm.conversation.delayed_delivery %}
 {% include "delivery.html" %}
 <div class="actions"><button type="submit" name="action" value="send" class="btn-primary">{{ p.t(p.mode().message_send_key()) }}</button></div>
@@ -55,6 +50,19 @@
 {%- let navform = "" %}
 {% include "parts_nav.html" %}
 </form>
+{%- if p.is_last_part() %}
+<form id="file-form" method="post" action="{{ p.href(Route::Conversation) }}" enctype="multipart/form-data">
+{% include "ft.html" %}
+<div class="field">
+{%- let fid = "file" %}
+<label for="f-file">{{ p.t("sui-conv-file") }}</label>
+<p class="hint" id="h-file">{{ p.t("sui-files-one") }} {{ p.t("sui-conv-file-separate") }} {{ p.t("sui-files-size-visible") }}</p>
+{% include "field_error.html" %}
+<input type="file" id="f-file" name="file" aria-describedby="{{ p.describedby(fid, true) }}">
+</div>
+<div class="actions"><button type="submit" name="action" value="upload">{{ p.t("sui-files-upload") }}</button></div>
+</form>
+{%- endif %}
 <ul>
 {%- if !p.mode().is_disclosed() %}
 <li><a href="{{ p.href(Route::Identity) }}">{{ p.t("sui-conv-identify") }}</a></li>

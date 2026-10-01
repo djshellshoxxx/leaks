@@ -7,7 +7,7 @@ use std::sync::LazyLock;
 
 use base64::Engine as _;
 use sha2::{Digest, Sha256};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize as _, Zeroizing};
 
 use crate::model::Method;
 
@@ -84,6 +84,129 @@ impl SizeClass {
             SizeClass::P2 => 129_024,
         }
     }
+
+    /// Exact length of the serialized HTTP/1.1 response head (status line, every header line
+    /// and the blank line) after [`finalize_headers`] (AUD-RM1-SUI-05). With the fixed body
+    /// size, every response of a class has the same total length on the wire, whatever the
+    /// screen, locale, session state or cookie.
+    pub fn head_bytes(self) -> usize {
+        match self {
+            SizeClass::P1 | SizeClass::P2 => HEAD_BYTES,
+        }
+    }
+}
+
+/// Serialized response head length for both classes. The largest head without padding is
+/// about 1.2 KB plus the cookie slot ([`MAX_SET_COOKIE_BYTES`]), so 2 KiB leaves room for
+/// longer locale tags and status phrases.
+const HEAD_BYTES: usize = 2_048;
+
+/// Name of the fixed-width padding header, always the last header (AUD-RM1-SUI-05).
+pub const PAD_HEADER: &str = "X-Pad";
+
+/// Byte used to fill [`PAD_HEADER`]. A visible character, because HTTP strips leading and
+/// trailing whitespace from field values (RFC 9110 §5.5), which would make the length depend on
+/// the server library.
+const PAD_BYTE: u8 = b'0';
+
+/// Largest `Set-Cookie` value [`finalize_headers`] accepts (the session or pre-session cookie
+/// slot, including its attributes).
+pub const MAX_SET_COOKIE_BYTES: usize = 256;
+
+/// The status line C-06 must send for `status`: `HTTP/1.1 {status} {reason}` (standard reason
+/// phrases, RFC 9110 §15). `None` for a status this crate never produces.
+pub fn reason_phrase(status: u16) -> Option<&'static str> {
+    match status {
+        200 => Some("OK"),
+        404 => Some("Not Found"),
+        405 => Some("Method Not Allowed"),
+        429 => Some("Too Many Requests"),
+        500 => Some("Internal Server Error"),
+        503 => Some("Service Unavailable"),
+        _ => None,
+    }
+}
+
+/// Header finalization failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderError {
+    /// The cookie value is empty, longer than [`MAX_SET_COOKIE_BYTES`], or contains a byte
+    /// outside visible ASCII and space (CR, LF, controls, non-ASCII), or starts/ends with a space.
+    InvalidCookie,
+    /// The status has no known reason phrase.
+    UnknownStatus,
+    /// The headers do not fit the fixed head length (a deployment or programming defect).
+    TooLong,
+}
+
+impl fmt::Display for HeaderError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Never include the cookie.
+        f.write_str(match self {
+            HeaderError::InvalidCookie => "invalid cookie value",
+            HeaderError::UnknownStatus => "unknown status",
+            HeaderError::TooLong => "response head over its fixed length",
+        })
+    }
+}
+
+impl std::error::Error for HeaderError {}
+
+/// Length of `HTTP/1.1 {status} {reason}\r\n` + every `Name: value\r\n` + the final `\r\n`.
+fn head_len(status: u16, headers: &[(&'static str, String)]) -> Option<usize> {
+    let reason = reason_phrase(status)?;
+    let line = "HTTP/1.1 000 \r\n".len().checked_add(reason.len())?;
+    headers.iter().try_fold(line.checked_add(2)?, |n, (k, v)| {
+        n.checked_add(k.len())?.checked_add(v.len())?.checked_add(4)
+    })
+}
+
+/// Sets the cookie slot and recomputes the [`PAD_HEADER`] so that the serialized response head
+/// is exactly [`SizeClass::head_bytes`] long (AUD-RM1-SUI-05).
+///
+/// [`crate::render`] already calls this with `None`. C-06 calls it again with the
+/// `Set-Cookie` value it sends (session cookie, pre-session cookie or its expiry), if any, as
+/// the **last** step before writing the response. Any earlier `Set-Cookie` and padding are
+/// replaced. C-06 then writes the status line `HTTP/1.1 {status} {reason_phrase(status)}`, the
+/// headers in [`Page::headers`] order as `Name: value` lines, and adds nothing else (no `Date`,
+/// no chunking; HTTP/1.1 only). On error the page is unchanged and C-06 must answer with S92,
+/// never send a head of a different length.
+pub fn finalize_headers(page: &mut Page, session_cookie: Option<&str>) -> Result<(), HeaderError> {
+    if let Some(c) = session_cookie {
+        let ok = (1..=MAX_SET_COOKIE_BYTES).contains(&c.len())
+            && c.bytes().all(|b| (0x20..=0x7e).contains(&b))
+            && !c.starts_with(' ')
+            && !c.ends_with(' ');
+        if !ok {
+            return Err(HeaderError::InvalidCookie);
+        }
+    }
+    let mut headers: Vec<(&'static str, String)> = page
+        .headers
+        .iter()
+        .filter(|(n, _)| *n != "Set-Cookie" && *n != PAD_HEADER)
+        .cloned()
+        .collect();
+    if let Some(c) = session_cookie {
+        headers.push(("Set-Cookie", c.to_owned()));
+    }
+    let used = head_len(page.status, &headers).ok_or(HeaderError::UnknownStatus)?;
+    let fill = page
+        .class
+        .head_bytes()
+        .checked_sub(used)
+        .and_then(|r| r.checked_sub(PAD_HEADER.len().saturating_add(4)))
+        .ok_or(HeaderError::TooLong)?;
+    let pad = String::from_utf8(vec![PAD_BYTE; fill]).map_err(|_| HeaderError::TooLong)?;
+    headers.push((PAD_HEADER, pad));
+    if head_len(page.status, &headers) != Some(page.class.head_bytes()) {
+        return Err(HeaderError::TooLong);
+    }
+    for (_, v) in &mut page.headers {
+        v.zeroize();
+    }
+    page.headers = headers;
+    Ok(())
 }
 
 /// `sha256-…` source for the stylesheet.
@@ -115,8 +238,8 @@ fullscreen=(), geolocation=(), gyroscope=(), hid=(), idle-detection=(), magnetom
 microphone=(), midi=(), payment=(), publickey-credentials-get=(), screen-wake-lock=(), \
 serial=(), usb=(), xr-spatial-tracking=(), browsing-topics=()";
 
-/// Headers that must never be sent (11 §5.3, SUI-055, API-009). `Set-Cookie` is set only by
-/// the session layer (§5.6), never by this crate.
+/// Headers that [`crate::render`] never emits (11 §5.3, SUI-055, API-009). `Set-Cookie` is
+/// added only through [`finalize_headers`], with the value the session layer chooses (§5.6).
 pub const PROHIBITED_HEADERS: &[&str] = &[
     "Server",
     "X-Powered-By",
@@ -138,8 +261,9 @@ pub const PROHIBITED_HEADERS: &[&str] = &[
 pub struct Page {
     /// HTTP status code.
     pub status: u16,
-    /// Response headers, in a fixed order. The server must add nothing else except the
-    /// session cookie (§5.6) and must not add `Date` (11 §5.3, SUI-055).
+    /// Response headers, in a fixed order, ending with the [`PAD_HEADER`]. The server must add
+    /// nothing; the session cookie goes in through [`finalize_headers`] (§5.6), which keeps
+    /// the serialized head length constant (AUD-RM1-SUI-05). No `Date` (11 §5.3, SUI-055).
     pub headers: Vec<(&'static str, String)>,
     /// Padded HTML, exactly `class.bytes()` long.
     pub body: Zeroizing<Vec<u8>>,
@@ -158,9 +282,11 @@ pub struct Page {
 
 impl fmt::Debug for Page {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Header names only: `Set-Cookie` carries the session secret.
+        let names: Vec<&str> = self.headers.iter().map(|(n, _)| *n).collect();
         f.debug_struct("Page")
             .field("status", &self.status)
-            .field("headers", &self.headers)
+            .field("headers", &names)
             .field(
                 "body",
                 &format_args!("[{} bytes redacted]", self.body.len()),
@@ -170,7 +296,23 @@ impl fmt::Debug for Page {
     }
 }
 
+impl Drop for Page {
+    fn drop(&mut self) {
+        // The `Set-Cookie` value is the session secret.
+        for (_, v) in &mut self.headers {
+            v.zeroize();
+        }
+    }
+}
+
 impl Page {
+    /// Length of the serialized HTTP/1.1 response head (status line, header lines, blank
+    /// line), as C-06 must write it. Equals [`SizeClass::head_bytes`] after
+    /// [`finalize_headers`]. `None` for an unknown status.
+    pub fn head_len(&self) -> Option<usize> {
+        head_len(self.status, &self.headers)
+    }
+
     /// Header value by case-insensitive name.
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers
@@ -262,7 +404,7 @@ pub fn robots_txt() -> Page {
         ct.1 = "text/plain; charset=utf-8".to_owned();
     }
     headers.retain(|(n, _)| *n != "Content-Language");
-    Page {
+    let mut page = Page {
         status: 200,
         headers,
         body,
@@ -270,7 +412,10 @@ pub fn robots_txt() -> Page {
         unpadded_len: text.len(),
         part: 0,
         parts: 1,
-    }
+    };
+    // Cannot fail: status 200 and a fixed header set far below the head length (tested).
+    let _ = finalize_headers(&mut page, None);
+    page
 }
 
 #[cfg(test)]
@@ -317,6 +462,35 @@ mod tests {
             pad_html(&ok, SizeClass::P1).map(|b| b.len()).ok(),
             Some(65_536)
         );
+    }
+
+    #[test]
+    fn finalize_rejects_bad_cookies_and_keeps_length() {
+        let mut p = robots_txt();
+        assert_eq!(p.head_len(), Some(SizeClass::P1.head_bytes()));
+        for bad in [
+            "",
+            " a",
+            "a ",
+            "a\r\nX-Evil: 1",
+            "a\nb",
+            "é",
+            &"a".repeat(MAX_SET_COOKIE_BYTES + 1),
+        ] {
+            assert_eq!(
+                finalize_headers(&mut p, Some(bad)),
+                Err(HeaderError::InvalidCookie)
+            );
+            assert_eq!(p.head_len(), Some(SizeClass::P1.head_bytes()));
+            assert!(p.header("Set-Cookie").is_none());
+        }
+        let max = "a".repeat(MAX_SET_COOKIE_BYTES);
+        assert_eq!(finalize_headers(&mut p, Some(&max)), Ok(()));
+        assert_eq!(p.head_len(), Some(SizeClass::P1.head_bytes()));
+        assert_eq!(p.headers.last().map(|(n, _)| *n), Some(PAD_HEADER));
+        assert!(!format!("{p:?}").contains("aaaa"), "cookie never in Debug");
+        p.status = 299;
+        assert_eq!(finalize_headers(&mut p, None), Err(HeaderError::UnknownStatus));
     }
 
     #[test]

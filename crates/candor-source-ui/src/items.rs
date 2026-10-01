@@ -202,6 +202,28 @@ impl Ctx {
     }
 }
 
+/// The hidden `piece` value for `range` of `stored` (empty for a whole value). Fails closed
+/// without a session piece key (AUD-RM1-SUI-11).
+fn piece_field(
+    p: &PageView<'_>,
+    field: &str,
+    range: Option<&Range<usize>>,
+    stored: &str,
+) -> Result<Zeroizing<String>, RenderError> {
+    let Some(r) = range else {
+        return Ok(Zeroizing::default());
+    };
+    let key = p
+        .vm
+        .ctx
+        .piece_key
+        .as_ref()
+        .ok_or(RenderError::MissingData("piece key"))?;
+    piece_value(key, field, r, stored)
+        .map(Zeroizing::new)
+        .ok_or(RenderError::MissingData("piece key"))
+}
+
 /// Builds the items of a paged screen. `budget` is the room left on a part after the chrome.
 pub(crate) fn build(
     p: &PageView<'_>,
@@ -220,7 +242,6 @@ pub(crate) fn build(
                 } else {
                     ""
                 };
-                let total = value.len();
                 items.extend(cx.splittable(
                     Region::Questions,
                     value,
@@ -228,9 +249,7 @@ pub(crate) fn build(
                         if piece.is_some() && !text_kind {
                             return Ok(None);
                         }
-                        let pv = range
-                            .map(|r| Zeroizing::new(piece_value(&q.id, r, total)))
-                            .unwrap_or_default();
+                        let pv = piece_field(p, &q.id, range, value)?;
                         render_capped(
                             &QuestionSeg {
                                 p,
@@ -291,14 +310,11 @@ pub(crate) fn build(
             }
             if deletable {
                 let draft = &vm.conversation.draft_text;
-                let total = draft.len();
                 items.extend(cx.splittable(
                     Region::Composer,
                     draft,
                     |text, piece, range, cap| {
-                        let pv = range
-                            .map(|r| Zeroizing::new(piece_value("text", r, total)))
-                            .unwrap_or_default();
+                        let pv = piece_field(p, "text", range, draft)?;
                         render_capped(
                             &ComposerSeg {
                                 p,

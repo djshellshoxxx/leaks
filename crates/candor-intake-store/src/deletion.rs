@@ -267,6 +267,89 @@ pub fn verify_chain(
     Ok(())
 }
 
+/// Signature context of a Z-CORE deletion-list head attestation
+/// (AUD-RM2-STO-21/22; implementation decision, spec feedback for 08 RL-11/RL-12).
+pub const HEAD_CONTEXT: &[u8] = b"candor/v1/intake/deletion-head";
+
+/// A deletion-list head as attested by Z-CORE: "I hold the chain through `seq`,
+/// whose chain hash is `head_hash`", signed with the Z-CORE head key whose public
+/// half is intake configuration (`core_pk`).
+///
+/// - `head_hash` = [`DeletionEntry::next_prev_hash`] of entry `seq` (it commits
+///   to the whole chain through `seq`); all-zero for `seq = 0`;
+/// - `sig = Ed25519_core("candor/v1/intake/deletion-head" ‖ tenant_id(16) ‖
+///   u64be seq ‖ head_hash)`.
+///
+/// The relay cannot assert a head on its own: the store acknowledges (RL-11)
+/// and accepts pushed lists (RL-12) only against a head whose signature verifies.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct SignedDeletionHead {
+    /// Highest seq Z-CORE holds.
+    pub seq: u64,
+    /// Chain hash through `seq`.
+    pub head_hash: [u8; 32],
+    /// Z-CORE signature.
+    pub sig: [u8; 64],
+}
+
+impl fmt::Debug for SignedDeletionHead {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SignedDeletionHead")
+            .field("seq", &self.seq)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Signed message of a head attestation.
+#[must_use]
+pub fn head_message(tenant: &TenantId, seq: u64, head_hash: &[u8; 32]) -> Vec<u8> {
+    let mut m = Vec::with_capacity(HEAD_CONTEXT.len().saturating_add(16 + 8 + 32));
+    m.extend_from_slice(HEAD_CONTEXT);
+    m.extend_from_slice(&tenant.0);
+    m.extend_from_slice(&seq.to_be_bytes());
+    m.extend_from_slice(head_hash);
+    m
+}
+
+/// Chain hash through `entry` (all-zero for no entry): the `head_hash` of a head.
+#[must_use]
+pub fn chain_hash(entry: Option<&DeletionEntry>) -> [u8; 32] {
+    entry.map_or([0u8; 32], DeletionEntry::next_prev_hash)
+}
+
+impl SignedDeletionHead {
+    /// Sign a head (Z-CORE side and tests).
+    #[must_use]
+    pub fn sign(
+        tenant: &TenantId,
+        head: Option<&DeletionEntry>,
+        key: &candor_core::sig::SigningKey,
+    ) -> Self {
+        let seq = head.map_or(0, |e| e.seq);
+        let head_hash = chain_hash(head);
+        let sig = key.sign(&head_message(tenant, seq, &head_hash));
+        Self {
+            seq,
+            head_hash,
+            sig,
+        }
+    }
+
+    /// Verify the attestation (strict Ed25519 under `core_pk`) and its shape
+    /// (`seq = 0` ⇔ all-zero hash).
+    pub fn verify(&self, tenant: &TenantId, core_pk: &[u8; 32]) -> Result<()> {
+        if (self.seq == 0) != (self.head_hash == [0u8; 32]) || i64::try_from(self.seq).is_err() {
+            return Err(StoreError::DeletionList("malformed head"));
+        }
+        candor_core::sig::verify_strict(
+            core_pk,
+            &head_message(tenant, self.seq, &self.head_hash),
+            &self.sig,
+        )
+        .map_err(|_| StoreError::DeletionList("bad head signature"))
+    }
+}
+
 /// Computes the REPLY `object_hash` from a stored `reply_ct`, used when a restore
 /// applies `reply` entries to replies already on disk (no hash column exists in
 /// 09 §5.1).

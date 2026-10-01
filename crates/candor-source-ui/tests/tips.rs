@@ -316,6 +316,7 @@ fn honest_wording_lint() {
         "jail",
         "terrifying",
     ];
+    let banned = BANNED.iter().chain(ANONYMITY_ABSOLUTES);
     let mut texts: Vec<(String, String)> = tip_messages();
     for s in Screen::ALL {
         let b = render_html(s, Locale::En, Mode::Anonymous, false);
@@ -324,7 +325,7 @@ fn honest_wording_lint() {
     }
     for (k, v) in texts {
         let low = v.to_lowercase();
-        for w in BANNED {
+        for w in banned.clone() {
             assert!(!low.contains(w), "{k}: banned wording {w:?}");
         }
         assert!(!v.contains('!'), "{k}: exclamation mark");
@@ -404,4 +405,85 @@ fn fk_heuristic_sane() {
     );
     assert_eq!(syllables("phone"), 1);
     assert_eq!(syllables("passphrase"), 2);
+}
+
+/// Absolute anonymity claims (DECISIONS §0, ADR-035(5), AUD-RM1-SUI-08). Candor does not collect
+/// who the source is, but their writing and files can still identify them, so no string may say
+/// that the organisation does not or will not know who they are.
+const ANONYMITY_ABSOLUTES: &[&str] = &[
+    "don't know who you are",
+    "do not know who you are",
+    "won't know who you are",
+    "will not know who you are",
+    "never know who you are",
+    "can't know who you are",
+    "cannot know who you are",
+    "no one will know",
+    "nobody will know",
+    "no one can find out",
+    "nobody can find out",
+    "no one can identify you",
+    "nobody can identify you",
+    "can't identify you",
+    "cannot identify you",
+    "you are anonymous",
+    "you will stay anonymous",
+    "you stay anonymous",
+    "keeps you anonymous",
+    "stay completely anonymous",
+];
+
+/// Every catalog file (all screens, guidance cards and tips).
+const CATALOGS: [(&str, &str); 3] = [
+    ("sui.ftl", include_str!("../locales/en/sui.ftl")),
+    ("sops.ftl", include_str!("../locales/en/sops.ftl")),
+    ("tips.ftl", include_str!("../locales/en/tips.ftl")),
+];
+
+// ST: AUD-RM1-SUI-08 — no catalog string makes an absolute anonymity claim, and every claim that
+// the site cannot see (or hides) the source's internet address is conditional on Tor Browser
+// (the site cannot know how it is reached, e.g. through a Tor2web-style gateway).
+#[test]
+fn catalog_anonymity_claims_are_conditional() {
+    let mut checked = 0usize;
+    for (file, src) in CATALOGS {
+        for (n, line) in src.lines().enumerate() {
+            if line.trim_start().starts_with('#') {
+                continue;
+            }
+            let low = line.to_lowercase().replace('\u{2019}', "'");
+            for w in ANONYMITY_ABSOLUTES {
+                assert!(!low.contains(w), "{file}:{}: absolute claim {w:?}", n + 1);
+            }
+            for sentence in low.split(". ") {
+                let hides = [
+                    "can't see",
+                    "cannot see",
+                    "can not see",
+                    "never see",
+                    "hides",
+                    "hidden",
+                    "not visible",
+                ]
+                .iter()
+                .any(|v| sentence.contains(v));
+                if sentence.contains("internet address") && hides {
+                    checked += 1;
+                    assert!(
+                        sentence.contains("tor browser"),
+                        "{file}:{}: unconditional address claim: {sentence:?}",
+                        n + 1
+                    );
+                }
+            }
+        }
+    }
+    assert!(checked >= 4, "the address statements were found ({checked})");
+    // The lint catches the audited phrasings.
+    for old in [
+        "anonymous: we don't know who you are unless you tell us.",
+        "we won't know who you are unless you tell us later.",
+    ] {
+        assert!(ANONYMITY_ABSOLUTES.iter().any(|w| old.contains(w)), "{old}");
+    }
 }

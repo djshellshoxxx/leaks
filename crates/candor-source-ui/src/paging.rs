@@ -16,13 +16,15 @@
 //!
 //! Nothing is truncated: every byte of source and team text is on exactly one part, and the
 //! source reaches every part with the "Previous part" / "Next part" buttons (`part` field).
-//! An editable piece carries a hidden `piece` field (`{field}-{start}-{end}-{total}`, byte
-//! offsets into the stored value) so that C-07 can replace exactly that range
-//! ([`splice_piece`]).
+//! An editable piece carries a hidden `piece` field (`{field}-{start}-{end}-{total}-{tag}`,
+//! byte offsets into the stored value plus a keyed MAC of the stored value) so that C-07 can
+//! replace exactly that range ([`splice_piece`]) and refuse a stale page (AUD-RM1-SUI-11).
 
 use core::fmt;
 use core::ops::Range;
 
+use hmac::{Hmac, KeyInit, Mac};
+use sha2::Sha256;
 use zeroize::Zeroizing;
 
 /// Name of the part-navigation field (a submit button value, 0-based part index).
@@ -104,7 +106,46 @@ pub(crate) fn split_escaped(text: &str, budget: usize) -> Vec<Range<usize>> {
     out
 }
 
-/// One piece of a long value as sent back by the form (`{field}-{start}-{end}-{total}`).
+/// Length in bytes of the piece tag (HMAC-SHA256 truncated to 128 bits).
+const TAG_LEN: usize = 16;
+
+/// Domain separation for the piece MAC.
+const PIECE_DOMAIN: &[u8] = b"candor-sui-piece-v1\0";
+
+/// Per-session secret that binds every `piece` field to the exact stored value it was cut from
+/// (AUD-RM1-SUI-11). C-06/C-07 create it from a CSPRNG when the session starts, keep it only in
+/// RAM with the session (sealer session record) and pass the same key to [`crate::render`]
+/// (`PageContext::piece_key`) and [`splice_piece`]. It is zeroized on drop and never printed.
+#[derive(Clone)]
+pub struct PieceKey(Zeroizing<[u8; 32]>);
+
+impl PieceKey {
+    /// Wraps 32 secret bytes.
+    pub fn new(bytes: [u8; 32]) -> PieceKey {
+        PieceKey(Zeroizing::new(bytes))
+    }
+
+    fn mac(&self, field: &str, start: usize, end: usize, stored: &str) -> Option<Hmac<Sha256>> {
+        let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(self.0.as_slice()).ok()?;
+        let n = |v: usize| u64::try_from(v).unwrap_or(u64::MAX).to_be_bytes();
+        mac.update(PIECE_DOMAIN);
+        mac.update(field.as_bytes());
+        mac.update(&[0]);
+        mac.update(&n(start));
+        mac.update(&n(end));
+        mac.update(&n(stored.len()));
+        mac.update(stored.as_bytes());
+        Some(mac)
+    }
+}
+
+impl fmt::Debug for PieceKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("PieceKey([redacted])")
+    }
+}
+
+/// One piece of a long value as sent back by the form (`{field}-{start}-{end}-{total}-{tag}`).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct PieceRef<'a> {
     /// Field (question id or `text`), validated `[a-z0-9_]{1,32}`.
@@ -115,6 +156,10 @@ pub struct PieceRef<'a> {
     pub end: usize,
     /// Byte length of the stored value when the page was rendered.
     pub total: usize,
+    /// Keyed MAC (truncated HMAC-SHA256 under the session [`PieceKey`]) of the field, the
+    /// offsets and the whole stored value at render time. Not secret, but only checked by
+    /// [`splice_piece`] in constant time.
+    pub tag: [u8; TAG_LEN],
 }
 
 impl fmt::Debug for PieceRef<'_> {
@@ -130,7 +175,7 @@ impl fmt::Debug for PieceRef<'_> {
 
 /// Parses a `piece` field value strictly. Returns `None` for anything malformed.
 pub fn parse_piece(v: &str) -> Option<PieceRef<'_>> {
-    if v.len() > 64 {
+    if v.len() > 128 {
         return None;
     }
     let mut it = v.split('-');
@@ -148,6 +193,7 @@ pub fn parse_piece(v: &str) -> Option<PieceRef<'_>> {
     let start = num(it.next())?;
     let end = num(it.next())?;
     let total = num(it.next())?;
+    let tag = unhex(it.next()?)?;
     if it.next().is_some() || start > end || end > total {
         return None;
     }
@@ -156,33 +202,84 @@ pub fn parse_piece(v: &str) -> Option<PieceRef<'_>> {
         start,
         end,
         total,
+        tag,
     })
 }
 
-/// Formats a `piece` field value.
-pub(crate) fn piece_value(field: &str, r: &Range<usize>, total: usize) -> String {
-    format!("{field}-{}-{}-{total}", r.start, r.end)
+/// Strict lowercase hex of exactly [`TAG_LEN`] bytes.
+fn unhex(s: &str) -> Option<[u8; TAG_LEN]> {
+    let b = s.as_bytes();
+    if b.len() != TAG_LEN.checked_mul(2)? {
+        return None;
+    }
+    let nib = |c: u8| match c {
+        b'0'..=b'9' => Some(c.wrapping_sub(b'0')),
+        b'a'..=b'f' => Some(c.wrapping_sub(b'a').wrapping_add(10)),
+        _ => None,
+    };
+    let mut out = [0u8; TAG_LEN];
+    for (o, pair) in out.iter_mut().zip(b.chunks_exact(2)) {
+        let hi = nib(*pair.first()?)?;
+        let lo = nib(*pair.get(1)?)?;
+        *o = (hi << 4) | lo;
+    }
+    Some(out)
 }
+
+/// Formats a `piece` field value for `range` of `stored`, bound to `stored` by a keyed MAC.
+pub(crate) fn piece_value(
+    key: &PieceKey,
+    field: &str,
+    r: &Range<usize>,
+    stored: &str,
+) -> Option<String> {
+    let tag = key.mac(field, r.start, r.end, stored)?.finalize().into_bytes();
+    let mut v = format!("{field}-{}-{}-{}-", r.start, r.end, stored.len());
+    for b in tag.iter().take(TAG_LEN) {
+        v.push(char::from(HEX.get(usize::from(b >> 4)).copied()?));
+        v.push(char::from(HEX.get(usize::from(b & 0x0f)).copied()?));
+    }
+    Some(v)
+}
+
+const HEX: &[u8; 16] = b"0123456789abcdef";
 
 /// Why a piece could not be applied. C-07 then re-renders the page with the posted text kept
 /// (11 §5.7) instead of guessing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpliceError {
-    /// The stored value changed since the page was rendered (length differs).
+    /// The stored value changed since the page was rendered (any change, including one of the
+    /// same length, or a piece from another session or field: the keyed MAC does not match).
     Stale,
     /// The offsets are not on character boundaries of the stored value.
     Boundary,
 }
 
-/// Replaces `piece.start..piece.end` of `stored` with `edited`. Fails closed if the stored
-/// value changed since rendering or the offsets are not character boundaries. The result is
-/// zeroized on drop and allocated once (no reallocation copies).
+/// Replaces `piece.start..piece.end` of `stored` with `edited`.
+///
+/// Fails closed with [`SpliceError::Stale`] unless `piece.tag` is the keyed MAC (under `key`,
+/// the session's [`PieceKey`]) of the field, the offsets and the **whole current** `stored`
+/// value, compared in constant time. So any change to the stored value since the page was
+/// rendered, even one that keeps its length (a second tab, a re-posted older part), is
+/// refused (AUD-RM1-SUI-11). Fails with [`SpliceError::Boundary`] if the offsets are not
+/// character boundaries. `field` is the name of the form field the value belongs to; it must
+/// equal `piece.field`. The result is zeroized on drop and allocated once (no reallocation
+/// copies).
 pub fn splice_piece(
+    key: &PieceKey,
+    field: &str,
     stored: &str,
     piece: &PieceRef<'_>,
     edited: &str,
 ) -> Result<Zeroizing<String>, SpliceError> {
-    if stored.len() != piece.total {
+    if stored.len() != piece.total || field != piece.field {
+        return Err(SpliceError::Stale);
+    }
+    let mac = key
+        .mac(piece.field, piece.start, piece.end, stored)
+        .ok_or(SpliceError::Stale)?;
+    // `verify_truncated_left` compares in constant time.
+    if mac.verify_truncated_left(&piece.tag).is_err() {
         return Err(SpliceError::Stale);
     }
     let head = stored.get(..piece.start).ok_or(SpliceError::Boundary)?;
@@ -332,58 +429,112 @@ mod tests {
         assert_eq!(split_escaped("", 100), vec![0..0]);
     }
 
+    const T: &str = "0123456789abcdef0123456789abcdef";
+
+    fn key(b: u8) -> PieceKey {
+        PieceKey::new([b; 32])
+    }
+
+    fn pv(k: &PieceKey, field: &str, r: Range<usize>, s: &str) -> String {
+        piece_value(k, field, &r, s).unwrap_or_default()
+    }
+
+    fn piece(v: &str) -> PieceRef<'_> {
+        parse_piece(v).unwrap_or(PieceRef {
+            field: "x",
+            start: 0,
+            end: 0,
+            total: 0,
+            tag: [0; TAG_LEN],
+        })
+    }
+
     #[test]
     fn piece_round_trip() {
-        let v = piece_value("what", &(3..10), 20);
-        let p = parse_piece(&v);
-        assert_eq!(
-            p,
-            Some(PieceRef {
-                field: "what",
-                start: 3,
-                end: 10,
-                total: 20
-            })
-        );
+        let v = pv(&key(1), "what", 3..10, "0123456789abcdefghij");
+        let p = piece(&v);
+        assert_eq!((p.field, p.start, p.end, p.total), ("what", 3, 10, 20));
+        assert_eq!(v.len(), "what-3-10-20-".len() + 2 * TAG_LEN);
+        assert!(format!("{p:?}").starts_with("PieceRef(what, 3..10 of 20)"));
+        assert_eq!(format!("{:?}", key(1)), "PieceKey([redacted])");
         for bad in [
-            "",
-            "what",
-            "what-1-2",
-            "what-2-1-3",
-            "what-1-4-3",
-            "WHAT-1-2-3",
-            "what-1-2-3-4",
-            "what-+1-2-3",
-            "what--2-3",
-            "what-1-2-9999999999",
+            "".to_owned(),
+            "what".to_owned(),
+            "what-1-2".to_owned(),
+            "what-1-2-3".to_owned(),
+            format!("what-2-1-3-{T}"),
+            format!("what-1-4-3-{T}"),
+            format!("WHAT-1-2-3-{T}"),
+            format!("what-1-2-3-{T}-4"),
+            format!("what-+1-2-3-{T}"),
+            format!("what--2-3-{T}"),
+            format!("what-1-2-9999999999-{T}"),
+            format!("what-1-2-3-{}", T.to_uppercase()),
+            format!("what-1-2-3-{}", &T[1..]),
+            format!("what-1-2-3-{T}0"),
+            format!("what-1-2-3-{}g", &T[1..]),
         ] {
-            assert_eq!(parse_piece(bad), None, "{bad}");
+            assert_eq!(parse_piece(&bad), None, "{bad}");
         }
     }
 
     #[test]
     fn splice_checks() {
+        let k = key(7);
         let stored = "héllo world";
-        let p = PieceRef {
-            field: "what",
-            start: 0,
-            end: 6,
-            total: stored.len(),
-        };
+        let v = pv(&k, "what", 0..6, stored);
+        let p = piece(&v);
         assert_eq!(
-            splice_piece(stored, &p, "HELLO").map(|s| s.to_string()),
+            splice_piece(&k, "what", stored, &p, "HELLO").map(|s| s.to_string()),
             Ok("HELLO world".to_owned())
         );
-        let bad = PieceRef { end: 2, ..p };
+        // Offsets are MAC-bound: changing them is stale, not a boundary error.
+        let moved = PieceRef { end: 2, ..p };
         assert_eq!(
-            splice_piece(stored, &bad, "x").map(|s| s.to_string()),
+            splice_piece(&k, "what", stored, &moved, "x").map(|s| s.to_string()),
+            Err(SpliceError::Stale)
+        );
+        let v2 = pv(&k, "what", 0..2, stored);
+        let bad = piece(&v2);
+        assert_eq!(
+            splice_piece(&k, "what", stored, &bad, "x").map(|s| s.to_string()),
             Err(SpliceError::Boundary)
         );
         let stale = PieceRef { total: 3, ..p };
         assert_eq!(
-            splice_piece(stored, &stale, "x").map(|s| s.to_string()),
+            splice_piece(&k, "what", stored, &stale, "x").map(|s| s.to_string()),
             Err(SpliceError::Stale)
         );
+        // Another session's key, or another field, is refused.
+        assert_eq!(
+            splice_piece(&key(8), "what", stored, &p, "x").map(|s| s.to_string()),
+            Err(SpliceError::Stale)
+        );
+        assert_eq!(
+            splice_piece(&k, "who", stored, &p, "x").map(|s| s.to_string()),
+            Err(SpliceError::Stale)
+        );
+    }
+
+    // ST: AUD-RM1-SUI-11 — a same-length change of the stored value is detected (the audit's
+    // harness case: `splice_piece("XYZdef", "text-0-3-6", "123")` must not succeed).
+    #[test]
+    fn same_length_change_is_stale() {
+        let k = key(3);
+        let v = pv(&k, "text", 0..3, "abcdef");
+        let p = piece(&v);
+        assert_eq!(
+            splice_piece(&k, "text", "abcdef", &p, "123").map(|s| s.to_string()),
+            Ok("123def".to_owned())
+        );
+        for changed in ["XYZdef", "abcdeF", "fedcba"] {
+            assert_eq!(changed.len(), 6);
+            assert_eq!(
+                splice_piece(&k, "text", changed, &p, "123").map(|s| s.to_string()),
+                Err(SpliceError::Stale),
+                "{changed}"
+            );
+        }
     }
 
     #[test]
@@ -423,6 +574,23 @@ mod tests {
     }
 
     proptest! {
+        // ST: AUD-RM1-SUI-11 — any modification of the stored value (same length or not) makes
+        // every piece of the old value stale.
+        #[test]
+        fn any_change_is_stale(s in "[a-z]{1,40}", i in 0usize..40, c in "[A-Z]") {
+            let k = key(9);
+            let i = i % s.len();
+            let mut changed = s.clone();
+            changed.replace_range(i..i + 1, &c);
+            let v = pv(&k, "text", 0..s.len(), &s);
+            let p = piece(&v);
+            prop_assert!(splice_piece(&k, "text", &s, &p, "z").is_ok());
+            prop_assert_eq!(
+                splice_piece(&k, "text", &changed, &p, "z").map(|x| x.to_string()),
+                Err(SpliceError::Stale)
+            );
+        }
+
         // ST: AUD-RM1-SUI-01 — pieces cover the text exactly, on char boundaries, each within
         // the escaped budget.
         #[test]

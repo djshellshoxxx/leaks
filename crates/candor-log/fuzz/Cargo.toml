@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # cargo-fuzz layout (ST-051 fuzz_audit_log_verify; AUD-RM1-LOG-10). Run with:
-#   cargo +nightly fuzz run <target>   (from crates/candor-log)
+#   mkdir -p fuzz/corpus/<target> && cp -n fuzz/seeds/<target>/* fuzz/corpus/<target>/
+#   cargo +nightly fuzz run <target> fuzz/corpus/<target>   (from crates/candor-log)
+# Committed seed inputs live in fuzz/seeds/<target>/; fuzz/corpus/ and
+# fuzz/artifacts/ are generated working state (gitignored).
 # Own workspace so the main workspace never builds libFuzzer (the root
 # `members = ["crates/*"]` glob does not reach this nested directory).
 # No network, no filesystem access: every target works on in-memory bytes.

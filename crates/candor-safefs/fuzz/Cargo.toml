@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0 OR MIT
 # cargo-fuzz layout (29 §4: ST-048 fuzz_safefs_names, ST-049 fuzz_archive). Run with:
-#   cargo +nightly fuzz run <target>   (from crates/candor-safefs)
+#   mkdir -p fuzz/corpus/<target> && cp -n fuzz/seeds/<target>/* fuzz/corpus/<target>/
+#   cargo +nightly fuzz run <target> fuzz/corpus/<target>   (from crates/candor-safefs)
+# Committed seed inputs live in fuzz/seeds/<target>/; fuzz/corpus/ and
+# fuzz/artifacts/ are generated working state (gitignored).
 # Own workspace so the main workspace never builds libFuzzer (same as candor-core/fuzz;
 # the root `members = ["crates/*"]` glob does not reach this nested directory).
 # The archive targets write only below a private 0700 temp root that is

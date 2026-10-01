@@ -325,8 +325,16 @@ pub struct PageContext {
     pub mode: Mode,
     /// Organisation label (deployment configuration).
     pub org: String,
-    /// Single-use form token `ft` (11 §5.7). `None` on session-less GET pages.
+    /// Single-use form token, rendered as the hidden `csrf` field in **every** form
+    /// (ADR-051(4); 11 §5.7 calls it `ft`). Pre-session pages (S01, S02, S03, S11 login, Leave,
+    /// error pages) carry a pre-session token that C-06 binds to a short-lived pre-session
+    /// cookie (AUD-RM1-SUI-06). Rendering a page that contains a form fails closed with
+    /// `RenderError::MissingData("form token")` when this is `None`.
     pub form_token: Option<String>,
+    /// Per-session key binding `piece` fields of long values to the stored value
+    /// (AUD-RM1-SUI-11). Required when a long draft or answer is split into pieces; the render
+    /// fails closed with `RenderError::MissingData("piece key")` otherwise.
+    pub piece_key: Option<crate::PieceKey>,
     /// Session timers, when the page is rendered inside a session.
     pub session: Option<SessionTimers>,
     /// Warning banner inputs.

@@ -130,7 +130,7 @@ sui-landing-b1 = Don't use a work computer, work phone or work network.
 # @class critical
 sui-landing-b2 = Use Tor Browser set to "Safest".
 # @class critical
-sui-landing-b3 = This site can't see your internet address, but it can't protect a computer or phone that your employer watches.
+sui-landing-b3 = In Tor Browser, this site can't see your internet address, but it can't protect a computer or phone that your employer watches.
 sui-landing-start = Start a new report
 sui-landing-return = I have a passphrase
 sui-landing-guide = Read the safety guide
@@ -156,7 +156,7 @@ sui-status-step = How this site protects you
 sui-status-h1 = How this site protects you
 sui-status-connection = Connection
 # @class critical
-sui-status-connection-dd = Through Tor (onion address). This site cannot see your internet address.
+sui-status-connection-dd = Through Tor (onion address). In Tor Browser, this site cannot see your internet address.
 sui-status-address = Check the address
 # @class critical
 sui-status-address-dd = It should match the address on { $info } or on printed material from { $org }. If it doesn't, leave.
@@ -167,7 +167,7 @@ sui-status-js-off = JavaScript is off ✓
 sui-status-js-on = JavaScript is on: set Safest
 sui-status-mode = Mode
 # @class tier0
-sui-status-mode-anonymous = ANONYMOUS: we don't know who you are unless you tell us.
+sui-status-mode-anonymous = ANONYMOUS: Candor does not collect who you are. Your writing and files can still identify you.
 # @class tier0
 sui-status-mode-confidential = CONFIDENTIAL, NOT ANONYMOUS: your name is locked for { $custodian }.
 # @class tier0
@@ -225,7 +225,7 @@ sui-new-mode-legend = Do you want to tell us who you are?
 # @class tier0
 sui-new-mode-anon = No, stay anonymous (recommended)
 # @class tier0
-sui-new-mode-anon-consequence = We won't know who you are unless you tell us later.
+sui-new-mode-anon-consequence = Candor does not collect who you are. Your writing and files can still identify you.
 # @class tier0
 sui-new-mode-conf = Yes, but keep my name confidential
 # @class tier0
@@ -637,6 +637,7 @@ sui-conv-recipients = Your messages go only to people who could read your first 
 sui-conv-reply = Write a message
 sui-conv-text = Your message
 sui-conv-file = Add a file (optional)
+sui-conv-file-separate = Adding a file is a separate step: it does not send or save the message text above. Send your message first, or add the file before you write.
 # @class tier0
 sui-conv-send-anonymous = Send message
 # @class tier0

@@ -30,18 +30,20 @@ pub use files::{FileClass, classify};
 pub use locale::{CatalogError, Dir, Locale, StringClass, catalog_keys, string_class};
 pub use model::*;
 pub use page::{
-    MAX_CSS_BYTES, MAX_SVG_BYTES, OverBudget, PERMISSIONS_POLICY, PROHIBITED_HEADERS, Page,
-    SizeClass, content_security_policy, pad_html, robots_txt, stylesheet, stylesheet_hash,
+    HeaderError, MAX_CSS_BYTES, MAX_SET_COOKIE_BYTES, MAX_SVG_BYTES, OverBudget, PAD_HEADER,
+    PERMISSIONS_POLICY, PROHIBITED_HEADERS, Page, SizeClass, content_security_policy,
+    finalize_headers, pad_html, reason_phrase, robots_txt, stylesheet, stylesheet_hash,
 };
 pub use paging::{
-    PART_FIELD, PIECE_FIELD, PieceRef, SHOWN_FIELD, SpliceError, escaped_len, parse_piece,
+    PART_FIELD, PIECE_FIELD, PieceKey, PieceRef, SHOWN_FIELD, SpliceError, escaped_len, parse_piece,
     splice_piece,
 };
 pub use routes::Route;
 pub use screens::Screen;
 pub use tips::Tip;
 
-/// Name of the hidden single-use form-token field (11 §5.7 `ft`; 08 SW-* `csrf`).
+/// Name of the hidden single-use form-token field in every form: `csrf` (ADR-051(4), 08 SW-*;
+/// 11 §5.7 still says `ft`, recorded as spec feedback).
 pub const FORM_TOKEN_FIELD: &str = "csrf";
 
 /// Rendering failure. All variants are deployment or programming defects; C-06 answers with
@@ -60,6 +62,8 @@ pub enum RenderError {
     Template(String),
     /// The page exceeds its size-class budget.
     OverBudget(OverBudget),
+    /// The response head cannot be padded to its fixed length (AUD-RM1-SUI-05).
+    Header(HeaderError),
 }
 
 impl fmt::Display for RenderError {
@@ -72,6 +76,7 @@ impl fmt::Display for RenderError {
             RenderError::MissingData(what) => write!(f, "missing screen data: {what}"),
             RenderError::Template(_) => f.write_str("template error"),
             RenderError::OverBudget(o) => write!(f, "page over budget ({} bytes)", o.len),
+            RenderError::Header(e) => write!(f, "{e}"),
         }
     }
 }
@@ -140,6 +145,10 @@ fn validate(screen: Screen, vm: &ViewModel) -> Result<(), RenderError> {
 
 /// Renders `screen` for `locale` and pads it to its size class.
 ///
+/// The response head is padded too ([`PAD_HEADER`]): its serialized length is
+/// [`SizeClass::head_bytes`] for every screen, locale and session state. C-06 adds its cookie
+/// with [`finalize_headers`], which keeps that length (AUD-RM1-SUI-05).
+///
 /// The size class comes only from `vm.ctx.method` and `vm.ctx.has_session_cookie`
 /// (11 §5.4), except the 405 page, which is always P1 (SUI-056).
 ///
@@ -182,13 +191,18 @@ pub fn render(screen: Screen, vm: &ViewModel, locale: &Locale) -> Result<Page, R
     if !missing.is_empty() {
         return Err(RenderError::MissingStrings(missing));
     }
+    // AUD-RM1-SUI-06: every form carries a token (a pre-session one before login); a page with
+    // a form and no token fails closed instead of rendering an unprotected form.
+    if vm.ctx.form_token.is_none() && html.contains("<form") {
+        return Err(RenderError::MissingData("form token"));
+    }
     let (part, parts) = match &pv.paging {
         paging::Paging::Show { parts, cur, .. } => (*cur, parts.len()),
         paging::Paging::Off | paging::Paging::Measure => (0, 1),
     };
     let body = pad_html(&html, class).map_err(RenderError::OverBudget)?;
     let headers = page::html_headers(locale.tag(), body.len(), screen.clears_site_data());
-    Ok(Page {
+    let mut page = Page {
         status: screen.status(),
         headers,
         body,
@@ -196,7 +210,9 @@ pub fn render(screen: Screen, vm: &ViewModel, locale: &Locale) -> Result<Page, R
         unpadded_len: html.len(),
         part,
         parts,
-    })
+    };
+    finalize_headers(&mut page, None).map_err(RenderError::Header)?;
+    Ok(page)
 }
 
 /// Renders the screen template into a fixed buffer of `cap` bytes (`None` = does not fit).

@@ -59,7 +59,7 @@ sops-group-j = J. More situations
 # @class critical
 sops-limits-title = What this site can and cannot do
 # @class critical
-sops-limits-n1 = **What this site does.** This site hides your internet address from us and from the people who read reports. We don't ask for your name. Our systems keep only the day your report is picked up for the team, not the time. The team sees { $profile ->
+sops-limits-n1 = **What this site does.** When you use Tor Browser, your internet address is hidden from us and from the people who read reports. We don't ask for your name. Our systems keep only the day your report is picked up for the team, not the time. The team sees { $profile ->
     [high] only the week
    *[other] only that day
 }.

@@ -38,6 +38,42 @@ pub const REPLY_WINDOW_DAYS: u32 = 30;
 /// Largest `reply_ct`: the entry is `u32 entry_len ‖ reply_ct` padded to 70,000 B
 /// (04 §13.5), so 4 bytes are reserved for the length prefix.
 pub const MAX_REPLY_CT: usize = REPLY_ENTRY_LEN - 4;
+/// REPLY size buckets: `padded_plaintext_len = 4096 × k`, k = 1..=16 (04 §13.6).
+pub const REPLY_BUCKETS: u8 = 16;
+/// REPLY bucket unit (04 §13.6).
+pub const REPLY_BUCKET_UNIT: usize = 4096;
+/// Fixed CANDOR-STD-1 overhead of a `reply_ct = SealedObject(REPLY) ‖ stanza (1)`
+/// (04 §13.5): CoreHeader 128 + header_mac 32 + one STREAM tag 16 (every REPLY
+/// bucket is one 64 KiB chunk) + HPKE_BASE stanza (70 fixed + X-Wing enc 1120 +
+/// u32 ct_len 4 + wrapped CK 32 + tag 16 = 1242). Checked against candor-core in
+/// the tests (`reply_ct_len_matches_core`).
+pub const REPLY_CT_OVERHEAD_STD: usize = 128 + 32 + 16 + (70 + 1120 + 4 + 32 + 16);
+
+/// Canonical `reply_ct` length of REPLY bucket `k` (AUD-RM2-STO-19/20): the only
+/// lengths the store accepts, for real replies and dummies alike.
+#[must_use]
+pub fn reply_ct_len(bucket: u8) -> Option<usize> {
+    if !(1..=REPLY_BUCKETS).contains(&bucket) {
+        return None;
+    }
+    usize::from(bucket)
+        .checked_mul(REPLY_BUCKET_UNIT)?
+        .checked_add(REPLY_CT_OVERHEAD_STD)
+}
+
+/// The single function that derives the stored `reply.size_bucket` from a
+/// `reply_ct` length, for real and dummy rows alike (AUD-RM2-STO-20). `None`
+/// for any non-canonical length.
+#[must_use]
+pub fn reply_bucket_of_len(len: usize) -> Option<u8> {
+    let body = len.checked_sub(REPLY_CT_OVERHEAD_STD)?;
+    if body == 0 || body % REPLY_BUCKET_UNIT != 0 {
+        return None;
+    }
+    let k = u8::try_from(body / REPLY_BUCKET_UNIT).ok()?;
+    (reply_ct_len(k) == Some(len)).then_some(k)
+}
+
 /// Tier W fixed mailbox size (08 §3.8 `N_fixed = 32`).
 pub const MAILBOX_SLOTS: u8 = 32;
 /// Replies per RL-05 push (08 RL-05).
@@ -587,6 +623,11 @@ pub struct MetaSnapshot {
     pub last_batch_no: u64,
     /// KD high-water mark.
     pub kd: KdHighWater,
+    /// Last Z-CORE-signed deletion-list head the store verified (acknowledged
+    /// through RL-11 or confirmed by RL-12). Carried in backups so that a
+    /// restored node only accepts a pushed list that chains to it
+    /// (AUD-RM2-STO-22).
+    pub deletion_head: Option<crate::deletion::SignedDeletionHead>,
 }
 
 impl fmt::Debug for MetaSnapshot {
@@ -627,6 +668,42 @@ mod tests {
         // 2026-12-31 -> 2027-01-01
         assert_eq!(Day(20818).next_month_start(), Day(20819));
         assert_eq!(Day(0).month_start(), Day(0));
+    }
+
+    /// AUD-RM2-STO-19/20: the canonical REPLY lengths match candor-core's STREAM
+    /// and HPKE_BASE stanza encodings, and length ↔ bucket is a bijection.
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn reply_ct_len_matches_core() {
+        use candor_core::stanza::{HpkeWrapContext, WrapStanza};
+        use candor_core::{Suite, kem::KemKeyPair};
+        let kp = KemKeyPair::derive(Suite::CandorStd1, &[7u8; 32]).unwrap();
+        let ctx = HpkeWrapContext::Reply {
+            tenant_id: [1; 16],
+            channel_id: [2; 16],
+            mailbox_id: [3; 32],
+        };
+        let st = WrapStanza::seal_hpke(Suite::CandorStd1, &kp.public, [0; 32], [9; 32], &ctx, &[5u8; 32])
+            .unwrap();
+        let stanza_len = st.encode().unwrap().len();
+        for k in 1..=REPLY_BUCKETS {
+            let pt = u64::from(k) * 4096;
+            let payload = usize::try_from(candor_core::stream::ciphertext_len(pt).unwrap()).unwrap();
+            let expect = candor_core::header::HEADER_LEN
+                + candor_core::header::HEADER_MAC_LEN
+                + payload
+                + stanza_len;
+            assert_eq!(reply_ct_len(k), Some(expect), "bucket {k}");
+            assert!(expect <= MAX_REPLY_CT);
+            assert_eq!(reply_bucket_of_len(expect), Some(k));
+            assert_eq!(reply_bucket_of_len(expect + 1), None);
+            assert_eq!(reply_bucket_of_len(expect - 1), None);
+        }
+        assert_eq!(reply_ct_len(0), None);
+        assert_eq!(reply_ct_len(17), None);
+        assert_eq!(reply_bucket_of_len(0), None);
+        assert_eq!(reply_bucket_of_len(REPLY_CT_OVERHEAD_STD), None);
+        assert_eq!(reply_bucket_of_len(usize::MAX), None);
     }
 
     #[test]

@@ -6,14 +6,14 @@ use std::collections::{BTreeMap, HashSet};
 
 use subtle::ConstantTimeEq;
 
-use crate::deletion::{DeletionEntry, verify_chain};
+use crate::deletion::{DeletionEntry, SignedDeletionHead, verify_chain};
 use crate::error::{Result, StoreError};
 use crate::types::{
     BackupSnapshot, ClaimLimits, CommitEnvelope, CounterDelta, DISPOSITION_CT_LEN_STD,
     GROUP_OBJECTS, IncomingReply, InstallOutcome, KdHighWater, MAX_CLAIM_BYTES, MAX_CLAIM_OBJECTS,
     MAX_PART_PADDED_SIZE, MAX_PREFS_CT, MAX_PUSHED_DELETION_LIST, MAX_RELEASE_OFFSET_DAYS,
     MAX_REPLY_CT, MAX_SNAPSHOT_BODY, MAX_SNAPSHOT_SIGNATURES, NewAccount, SLOT_BLOCK_LEN_STD,
-    VerifiedSnapshot, XWING_PK_LEN,
+    TenantId, VerifiedSnapshot, XWING_PK_LEN, reply_bucket_of_len,
 };
 
 pub(crate) fn has_duplicates<T: PartialEq>(v: &[T]) -> bool {
@@ -110,6 +110,25 @@ pub(crate) fn backup(b: &BackupSnapshot) -> Result<()> {
         }
         day_i32(e.del_day)?;
     }
+    // The database accepts only chain-extending inserts (AUD-RM2-STO-21): the
+    // backup list must be one contiguous, linked run.
+    if b.deletion_list.windows(2).any(|w| match w {
+        [x, y] => !links(x, y),
+        _ => false,
+    }) || b
+        .deletion_list
+        .first()
+        .is_some_and(|e| e.seq == 1 && e.prev_hash != [0u8; 32])
+    {
+        return Err(StoreError::DeletionList("backup list not a chain"));
+    }
+    if let Some(h) = &b.meta.deletion_head {
+        let map: BTreeMap<u64, &DeletionEntry> =
+            b.deletion_list.iter().map(|e| (e.seq, e)).collect();
+        if !links_to_head(&map, h) {
+            return Err(StoreError::DeletionList("backup head not in backup list"));
+        }
+    }
     if let Some(d) = b.meta.kd.checkpoint_day {
         day_i32(d)?;
     }
@@ -163,11 +182,14 @@ pub(crate) fn fill_batch(sizes: &[u64], limits: ClaimLimits) -> Vec<usize> {
     out
 }
 
-/// Structural check of a pushed reply (other than deletion-list drops).
+/// Structural check of a pushed reply (other than deletion-list drops). The
+/// ciphertext must have the canonical length of its REPLY bucket, and the bucket
+/// the caller reports must be the one [`reply_bucket_of_len`] derives, the same
+/// function that sizes dummies (AUD-RM2-STO-20).
 pub(crate) fn reply(r: &IncomingReply) -> bool {
     !r.reply_ct.is_empty()
         && r.reply_ct.len() <= MAX_REPLY_CT
-        && (1..=16).contains(&r.size_bucket)
+        && reply_bucket_of_len(r.reply_ct.len()) == Some(r.size_bucket)
         && (r.mailbox_id.is_some() || r.account.is_none())
 }
 
@@ -240,56 +262,115 @@ impl From<SnapshotDecision> for InstallOutcome {
     }
 }
 
-/// RL-12 step 1 (outside any lock, AUD-RM2-STO-12): bound the size and verify
-/// the pushed run's internal chain and every strict Ed25519 signature under K31.
-pub(crate) fn verify_pushed(pushed: &[DeletionEntry], k31_pk: &[u8; 32]) -> Result<()> {
+/// RL-12 step 1 (outside any lock, AUD-RM2-STO-12/22): bound the size, verify
+/// the Z-CORE head attestation under `core_pk`, and verify the pushed run's
+/// internal chain and every strict Ed25519 signature under K31.
+pub(crate) fn verify_pushed(
+    pushed: &[DeletionEntry],
+    k31_pk: &[u8; 32],
+    head: &SignedDeletionHead,
+    tenant: &TenantId,
+    core_pk: &[u8; 32],
+) -> Result<()> {
     if pushed.len() > MAX_PUSHED_DELETION_LIST {
         return Err(StoreError::InvalidInput("deletion list too long"));
     }
+    head.verify(tenant, core_pk)?;
     verify_chain(pushed, k31_pk, None)
 }
 
-fn links(prev: &DeletionEntry, next: &DeletionEntry) -> bool {
+pub(crate) fn links(prev: &DeletionEntry, next: &DeletionEntry) -> bool {
     prev.seq.checked_add(1) == Some(next.seq)
         && bool::from(prev.next_prev_hash().ct_eq(&next.prev_hash))
 }
 
-/// RL-12 step 2 (under the row lock): merge an already signature-verified
-/// pushed run into the local list (AUD-RM2-STO-04). `local` is sorted by seq;
-/// `acked` is the highest seq the relay has acknowledged; `core_head` is the
-/// Z-CORE head seq the relay asserts. Fails closed on:
-/// - a non-empty push whose last seq is not `core_head` (truncation);
-/// - an empty push when `core_head > 0` (missing list);
-/// - `core_head < acked` (Z-CORE lost entries it acknowledged);
+/// Whether the chain in `map` contains the head `h`: the entry at `h.seq`
+/// hashes to `h.head_hash`, or (if that entry was pruned) its successor links to
+/// it. `seq = 0` is the empty chain.
+pub(crate) fn links_to_head(map: &BTreeMap<u64, &DeletionEntry>, h: &SignedDeletionHead) -> bool {
+    if h.seq == 0 {
+        return true;
+    }
+    if let Some(e) = map.get(&h.seq) {
+        return bool::from(e.next_prev_hash().ct_eq(&h.head_hash));
+    }
+    h.seq
+        .checked_add(1)
+        .and_then(|s| map.get(&s))
+        .is_some_and(|n| bool::from(n.prev_hash.ct_eq(&h.head_hash)))
+}
+
+/// RL-11 acknowledgement of a verified Z-CORE head (AUD-RM2-STO-21): the head
+/// must lie within the local chain and match it. Returns `true` when the stored
+/// acknowledged head must advance; an older head changes nothing.
+pub(crate) fn ack_head(
+    local: &[DeletionEntry],
+    current: Option<&SignedDeletionHead>,
+    head: &SignedDeletionHead,
+) -> Result<bool> {
+    let cur = current.map_or(0, |c| c.seq);
+    if head.seq < cur {
+        return Ok(false);
+    }
+    if let Some(c) = current
+        && head.seq == cur
+    {
+        return if bool::from(c.head_hash.ct_eq(&head.head_hash)) {
+            Ok(false)
+        } else {
+            Err(StoreError::DeletionList("head differs from acknowledged head"))
+        };
+    }
+    let local_head = local.last().map_or(0, |e| e.seq);
+    if head.seq > local_head {
+        return Err(StoreError::InvalidInput("head beyond local list"));
+    }
+    let map: BTreeMap<u64, &DeletionEntry> = local.iter().map(|e| (e.seq, e)).collect();
+    if !links_to_head(&map, head) {
+        return Err(StoreError::DeletionList("head does not match local chain"));
+    }
+    Ok(true)
+}
+
+/// RL-12 step 2 (under the row lock): merge an already verified pushed run
+/// into the local list (AUD-RM2-STO-04/22). `local` is sorted by seq;
+/// `verified` is the last Z-CORE head the store verified (kept across restore);
+/// `head` is the verified Z-CORE head of this push. Fails closed on:
+/// - a head older than the verified head;
+/// - a non-empty push that does not end exactly at the signed head (seq and
+///   chain hash: truncation or a relay-claimed head);
+/// - an empty push unless the local chain already contains the head;
 /// - a gap between the local head and the pushed run;
 /// - a run that neither links to a local entry nor overlaps the local list
 ///   (unanchored), unless the local list is empty;
 /// - any overlapping entry that differs (fork), a filled hole that does not link
-///   to its local successor, or a merged list that is not contiguous.
+///   to its local successor, or a merged list that is not contiguous;
+/// - a merged chain that does not contain the last verified head.
 ///
-/// Returns the pushed entries that are new locally (marked relayed).
+/// Returns the pushed entries that are new locally.
 pub(crate) fn merge_pushed(
     local: &[DeletionEntry],
-    acked: u64,
+    verified: Option<&SignedDeletionHead>,
     pushed: &[DeletionEntry],
-    core_head: u64,
+    head: &SignedDeletionHead,
 ) -> Result<Vec<DeletionEntry>> {
     if pushed.len() > MAX_PUSHED_DELETION_LIST {
         return Err(StoreError::InvalidInput("deletion list too long"));
     }
-    if core_head < acked {
+    if head.seq < verified.map_or(0, |v| v.seq) {
         return Err(StoreError::DeletionList(
-            "Z-CORE head behind acknowledged entries",
+            "Z-CORE head behind verified head",
         ));
     }
+    let map: BTreeMap<u64, &DeletionEntry> = local.iter().map(|e| (e.seq, e)).collect();
     let Some(last) = pushed.last() else {
-        return if core_head == 0 {
+        return if links_to_head(&map, head) && verified.is_none_or(|v| links_to_head(&map, v)) {
             Ok(Vec::new())
         } else {
             Err(StoreError::DeletionList("empty push for non-empty list"))
         };
     };
-    if last.seq != core_head {
+    if last.seq != head.seq || !bool::from(last.next_prev_hash().ct_eq(&head.head_hash)) {
         return Err(StoreError::DeletionList("truncated push"));
     }
     // Internal contiguity again (cheap; signatures were verified before the lock).
@@ -299,7 +380,6 @@ pub(crate) fn merge_pushed(
     }) {
         return Err(StoreError::DeletionList("broken hash chain"));
     }
-    let map: BTreeMap<u64, &DeletionEntry> = local.iter().map(|e| (e.seq, e)).collect();
     let first = pushed.first().ok_or(StoreError::DeletionList("empty"))?;
     if first.seq == 1 && first.prev_hash != [0u8; 32] {
         return Err(StoreError::DeletionList("bad genesis link"));
@@ -333,7 +413,7 @@ pub(crate) fn merge_pushed(
             }
             None => {
                 let mut e = *p;
-                e.relayed = true;
+                e.relayed = false;
                 new.push(e);
             }
         }
@@ -347,19 +427,36 @@ pub(crate) fn merge_pushed(
         }
     }
     // The merged list must be contiguous from its lowest retained seq.
-    let mut seqs: Vec<u64> = map
+    let mut merged = map;
+    for n in &new {
+        merged.insert(n.seq, n);
+    }
+    if merged
         .keys()
-        .copied()
-        .chain(new.iter().map(|e| e.seq))
-        .collect();
-    seqs.sort_unstable();
-    if seqs
-        .windows(2)
-        .any(|w| matches!(w, [a, b] if a.checked_add(1) != Some(*b)))
+        .zip(merged.keys().skip(1))
+        .any(|(a, b)| a.checked_add(1) != Some(*b))
     {
         return Err(StoreError::DeletionList("merged list not contiguous"));
     }
+    // AUD-RM2-STO-22: the result must still contain the last verified head.
+    if let Some(v) = verified
+        && !links_to_head(&merged, v)
+    {
+        return Err(StoreError::DeletionList(
+            "push does not chain to the verified head",
+        ));
+    }
     Ok(new)
+}
+
+/// Insertion order that keeps every insert chain-extending for the database
+/// guard (AUD-RM2-STO-21): entries below the local list in descending order,
+/// then entries above it in ascending order.
+pub(crate) fn insertion_order(local_min: Option<u64>, new: &mut [DeletionEntry]) {
+    new.sort_by_key(|e| match local_min {
+        Some(m) if e.seq < m => (0u8, u64::MAX.saturating_sub(e.seq)),
+        _ => (1u8, e.seq),
+    });
 }
 
 #[cfg(test)]
@@ -423,71 +520,157 @@ mod tests {
         );
     }
 
-    fn chain(n: usize) -> (Vec<DeletionEntry>, [u8; 32]) {
+    fn chain_seed(n: usize, seed: u8) -> (Vec<DeletionEntry>, [u8; 32]) {
         use crate::deletion::{DeletionKind, Ed25519DeletionSigner, make_entry};
         let s = Ed25519DeletionSigner::new(candor_core::sig::SigningKey::from_seed(&[4u8; 32]));
         let mut v: Vec<DeletionEntry> = Vec::new();
         for i in 0..n {
-            let e = make_entry(v.last(), DeletionKind::Account, [i as u8; 32], Day(9), &s).unwrap();
+            let e = make_entry(
+                v.last(),
+                DeletionKind::Account,
+                [i as u8 ^ seed; 32],
+                Day(9),
+                &s,
+            )
+            .unwrap();
             v.push(e);
         }
         (v, s.verifying_key())
     }
 
-    /// AUD-RM2-STO-04: gapped, truncated, empty, unanchored and forked pushes
-    /// are rejected; a proper push merges.
+    fn chain(n: usize) -> (Vec<DeletionEntry>, [u8; 32]) {
+        chain_seed(n, 0)
+    }
+
+    const T: TenantId = TenantId([0x11; 16]);
+
+    fn core_key() -> candor_core::sig::SigningKey {
+        candor_core::sig::SigningKey::from_seed(&[0x7c; 32])
+    }
+
+    fn head_of(e: Option<&DeletionEntry>) -> SignedDeletionHead {
+        SignedDeletionHead::sign(&T, e, &core_key())
+    }
+
+    /// AUD-RM2-STO-04/22: gapped, truncated, empty, unanchored and forked pushes
+    /// are rejected; a push must end at the signed head and chain to the last
+    /// verified head; a proper push merges.
     #[test]
     fn merge_rules() {
         let (all, pk) = chain(8);
-        verify_pushed(&all, &pk).unwrap();
+        let cpk = core_key().verifying_key_bytes();
+        let h8 = head_of(all.last());
+        verify_pushed(&all, &pk, &h8, &T, &cpk).unwrap();
         let local = &all[..2];
         // Gap: local [1,2] + pushed [5..=6].
         assert_eq!(
-            merge_pushed(local, 0, &all[4..6], 6),
+            merge_pushed(local, None, &all[4..6], &head_of(all.get(5))),
             Err(StoreError::DeletionList("gap after local head"))
         );
-        // Empty push while Z-CORE has entries.
-        assert!(merge_pushed(local, 0, &[], 6).is_err());
-        // Empty push when Z-CORE has none and nothing was acknowledged: fine.
-        assert_eq!(merge_pushed(local, 0, &[], 0).unwrap().len(), 0);
-        // Z-CORE behind what it acknowledged.
-        assert!(merge_pushed(local, 2, &[], 0).is_err());
-        // Truncated: the run ends before the asserted head.
+        // Empty push while Z-CORE has entries the local list lacks.
+        assert!(merge_pushed(local, None, &[], &head_of(all.get(5))).is_err());
+        // Empty push when Z-CORE has none: fine.
+        assert_eq!(merge_pushed(local, None, &[], &head_of(None)).unwrap().len(), 0);
+        // Empty push of a head the local list already holds: fine.
+        assert_eq!(merge_pushed(local, None, &[], &head_of(all.get(1))).unwrap().len(), 0);
+        // Z-CORE head behind the verified head.
+        assert!(merge_pushed(local, Some(&head_of(all.get(1))), &[], &head_of(None)).is_err());
+        // Truncated: the run ends before the signed head.
         assert_eq!(
-            merge_pushed(local, 0, &all[..5], 8),
+            merge_pushed(local, None, &all[..5], &h8),
             Err(StoreError::DeletionList("truncated push"))
         );
+        // A head whose hash is not the run's chain hash.
+        let mut bent = h8;
+        bent.head_hash[0] ^= 1;
+        assert!(merge_pushed(local, None, &all[2..], &bent).is_err());
         // Proper: anchored at 2, through the head.
-        let new = merge_pushed(local, 0, &all[2..], 8).unwrap();
+        let new = merge_pushed(local, Some(&head_of(all.get(1))), &all[2..], &h8).unwrap();
         assert_eq!(
             new.iter().map(|e| e.seq).collect::<Vec<_>>(),
             vec![3, 4, 5, 6, 7, 8]
         );
-        assert!(new.iter().all(|e| e.relayed));
         // Overlapping full copy.
-        assert_eq!(merge_pushed(local, 0, &all, 8).unwrap().len(), 6);
+        assert_eq!(merge_pushed(local, None, &all, &h8).unwrap().len(), 6);
         // Local list empty: unanchored suffix accepted (only option).
-        assert_eq!(merge_pushed(&[], 0, &all[3..], 8).unwrap().len(), 5);
+        assert_eq!(merge_pushed(&[], None, &all[3..], &h8).unwrap().len(), 5);
         // Unanchored with a local list: other chain's suffix.
-        let (other, _) = {
-            use crate::deletion::{DeletionKind, Ed25519DeletionSigner, make_entry};
-            let s = Ed25519DeletionSigner::new(candor_core::sig::SigningKey::from_seed(&[4u8; 32]));
-            let mut v: Vec<DeletionEntry> = Vec::new();
-            for i in 0..4 {
-                v.push(
-                    make_entry(v.last(), DeletionKind::Reply, [i as u8; 32], Day(9), &s).unwrap(),
-                );
-            }
-            (v, ())
-        };
-        assert!(merge_pushed(local, 0, &other[2..], 4).is_err());
+        let (other, _) = chain_seed(4, 0x80);
+        assert!(merge_pushed(local, None, &other[2..], &head_of(other.last())).is_err());
         // Fork on overlap.
         assert_eq!(
-            merge_pushed(&all[..3], 0, &other, 4),
+            merge_pushed(&all[..3], None, &other, &head_of(other.last())),
             Err(StoreError::DeletionList("fork with local list"))
         );
         // Local head beyond Z-CORE (unrelayed local entries) is accepted.
-        assert_eq!(merge_pushed(&all[..6], 0, &all[..4], 4).unwrap().len(), 0);
+        assert_eq!(
+            merge_pushed(&all[..6], None, &all[..4], &head_of(all.get(3)))
+                .unwrap()
+                .len(),
+            0
+        );
+        // AUD-RM2-STO-22: the verified head (seq 2 of `all`) is the anchor; a
+        // pushed chain that does not contain it is refused even on an empty
+        // local list.
+        let v2 = head_of(all.get(1));
+        assert_eq!(
+            merge_pushed(&[], Some(&v2), &other, &head_of(other.last())),
+            Err(StoreError::DeletionList(
+                "push does not chain to the verified head"
+            ))
+        );
+        // ... and a run starting after a pruned verified head links via the
+        // successor's prev_hash.
+        assert_eq!(merge_pushed(&[], Some(&v2), &all[2..], &h8).unwrap().len(), 6);
+        assert!(merge_pushed(&[], Some(&v2), &all[3..], &h8).is_err());
+    }
+
+    /// The head attestation binds tenant, seq and hash to the Z-CORE key.
+    #[test]
+    fn head_signature_rules() {
+        let (all, pk) = chain(3);
+        let cpk = core_key().verifying_key_bytes();
+        let h = head_of(all.last());
+        h.verify(&T, &cpk).unwrap();
+        assert!(h.verify(&TenantId([0x22; 16]), &cpk).is_err());
+        assert!(h.verify(&T, &pk).is_err(), "K31 is not the Z-CORE key");
+        let mut s = h;
+        s.seq = 2;
+        assert!(s.verify(&T, &cpk).is_err());
+        let mut z = h;
+        z.head_hash = [0; 32];
+        assert!(z.verify(&T, &cpk).is_err());
+        assert!(verify_pushed(&all, &pk, &s, &T, &cpk).is_err());
+    }
+
+    /// AUD-RM2-STO-21: acknowledgement only of a head the local chain contains.
+    #[test]
+    fn ack_rules() {
+        let (all, _) = chain(5);
+        let h3 = head_of(all.get(2));
+        assert_eq!(ack_head(&all, None, &h3), Ok(true));
+        assert_eq!(ack_head(&all, Some(&h3), &h3), Ok(false));
+        assert_eq!(ack_head(&all, Some(&h3), &head_of(all.get(1))), Ok(false));
+        assert!(matches!(
+            ack_head(&all[..2], None, &h3),
+            Err(StoreError::InvalidInput(_))
+        ));
+        let (other, _) = chain_seed(5, 0x80);
+        assert!(ack_head(&all, None, &head_of(other.get(2))).is_err());
+        // Pruned prefix: the successor's link proves the head.
+        assert_eq!(ack_head(&all[3..], None, &h3), Ok(true));
+        assert!(ack_head(&all[4..], None, &h3).is_err());
+    }
+
+    #[test]
+    fn insertion_order_keeps_chain_extending() {
+        let (all, _) = chain(10);
+        let mut new: Vec<DeletionEntry> = all[..3].iter().chain(&all[7..]).copied().collect();
+        insertion_order(Some(4), &mut new);
+        assert_eq!(
+            new.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![3, 2, 1, 8, 9, 10]
+        );
     }
 
     #[test]

@@ -207,3 +207,32 @@ Audit: `process/audits/AUDIT-RM1-candor-core.md` (commit `60e732f`). Lead decisi
 | CORE-16 | I | (b) Start-up self-test now includes an HPKE-PQ 0x647a base-mode open KAT (hpke-pq vector, encryption 0) with a tamper check. (a) **Deferred:** a strict deterministic-CBOR decoder for §13.4/§13.5 is a new component (owned with the consumers' schemas), not a fix. Weak-key check: X-Wing/Ed25519 keys are derived from 32-byte seeds and the PCT already runs on generation; nothing further identified. (c) Dev-dependency defaults (`serde`, `serde_json`, `hex`) are only `std`; test-only. | `selftest::tests::self_test_passes` |
 
 ### Fuzzing evidence (AUD-RM1-CORE-05/06)
+
+`cargo-fuzz 0.13.1`, `nightly-2026-09-28`, libFuzzer via `libfuzzer-sys =0.4.10`; each target ran 70 s (3 in parallel on 4 cores) from the committed seeds with the README `-max_len`, `-rss_limit_mb=2048 -timeout=20`. Corpora/artifacts were written to a scratch directory. No crash, leak, OOM or timeout, except one invariant failure in the new `fuzz_normalize` (see the spec finding below): it was a wrong assertion in the harness, the target was corrected and re-run clean. "cov" is libFuzzer's edge coverage; the audit's numbers (no seeds, 120 s) are given for comparison.
+
+| Target | Audit cov | cov at start (seeds) | cov at end | Executions |
+|---|---|---|---|---|
+| `fuzz_header` | 170 | 124 | 170 | 10,874,656 |
+| `fuzz_slot_block` | 40 | 1,859 | 1,870 | 1,038 (≈ 14/s: every input runs 16 X-Wing decapsulations and, when trial-open succeeds, 16 re-encapsulations) |
+| `fuzz_envelope_parse` | 126 | 2,322 | 2,462 | 91,474 |
+| `fuzz_stanza` | 64 | 1,926 | 1,987 | 267,979 |
+| `fuzz_record` | 535 | 518 | 571 | 410,940 |
+| `fuzz_stream_decrypt` | 586 | 636 | 701 | 146,879 |
+| `fuzz_hpke_open` (new) | — | 1,276 | 1,288 | 7,746 |
+| `fuzz_recipient_entry` (new) | — | 205 | 212 | 2,604,585 |
+| `fuzz_normalize` (new) | — | 504 | 623 | 247,019 |
+
+### Spec finding: §11.3 normalization is not idempotent for some non-ASCII input
+
+`fuzz_normalize` found that `normalize(normalize(p)) ≠ normalize(p)` for inputs such as `U+0130 U+031F`: NFKC runs before lowercasing, and the full lowercase mapping of U+0130 (`i U+0307`) followed by a combining mark of lower canonical class (U+031F, ccc 220) is not in NFKC order, so a second pass reorders it. The previous implementation behaves identically (the fixed-buffer version is byte-identical to it, proven by `normalize_matches_reference`). Derivation is unaffected for wordlist passphrases (ASCII after normalization, where idempotence holds and is fuzzed), and the implementation keeps the spec's definition so that keys stay reproducible. **Proposed amendment** (04 §11.3, ST-053): define `normalize = separators ∘ NFKC ∘ lowercase ∘ NFKC` (or Unicode `toNFKC_Casefold`), which is idempotent; ST-053 should state idempotence only for that definition.
+
+### Security self-review (AUD-RM1-CORE fixes)
+
+Reviewed the diff as an attacker (OWASP ASVS 5.0 L3 mindset):
+- **Secrets:** every new type holding CK-equivalent or seed-equivalent bytes (`RecipientListEntry`, `RecipientList`, `SealSecrets`, `SessionKey`, `Argon2Arena`, passphrase intermediates) zeroizes on drop, has no `Clone` and a redacted `Debug`; no new `Display`; error strings stay static. The new `Debug` of `SealedObject`/`ParsedObject` prints only the object type and lengths.
+- **Nonce reuse:** no public API can choose a STREAM key or nonce; a `PartId` yields one encryptor. Sealer variant hunt remains for the RM-2 audit (its current code no longer compiles against this API and must migrate per README).
+- **Hostile input:** new parsers (`RecipientListEntry::from_bytes`, slot-block entry tails in fuzzers) use `Reader`/checked lengths; `normalize` refuses > 1,024 bytes before allocating and never grows a buffer; `Wordlist::check` work is bounded by `word_count × N`.
+- **Fail closed:** stuck RNG → `Error::Rng`; Argon2 allocation failure → `Error::PasswordHash`; over-capacity normalization → `Error::Length`; slot context mismatch → refuse to seal.
+- **Timing:** comparisons on secrets use `subtle`; measured by `ct_timing` (|t| ≤ 2.05). `verify_slot_block`'s new duplicate-`key_id` check runs on the (CK-holder-visible) list and is not secret-dependent.
+- **Dependencies:** no new crates; `sha2`/`blake3` gain their `zeroize` features; `x25519-dalek` is a dev-dependency already in the lockfile.
+- **Residual risk:** memory locking is the process's job (CORE-02); compiler stack temporaries and `unicode-normalization`'s spill buffer are not wiped (CORE-03/07); CORE-13 typestate, CORE-15 AAD v2 and CORE-16(a) CBOR decoder are deferred as recorded above; ST-027 zeroization scan is not automated.

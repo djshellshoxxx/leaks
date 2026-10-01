@@ -31,6 +31,11 @@ fn channel(id: &str, name: &str, desc: &str, available: bool, independent: bool)
     }
 }
 
+/// The fixed, public test piece key (AUD-RM1-SUI-11). Never a production value.
+pub fn sample_piece_key() -> PieceKey {
+    PieceKey::new([0x5a; 32])
+}
+
 /// A sample view model for `screen` in `mode`, with or without errors.
 pub fn sample_view_model(screen: Screen, mode: Mode, with_errors: bool) -> ViewModel {
     let mut vm = ViewModel::default();
@@ -52,6 +57,7 @@ pub fn sample_view_model(screen: Screen, mode: Mode, with_errors: bool) -> ViewM
         mode,
         org: "Example Org".to_owned(),
         form_token: Some("Zm9ybS10b2tlbi1zYW1wbGU".to_owned()),
+        piece_key: Some(sample_piece_key()),
         session: session.then_some(SessionTimers {
             abs_remaining_secs: 5_400,
         }),
@@ -265,10 +271,9 @@ pub fn sample_view_model(screen: Screen, mode: Mode, with_errors: bool) -> ViewM
         at_submit: false,
     };
     if !session {
-        // Session-less GET pages: the landing page carries no token (its only form is Leave);
-        // others carry a pre-session token (08 SW-03).
-        vm.ctx.form_token =
-            (screen != Screen::Landing).then(|| "cHJlLXNlc3Npb24tdG9rZW4".to_owned());
+        // Session-less pages carry a pre-session token bound to a pre-session cookie
+        // (AUD-RM1-SUI-06; every form has a token).
+        vm.ctx.form_token = Some("cHJlLXNlc3Npb24tdG9rZW4".to_owned());
     }
     // Responses to POST-only routes.
     if matches!(

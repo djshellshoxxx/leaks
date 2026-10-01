@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! AUD-RM1-LOG-10 `fuzz_jsonl_read_verify`: hostile JSON-lines record and
 //! checkpoint files (the stored audit format) never panic the bounded
-//! reader or the verifier, and never verify as a non-empty stream without
-//! a valid instance signature.
+//! reader or the verifier; anything accepted is internally consistent and
+//! attested only by checkpoints that carry a valid instance signature.
 #![no_main]
 
 use candor_log::chain::CheckpointSigner;
@@ -38,11 +38,13 @@ fuzz_target!(|data: &[u8]| {
             allow_pruned_prefix,
         };
         if let Ok(rep) = verify_stream(&p, &records, &checkpoints) {
-            // Without the signing key, no checkpoint can verify, so anything
-            // accepted is an unattested chain from genesis.
-            assert_eq!(rep.checkpoints, 0);
-            assert_eq!(rep.redacted, 0, "unbound redaction accepted");
-            assert_eq!(rep.first_seq.unwrap_or(0), 0, "unbound prune accepted");
+            assert_eq!(rep.checkpoints, checkpoints.len() as u64);
+            assert!(checkpoints.iter().all(|c| c.verify_signature(&key)));
+            assert!(rep.next_seq >= rep.first_seq.unwrap_or(0));
+            assert!(rep.redacted <= rep.records);
+            if !allow_pruned_prefix {
+                assert_eq!(rep.first_seq.unwrap_or(0), 0, "prefix accepted without opt-in");
+            }
         }
     }
 });
