@@ -14,9 +14,18 @@
 //! (it returns after the database `COMMIT`, ADR-046(1)) for an envelope whose
 //! ATTACHMENT_BUNDLE object references exactly this blob with its exact size.
 //!
-//! Wire format (one SEQPACKET message, exactly one descriptor):
-//! `u8 version (= 1) ‖ u64be len ‖ sha256(file bytes)(32)` = 41 bytes; the
-//! reply is one byte, `0x01` (committed) or `0x00` (refused).
+//! Wire format, protocol version 2 (AUD-RM2-STO-29, C-5): one SEQPACKET
+//! message, exactly one descriptor:
+//! `u8 version (= 2) ‖ u64be len ‖ sha256(file bytes)(32)` = 41 bytes. The
+//! replies are 33-byte acknowledgements `u8 code ‖ sha256(file bytes)` that
+//! echo the bundle hash: `0x02` ("copied") as soon as the copy is durable in
+//! the blob root (sent by [`StagedReceiver::receive`]), then `0x01`
+//! ("committed", [`StagedReceiver::acknowledge`], only with a
+//! [`CommittedStaged`] token) or `0x00` (refused; the hash field is zero).
+//! The sealer waits for `0x02` with a deadline scaled by the length and for
+//! `0x01` with a fixed 60 s, so a large copy cannot eat the commit budget.
+//! Both sides enforce one bundle-size cap, [`STAGED_MAX_BUNDLE_LEN`]
+//! (`candor_sealer::server::handover::MAX_BUNDLE_LEN`).
 //!
 //! Hostile-peer discipline (all refused before anything is committed, every
 //! received descriptor closed): a peer whose `SO_PEERCRED` uid is not the
@@ -62,19 +71,29 @@ use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 use crate::error::{Result, StoreError};
-use crate::types::{BlobId, CommitEnvelope, EnvelopeRef, GROUP_OBJECTS, MAX_PART_PADDED_SIZE};
+use crate::types::{BlobId, CommitEnvelope, EnvelopeRef, GROUP_OBJECTS};
 use crate::{IntakeMaintenance, IntakeStore};
 
 const _: () = assert!(STAGED_BUNDLE_INDEX < GROUP_OBJECTS);
 
-/// Protocol version of the hand-over message.
-pub const STAGED_VERSION: u8 = 1;
+/// Protocol version of the hand-over message (2: two-phase acknowledgements
+/// with hash echo, AUD-RM2-STO-29).
+pub const STAGED_VERSION: u8 = 2;
 /// Exact length of the hand-over message.
 pub const STAGED_MSG_LEN: usize = 1 + 8 + 32;
-/// Acknowledgement byte: the envelope referencing the blob is committed.
+/// Exact length of an acknowledgement: `u8 code ‖ sha256`.
+pub const STAGED_ACK_LEN: usize = 1 + 32;
+/// Acknowledgement code: the envelope referencing the blob is committed.
 pub const STAGED_ACK_COMMITTED: u8 = 0x01;
-/// Acknowledgement byte: refused (nothing committed).
+/// Acknowledgement code: refused (nothing committed).
 pub const STAGED_ACK_REFUSED: u8 = 0x00;
+/// Acknowledgement code: the copy is durable in the blob root; the envelope
+/// commit follows (AUD-RM2-STO-29).
+pub const STAGED_ACK_COPIED: u8 = 0x02;
+/// Largest bundle accepted (bytes), whatever `max_len` a receiver is built
+/// with. The sealer enforces the same cap
+/// (`candor_sealer::server::handover::MAX_BUNDLE_LEN`; AUD-RM2-STO-29).
+pub const STAGED_MAX_BUNDLE_LEN: u64 = 4 << 30;
 /// Index of the ATTACHMENT_BUNDLE object in a group (ADR-052(1)).
 pub const STAGED_BUNDLE_INDEX: usize = 1;
 /// Default per-call socket deadline (`SO_RCVTIMEO` / `SO_SNDTIMEO`).
@@ -256,6 +275,7 @@ impl Drop for CommitGuard<'_> {
 pub struct StagedBlob {
     blob_id: BlobId,
     len: u64,
+    sha256: [u8; 32],
     reg: Arc<Registry>,
     armed: bool,
 }
@@ -280,9 +300,9 @@ impl StagedBlob {
         self.len == 0
     }
 
-    fn disarm(mut self) -> (BlobId, u64, Arc<Registry>) {
+    fn disarm(mut self) -> (BlobId, u64, [u8; 32], Arc<Registry>) {
         self.armed = false;
-        (self.blob_id, self.len, Arc::clone(&self.reg))
+        (self.blob_id, self.len, self.sha256, Arc::clone(&self.reg))
     }
 }
 
@@ -307,6 +327,7 @@ impl core::fmt::Debug for StagedBlob {
 pub struct CommittedStaged {
     blob_id: BlobId,
     envelope_ref: EnvelopeRef,
+    sha256: [u8; 32],
 }
 
 impl CommittedStaged {
@@ -372,7 +393,7 @@ impl StagedReceiver {
     /// A receiver writing into `blobs`, accepting hand-overs only from a peer
     /// whose `SO_PEERCRED` uid is `sealer_uid` (the sealer's dedicated system
     /// user; there is no default) and bundles of at most
-    /// `min(max_len, MAX_PART_PADDED_SIZE)` bytes (`max_len ≥ 1`).
+    /// `min(max_len, STAGED_MAX_BUNDLE_LEN)` bytes (`max_len ≥ 1`).
     pub fn new(blobs: SafeRoot, sealer_uid: u32, max_len: u64) -> Result<Self> {
         if max_len == 0 {
             return Err(StoreError::InvalidInput("staged bound"));
@@ -380,7 +401,7 @@ impl StagedReceiver {
         Ok(Self {
             blobs,
             sealer_uid,
-            max_len: max_len.min(MAX_PART_PADDED_SIZE),
+            max_len: max_len.min(STAGED_MAX_BUNDLE_LEN),
             timeout: STAGED_DEFAULT_TIMEOUT,
             reg: Arc::new(Registry::default()),
         })
@@ -424,17 +445,18 @@ impl StagedReceiver {
         self.sweep(refs, slot).await
     }
 
-    /// Receive one hand-over from `sock` and copy the passed file into the
-    /// blob root (times normalised to `slot`). The total time is bounded:
-    /// one `recvmsg` under `SO_RCVTIMEO`, then a copy of at most the bound
-    /// from a sealed RAM-backed file, and (on refusal) one `send` under
+    /// Receive one hand-over from `sock`, copy the passed file into the
+    /// blob root (times normalised to `slot`) and, once the copy is durable,
+    /// send `0x02 ‖ sha256` ("copied", AUD-RM2-STO-29). The total time is
+    /// bounded: one `recvmsg` under `SO_RCVTIMEO`, then a copy of at most the
+    /// bound from a sealed RAM-backed file, and one `send` under
     /// `SO_SNDTIMEO`. If a message was consumed and refused, `0x00` is sent
     /// (best effort). On any error the caller should close the connection.
     pub fn receive(&self, sock: BorrowedFd<'_>, slot: SlotTime) -> Result<StagedBlob> {
         let mut consumed = false;
         let r = self.receive_inner(sock, slot, &mut consumed);
         if r.is_err() && consumed {
-            let _ = self.send_byte(sock, STAGED_ACK_REFUSED);
+            let _ = self.refuse(sock);
         }
         r
     }
@@ -481,12 +503,18 @@ impl StagedReceiver {
         }
         guard.outcome = Some(State::Live);
         drop(guard);
-        Ok(StagedBlob {
+        let blob = StagedBlob {
             blob_id,
             len: header.len,
+            sha256: header.sha256,
             reg: Arc::clone(&self.reg),
             armed: true,
-        })
+        };
+        // STO-29: the copy is durable; tell the sealer, which now switches
+        // from its length-scaled copy deadline to the fixed commit deadline.
+        // If this fails the blob is dropped (orphan, swept) and refused.
+        self.send_ack(sock, STAGED_ACK_COPIED, &header.sha256)?;
+        Ok(blob)
     }
 
     /// `SO_PEERCRED` uid = the configured sealer uid, and `SOCK_SEQPACKET`.
@@ -520,7 +548,7 @@ impl StagedReceiver {
         env: CommitEnvelope,
         blob: StagedBlob,
     ) -> Result<CommittedStaged> {
-        let (blob_id, len, reg) = blob.disarm();
+        let (blob_id, len, sha256, reg) = blob.disarm();
         if !references_exactly(&env, blob_id, len) {
             reg.set(blob_id, State::Orphan);
             return Err(StoreError::InvalidInput("staged blob not referenced"));
@@ -552,6 +580,7 @@ impl StagedReceiver {
                 Ok(CommittedStaged {
                     blob_id,
                     envelope_ref,
+                    sha256,
                 })
             }
             Err(e) => {
@@ -561,28 +590,25 @@ impl StagedReceiver {
         }
     }
 
-    /// Send `0x01`; possible only with the token of a committed envelope.
+    /// Send `0x01 ‖ sha256` (the hash of the committed bundle); possible only
+    /// with the token of a committed envelope.
     pub fn acknowledge(&self, sock: BorrowedFd<'_>, committed: CommittedStaged) -> Result<()> {
-        let CommittedStaged { .. } = committed;
-        self.send_byte(sock, STAGED_ACK_COMMITTED)
+        let CommittedStaged { sha256, .. } = committed;
+        self.send_ack(sock, STAGED_ACK_COMMITTED, &sha256)
     }
 
-    /// Send `0x00` (nothing referencing the hand-over was committed).
+    /// Send `0x00 ‖ 0³²` (nothing referencing the hand-over was committed).
     pub fn refuse(&self, sock: BorrowedFd<'_>) -> Result<()> {
-        self.send_byte(sock, STAGED_ACK_REFUSED)
+        self.send_ack(sock, STAGED_ACK_REFUSED, &[0u8; 32])
     }
 
-    fn send_byte(&self, sock: BorrowedFd<'_>, b: u8) -> Result<()> {
+    fn send_ack(&self, sock: BorrowedFd<'_>, code: u8, sha256: &[u8; 32]) -> Result<()> {
         set_socket_timeout(sock, Timeout::Send, Some(self.timeout)).map_err(io_err)?;
+        let msg = encode_staged_ack(code, sha256);
         let mut control = SendAncillaryBuffer::default();
-        let n = rustix::net::sendmsg(
-            sock,
-            &[IoSlice::new(&[b])],
-            &mut control,
-            SendFlags::NOSIGNAL,
-        )
-        .map_err(io_err)?;
-        if n != 1 {
+        let n = rustix::net::sendmsg(sock, &[IoSlice::new(&msg)], &mut control, SendFlags::NOSIGNAL)
+            .map_err(io_err)?;
+        if n != STAGED_ACK_LEN {
             return Err(StoreError::Backend);
         }
         Ok(())
@@ -838,6 +864,16 @@ fn receive_message(sock: BorrowedFd<'_>, consumed: &mut bool) -> Result<(StagedH
     Ok((header, fd))
 }
 
+/// Encode a 33-byte acknowledgement `code ‖ sha256` (AUD-RM2-STO-29).
+#[must_use]
+pub fn encode_staged_ack(code: u8, sha256: &[u8; 32]) -> [u8; STAGED_ACK_LEN] {
+    let mut m = [0u8; STAGED_ACK_LEN];
+    let (c, h) = m.split_at_mut(1);
+    c.copy_from_slice(&[code]);
+    h.copy_from_slice(sha256);
+    m
+}
+
 /// Send a hand-over message with one descriptor (sealer side and tests).
 pub fn send_staged_bundle(
     sock: impl AsFd,
@@ -881,14 +917,27 @@ mod tests {
         let mut long = m.to_vec();
         long.push(0);
         assert!(StagedHeader::decode(&long).is_err());
-        let mut v = m;
-        v[0] = 2;
-        assert!(StagedHeader::decode(&v).is_err());
+        // Unknown versions, including the retired version 1 (STO-29).
+        for ver in [0u8, 1, 3, 0xff] {
+            let mut v = m;
+            v[0] = ver;
+            assert!(StagedHeader::decode(&v).is_err());
+        }
+        assert_eq!(m[0], STAGED_VERSION);
         let zero = StagedHeader {
             len: 0,
             sha256: [0; 32],
         };
         assert!(StagedHeader::decode(&zero.encode()).is_err());
+    }
+
+    /// AUD-RM2-STO-29: acknowledgements are `code ‖ sha256`, 33 bytes.
+    #[test]
+    fn ack_encoding() {
+        let a = encode_staged_ack(STAGED_ACK_COPIED, &[9; 32]);
+        assert_eq!(a.len(), STAGED_ACK_LEN);
+        assert_eq!(a[0], STAGED_ACK_COPIED);
+        assert_eq!(&a[1..], &[9u8; 32]);
     }
 
     proptest::proptest! {

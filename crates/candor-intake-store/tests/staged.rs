@@ -23,8 +23,9 @@ use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::time::Duration;
 
 use candor_intake_store::staged::{
-    STAGED_ACK_COMMITTED, STAGED_ACK_REFUSED, STAGED_BUNDLE_INDEX, STAGED_MAX_IN_FLIGHT,
-    StagedBlob, StagedCommit, StagedHeader, StagedReceiver, send_staged_bundle,
+    STAGED_ACK_COMMITTED, STAGED_ACK_COPIED, STAGED_ACK_LEN, STAGED_ACK_REFUSED,
+    STAGED_BUNDLE_INDEX, STAGED_MAX_BUNDLE_LEN, STAGED_MAX_IN_FLIGHT, STAGED_VERSION, StagedBlob,
+    StagedCommit, StagedHeader, StagedReceiver, send_staged_bundle,
 };
 use candor_intake_store::*;
 use candor_safefs::{ObjectId, RootPolicy, SafeRoot, SlotTime};
@@ -136,9 +137,10 @@ fn header(data: &[u8]) -> StagedHeader {
     }
 }
 
-/// The next reply byte, or `None` if nothing is queued.
-fn try_recv_byte(sock: &OwnedFd) -> Option<u8> {
-    let mut b = [0u8; 4];
+/// The next acknowledgement `(code, echoed hash)`, or `None` if nothing is
+/// queued. Every acknowledgement is exactly 33 bytes (AUD-RM2-STO-29).
+fn try_recv_ack(sock: &OwnedFd) -> Option<(u8, [u8; 32])> {
+    let mut b = [0u8; STAGED_ACK_LEN + 4];
     let mut space = [MaybeUninit::<u8>::uninit(); rustix::cmsg_space!(ScmRights(1))];
     let mut control = RecvAncillaryBuffer::new(&mut space);
     match rustix::net::recvmsg(
@@ -148,12 +150,27 @@ fn try_recv_byte(sock: &OwnedFd) -> Option<u8> {
         RecvFlags::DONTWAIT,
     ) {
         Ok(m) => {
-            assert_eq!(m.bytes, 1);
-            Some(b[0])
+            assert_eq!(m.bytes, STAGED_ACK_LEN);
+            Some((b[0], b[1..STAGED_ACK_LEN].try_into().unwrap()))
         }
         Err(e) => {
             assert_eq!(e, rustix::io::Errno::AGAIN);
             None
+        }
+    }
+}
+
+/// The next acknowledgement code other than "copied" (`0x02` acks of
+/// successful receives are skipped), or `None` if nothing else is queued.
+fn try_recv_byte(sock: &OwnedFd) -> Option<u8> {
+    loop {
+        match try_recv_ack(sock) {
+            Some((STAGED_ACK_COPIED, _)) => continue,
+            Some((STAGED_ACK_REFUSED, h)) => {
+                assert_eq!(h, [0u8; 32], "a refusal carries no hash");
+                return Some(STAGED_ACK_REFUSED);
+            }
+            other => return other.map(|(c, _)| c),
         }
     }
 }
@@ -218,14 +235,18 @@ async fn staged_bundle_handover_roundtrip() {
     assert_eq!(blob.len(), data.len() as u64);
     let id = ObjectId::from_bytes(blob.blob_id().0);
     assert_eq!(e.rx.blobs().read_to_vec(&id, MAX).unwrap(), data);
-    // Nothing is acknowledged before the commit.
-    assert_eq!(try_recv_byte(&sealer), None);
+    // STO-29: only "copied" (with this bundle's hash) before the commit.
+    let h = header(&data).sha256;
+    assert_eq!(try_recv_ack(&sealer), Some((STAGED_ACK_COPIED, h)));
+    assert_eq!(try_recv_ack(&sealer), None);
     let s = mem_store().await;
     let env_in = envelope_for(&blob);
     let c = e.rx.commit_staged(&s, env_in, blob).await.unwrap();
     assert_eq!(s.pending_count().await.unwrap(), 1);
     e.rx.acknowledge(store_sock.as_fd(), c).unwrap();
-    assert_eq!(try_recv_byte(&sealer), Some(STAGED_ACK_COMMITTED));
+    // The commit ack echoes the committed bundle's hash.
+    assert_eq!(try_recv_ack(&sealer), Some((STAGED_ACK_COMMITTED, h)));
+    assert_eq!(try_recv_ack(&sealer), None);
     // Committed blobs are never swept.
     assert_eq!(e.rx.in_flight(), 0);
     assert_eq!(e.rx.sweep(&s, next_slot()).await.unwrap(), 0);
@@ -334,8 +355,8 @@ fn staged_bundle_hostile_variants_refused() {
     bad_len.len += 1;
     let mut short = good;
     short.len -= 1;
-    let mut v2 = good.encode();
-    v2[0] = 2;
+    let mut v2 = good.encode(); // an unknown version (STO-29: 2 is current)
+    v2[0] = 3;
     let zero_len = StagedHeader {
         len: 0,
         sha256: good.sha256,
@@ -851,4 +872,65 @@ async fn staged_sweep_uninitialised_memory_store_fails_closed() {
     );
     assert!(e.rx.sweep(&m, next_slot()).await.is_err());
     assert_eq!(e.rx.blobs().list().unwrap().len(), 1);
+}
+
+/// AUD-RM2-STO-29: protocol version 2 only, and one bundle-size cap shared
+/// with the sealer: a receiver built with a larger bound is clamped to
+/// `STAGED_MAX_BUNDLE_LEN`, and a header above it is refused (with `0x00`)
+/// before the descriptor is used.
+#[test]
+fn staged_protocol_v2_and_shared_cap() {
+    assert_eq!(STAGED_VERSION, 2);
+    assert_eq!(STAGED_MAX_BUNDLE_LEN, 4 << 30);
+    let e = env_with(u64::MAX);
+    let (sealer, store_sock) = pair();
+    let data = bundle(1000);
+    let file = memfile(&data);
+    // A header above the cap (the file itself is small: refused on the
+    // length before any copy).
+    let big = StagedHeader {
+        len: STAGED_MAX_BUNDLE_LEN + 1,
+        sha256: header(&data).sha256,
+    };
+    send_staged_bundle(&sealer, &big, file.as_fd()).unwrap();
+    assert_eq!(
+        e.rx.receive(store_sock.as_fd(), slot()).unwrap_err(),
+        StoreError::InvalidInput("staged bundle too large")
+    );
+    assert_eq!(try_recv_ack(&sealer), Some((STAGED_ACK_REFUSED, [0u8; 32])));
+    assert_clean(&e, "above the shared cap");
+    // A version-1 message is refused.
+    let mut v1 = header(&data).encode();
+    v1[0] = 1;
+    send_raw(&sealer, &v1, &[file.as_fd()]);
+    assert!(e.rx.receive(store_sock.as_fd(), slot()).is_err());
+    assert_eq!(try_recv_byte(&sealer), Some(STAGED_ACK_REFUSED));
+    assert_clean(&e, "version 1");
+}
+
+/// AUD-RM2-STO-29: the "copied" ack is sent only after the copy is durable
+/// (the blob exists in the root when the ack is readable); if the sealer is
+/// gone by then, the blob is an orphan and is swept.
+#[tokio::test]
+async fn staged_copied_ack_after_durable_copy() {
+    let e = env();
+    let (sealer, store_sock) = pair();
+    let data = bundle(70_000);
+    let file = memfile(&data);
+    send_staged_bundle(&sealer, &header(&data), file.as_fd()).unwrap();
+    let blob = e.rx.receive(store_sock.as_fd(), slot()).unwrap();
+    let id = ObjectId::from_bytes(blob.blob_id().0);
+    assert!(e.rx.blobs().exists(&id).unwrap());
+    assert_eq!(
+        try_recv_ack(&sealer),
+        Some((STAGED_ACK_COPIED, header(&data).sha256))
+    );
+    drop(blob);
+    // Sealer gone before the copied ack can be sent: refused, orphan swept.
+    send_staged_bundle(&sealer, &header(&data), file.as_fd()).unwrap();
+    drop(sealer);
+    assert!(e.rx.receive(store_sock.as_fd(), slot()).is_err());
+    let s = mem_store().await;
+    assert_eq!(e.rx.sweep(&s, next_slot()).await.unwrap(), 2);
+    assert_clean(&e, "copied ack undeliverable");
 }
