@@ -239,9 +239,9 @@ impl Fixture {
 /// the client in the same process).
 pub fn dev_mode() -> InsecureDevMode {
     use candor_log::codes::HostRole;
-    use candor_log::ids::{AuditIdKey, TenantRef};
+    use candor_log::ids::TenantRef;
     let mut log = candor_log::AuditLog::new(
-        TenantRef::derive(&AuditIdKey::new([3; 32]), b"tenant"),
+        TenantRef::generate().unwrap(),
         HostRole::Intake,
         candor_log::SoftwareSigner::from_seed(&zeroize::Zeroizing::new([9; 32])),
         candor_log::SystemClock,

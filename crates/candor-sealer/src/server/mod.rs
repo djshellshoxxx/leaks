@@ -1159,15 +1159,7 @@ impl Sealer {
     fn seal_preconditions(
         &self,
         channel_id: &[u8; 16],
-    ) -> Result<
-        (
-            Arc<VerifiedSnapshot>,
-            u32,
-            KemPublicKey,
-            KemPublicKey,
-        ),
-        Response,
-    > {
+    ) -> Result<(Arc<VerifiedSnapshot>, u32, KemPublicKey, KemPublicKey), Response> {
         let (today, _) = self.slot_today()?;
         let snap = self.snapshot().ok_or_else(|| err(ErrorCode::Unavailable))?;
         let alt = snap
@@ -1217,8 +1209,7 @@ impl Sealer {
         let Some(channel_id) = g.channel_id else {
             return err(ErrorCode::BadState);
         };
-        let (snap, today, custodian, disposition) = match self.seal_preconditions(&channel_id)
-        {
+        let (snap, today, custodian, disposition) = match self.seal_preconditions(&channel_id) {
             Ok(v) => v,
             Err(e) => return e,
         };
@@ -1592,7 +1583,9 @@ impl Sealer {
         let me = self.clone();
         v.push(tokio::spawn(async move {
             let every = me.st.cfg.chaff.account_flush_interval;
-            let start = Instant::now().checked_add(every).unwrap_or_else(Instant::now);
+            let start = Instant::now()
+                .checked_add(every)
+                .unwrap_or_else(Instant::now);
             let mut iv = tokio::time::interval_at(start, every);
             loop {
                 iv.tick().await;
@@ -1866,7 +1859,8 @@ fn shuffle_batch(batch: Vec<AccountUpsert>) -> Result<Vec<AccountUpsert>, candor
     let mut i = creates.len();
     while i > 1 {
         let n = u32::try_from(i).map_err(|_| candor_core::Error::Internal)?;
-        let j = usize::try_from(rand::uniform_below(n)?).map_err(|_| candor_core::Error::Internal)?;
+        let j =
+            usize::try_from(rand::uniform_below(n)?).map_err(|_| candor_core::Error::Internal)?;
         i = i.saturating_sub(1);
         creates.swap(i, j);
     }
@@ -2162,14 +2156,7 @@ fn rotate_blocking(
         return err(ErrorCode::Busy);
     }
     for group in groups {
-        if commit_group(st.sink.as_ref(),
-            group,
-            job.sel.epoch_id,
-            job.today,
-            0,
-        )
-        .is_err()
-        {
+        if commit_group(st.sink.as_ref(), group, job.sel.epoch_id, job.today, 0).is_err() {
             return err(ErrorCode::Internal);
         }
     }

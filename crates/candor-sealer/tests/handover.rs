@@ -23,7 +23,7 @@ use candor_sealer::server::handover::{self, ACK_COMMITTED, ACK_REFUSED, MSG_LEN,
 use candor_sealer::server::sink::{SinkError, StagedBundle};
 use candor_sealer::server::{ChaffConfig, Limits};
 use common::*;
-use rustix::fs::SealFlags;
+use rustix::fs::SealFlags; // safefs-lint: allow(memfd seal flags)
 use rustix::net::{
     AddressFamily, RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, SendAncillaryBuffer,
     SendFlags, SocketFlags, SocketType,
@@ -100,22 +100,28 @@ async fn bundle_is_handed_over_as_a_sealed_descriptor() {
         let (hdr, n, mut fds) = receive(&store_end);
         assert_eq!(n, MSG_LEN);
         assert_eq!(hdr[0], VERSION);
-        assert_eq!(u64::from_be_bytes(hdr[1..9].try_into().unwrap()), expect_len);
+        assert_eq!(
+            u64::from_be_bytes(hdr[1..9].try_into().unwrap()),
+            expect_len
+        );
         assert_eq!(&hdr[9..], &expect_hash);
         assert_eq!(fds.len(), 1, "exactly one descriptor");
         let fd = fds.pop().unwrap();
         // A regular file of exactly the announced size…
-        let st = rustix::fs::fstat(&fd).unwrap();
-        assert_eq!(
-            rustix::fs::FileType::from_raw_mode(st.st_mode),
-            rustix::fs::FileType::RegularFile
-        );
+        let st = rustix::fs::fstat(&fd).unwrap(); // safefs-lint: allow(fstat of a passed fd)
+        use rustix::fs::FileType; // safefs-lint: allow(file type of a passed fd)
+        let regular = FileType::from_raw_mode(st.st_mode) == FileType::RegularFile;
+        assert!(regular);
         assert_eq!(st.st_size as u64, expect_len);
         // …sealed against any change by either side…
-        let seals = rustix::fs::fcntl_get_seals(&fd).unwrap();
-        assert!(seals.contains(SealFlags::WRITE | SealFlags::GROW | SealFlags::SHRINK | SealFlags::SEAL));
+        let seals = rustix::fs::fcntl_get_seals(&fd).unwrap(); // safefs-lint: allow(fd seals)
+        assert!(
+            seals
+                .contains(SealFlags::WRITE | SealFlags::GROW | SealFlags::SHRINK | SealFlags::SEAL)
+        );
         assert!(rustix::io::pwrite(&fd, b"x", 0).is_err());
-        assert!(rustix::fs::ftruncate(&fd, 0).is_err());
+        let trunc = rustix::fs::ftruncate(&fd, 0); // safefs-lint: allow(fd-only probe)
+        assert!(trunc.is_err());
         // …whose bytes hash to the header value.
         let mut buf = vec![0u8; expect_len as usize];
         let mut off = 0;

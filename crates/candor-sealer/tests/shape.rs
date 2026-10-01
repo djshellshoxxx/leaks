@@ -238,5 +238,8 @@ async fn real_and_chaff_groups_are_indistinguishable_by_shape() {
     }
     // One dummy account per initial-shaped chaff group, written as a batch.
     let ops: String = f.sink.ops().chars().skip(real_ops.len()).collect();
-    assert_eq!(ops, format!("{}{}", "G".repeat(chaff.len()), "A".repeat(initial_chaff)));
+    assert_eq!(
+        ops,
+        format!("{}{}", "G".repeat(chaff.len()), "A".repeat(initial_chaff))
+    );
 }

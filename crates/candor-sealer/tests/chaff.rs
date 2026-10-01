@@ -399,9 +399,11 @@ async fn accounts_are_batched_and_dummies_rotate() {
         assert!(a.rewrapped_replies.is_empty());
         assert_eq!(a.account.prefs_ct.len(), first[0].account.prefs_ct.len());
     }
-    assert!(batch.iter().any(|a| a.replaces.is_some()), "no synthetic rotation");
+    assert!(
+        batch.iter().any(|a| a.replaces.is_some()),
+        "no synthetic rotation"
+    );
 }
-
 
 #[tokio::test(start_paused = true)]
 async fn poisson_schedule_runs_and_real_commits_cancel_events() {

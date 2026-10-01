@@ -10,13 +10,13 @@
 use std::io::Write;
 
 use super::directory::DirectorySnapshot;
+use super::handover::BundleWriter;
 use super::inner::{
     self, BUNDLE_MAGIC, ManifestFile, MessageKind, Prefs, RecipientListCbor, ReplyInner,
     ReportPrefs, SigSpec,
 };
 use super::select::Selection;
 use super::session::StagedPart;
-use super::handover::BundleWriter;
 use super::sink::{Blob, EnvelopeGroup, EnvelopeObject};
 use crate::proto::cbor::Value;
 use crate::proto::{Mode, PendingReply, SecretText};
@@ -576,7 +576,6 @@ pub(crate) fn seal_initial(
         Ok((group, sub_hash))
     })()
 }
-
 
 /// A follow-up or key-rotation SOURCE_MESSAGE (§13.4 v1.1) and optional bundle.
 pub(crate) struct SourceMessageInput<'a> {

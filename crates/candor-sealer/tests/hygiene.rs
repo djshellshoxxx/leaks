@@ -200,7 +200,7 @@ async fn no_plaintext_reaches_disk() {
     let check = |stage_name: &str| {
         let mut hits = scan_for(f.dir.path(), marker.as_bytes(), since, true);
         hits.extend(scan_for(
-            &std::env::temp_dir(),
+            &std::env::temp_dir(), // safefs-lint: allow(test checks $TMPDIR for plaintext)
             marker.as_bytes(),
             since,
             false,

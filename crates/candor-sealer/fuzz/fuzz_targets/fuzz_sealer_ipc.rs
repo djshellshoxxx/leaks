@@ -110,7 +110,7 @@ fn harness() -> &'static Harness {
         let staging: &'static SafeRoot =
             Box::leak(Box::new(SafeRoot::open(&dir, RootPolicy::Staging).unwrap()));
         let mut audit = candor_log::AuditLog::new(
-            candor_log::ids::TenantRef::derive(&candor_log::ids::AuditIdKey::new([3; 32]), b"t"),
+            candor_log::ids::TenantRef::generate().unwrap(),
             candor_log::codes::HostRole::Intake,
             candor_log::SoftwareSigner::from_seed(&zeroize::Zeroizing::new([9; 32])),
             candor_log::SystemClock,
@@ -456,9 +456,12 @@ fn structured(h: &Harness, data: &[u8], allow_derive: bool) {
     let steps = u.int_in_range(1..=32u8).unwrap_or(1);
     for rid in 0..u32::from(steps) {
         let Ok(req) = request(h, &mut g, &mut u) else { break };
-        // Every generated request is a valid, canonical frame body.
+        // The generator may exceed a decoder limit (oversized chunk, too many
+        // labels, an over-budget draft): such frames are refused by the
+        // decoder, as the sealer's listener would. Whatever decodes must round
+        // trip exactly.
         let Ok(bytes) = encode_request(rid, &req) else { continue };
-        let (rid2, req2) = decode_request(&bytes).expect("generated request must decode");
+        let Ok((rid2, req2)) = decode_request(&bytes) else { continue };
         assert_eq!(rid2, rid);
         assert!(req2 == req, "request round trip");
         let sealed = matches!(req2, Request::SealFinish { .. });

@@ -9,7 +9,6 @@
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects
 )]
-
 // Unix socket paths inside the fixture tempdir.
 #![allow(clippy::disallowed_methods)] // safefs-lint: allow(test socket path in own tempdir)
 

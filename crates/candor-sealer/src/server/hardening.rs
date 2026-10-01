@@ -71,7 +71,9 @@ thread_local! {
 fn probe_confined() -> bool {
     matches!(
         candor_safefs::SafeRoot::open(Path::new("/"), candor_safefs::RootPolicy::Staging),
-        Err(candor_safefs::SafeFsError::Io(std::io::ErrorKind::PermissionDenied))
+        Err(candor_safefs::SafeFsError::Io(
+            std::io::ErrorKind::PermissionDenied
+        ))
     )
 }
 

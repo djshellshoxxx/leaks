@@ -29,7 +29,7 @@ use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::sync::Arc;
 
-use rustix::fs::{MemfdFlags, SealFlags};
+use rustix::fs::{MemfdFlags, SealFlags, fcntl_add_seals, fstat, memfd_create}; // safefs-lint: allow(fd-only memfd API, no path)
 use rustix::net::{
     RecvAncillaryBuffer, RecvFlags, ReturnFlags, SendAncillaryBuffer, SendAncillaryMessage,
     SendFlags,
@@ -126,10 +126,9 @@ impl BundleWriter {
     /// A new anonymous file (`MFD_CLOEXEC | MFD_ALLOW_SEALING`; the name is a
     /// constant and carries no metadata).
     pub(crate) fn new() -> std::io::Result<Self> {
-        let fd = rustix::fs::memfd_create(
-            "candor-bundle",
-            MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING,
-        )?;
+        // Anonymous memory file: no path, no directory entry.
+        let flags = MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING;
+        let fd = memfd_create("candor-bundle", flags)?;
         Ok(Self {
             fd,
             hasher: Sha256::new(),
@@ -139,11 +138,9 @@ impl BundleWriter {
 
     /// Make the file immutable and return it.
     pub(crate) fn finish(self) -> std::io::Result<StagedBundle> {
-        rustix::fs::fcntl_add_seals(
-            &self.fd,
-            SealFlags::WRITE | SealFlags::GROW | SealFlags::SHRINK | SealFlags::SEAL,
-        )?;
-        let st = rustix::fs::fstat(&self.fd)?;
+        let seals = SealFlags::WRITE | SealFlags::GROW | SealFlags::SHRINK | SealFlags::SEAL;
+        fcntl_add_seals(&self.fd, seals)?;
+        let st = fstat(&self.fd)?;
         if u64::try_from(st.st_size).ok() != Some(self.len) {
             return Err(std::io::Error::from(std::io::ErrorKind::InvalidData));
         }
@@ -227,7 +224,9 @@ pub fn await_ack(sock: impl AsFd) -> Result<(), SinkError> {
     }
     if unexpected_fds
         || msg.bytes != 1
-        || msg.flags.intersects(ReturnFlags::TRUNC | ReturnFlags::CTRUNC)
+        || msg
+            .flags
+            .intersects(ReturnFlags::TRUNC | ReturnFlags::CTRUNC)
     {
         return Err(SinkError);
     }

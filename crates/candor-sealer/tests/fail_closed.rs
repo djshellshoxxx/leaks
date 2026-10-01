@@ -566,11 +566,18 @@ async fn nfc_expanding_draft_is_refused_at_draft_set() {
     let half = "\u{0958}".repeat(5_000); // 15,000 B, 30,000 B after NFC
     assert_eq!(
         f.sealer
-            .handle(draft(half.clone(), vec![(1, SecretText::new(&"a".repeat(10_961)))]))
+            .handle(draft(
+                half.clone(),
+                vec![(1, SecretText::new(&"a".repeat(10_961)))]
+            ))
             .await,
         Response::error(ErrorCode::Limit)
     );
-    ok(&f.sealer, draft(half, vec![(1, SecretText::new(&"a".repeat(10_960)))])).await;
+    ok(
+        &f.sealer,
+        draft(half, vec![(1, SecretText::new(&"a".repeat(10_960)))]),
+    )
+    .await;
     ok(&f.sealer, draft("a".repeat(40_959), vec![])).await;
     // NFC composes "e" + U+0301 (3 B) into U+00E9 (2 B): fits.
     ok(&f.sealer, draft("e\u{0301}".repeat(13_653), vec![])).await;

@@ -66,7 +66,10 @@ fn hardening_is_applied_and_enforced_before_serving() {
     let sock_dir = tempfile::tempdir().unwrap();
     // Sockets are bound before Landlock (binding creates a filesystem node
     // outside the staging root, which the hardened process may not do).
-    let bind = |n: &str| std::os::unix::net::UnixListener::bind(sock_dir.path().join(n)).unwrap();
+    let bind = |n: &str| {
+        let p = sock_dir.path().join(n); // safefs-lint: allow(test socket path in own tempdir)
+        std::os::unix::net::UnixListener::bind(p).unwrap()
+    };
     let (la, lb0, lb1, lc, ld) = (bind("a"), bind("b0"), bind("b1"), bind("c"), bind("d"));
 
     // 1. Unhardened: the self-check fails and a production sealer refuses to
@@ -168,7 +171,10 @@ fn hardening_is_applied_and_enforced_before_serving() {
     // production sealer served from the early runtime refuses to serve
     // although the process-wide record says "hardened" (the auditor's PoC).
     tx.send(()).unwrap();
-    assert!(!early.join().unwrap(), "pre-hardening thread must probe unconfined");
+    assert!(
+        !early.join().unwrap(),
+        "pre-hardening thread must probe unconfined"
+    );
     let prod = production_sealer(&f, 54_321);
     let r = early_rt.block_on(async move {
         tokio::spawn(async move { serve_result(&prod, ld).await })
@@ -191,7 +197,9 @@ fn hardening_is_applied_and_enforced_before_serving() {
     let per_worker = rt.block_on(async {
         let mut v = Vec::new();
         for _ in 0..16 {
-            v.push(tokio::spawn(async { (thread_confined(), self_check().is_ok()) }));
+            v.push(tokio::spawn(async {
+                (thread_confined(), self_check().is_ok())
+            }));
         }
         let mut out = Vec::new();
         for h in v {
@@ -225,10 +233,10 @@ fn hardening_is_applied_and_enforced_before_serving() {
 /// without a working audit sink it is refused.
 fn developer_override_is_audit_logged() {
     use candor_log::codes::{HostRole, StreamId};
-    use candor_log::ids::{AuditIdKey, TenantRef};
+    use candor_log::ids::TenantRef;
     let new_log = || {
         candor_log::AuditLog::new(
-            TenantRef::derive(&AuditIdKey::new([3; 32]), b"tenant"),
+            TenantRef::generate().unwrap(),
             HostRole::Intake,
             candor_log::SoftwareSigner::from_seed(&zeroize::Zeroizing::new([9; 32])),
             candor_log::SystemClock,
