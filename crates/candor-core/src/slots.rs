@@ -573,8 +573,13 @@ mod tests {
         let b = binding();
         // Malicious sealer seals to the attacker but lists the member's key id at the
         // same slot (with the same or any enc_rand).
-        let (blk, mut list) =
-            RecipientSlotBlock::build_with(&mut rng, &ck, &b, &[attacker.public.clone()]).unwrap();
+        let (blk, mut list) = RecipientSlotBlock::build_with(
+            &mut rng,
+            &ck,
+            &b,
+            core::slice::from_ref(&attacker.public),
+        )
+        .unwrap();
         list[0].key_id = key_id(Suite::CandorStd1, KeyKind::Mek, &member.public.to_bytes());
         let dir = directory(core::slice::from_ref(&member.public), KeyKind::Mek);
         assert_eq!(
@@ -585,8 +590,13 @@ mod tests {
         let lying = |_: &[u8; 32]| Some(attacker.public.clone());
         assert!(blk.verify_slot_block(&ck, &b, &list, lying).is_err());
         // Tampered enc_rand is detected.
-        let (blk2, mut list2) =
-            RecipientSlotBlock::build_with(&mut rng, &ck, &b, &[member.public.clone()]).unwrap();
+        let (blk2, mut list2) = RecipientSlotBlock::build_with(
+            &mut rng,
+            &ck,
+            &b,
+            core::slice::from_ref(&member.public),
+        )
+        .unwrap();
         assert!(blk2.verify_slot_block(&ck, &b, &list2, &dir).is_ok());
         list2[0].enc_rand[0] ^= 1;
         assert!(blk2.verify_slot_block(&ck, &b, &list2, &dir).is_err());

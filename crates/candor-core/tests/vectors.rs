@@ -177,7 +177,7 @@ fn sealed_object_vectors() {
             let (ck, pos) = r.unwrap();
             assert_eq!(ck.expose().to_vec(), ck_expected);
             assert!(list.iter().any(|e| usize::from(e.slot_index) == pos));
-            blk.verify_slot_block(&ck, &b, &list, &dir).unwrap();
+            blk.verify_slot_block(&ck, &b, &list, dir).unwrap();
         } else {
             assert_eq!(
                 r.err(),
@@ -205,7 +205,7 @@ fn sealed_object_vectors() {
         dummy.encode()[4..4 + candor_core::slots::SLOT_LEN].to_vec(),
         hx(&dk["slot_0"])
     );
-    dummy.verify_slot_block(&ck, &b, &[], &dir).unwrap();
+    dummy.verify_slot_block(&ck, &b, &[], dir).unwrap();
 
     let neg = &v["negative"];
     let mut t = bytes.clone();
@@ -241,7 +241,7 @@ fn sealed_object_vectors() {
             "{name}: envelope itself is well-formed"
         );
         assert_eq!(
-            nblk.verify_slot_block(&ck, &nbind, &nlist, &dir).err(),
+            nblk.verify_slot_block(&ck, &nbind, &nlist, dir).err(),
             Some(Error::SlotVerification),
             "{name}"
         );
