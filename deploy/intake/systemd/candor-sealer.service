@@ -33,6 +33,12 @@ LoadCredentialEncrypted=argon2_salt:/etc/credstore.encrypted/candor-intake.argon
 # it, so MemoryMax = 2560M (07 §4.2: mlocked keys/drafts + working set) + staging size; the
 # profile drop-ins (profiles/ce-*/) adjust it together with the mount size. Never swap.
 MemoryMax=6656M
+# Sealer-wide upload memory budget (Limits::memory_budget_bytes, AUD-RM2-SEA-26). Staged parts
+# in the tmpfs and the bundle memfd are both counted in it. The sealer refuses to start
+# without a valid value. config-check requires budget <= MemoryMax - 1024 MiB, and staging
+# tmpfs size >= budget, so the budget (not ENOSPC) refuses uploads. Not a secret; secrets
+# never go through Environment= (see top).
+Environment=CANDOR_SEALER_MEMORY_BUDGET_MIB=3840
 MemorySwapMax=0
 LimitMEMLOCK=2G
 TasksMax=64

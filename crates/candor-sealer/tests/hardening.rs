@@ -57,6 +57,31 @@ async fn serve_result(
 /// Runs on the main thread (`harness = false`): `harden_process` requires the
 /// main thread to be the only thread (AUD-RM2-SEA-20).
 fn main() {
+    // Production sealers take the memory budget and quota from the unit's
+    // environment (SEA-29). Environment changes need `unsafe` in-process, so
+    // the binary re-executes itself with the variables set.
+    if std::env::var_os(candor_sealer::server::MEMORY_BUDGET_ENV).is_none() {
+        // Without the variables a production sealer refuses to start.
+        let f = fixture();
+        let mut cfg = config(ChaffConfig::default(), Limits::default(), 54_321);
+        cfg.insecure_dev = None;
+        let r = Sealer::new(
+            cfg,
+            SigningKey::from_seed(&[0x35; 32]),
+            f.staging,
+            f.clock.clone(),
+            f.sink.clone(),
+        );
+        assert_eq!(r.err(), Some(candor_sealer::server::StartError::Config));
+        let exe = std::env::current_exe().unwrap();
+        let status = std::process::Command::new(exe) // safefs-lint: allow(test re-exec with env)
+            .env(candor_sealer::server::MEMORY_BUDGET_ENV, "64")
+            .env(candor_sealer::server::SESSION_UPLOAD_ENV, "16")
+            .status()
+            .unwrap();
+        assert!(status.success(), "hardening scenarios failed");
+        return;
+    }
     developer_override_is_audit_logged();
     hardening_is_applied_and_enforced_before_serving();
 }

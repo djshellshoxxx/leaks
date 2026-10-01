@@ -335,6 +335,7 @@ unit|candor-sealer.service|Service|LoadCredentialEncrypted|=|sealer_signing_key:
 unit|candor-sealer.service|Service|LoadCredentialEncrypted|=|argon2_salt:/etc/credstore.encrypted/candor-intake.argon2_salt.cred
 unit|candor-sealer.service|Service|MemoryMax|~|^6656M( ;; (6656M|10752M))?$
 unit|candor-sealer.service|Service|MemorySwapMax|=|0
+unit|candor-sealer.service|Service|Environment|~|^CANDOR_SEALER_MEMORY_BUDGET_MIB=[1-9][0-9]*( ;; CANDOR_SEALER_MEMORY_BUDGET_MIB=[1-9][0-9]*)*$
 unit|candor-sealer.service|Service|LimitMEMLOCK|=|2G
 unit|candor-sealer.service|Service|TasksMax|=|64
 unit|candor-sealer.service|Service|PrivateNetwork|=|yes

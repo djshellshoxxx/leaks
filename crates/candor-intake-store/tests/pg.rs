@@ -1856,7 +1856,12 @@ async fn pg_vacuum_full_erases_old_images() {
     .fetch_all(&mut c)
     .await
     .unwrap();
+    let items_q = "SELECT (lp::text || ' ' || coalesce(t_xmin::text,'-') || ' ' || coalesce(t_xmax::text,'-') || ' ' || coalesce(t_infomask::text,'-') || ' ' || coalesce(t_infomask2::text,'-') || ' ' || coalesce(t_ctid::text,'-') || ' ' || lp_flags::text) FROM heap_page_items(get_raw_page('candor.deletion_list', 0))";
+    let dl_before: Vec<String> = sqlx::query_scalar(items_q).fetch_all(&mut c).await.unwrap();
+    let rows_before: Vec<String> = sqlx::query_scalar("SELECT xmin::text || '/' || xmax::text || '/' || seq::text || '/' || relayed::text FROM candor.deletion_list").fetch_all(&mut c).await.unwrap();
     vacuum_full_daily(&vac(&b, &db)).await.unwrap();
+    let dl_after: Vec<String> = sqlx::query_scalar(items_q).fetch_all(&mut c).await.unwrap();
+    let activity = (activity, dl_before, rows_before, dl_after);
     let after_rels = intake_relations(&mut c).await;
     assert_eq!(after_rels.len(), rels.len());
     for ((r0, f0), (r1, f1)) in rels.iter().zip(&after_rels) {

@@ -193,6 +193,39 @@ impl Default for ChaffConfig {
     }
 }
 
+/// Environment variable with the attachment memory budget in MiB (set by the
+/// systemd unit; SEA-29).
+pub const MEMORY_BUDGET_ENV: &str = "CANDOR_SEALER_MEMORY_BUDGET_MIB";
+/// Environment variable with the per-session upload quota in MiB (SEA-29).
+pub const SESSION_UPLOAD_ENV: &str = "CANDOR_SEALER_SESSION_UPLOAD_MIB";
+/// Largest accepted value of either variable: 256 GiB.
+pub const MAX_MEMORY_MIB: u64 = 262_144;
+
+fn parse_mib(v: Option<&str>) -> Option<u64> {
+    let v = v?;
+    if v.is_empty() || v.len() > 6 || !v.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let mib: u64 = v.parse().ok()?;
+    if mib == 0 || mib > MAX_MEMORY_MIB {
+        return None;
+    }
+    mib.checked_mul(1 << 20)
+}
+
+/// Strictly parse the two memory variables (decimal MiB, digits only, 1 ..=
+/// [`MAX_MEMORY_MIB`], quota ≤ budget) into bytes. Any problem is
+/// [`StartError::Config`] without detail (fail closed).
+pub fn parse_memory_limits(
+    budget_mib: Option<&str>,
+    quota_mib: Option<&str>,
+) -> Result<(u64, u64), StartError> {
+    match (parse_mib(budget_mib), parse_mib(quota_mib)) {
+        (Some(b), Some(q)) if q <= b => Ok((b, q)),
+        _ => Err(StartError::Config),
+    }
+}
+
 /// Queued account writes are bounded; above this, new submissions get `BUSY`
 /// until the store accepts a flush.
 pub const MAX_QUEUED_ACCOUNTS: usize = 4096;
@@ -468,6 +501,17 @@ impl Sealer {
         sink: Arc<dyn EnvelopeSink>,
     ) -> Result<Self, StartError> {
         candor_core::selftest::self_test().map_err(|_| StartError::SelfTest)?;
+        // SEA-29: the memory budget and per-session quota come from the unit's
+        // environment. Production (no developer override) requires both;
+        // with the override they are optional, but if set they must be valid.
+        let mut cfg = cfg;
+        let budget = std::env::var(MEMORY_BUDGET_ENV).ok();
+        let quota = std::env::var(SESSION_UPLOAD_ENV).ok();
+        if cfg.insecure_dev.is_none() || budget.is_some() || quota.is_some() {
+            let (b, q) = parse_memory_limits(budget.as_deref(), quota.as_deref())?;
+            cfg.limits.memory_budget_bytes = b;
+            cfg.limits.per_session_upload_bytes = q;
+        }
         Wordlist::eff_large().map_err(|_| StartError::Wordlist)?;
         cfg.suite
             .require_supported()
@@ -2425,6 +2469,44 @@ fn rotate_blocking(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
     use super::*;
+
+    /// SEA-29: strict parsing of the memory variables.
+    #[test]
+    fn memory_env_parsing_is_strict() {
+        const M: u64 = 1 << 20;
+        assert_eq!(
+            parse_memory_limits(Some("3840"), Some("768")),
+            Ok((3840 * M, 768 * M))
+        );
+        assert_eq!(parse_memory_limits(Some("1"), Some("1")), Ok((M, M)));
+        assert_eq!(
+            parse_memory_limits(Some("262144"), Some("262144")),
+            Ok((262_144 * M, 262_144 * M))
+        );
+        for (b, q) in [
+            (None, Some("768")),
+            (Some("3840"), None),
+            (Some(""), Some("768")),
+            (Some("0"), Some("768")),
+            (Some("3840"), Some("0")),
+            (Some("262145"), Some("768")),
+            (Some("1000000"), Some("768")),
+            (Some("-1"), Some("768")),
+            (Some("+3840"), Some("768")),
+            (Some(" 3840"), Some("768")),
+            (Some("3840 "), Some("768")),
+            (Some("3.8e3"), Some("768")),
+            (Some("0x100"), Some("768")),
+            (Some("3840"), Some("abc")),
+            (Some("768"), Some("3840")), // quota above budget
+        ] {
+            assert_eq!(
+                parse_memory_limits(b, q),
+                Err(StartError::Config),
+                "{b:?} {q:?}"
+            );
+        }
+    }
 
     fn upsert(tag: u8, replaces: Option<u8>) -> AccountUpsert {
         AccountUpsert {

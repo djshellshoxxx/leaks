@@ -94,6 +94,8 @@ pub struct MemorySink {
     pub fail: AtomicBool,
     /// Fail only account upserts.
     pub fail_accounts: AtomicBool,
+    /// Report the store as unreachable (`is_available`).
+    pub unavailable: AtomicBool,
     /// Sealed bundles as handed over (descriptor kept for hand-over tests).
     pub bundles: Mutex<Vec<StagedBundle>>,
 }
@@ -152,6 +154,10 @@ impl EnvelopeSink for MemorySink {
         });
         self.ops.lock().unwrap().push('G');
         Ok(())
+    }
+
+    fn is_available(&self) -> bool {
+        !self.unavailable.load(Ordering::SeqCst)
     }
 
     fn upsert_account(&self, op: AccountUpsert) -> Result<(), SinkError> {
@@ -365,6 +371,7 @@ pub fn fixture_custom(
         fail: AtomicBool::new(false),
         fail_accounts: AtomicBool::new(false),
         bundles: Mutex::new(Vec::new()),
+        unavailable: AtomicBool::new(false),
     });
     // Triage Set: labels 1 (ombudsman), 2 (audit chair), 3 (counsel); label 4 is
     // a non-triage investigator.

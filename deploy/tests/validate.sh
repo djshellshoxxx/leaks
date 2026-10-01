@@ -195,6 +195,33 @@ mutate "relay on all interfaces"       systemd/candor-intake-store-relay.socket 
 mutate "drop-in resets syscall filter" systemd/candor-sealer.service.d/zz-local.conf $'+[Service]\nSystemCallFilter='
 mutate "drop-in re-enables network"    systemd/candor-intake-web.service.d/zz-local.conf $'+[Service]\nPrivateNetwork=no'
 mutate "profile drop-in allows swap"   profiles/ce-hardened/run-candor-staging.mount.d/50-profile.conf 's|,noswap,|,|' --profile ce-hardened
+# Sealer memory budget (lead decision after round 5): (a) budget <= MemoryMax - 1024 MiB,
+# (b) staging tmpfs size >= budget, each with the profile's own values (c). Every case must
+# exit 30 AND name the expected rule; the hardened profile also gets one accepted case.
+SU=systemd/candor-sealer.service; HD=profiles/ce-hardened/candor-sealer.service.d/50-profile.conf
+memcase() { # name want-rule(s, |-separated, or "OK") file sed-expr [--profile p]
+  local name=$1 want=$2 file=$3 expr=$4 rc; shift 4
+  MUTN=$((MUTN + 1)); local d="$T/mem.$MUTN"; cp -a "$INTAKE" "$d"
+  sed -i "$expr" "$d/$file"
+  if cmp -s "$INTAKE/$file" "$d/$file"; then bad "memory case '$name' did not change its file (test bug)"; return; fi
+  cc -q --dir "$d" --only units "$@" > "$d.out" 2>&1; rc=$?
+  if [ "$want" = OK ]; then
+    if [ "$rc" -eq 0 ]; then pass "config-check accepts: $name"; else bad "config-check rejected: $name (exit $rc)"; fi
+  elif [ "$rc" -eq 30 ] && grep -qE "unit\.candor-sealer\.(service\.Service\.)?($want) .* FAIL " "$d.out"; then pass "config-check rejects: $name (exit 30, $want)"
+  else bad "memory case '$name': exit $rc or rule $want did not fail"; fi
+}
+memcase "sealer budget > MemoryMax - 1024 MiB"       memory_budget       "$SU" 's|^Environment=CANDOR_SEALER_MEMORY_BUDGET_MIB=3840$|Environment=CANDOR_SEALER_MEMORY_BUDGET_MIB=5700|'
+memcase "staging tmpfs smaller than the budget"     staging_vs_budget   "$SU" 's|^Environment=CANDOR_SEALER_MEMORY_BUDGET_MIB=3840$|Environment=CANDOR_SEALER_MEMORY_BUDGET_MIB=4200|'
+memcase "budget variable missing"                   memory_budget       "$SU" '/^Environment=CANDOR_SEALER_MEMORY_BUDGET_MIB=/d'
+memcase "budget reset by an empty Environment="     memory_budget       "$SU" 's|^Environment=CANDOR_SEALER_MEMORY_BUDGET_MIB=3840$|&\nEnvironment=|'
+memcase "budget not a number"                       memory_budget       "$SU" 's|^Environment=CANDOR_SEALER_MEMORY_BUDGET_MIB=3840$|Environment=CANDOR_SEALER_MEMORY_BUDGET_MIB=4G|'
+memcase "budget of 8 digits"                        memory_budget       "$SU" 's|^Environment=CANDOR_SEALER_MEMORY_BUDGET_MIB=3840$|Environment=CANDOR_SEALER_MEMORY_BUDGET_MIB=10000000|'
+memcase "another variable in Environment="          Environment         "$SU" 's|^Environment=CANDOR_SEALER_MEMORY_BUDGET_MIB=3840$|&\nEnvironment=LD_PRELOAD=/tmp/x.so|'
+memcase "MemoryMax infinity"                        "MemoryMax|memory_budget" "$SU" 's|^MemoryMax=6656M$|MemoryMax=infinity|'
+memcase "hardened: budget > its MemoryMax - 1024"   memory_budget       "$HD" 's|^MemoryMax=10752M$|&\nEnvironment=CANDOR_SEALER_MEMORY_BUDGET_MIB=9800|' --profile ce-hardened
+memcase "hardened: staging smaller than budget"     staging_vs_budget   "$HD" 's|^MemoryMax=10752M$|&\nEnvironment=CANDOR_SEALER_MEMORY_BUDGET_MIB=8500|' --profile ce-hardened
+memcase "hardened: budget 8000 within its limits"   OK                  "$HD" 's|^MemoryMax=10752M$|&\nEnvironment=CANDOR_SEALER_MEMORY_BUDGET_MIB=8000|' --profile ce-hardened
+memcase "ce-single: budget 4200 over its staging"   staging_vs_budget   "$SU" 's|^Environment=CANDOR_SEALER_MEMORY_BUDGET_MIB=3840$|Environment=CANDOR_SEALER_MEMORY_BUDGET_MIB=4200|' --profile ce-single
 mutate "staging may swap"              systemd/run-candor-staging.mount 's|,noswap,|,|'
 # journald / DNS (NET-008, LOG-007, 17 §4.5/§5.5)
 mutate "journald persistent"           journald/journald@candor-intake.conf 's|^Storage=volatile$|Storage=persistent|'

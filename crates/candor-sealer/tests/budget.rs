@@ -106,15 +106,26 @@ async fn per_session_quotas_bound_memory_and_never_depend_on_others() {
         drop_part(&f, sess(a), part).await;
     }
     // Over its own quota: LIMIT, independent of others.
-    assert_eq!(begin(&f, sess(a), 6 * MIB).await, Response::error(ErrorCode::Limit));
+    assert_eq!(
+        begin(&f, sess(a), 6 * MIB).await,
+        Response::error(ErrorCode::Limit)
+    );
     // An admitted draft's answers are the same with or without other drafts.
     let (b, part_b) = admitted[1];
     ok(&f.sealer, Request::SealAbort { sess: sess(b) }).await;
     let _ = part_b;
-    assert_eq!(begin(&f, sess(a), 6 * MIB).await, Response::error(ErrorCode::Limit));
+    assert_eq!(
+        begin(&f, sess(a), 6 * MIB).await,
+        Response::error(ErrorCode::Limit)
+    );
     // The freed quota admits a waiting draft.
-    let waiting = (10..18u8).find(|i| !admitted.iter().any(|(x, _)| x == i)).unwrap();
-    assert!(matches!(begin(&f, sess(waiting), MIB).await, Response::Part { .. }));
+    let waiting = (10..18u8)
+        .find(|i| !admitted.iter().any(|(x, _)| x == i))
+        .unwrap();
+    assert!(matches!(
+        begin(&f, sess(waiting), MIB).await,
+        Response::Part { .. }
+    ));
     assert!(f.sealer.memory_reserved() <= budget);
     // Dropping the draft's only part releases its quota.
     let before = f.sealer.memory_reserved();
@@ -137,19 +148,31 @@ async fn stalled_sessions_do_not_block_a_third() {
         open(&f, sess(i)).await;
     }
     for i in 1..=2u8 {
-        assert!(matches!(begin(&f, sess(i), MIB).await, Response::Part { .. }));
+        assert!(matches!(
+            begin(&f, sess(i), MIB).await,
+            Response::Part { .. }
+        ));
     }
-    assert_eq!(begin(&f, sess(3), MIB).await, Response::error(ErrorCode::Busy));
+    assert_eq!(
+        begin(&f, sess(3), MIB).await,
+        Response::error(ErrorCode::Busy)
+    );
     // Neither admitted source sends a byte.
     tokio::time::advance(std::time::Duration::from_secs(119)).await;
     f.sealer.reap_expired();
-    assert_eq!(begin(&f, sess(3), MIB).await, Response::error(ErrorCode::Busy));
+    assert_eq!(
+        begin(&f, sess(3), MIB).await,
+        Response::error(ErrorCode::Busy)
+    );
     tokio::time::advance(std::time::Duration::from_secs(2)).await;
     f.sealer.reap_expired();
     // Both stalled parts are aborted (no bytes for 120 s) and their quotas
     // released: the third source is admitted.
     assert_eq!(f.sealer.memory_reserved(), 0);
-    assert!(matches!(begin(&f, sess(3), MIB).await, Response::Part { .. }));
+    assert!(matches!(
+        begin(&f, sess(3), MIB).await,
+        Response::Part { .. }
+    ));
     assert_eq!(
         read_all_files(&f.staging_path).len(),
         1,
@@ -194,4 +217,46 @@ async fn sealing_frees_parts_and_releases_the_reservation() {
         env.objects[1].bytes.len() > 50_000,
         "bundle carries the part"
     );
+}
+
+/// Round-4 Info: a store known to be down fails the seal with the uniform
+/// INTERNAL before any part is consumed; the draft keeps its attachment.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn known_store_outage_keeps_the_attachments() {
+    let f = fixture_with(no_chaff(), limits(4 * MIB, 4 * MIB));
+    let s = sess(1);
+    confirmed(&f, s, None).await;
+    let Response::Part { part } = begin(&f, s, 1_000).await else {
+        panic!()
+    };
+    ok(
+        &f.sealer,
+        Request::PartChunk {
+            sess: s,
+            part,
+            data: SecretBytes::from_slice(&[1u8; 1_000]),
+            last: true,
+        },
+    )
+    .await;
+    f.sink
+        .unavailable
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let seal = Request::SealFinish {
+        sess: s,
+        delayed_delivery: false,
+    };
+    assert_eq!(
+        f.sealer.handle(seal.clone()).await,
+        Response::error(ErrorCode::Internal)
+    );
+    assert_eq!(read_all_files(&f.staging_path).len(), 1, "part kept");
+    f.sink
+        .unavailable
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    assert!(matches!(
+        f.sealer.handle(seal).await,
+        Response::Sealed { .. }
+    ));
+    assert!(f.sink.envelopes()[0].objects[1].bytes.len() > 1_000);
 }

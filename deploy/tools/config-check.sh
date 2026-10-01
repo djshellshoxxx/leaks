@@ -85,7 +85,7 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd -P)
 BASE="$SCRIPT_DIR/config-check.baseline"
 MANIFEST="$SCRIPT_DIR/config-check.manifest"
 # sha256 of config-check.manifest (release-pinned; update together with the manifest).
-MANIFEST_SHA256=c1de01103886f1b30439a1ce7a18c784454502e964e8aadd2b93093ec2965fa6
+MANIFEST_SHA256=1cb8ec3109a789e1c01f2012dbb74dc6c5cc10834d29a61e4177f164a24926d5
 SECTIONS="tor nft pg units journald kernel dns apparmor host"
 MODE=static
 DIR="$SCRIPT_DIR/../intake"
@@ -851,13 +851,16 @@ check_units() {
                       else if (g==ex[k]) printf "OK\tunit.%s.%s\t%s\n", u, dk, (g=="" ? "<empty>" : g)
                       else printf "FAIL\tunit.%s.%s\texpected [%s], effective value differs\n", u, dk, ex[k] }
         else if (m=="~") { if (g ~ ex[k]) printf "OK\tunit.%s.%s\tmatches %s\n", u, dk, ex[k]
-                           else printf "FAIL\tunit.%s.%s\teffective value does not match %s\n", u, dk, ex[k] } } }' "$BASE" "$WORK/eff/$u" > "$WORK/rl"; report_lines < "$WORK/rl"
+                           else printf "FAIL\tunit.%s.%s\teffective value does not match %s\n", u, dk, ex[k] } } }' "$BASE" "$WORK/eff/$u" > "$WORK/rl" 2>/dev/null ||
+      printf 'FAIL\tunit.%s.allow_list\tevaluation failed (awk error; fail closed)\n' "$u" >> "$WORK/rl"
+    report_lines < "$WORK/rl"
   done
 
   # Sealer syscall filter (AUD-RM2-DEP-16): the assignment lines are pinned exactly above; here
   # the EFFECTIVE allow-set (systemd's group expansion, allow-list minus '~' lines plus re-adds,
   # in order) must equal the release set, and the explicitly denied calls must stay denied.
   [ -f "$WORK/eff/candor-sealer.service" ] && check_sealer_syscalls "$WORK/eff/candor-sealer.service"
+  check_sealer_memory "$WORK/eff/candor-sealer.service" "$WORK/eff/run-candor-staging.mount"
   # Relay socket: an IPAddressAllow drop-in must name exactly the single @core_relay address.
   local allow
   allow=$(awk -F'|' '$1=="Socket" && $2=="IPAddressAllow" {print substr($0, length($1 $2)+3)}' "$WORK/eff/candor-intake-store-relay.socket" 2>/dev/null)
@@ -894,6 +897,41 @@ check_units() {
   if [ -n "$bad" ]; then fail unit.no_transient_or_generated "transient/generated unit configuration present: $(printf '%s' "$bad" | san_names)"; else ok unit.no_transient_or_generated; fi
   [ "$LIVE" -eq 1 ] || { skip unit.live "offline root: systemctl show not checked"; return; }
   check_units_live
+}
+
+# Sealer memory (lead decision after round 5): from the EFFECTIVE units (base + drop-ins, so a
+# profile is checked with its own MemoryMax and mount size), the last
+# CANDOR_SEALER_MEMORY_BUDGET_MIB must exist and satisfy
+#   (a) budget <= MemoryMax - 1024 MiB (base working set + slack outside the budget);
+#   (b) staging tmpfs size= >= budget (staged parts are budget-counted, so the budget and not
+#       ENOSPC refuses an upload).
+# Unparseable values (infinity, %, missing size=) fail.
+check_sealer_memory() { # eff-sealer eff-mount
+  local res
+  res=$(awk -F'|' '
+    function bytes(v,   n, u) {
+      if (v !~ /^[0-9]+[KkMmGgTt]?$/) return -1
+      n=v; sub(/[KkMmGgTt]$/, "", n); u=toupper(substr(v, length(v)))
+      if (u == "K") return n * 1024; if (u == "M") return n * 1048576
+      if (u == "G") return n * 1073741824; if (u == "T") return n * 1099511627776
+      return n + 0 }
+    function last(v,   a, k) { k=split(v, a, / ;; /); return a[k] }
+    FNR==NR { if ($1=="Service" && $2=="MemoryMax") mm=last(substr($0, length($1 $2)+3))
+              if ($1=="Service" && $2=="Environment") env=last(substr($0, length($1 $2)+3)); next }
+    $1=="Mount" && $2=="Options" { o=last(substr($0, length($1 $2)+3)); k=split(o, a, ","); for (i=1; i<=k; i++) if (a[i] ~ /^size=/) sz=substr(a[i], 6) }
+    END {
+      if (env !~ /^CANDOR_SEALER_MEMORY_BUDGET_MIB=[1-9][0-9]{0,6}$/) { print "FAIL\tunit.candor-sealer.memory_budget\tCANDOR_SEALER_MEMORY_BUDGET_MIB missing or invalid"; b=-1 }
+      else b=substr(env, 33) * 1048576
+      m=bytes(mm); s=bytes(sz)
+      if (b >= 0) {
+        if (m < 0) print "FAIL\tunit.candor-sealer.memory_budget\tMemoryMax missing or not an absolute size"
+        else if (b > m - 1073741824) printf "FAIL\tunit.candor-sealer.memory_budget\tbudget %d MiB > MemoryMax %d MiB - 1024 MiB\n", b/1048576, m/1048576
+        else printf "OK\tunit.candor-sealer.memory_budget\tbudget %d MiB <= MemoryMax %d MiB - 1024 MiB\n", b/1048576, m/1048576
+        if (s < 0) print "FAIL\tunit.candor-sealer.staging_vs_budget\tstaging tmpfs size= missing or not an absolute size"
+        else if (s < b) printf "FAIL\tunit.candor-sealer.staging_vs_budget\tstaging tmpfs %d MiB < budget %d MiB (ENOSPC before the budget)\n", s/1048576, b/1048576
+        else printf "OK\tunit.candor-sealer.staging_vs_budget\tstaging tmpfs %d MiB >= budget %d MiB\n", s/1048576, b/1048576 } }' "$1" "$2" 2>/dev/null)
+  if [ -z "$res" ]; then fail unit.candor-sealer.memory_budget "effective sealer/staging units not available"; return; fi
+  printf '%s\n' "$res" | report_lines
 }
 
 # Effective sealer syscall allow-set (AUD-RM2-DEP-16). systemd semantics: the first non-empty

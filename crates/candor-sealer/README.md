@@ -61,7 +61,8 @@ rt.block_on(async {
         _ = term => Ok(()),                                // then exit
     }
 })?;
-// Limits::memory_budget_bytes must sit below the unit's MemoryMax (SEA-26).
+// The unit sets CANDOR_SEALER_MEMORY_BUDGET_MIB (below MemoryMax) and
+// CANDOR_SEALER_SESSION_UPLOAD_MIB; Sealer::new refuses to start without them (SEA-29).
 ```
 
 The integrator supplies four things:
