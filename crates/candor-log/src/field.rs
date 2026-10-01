@@ -42,8 +42,22 @@ pub trait AuditField: sealed::Sealed {
     /// verification failure cannot carry 64 chosen bits). `true` for every
     /// other field type.
     #[doc(hidden)]
-    fn origin_ok(&self, _key: &[u8; 32], _max_seq: u64) -> bool {
+    fn origin_ok(&self, _key: &[u8; 32], _bounds: &SeqBounds) -> bool {
         true
+    }
+}
+
+/// The emitting writer's `next_seq` per stream (AUD-RM1-LOG-26). Built only
+/// by the writer.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug)]
+pub struct SeqBounds(pub(crate) [u64; 5]);
+
+impl SeqBounds {
+    /// `next_seq` of `stream`.
+    pub(crate) fn next(&self, stream: crate::codes::StreamId) -> u64 {
+        let i = usize::from(crate::chain::stream_byte(stream)).saturating_sub(1);
+        self.0.get(i).copied().unwrap_or(0)
     }
 }
 
@@ -80,6 +94,7 @@ impl Sample for SeqRange {
             first: 0,
             last: 9,
             origin: [0; 32],
+            stream: crate::codes::StreamId::Sec,
         }
     }
 }
@@ -93,6 +108,7 @@ impl Sample for Seq {
         Seq {
             v: 7,
             origin: [0; 32],
+            stream: crate::codes::StreamId::Sec,
         }
     }
 }
@@ -158,8 +174,8 @@ impl<T: AuditField> AuditField for Option<T> {
     fn schema_codes() -> &'static [&'static str] {
         T::schema_codes()
     }
-    fn origin_ok(&self, key: &[u8; 32], max_seq: u64) -> bool {
-        self.as_ref().is_none_or(|v| v.origin_ok(key, max_seq))
+    fn origin_ok(&self, key: &[u8; 32], bounds: &SeqBounds) -> bool {
+        self.as_ref().is_none_or(|v| v.origin_ok(key, bounds))
     }
 }
 
@@ -291,18 +307,21 @@ impl AuditField for Count {
 pub struct Seq {
     v: u64,
     origin: [u8; 32],
+    stream: crate::codes::StreamId,
 }
 
 impl Seq {
-    pub(crate) fn bound(v: u64, origin: [u8; 32]) -> Self {
-        Self { v, origin }
+    pub(crate) fn bound(v: u64, origin: [u8; 32], stream: crate::codes::StreamId) -> Self {
+        Self { v, origin, stream }
     }
     /// The offending sequence number of a verification failure (bound to
-    /// the key the stream was verified under).
+    /// the key and stream it was verified under). Audit/verify tooling only:
+    /// banned elsewhere by the workspace `clippy.toml` (AUD-RM1-LOG-26).
     pub fn of_failure(e: &crate::verify::VerifyError) -> Self {
         Self {
             v: e.seq,
             origin: e.origin,
+            stream: e.stream,
         }
     }
     /// Value.
@@ -316,8 +335,8 @@ impl AuditField for Seq {
     fn to_value(&self) -> Value {
         Value::Uint(self.v)
     }
-    fn origin_ok(&self, key: &[u8; 32], max_seq: u64) -> bool {
-        &self.origin == key && self.v <= max_seq
+    fn origin_ok(&self, key: &[u8; 32], bounds: &SeqBounds) -> bool {
+        &self.origin == key && self.v <= bounds.next(self.stream)
     }
 }
 
@@ -330,17 +349,21 @@ pub struct SeqRange {
     pub(crate) first: u64,
     pub(crate) last: u64,
     pub(crate) origin: [u8; 32],
+    pub(crate) stream: crate::codes::StreamId,
 }
 
 impl SeqRange {
     /// The records covered by a successful verification, optionally
-    /// narrowed to `[first, last]` inside it (viewer/exports).
+    /// narrowed to `[first, last]` inside it (viewer/exports). Audit/verify
+    /// tooling only: banned elsewhere by the workspace `clippy.toml`
+    /// (AUD-RM1-LOG-26).
     pub fn within(report: &crate::verify::VerifyReport, first: u64, last: u64) -> Option<Self> {
         let lo = report.first_seq?;
         (lo <= first && first <= last && last < report.next_seq).then_some(Self {
             first,
             last,
             origin: report.origin,
+            stream: report.stream,
         })
     }
     /// First sequence number.
@@ -358,8 +381,8 @@ impl AuditField for SeqRange {
     fn to_value(&self) -> Value {
         Value::Array(vec![Value::Uint(self.first), Value::Uint(self.last)])
     }
-    fn origin_ok(&self, key: &[u8; 32], max_seq: u64) -> bool {
-        &self.origin == key && self.first <= self.last && self.last < max_seq
+    fn origin_ok(&self, key: &[u8; 32], bounds: &SeqBounds) -> bool {
+        &self.origin == key && self.first <= self.last && self.last < bounds.next(self.stream)
     }
 }
 
@@ -385,7 +408,7 @@ impl AuditField for CheckpointRoot {
     fn to_value(&self) -> Value {
         Value::Bytes(self.root.to_vec())
     }
-    fn origin_ok(&self, key: &[u8; 32], _max_seq: u64) -> bool {
+    fn origin_ok(&self, key: &[u8; 32], _bounds: &SeqBounds) -> bool {
         &self.origin == key
     }
 }

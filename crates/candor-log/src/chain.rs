@@ -1209,7 +1209,11 @@ impl<S: CheckpointSigner, C: AuditClock> AuditLog<S, C> {
     /// checkpoints (for `audit.witness_*`); `None` for a checkpoint not
     /// signed by this log's key for its tenant (AUD-RM1-LOG-17).
     pub fn checkpoint_seq(&self, cp: &SignedCheckpoint) -> Option<Seq> {
-        Some(Seq::bound(cp.body().end_seq, self.own(cp)?))
+        Some(Seq::bound(
+            cp.body().end_seq,
+            self.own(cp)?,
+            cp.body().stream,
+        ))
     }
 
     /// The (non-empty) interval of one of this log's checkpoints.
@@ -1220,6 +1224,7 @@ impl<S: CheckpointSigner, C: AuditClock> AuditLog<S, C> {
             first: b.first_seq,
             last: b.end_seq.saturating_sub(1),
             origin,
+            stream: b.stream,
         })
     }
 
@@ -1287,8 +1292,10 @@ impl<S: CheckpointSigner, C: AuditClock> AuditLog<S, C> {
         if self.host_role == HostRole::Intake && !event.allowed_on_intake() {
             return Err(LogError::Envelope(EnvelopeError::NotAllowedOnHost));
         }
-        let max_seq = self.streams.iter().map(|s| s.next_seq).max().unwrap_or(0);
-        if !event.origins_ok(self.signer.verifying_key().as_bytes(), max_seq) {
+        // Each artefact-derived seq/range is bounded by the counter of the
+        // stream it was derived from (AUD-RM1-LOG-24/26).
+        let bounds = crate::field::SeqBounds(self.streams.each_ref().map(|s| s.next_seq));
+        if !event.origins_ok(self.signer.verifying_key().as_bytes(), &bounds) {
             return Err(LogError::ForeignArtefact);
         }
         if self.primary.is_none() {

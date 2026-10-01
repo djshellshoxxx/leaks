@@ -145,6 +145,7 @@ Tips are a static function of the screen (TIP-011). The order is the display ord
 - S02b is a separate URL: a compelled C-06 operator could log that someone opened it. It lists both tracks, so it reveals interest in safety, not the track.
 - The heuristic readability check approximates Flesch–Kincaid in English only; translations need human review (26 §12.2).
 - Placement at the end of `<main>` means NORMAL tips may be below the first viewport on long forms. Critical moment-of-action warnings that 11 already places inline (S06 size honesty, S07, S10) are unchanged.
+- New accounts and passphrase changes on the no-JavaScript path are saved in shuffled batches every 15 minutes to hide when you were active (ADR-055, AUD-RM2-SEA-21/28). If the service restarts before a batch is saved, a new account or a passphrase change can be lost. The S04/S11 notice says: "Your new passphrase works now. If it stops working within the next hour, use your old one or send your report again."
 - Bridge advice is bounded: bridges make Tor use harder to spot but do not hide it from a party watching the network (Tor Project manual).
 
 ## 8. Open issues

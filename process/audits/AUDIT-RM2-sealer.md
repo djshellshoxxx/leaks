@@ -483,3 +483,84 @@ Gate: FAIL 2026-10-01 d21981fea263b5a5926922b3f13147d6b0c00932
 Fixed and re-tested: SEA-01, 02 (sealer side), 03, 04, 05, 08, 09, 10, 11, 12, 13, 14, 15, 18.
 
 **Gate: FAIL 2026-10-01 cbf7c0f** (core/safefs at b38ae65): SEA-19 (High) is open, and SEA-20 (Medium) needs a fix or the lead's written acceptance.
+
+---
+
+## Re-test (round 3)
+
+| Item | Value |
+|---|---|
+| Re-tested revision | HEAD `8517304`. This commit follows `837be04`, and its "Sealer round-3 fixes" contain the claimed changes. The working tree was clean for `crates/candor-sealer`, `candor-core`, `candor-safefs` and `candor-intake-store`. Tested against the **live** candor-core (migration complete) |
+| Results | `cargo test -p candor-sealer --locked`: 72 pass (28 unit + 44 integration) plus the `harness = false` hardening binary (exit 0). `cargo clippy -p candor-sealer --all-targets --all-features -D warnings`: clean. No raw-key STREAM construction remains in `src`: no `StreamEncryptor::new`, `StreamDecryptor::new`, `derive_payload_key` or `derive_stage_part_key`. Fuzz, in a scratch `git archive` copy: `fuzz_sealer_ipc` with the shipped seeds ran 180 s, 3,530 execs, **cov 10,673**, no crash, leak or OOM |
+
+### Status
+
+| ID | Status | Evidence / note |
+|---|---|---|
+| SEA-19 | **Fixed** | `kd.rs`/`directory.rs` recompute the RFC 9162 root over every SignedKDEntry and require it to equal the signed root, with count = tree size. Entries are checked in leaf order for continuity and per-type signers; MEK usability requires the member's current unrevoked K08. My PoC (genuine checkpoint + attacker MEK) and its add/remove/reorder variants → `Inclusion` (`tests/directory.rs::genuine_checkpoint_with_attacker_mek_is_rejected`). A compromised LOG_KEY cannot introduce a MEK, CIK relabel or COI loosening (`entries_need_their_own_signers…`). The new variant is SEA-25 |
+| SEA-20 | **Fixed** | `harden_process` refuses unless `gettid == getpid` and no runtime is active. `confined_runtime()` marks only its own threads (`on_thread_start`). `guard()` runs on every request, frame and blocking job, and a single unconfined thread poisons the sealer. My PoC (helper-thread hardening) is refused (`tests/hardening.rs`) |
+| SEA-21 | **Partially fixed** | Account writes are queued in RAM and flushed every 15 min in a CSPRNG-shuffled batch (creates before replacements); dummy accounts rotate at 50 ‰; there is no `A` between envelope groups (`shape.rs`, `chaff.rs`). The residual is rated in SEA-28 |
+| SEA-22 | **Fixed** | `DRAFT_SET` caps the NFC length (message + answers, identity) before storing. The pending passphrase survives a failed commit (`fail_closed.rs::nfc_expanding_draft_is_refused_at_draft_set`, which is my PoC) |
+| SEA-23 | **Fixed** | A structure-aware stateful mode reaches sealing, login, rotation and account flush; seed corpus of 73 files. Residual: about 20 exec/s, because a real Argon2id runs per input. That is acceptable for the nightly job |
+| SEA-24 | **Fixed** except (a) | (a) The dev-mode event still uses a generic code (candor-log C-2). (b), (c), (d) are done |
+| SEA-16 | **Fixed (sealer side)** | Bundles are anonymous memfds sealed `WRITE|GROW|SHRINK|SEAL`; `fstat` size is checked before hand-over. `await_ack` accepts only exactly one byte `0x01` with no descriptors and no `TRUNC`/`CTRUNC`; it refuses `0x00`, other bytes, longer replies, returned fds and EOF (`tests/handover.rs`). The 41-byte format matches `candor-intake-store/src/staged.rs` (`STAGED_MSG_LEN`, version, `u64be len`, SHA-256; acks `0x01`/`0x00`). Receiver gaps known as STO-27, confirmed in this review: no `F_GET_SEALS` check, no peer-UID check, and the module doc still talks about "the sealer deletes its staged file". `await_ack` has no receive timeout, so a hung store pins one blocking thread per commit (Low; add `SO_RCVTIMEO`). Memory budget → SEA-26 |
+| STREAM migration | **Verified** | `for_payload` / `for_staged_part(SessionKey, PartId)`; K36 is a `SessionKey` |
+| ADR-055(2) KD encoding | **Info** | The numbering follows the 04 §14.2 field order, and composite subjects are domain-labelled SHA-256. This is acceptable as an interim canonical form. Until 04 §14.2 and 09 are amended, C-14 (the producer) has no normative source, so any divergence is a silent format break. 09 `kd_entry.signer_key_id bytea(16)` contradicts the 32-byte key id used here. Track as spec item C-3 |
+| SEA-17 | Open (workspace) | unchanged |
+
+### New findings (round 3)
+
+**AUD-RM2-SEA-25 — Unsigned REVOCATION and OBJECTION entries are honoured (Medium).** `kd.rs` (`ty::REVOCATION`: no signer check; `ty::OBJECTION` with `resolved = false`: no signer check). 04 §14.2 requires REVOCATION to be signed by a "signer authorized for the subject type", and OBJECTION by the K08 of a current channel member or OVERSIGHT member. The builder's own test appends an attacker-signed REVOCATION of member 1's MEK and the sealer accepts it (`revocations_rotations_and_objections_shrink_the_recipient_set`). An adversary who can append and checkpoint (a compromised C-14/LOG_KEY; witnesses cosign anything consistent) can:
+- remove chosen honest Triage Set members' MEKs or K08s, steering every new submission to the remaining (possibly colluding) members without the CIK+K15 tightening governance;
+- revoke the K01, CIK or LOG_KEY to freeze the directory, or block any loosening with an unsigned objection.
+
+This is not plaintext disclosure to a non-member. It is a governance bypass on the recipient set, which is why it is Medium. Fix: require the authorized signer per subject type (the key itself, its K01/CIK/K15 authority, or OVERSIGHT) and a channel-member or OVERSIGHT K08 on objections; regression = the existing test with `attacker()` expecting `Entry`.
+
+**AUD-RM2-SEA-26 — Memfd bundles double the attachment memory; a source can OOM-kill the sealer (High).** `handover::BundleWriter` (unbounded memfd), `seal.rs` bundle sealing; unit `MemoryMax=6656M` (= 2560M + 4 GiB staging). At `SEAL_FINISH` the staged parts (tmpfs, charged to the sealer cgroup per the unit comment) still exist while the full padded bundle is written into a memfd in the same cgroup. Peak usage is therefore about 2× the attachment volume, plus working set.
+- Before this change the bundle went to the size-limited staging tmpfs, so overflow gave `ENOSPC` → `BUSY`.
+- Now nothing bounds memfd bytes. One source uploading a bit over 2 GiB (within `max_file_bytes`/`max_bundle_bytes` = 4 GiB and the staging size), or several concurrent large seals, pushes the cgroup past `MemoryMax`. The kernel OOM-kills the sealer and every session and draft is lost (also SEA-28's account queue).
+- This is remotely triggerable at will through C-06, and the restart is observable.
+
+Fix: a global byte budget for in-flight memfds (`try_acquire_many` on a byte semaphore → `BUSY` before writing); budget `MemoryMax` for parts + bundle (or cap `max_bundle_bytes` so that 2× fits); or stream the bundle to the store in chunks. Regression: a seal whose bundle exceeds the budget returns `BUSY` without allocating.
+
+**AUD-RM2-SEA-27 — Only the Ed25519 halves of KD signatures are verified (Low).** `alg 2/3` signatures are "carried, not verified" (SPEC-NOTES, KD verification). Entries that 04 requires to be signed with "both algs" (ORG_ROOT, GOVERNANCE_ROLES, K01 entries) are accepted on Ed25519 alone, so the post-quantum half adds nothing at the sealer. Fix: verify the ML-DSA half where 04 requires it (candor-core API), or record the downgrade as an accepted residual with an expiry.
+
+**AUD-RM2-SEA-28 — Queued account writes are not durable when the source is told "received" or "rotated" (Medium).** `mod.rs` `enqueue_account`, `flush_accounts` (15-min batches, RAM only), `rotate_blocking` (the replacement is queued, the session switches to the new keys and `Locator` is returned). Rating of the residual the coordinator asked about:
+- **Crash loss.** Any sealer crash or restart within the window loses every queued real account (the source believes it can return for replies and cannot), and every queued rotation. Crashes include `Restart=on-failure`, a deploy restart, or SEA-26's OOM, which a source can trigger.
+- **Rotation after suspected compromise.** The **old passphrase stays valid at the store** for up to 15 min, and indefinitely if the sealer crashes. That defeats the recovery action.
+- **Double rotation within the window.** `enqueue_account` merges the second replacement into the first and **overwrites** `rewrapped_replies`. The second rotation cannot open replies still wrapped to the original key (skipped per SEA-14), so those replies become permanently unreadable.
+
+Medium: integrity and availability of the source's reply channel, plus a rotation gap; no anonymity loss. Fix options:
+- Make rotations durable immediately: replacements are rare and are a different row operation from creates, so the adjacency concern does not apply in the same way.
+- For creates, keep batching but have the store persist an indistinguishable encrypted pending row at commit time.
+- Merge `rewrapped_replies` by object hash instead of replacing them.
+- Tell the source in the UI that the account becomes usable at the next slot.
+
+A lead acceptance is possible for the create-loss part only.
+
+### Gate (round 3)
+
+| Severity | Open |
+|---|---|
+| Critical | 0 |
+| High | 1 (SEA-26) |
+| Medium | 2 (SEA-25, SEA-28) |
+| Low | 1 (SEA-27) plus the `await_ack` timeout note |
+| Info | SEA-16 receiver side (STO-27), SEA-17, SEA-24(a), ADR-055(2) / C-3 |
+
+Fixed and re-tested in round 3: SEA-19, SEA-20, SEA-22, SEA-23, SEA-24(b–d); SEA-16 on the sealer side; STREAM migration. SEA-21 is partially fixed, with its residual tracked as SEA-28.
+
+**Gate: FAIL 2026-10-01 8517304**: SEA-26 (High) is open, and SEA-25/SEA-28 (Medium) need fixes or the lead's written acceptance.
+
+## Lead dispositions after round 3 (2026-10-01)
+- **Gate: FAIL.** Fixes have been assigned to the builder:
+  - **SEA-26 (High):** incremental memfd write that frees each part, plus global admission control against a memory budget below MemoryMax, using the uniform "busy" refusal.
+  - **SEA-25 (Medium):** REVOCATION and OBJECTION must be signed per 04 §14.2; otherwise the snapshot fails closed.
+  - **SEA-27 (Low):** both halves of the hybrid signature must verify.
+  - **SEA-28 (Medium):**
+    - immediate in-memory invalidation of the old passphrase;
+    - coalesced double rotation, with a test that replies stay readable;
+    - flush on SIGTERM.
+    The residual crash loss is documented to sources in 11a §7.
+  - **Info:** await_ack gets a receive timeout. `signer_key_id` is 32 bytes; spec 09 is amended under ADR-055(2).
+- **C-2:** done in candor-log (`Service::Sealer`, `HealthCheck::InsecureDevOverride`); the sealer is switching to it.

@@ -9,6 +9,10 @@
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects
 )]
+#![allow(
+    clippy::disallowed_methods,
+    reason = "audit/verify tooling tests: build audit.* events from verification failures and reports (Seq::of_failure / SeqRange::within, AUD-RM1-LOG-26)"
+)]
 
 mod common;
 
@@ -1767,11 +1771,11 @@ fn checkpoint_values_cannot_be_laundered() {
         .unwrap_err(),
         LogError::ForeignArtefact
     );
-    let e = verify_stream(&params(&log.verifying_key(), StreamId::Case), &[], &[real]).unwrap_err();
+    let e = verify_stream(&params(&log.verifying_key(), StreamId::Sec), &[], &[real]).unwrap_err();
     log.emit(
         EventContext::staff(user(1)),
         AuditEvent::AuditVerificationFailed {
-            stream: StreamId::Case,
+            stream: StreamId::Sec,
             seq: candor_log::field::Seq::of_failure(&e),
             failure_code: e.code,
         },
@@ -1869,4 +1873,39 @@ fn restart_marks_possible_stage_loss() {
     )
     .unwrap();
     assert!(sink.0.lock().unwrap().chain(StreamId::CaseSlot).is_empty());
+}
+
+// AUD-RM1-LOG-26: a failure seq is bounded by the counter of the stream it
+// was verified for, not by the largest stream of the writer.
+#[test]
+fn failure_seq_bounded_by_its_own_stream() {
+    let (mut log, _sink, _c) = log_with(HostRole::Core, CheckpointPolicy::DEFAULT);
+    for i in 0..6 {
+        log.emit(EventContext::staff(user(1)), opened(i)).unwrap();
+    }
+    log.emit(EventContext::staff(user(1)), login()).unwrap();
+    let key = log.verifying_key();
+    let stub = |s| ChainRecord::Redacted {
+        seq: 5,
+        case: case(1),
+        inner: [0; 32],
+        tombstone_seq: s,
+    };
+    let fail = |stream| {
+        let e = verify_stream(&params(&key, stream), &[stub(9)], &[]).unwrap_err();
+        assert_eq!(e.seq, 5);
+        AuditEvent::AuditVerificationFailed {
+            stream,
+            seq: candor_log::field::Seq::of_failure(&e),
+            failure_code: e.code,
+        }
+    };
+    // SEC holds 1 record: seq 5 is outside it (CASE holds 6).
+    assert_eq!(
+        log.emit(EventContext::staff(user(1)), fail(StreamId::Sec))
+            .unwrap_err(),
+        LogError::ForeignArtefact
+    );
+    log.emit(EventContext::staff(user(1)), fail(StreamId::Case))
+        .unwrap();
 }

@@ -69,6 +69,8 @@ pub struct VerifyError {
     /// Checkpoint key the stream was verified under (binds
     /// [`crate::field::Seq::of_failure`], AUD-RM1-LOG-17).
     pub(crate) origin: [u8; 32],
+    /// Stream verified (bounds the failure seq, AUD-RM1-LOG-26).
+    pub(crate) stream: StreamId,
 }
 
 impl fmt::Display for VerifyError {
@@ -112,6 +114,8 @@ pub struct VerifyReport {
     /// Checkpoint key the stream was verified under (binds
     /// [`crate::field::SeqRange::within`]).
     pub(crate) origin: [u8; 32],
+    /// Stream verified.
+    pub(crate) stream: StreamId,
 }
 
 impl VerifyReport {
@@ -348,6 +352,7 @@ pub fn verify_stream(
         code,
         seq,
         origin,
+        stream: p.stream,
     })
 }
 
@@ -568,5 +573,6 @@ fn verify_inner(
         last_checkpoint: prev_cp,
         pending_leaves,
         origin,
+        stream: p.stream,
     })
 }

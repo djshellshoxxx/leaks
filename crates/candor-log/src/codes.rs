@@ -439,6 +439,8 @@ Service {
     Backup => "backup",
     Scheduler => "scheduler",
     Siem => "siem",
+    /// The intake sealer (`candor-sealer`).
+    Sealer => "sealer",
 });
 code_enum!(
     /// Health status.
@@ -455,6 +457,10 @@ HealthCheck {
     AbuseFlood => "ABUSE_FLOOD",
     PowPressure => "POW_PRESSURE",
     QueueBacklog => "QUEUE_BACKLOG",
+    /// The service runs under the audited insecure developer override
+    /// (process hardening off); always an integrity alarm, never an
+    /// ordinary readiness degradation.
+    InsecureDevOverride => "INSECURE_DEV_OVERRIDE",
 });
 
 impl HealthCheck {

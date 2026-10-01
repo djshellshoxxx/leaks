@@ -119,6 +119,11 @@ disallowed-methods = [
     { path = "nix::unistd::unlink", reason = "ADR-027: use candor-safefs", allow-invalid = true },
     { path = "std::io::stdout", reason = "LOG-001: no free-text output; use the candor-log typed API" },
     { path = "std::io::stderr", reason = "LOG-001: no free-text output; use the candor-log typed API" },
+    # AUD-RM1-LOG-26: producers of caller-influenced audit sequence values
+    # are for audit/verify tooling only; allowed with a reasoned
+    # `#[allow(clippy::disallowed_methods, reason = "..")]` at those sites.
+    { path = "candor_log::field::Seq::of_failure", reason = "AUD-RM1-LOG-26: audit/verify tooling only", allow-invalid = true },
+    { path = "candor_log::field::SeqRange::within", reason = "AUD-RM1-LOG-26: audit/verify tooling only", allow-invalid = true },
     { path = "std::panic::panic_any", reason = "LOG-001 / AUD-RM1-LOG-21: a panic payload reaches stderr/journald" },
     { path = "std::panic::resume_unwind", reason = "LOG-001 / AUD-RM1-LOG-21: a panic payload reaches stderr/journald" },
 ]

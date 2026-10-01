@@ -1355,7 +1355,7 @@ events:
     fields:
       - name: "service"
         type: "Service"
-        codes: ["tor", "web", "upload", "intake_store", "relay", "core", "authz", "auth", "audit", "health", "keydir", "admin", "viewer", "backup", "scheduler", "siem"]
+        codes: ["tor", "web", "upload", "intake_store", "relay", "core", "authz", "auth", "audit", "health", "keydir", "admin", "viewer", "backup", "scheduler", "siem", "sealer"]
       - name: "version"
         type: "Version"
       - name: "exit_code"
@@ -1367,7 +1367,7 @@ events:
     fields:
       - name: "service"
         type: "Service"
-        codes: ["tor", "web", "upload", "intake_store", "relay", "core", "authz", "auth", "audit", "health", "keydir", "admin", "viewer", "backup", "scheduler", "siem"]
+        codes: ["tor", "web", "upload", "intake_store", "relay", "core", "authz", "auth", "audit", "health", "keydir", "admin", "viewer", "backup", "scheduler", "siem", "sealer"]
       - name: "version"
         type: "Version"
       - name: "exit_code"
@@ -1379,7 +1379,7 @@ events:
     fields:
       - name: "service"
         type: "Service"
-        codes: ["tor", "web", "upload", "intake_store", "relay", "core", "authz", "auth", "audit", "health", "keydir", "admin", "viewer", "backup", "scheduler", "siem"]
+        codes: ["tor", "web", "upload", "intake_store", "relay", "core", "authz", "auth", "audit", "health", "keydir", "admin", "viewer", "backup", "scheduler", "siem", "sealer"]
       - name: "version"
         type: "Version"
       - name: "exit_code"
@@ -1391,13 +1391,13 @@ events:
     fields:
       - name: "service"
         type: "Service"
-        codes: ["tor", "web", "upload", "intake_store", "relay", "core", "authz", "auth", "audit", "health", "keydir", "admin", "viewer", "backup", "scheduler", "siem"]
+        codes: ["tor", "web", "upload", "intake_store", "relay", "core", "authz", "auth", "audit", "health", "keydir", "admin", "viewer", "backup", "scheduler", "siem", "sealer"]
       - name: "status"
         type: "HealthStatus"
         codes: ["OK", "DEGRADED", "DOWN"]
       - name: "check_code"
         type: "HealthCheck"
-        codes: ["LIVENESS", "READINESS", "DATABASE", "DISK", "TOR_BOOTSTRAP", "RELAY_SCHEDULE", "ABUSE_FLOOD", "POW_PRESSURE", "QUEUE_BACKLOG"]
+        codes: ["LIVENESS", "READINESS", "DATABASE", "DISK", "TOR_BOOTSTRAP", "RELAY_SCHEDULE", "ABUSE_FLOOD", "POW_PRESSURE", "QUEUE_BACKLOG", "INSECURE_DEV_OVERRIDE"]
   - type: "sys.capacity"
     class: SYSTEM
     stream: sys

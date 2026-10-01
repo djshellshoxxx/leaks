@@ -1,51 +1,68 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Receive side of the staged-bundle hand-over (deploy D-33; integration item
-//! for the sealer and store owners).
+//! Receive side of the staged-bundle hand-over (deploy D-33, ADR-055(1),
+//! AUD-RM2-STO-27).
 //!
-//! The sealer writes a sealed ATTACHMENT_BUNDLE into its own tmpfs staging
-//! root; the store has **no** access to that directory. The sealer passes the
-//! staged file to the store as an open file descriptor over `istore.sock`
-//! (`AF_UNIX`, `SOCK_SEQPACKET`) with `SCM_RIGHTS`, never as a path. The store
-//! copies the bytes into its own blob store through `candor-safefs` (atomic
-//! create + fsync + no-replace rename, timestamps normalised to the caller's
-//! slot), and acknowledges to the sealer only after the envelope that
-//! references the blob has been durably committed
-//! ([`crate::IntakeStore::commit_envelope`] returns after `COMMIT`).
+//! The sealer seals each ATTACHMENT_BUNDLE into an anonymous `memfd` sealed
+//! `F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL` and passes it to
+//! the store as an open descriptor over `istore.sock` (`AF_UNIX`,
+//! `SOCK_SEQPACKET`, `SCM_RIGHTS`), never as a path. A [`StagedReceiver`]
+//! copies the bytes into the store's blob root through `candor-safefs`
+//! (atomic create + fsync + no-replace rename, times normalised to the
+//! caller's slot). The acknowledgement `0x01` can only be sent with a
+//! [`CommittedStaged`] token, which only [`StagedReceiver::commit_staged`]
+//! creates, and only after [`crate::IntakeStore::commit_envelope`] returned
+//! (it returns after the database `COMMIT`, ADR-046(1)) for an envelope whose
+//! ATTACHMENT_BUNDLE object references exactly this blob with its exact size.
 //!
 //! Wire format (one SEQPACKET message, exactly one descriptor):
 //! `u8 version (= 1) ‖ u64be len ‖ sha256(file bytes)(32)` = 41 bytes; the
-//! reply is one byte, `0x01` (committed; the sealer may delete its file) or
-//! `0x00` (refused; the sealer deletes its file and fails the seal).
+//! reply is one byte, `0x01` (committed) or `0x00` (refused).
 //!
-//! Hostile-peer discipline: truncated data or control messages, a wrong
-//! message length, a missing descriptor or more than one (every received
-//! descriptor is closed), a non-regular file, a size that differs from the
-//! header, a file that changes during the copy, a length above the caller's
-//! bound and a hash mismatch are all refused before anything is committed (an
-//! uncommitted safefs object is removed on drop). The descriptor is read with
-//! `pread` from offset 0 (its file offset is ignored) and never written.
-//! No path, size or name is logged or put into an error.
+//! Hostile-peer discipline (all refused before anything is committed, every
+//! received descriptor closed): a peer whose `SO_PEERCRED` uid is not the
+//! configured sealer uid, a socket that is not `SOCK_SEQPACKET`, no message
+//! within the receive timeout (`SO_RCVTIMEO`), truncated data or control
+//! (`MSG_TRUNC`/`MSG_CTRUNC`), any length other than 41, an unknown version,
+//! `len = 0` or above the bound, credentials or a second control message, zero
+//! or more than one descriptor, a non-regular file, a file without all four
+//! seals (this also excludes FUSE/NFS/disk files, which cannot be sealed, so
+//! the copy reads RAM only and cannot stall), `fstat` size ≠ `len`, a file that
+//! shrinks or grows during the copy, and a hash mismatch.
 //!
-//! All calls block; run them on a blocking thread.
+//! Orphans: a blob copied into the blob root whose envelope did not commit is
+//! recorded in an in-memory registry (never on disk) and removed by
+//! [`StagedReceiver::sweep_orphans`], which the daemon calls at every slot
+//! boundary with that slot (and [`StagedReceiver::startup`] at start).
+//! No path, size, name or identifier is logged or put into an error.
+//!
+//! Receive, acknowledge, refuse and sweep block (run them on a blocking
+//! thread); [`StagedReceiver::commit_staged`] is async.
 
-use std::fs::File; // safefs-lint: allow(File only wraps an SCM_RIGHTS-received fd for pread; never opened by path)
+use std::collections::HashMap;
+use std::future::Future;
 use std::io::{IoSlice, IoSliceMut, Write};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
-use std::os::unix::fs::FileExt;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
-use candor_safefs::{SafeRoot, SlotTime};
-use rustix::fs::FileType; // safefs-lint: allow(type check of received fd; no path access)
+use candor_safefs::{ObjectId, SafeRoot, SlotTime};
+use rustix::fs::{FileType, SealFlags, fcntl_get_seals, fstat}; // safefs-lint: allow(fd-only calls on the SCM_RIGHTS-received descriptor: fstat and F_GET_SEALS; no path access)
+use rustix::net::sockopt::{Timeout, set_socket_timeout, socket_peercred, socket_type};
 use rustix::net::{
     RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, ReturnFlags, SendAncillaryBuffer,
-    SendFlags,
+    SendFlags, SocketType,
 };
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
+use crate::IntakeStore;
 use crate::error::{Result, StoreError};
-use crate::types::{BlobId, EnvelopeRef, MAX_PART_PADDED_SIZE};
+use crate::types::{BlobId, CommitEnvelope, EnvelopeRef, GROUP_OBJECTS, MAX_PART_PADDED_SIZE};
+
+const _: () = assert!(STAGED_BUNDLE_INDEX < GROUP_OBJECTS);
 
 /// Protocol version of the hand-over message.
 pub const STAGED_VERSION: u8 = 1;
@@ -55,6 +72,22 @@ pub const STAGED_MSG_LEN: usize = 1 + 8 + 32;
 pub const STAGED_ACK_COMMITTED: u8 = 0x01;
 /// Acknowledgement byte: refused (nothing committed).
 pub const STAGED_ACK_REFUSED: u8 = 0x00;
+/// Index of the ATTACHMENT_BUNDLE object in a group (ADR-052(1)).
+pub const STAGED_BUNDLE_INDEX: usize = 1;
+/// Default per-call socket deadline (`SO_RCVTIMEO` / `SO_SNDTIMEO`).
+pub const STAGED_DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Smallest accepted socket deadline (zero would mean "block forever").
+pub const STAGED_MIN_TIMEOUT: Duration = Duration::from_millis(10);
+/// Largest accepted socket deadline.
+pub const STAGED_MAX_TIMEOUT: Duration = Duration::from_secs(60);
+/// Blobs received but not yet committed or swept, per receiver; more are
+/// refused with [`StoreError::Capacity`] (bounded memory and disk).
+pub const STAGED_MAX_IN_FLIGHT: usize = 64;
+/// Required seals (ADR-055(1)).
+const REQUIRED_SEALS: SealFlags = SealFlags::WRITE
+    .union(SealFlags::GROW)
+    .union(SealFlags::SHRINK)
+    .union(SealFlags::SEAL);
 /// Copy buffer size.
 const CHUNK: usize = 64 * 1024;
 const CHUNK_U64: u64 = 64 * 1024;
@@ -66,7 +99,7 @@ const MAX_FDS: usize = 4;
 /// The hand-over header.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct StagedHeader {
-    /// Exact file length in bytes (1 ..= the caller's bound).
+    /// Exact file length in bytes (1 ..= the receiver's bound).
     pub len: u64,
     /// SHA-256 of the file bytes.
     pub sha256: [u8; 32],
@@ -118,15 +151,123 @@ impl StagedHeader {
     }
 }
 
-/// A staged bundle copied into the blob store, not yet acknowledged. Commit
-/// the envelope referencing [`Self::blob_id`], then call
-/// [`acknowledge_committed`]; on failure call [`refuse`] and remove the blob.
-#[must_use = "acknowledge after the envelope commit, or refuse and remove the blob"]
+/// Registry state of a blob this receiver wrote.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum State {
+    /// Being copied (no committed file yet).
+    Receiving,
+    /// Committed to the blob root; a [`StagedBlob`] is alive.
+    Live,
+    /// Its envelope commit is in progress.
+    Committing,
+    /// Definitely not referenced: removed by the next sweep.
+    Orphan,
+}
+
+#[derive(Default)]
+struct Registry {
+    map: Mutex<HashMap<BlobId, State>>,
+    /// Blobs whose envelope commit outcome is unknown (kept, never swept).
+    uncertain: AtomicU64,
+}
+
+impl Registry {
+    fn lock(&self) -> MutexGuard<'_, HashMap<BlobId, State>> {
+        // No code panics while holding the lock; recovering a poisoned map
+        // keeps the bookkeeping instead of failing every later call.
+        self.map.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn set(&self, id: BlobId, s: State) {
+        self.lock().insert(id, s);
+    }
+
+    fn forget(&self, id: BlobId) {
+        self.lock().remove(&id);
+    }
+
+    fn uncertain(&self, id: BlobId) {
+        self.forget(id);
+        self.uncertain.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Removes a `Receiving` entry unless the copy committed (`done`), and marks
+/// it `Orphan` if the safefs commit may have left a file behind.
+struct ReceiveGuard<'a> {
+    reg: &'a Registry,
+    id: BlobId,
+    outcome: Option<State>,
+}
+
+impl Drop for ReceiveGuard<'_> {
+    fn drop(&mut self) {
+        match self.outcome {
+            Some(s) => self.reg.set(self.id, s),
+            None => self.reg.forget(self.id),
+        }
+    }
+}
+
+/// Marks a blob `Uncertain` if the commit future is dropped mid-await (the
+/// database may or may not have committed: keep the blob).
+struct CommitGuard<'a> {
+    reg: &'a Registry,
+    id: BlobId,
+    armed: bool,
+}
+
+impl Drop for CommitGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.reg.uncertain(self.id);
+        }
+    }
+}
+
+/// A staged bundle copied into the blob root, not yet referenced by a
+/// committed envelope. Pass it to [`StagedReceiver::commit_staged`]; if it is
+/// dropped instead, the blob is an orphan and is removed by the next sweep.
+#[must_use = "commit the envelope with commit_staged, or the blob is swept as an orphan"]
 pub struct StagedBlob {
-    /// Blob id in the store's blob root.
-    pub blob_id: BlobId,
-    /// Copied length.
-    pub len: u64,
+    blob_id: BlobId,
+    len: u64,
+    reg: Arc<Registry>,
+    armed: bool,
+}
+
+impl StagedBlob {
+    /// Blob id in the store's blob root (put it in the ATTACHMENT_BUNDLE
+    /// object's [`crate::PartRef`]).
+    #[must_use]
+    pub fn blob_id(&self) -> BlobId {
+        self.blob_id
+    }
+
+    /// Copied length (the object's `padded_size`).
+    #[must_use]
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    /// Never empty (`len ≥ 1` is enforced on receive).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    fn disarm(mut self) -> (BlobId, u64, Arc<Registry>) {
+        self.armed = false;
+        (self.blob_id, self.len, Arc::clone(&self.reg))
+    }
+}
+
+impl Drop for StagedBlob {
+    fn drop(&mut self) {
+        if self.armed {
+            self.reg.set(self.blob_id, State::Orphan);
+        }
+    }
 }
 
 impl core::fmt::Debug for StagedBlob {
@@ -135,36 +276,367 @@ impl core::fmt::Debug for StagedBlob {
     }
 }
 
+/// Proof that the envelope referencing a received blob is durably committed.
+/// Not constructible outside this module, not `Clone`; consumed by
+/// [`StagedReceiver::acknowledge`].
+#[must_use = "acknowledge the hand-over"]
+pub struct CommittedStaged {
+    blob_id: BlobId,
+    envelope_ref: EnvelopeRef,
+}
+
+impl CommittedStaged {
+    /// The committed blob.
+    #[must_use]
+    pub fn blob_id(&self) -> BlobId {
+        self.blob_id
+    }
+
+    /// The committed envelope.
+    #[must_use]
+    pub fn envelope_ref(&self) -> EnvelopeRef {
+        self.envelope_ref
+    }
+}
+
+impl core::fmt::Debug for CommittedStaged {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("CommittedStaged")
+    }
+}
+
+/// The envelope commit used by [`StagedReceiver::commit_staged`]:
+/// implemented for every [`IntakeStore`] as
+/// [`IntakeStore::commit_envelope`], which returns only after the database
+/// `COMMIT` (ADR-046(1)). A separate seam so that commit outcomes the real
+/// stores cannot produce on demand (backend errors, cancellation) are
+/// testable; production code passes the store.
+pub trait StagedCommit: Send + Sync {
+    /// `COMMIT_ENVELOPE`; `Ok` only once the envelope is durably committed.
+    fn commit_staged_envelope(
+        &self,
+        env: CommitEnvelope,
+    ) -> impl Future<Output = Result<EnvelopeRef>> + Send;
+}
+
+impl<S: IntakeStore> StagedCommit for S {
+    fn commit_staged_envelope(
+        &self,
+        env: CommitEnvelope,
+    ) -> impl Future<Output = Result<EnvelopeRef>> + Send {
+        self.commit_envelope(env)
+    }
+}
+
+/// The store's end of `istore.sock` hand-overs. Share it (`&self` methods)
+/// between the receiving threads and the slot-boundary sweep.
+pub struct StagedReceiver {
+    blobs: SafeRoot,
+    sealer_uid: u32,
+    max_len: u64,
+    timeout: Duration,
+    reg: Arc<Registry>,
+}
+
+impl core::fmt::Debug for StagedReceiver {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("StagedReceiver")
+    }
+}
+
+impl StagedReceiver {
+    /// A receiver writing into `blobs`, accepting hand-overs only from a peer
+    /// whose `SO_PEERCRED` uid is `sealer_uid` (the sealer's dedicated system
+    /// user; there is no default) and bundles of at most
+    /// `min(max_len, MAX_PART_PADDED_SIZE)` bytes (`max_len ≥ 1`).
+    pub fn new(blobs: SafeRoot, sealer_uid: u32, max_len: u64) -> Result<Self> {
+        if max_len == 0 {
+            return Err(StoreError::InvalidInput("staged bound"));
+        }
+        Ok(Self {
+            blobs,
+            sealer_uid,
+            max_len: max_len.min(MAX_PART_PADDED_SIZE),
+            timeout: STAGED_DEFAULT_TIMEOUT,
+            reg: Arc::new(Registry::default()),
+        })
+    }
+
+    /// Per-call socket deadline, clamped to
+    /// [`STAGED_MIN_TIMEOUT`]..=[`STAGED_MAX_TIMEOUT`].
+    #[must_use]
+    pub fn with_timeout(mut self, t: Duration) -> Self {
+        self.timeout = t.clamp(STAGED_MIN_TIMEOUT, STAGED_MAX_TIMEOUT);
+        self
+    }
+
+    /// The blob root.
+    #[must_use]
+    pub fn blobs(&self) -> &SafeRoot {
+        &self.blobs
+    }
+
+    /// Blobs received and not yet committed or swept.
+    #[must_use]
+    pub fn in_flight(&self) -> usize {
+        self.reg.lock().len()
+    }
+
+    /// Blobs kept because their envelope commit outcome was unknown (health
+    /// counter; content-free).
+    #[must_use]
+    pub fn uncertain_count(&self) -> u64 {
+        self.reg.uncertain.load(Ordering::Relaxed)
+    }
+
+    /// Start-up: remove temp files of copies interrupted by a crash.
+    pub fn startup(&self, slot: SlotTime) -> Result<usize> {
+        self.blobs.purge_incomplete(slot).map_err(io_err)
+    }
+
+    /// Receive one hand-over from `sock` and copy the passed file into the
+    /// blob root (times normalised to `slot`). The total time is bounded:
+    /// one `recvmsg` under `SO_RCVTIMEO`, then a copy of at most the bound
+    /// from a sealed RAM-backed file, and (on refusal) one `send` under
+    /// `SO_SNDTIMEO`. If a message was consumed and refused, `0x00` is sent
+    /// (best effort). On any error the caller should close the connection.
+    pub fn receive(&self, sock: BorrowedFd<'_>, slot: SlotTime) -> Result<StagedBlob> {
+        let mut consumed = false;
+        let r = self.receive_inner(sock, slot, &mut consumed);
+        if r.is_err() && consumed {
+            let _ = self.send_byte(sock, STAGED_ACK_REFUSED);
+        }
+        r
+    }
+
+    fn receive_inner(
+        &self,
+        sock: BorrowedFd<'_>,
+        slot: SlotTime,
+        consumed: &mut bool,
+    ) -> Result<StagedBlob> {
+        self.check_socket(sock)?;
+        set_socket_timeout(sock, Timeout::Recv, Some(self.timeout)).map_err(io_err)?;
+        let (header, fd) = receive_message(sock, consumed)?;
+        if header.len > self.max_len {
+            return Err(StoreError::InvalidInput("staged bundle too large"));
+        }
+        check_descriptor(&fd, header.len)?;
+        // Reserve a registry entry before writing anything (bounded in-flight).
+        let id = ObjectId::random().map_err(io_err)?;
+        let blob_id = BlobId(*id.as_bytes());
+        {
+            let mut m = self.reg.lock();
+            if m.len() >= STAGED_MAX_IN_FLIGHT {
+                return Err(StoreError::Capacity);
+            }
+            if m.insert(blob_id, State::Receiving).is_some() {
+                return Err(StoreError::Integrity("staged blob id reuse"));
+            }
+        }
+        let mut guard = ReceiveGuard {
+            reg: &self.reg,
+            id: blob_id,
+            outcome: None,
+        };
+        // An uncommitted safefs object is removed on drop.
+        let mut pending = self.blobs.create_new(&id).map_err(io_err)?;
+        copy_verified(&fd, &header, &mut pending)?;
+        drop(fd);
+        // From here a file may exist even if `commit` reports an error.
+        guard.outcome = Some(State::Orphan);
+        let got = pending.commit(slot).map_err(io_err)?;
+        if got != id {
+            return Err(StoreError::Integrity("staged blob id"));
+        }
+        guard.outcome = Some(State::Live);
+        drop(guard);
+        Ok(StagedBlob {
+            blob_id,
+            len: header.len,
+            reg: Arc::clone(&self.reg),
+            armed: true,
+        })
+    }
+
+    /// `SO_PEERCRED` uid = the configured sealer uid, and `SOCK_SEQPACKET`.
+    fn check_socket(&self, sock: BorrowedFd<'_>) -> Result<()> {
+        let cred = socket_peercred(sock).map_err(|_| StoreError::InvalidInput("staged peer"))?;
+        if cred.uid.as_raw() != self.sealer_uid {
+            return Err(StoreError::InvalidInput("staged peer"));
+        }
+        if socket_type(sock).map_err(io_err)? != SocketType::SEQPACKET {
+            return Err(StoreError::InvalidInput("staged socket type"));
+        }
+        Ok(())
+    }
+
+    /// Commit `env`, whose ATTACHMENT_BUNDLE object must reference exactly
+    /// `blob` (id and size; no other object may name it), through
+    /// `store.commit_envelope`, which returns after the database `COMMIT`.
+    ///
+    /// Outcomes: `Ok` → the token for [`Self::acknowledge`]. A rejection
+    /// before the transaction (validation, duplicate, not initialised, …) →
+    /// the blob is an orphan (swept). A backend error has an unknown outcome:
+    /// the commit is retried once (a group that did commit is then reported
+    /// as a duplicate); if that does not succeed, or the future is dropped
+    /// mid-commit, the blob is kept (never swept: it may be referenced) and
+    /// counted in [`Self::uncertain_count`]. On `Err` call [`Self::refuse`].
+    pub async fn commit_staged<C: StagedCommit + ?Sized>(
+        &self,
+        store: &C,
+        env: CommitEnvelope,
+        blob: StagedBlob,
+    ) -> Result<CommittedStaged> {
+        let (blob_id, len, reg) = blob.disarm();
+        if !references_exactly(&env, blob_id, len) {
+            reg.set(blob_id, State::Orphan);
+            return Err(StoreError::InvalidInput("staged blob not referenced"));
+        }
+        reg.set(blob_id, State::Committing);
+        let mut guard = CommitGuard {
+            reg: &reg,
+            id: blob_id,
+            armed: true,
+        };
+        let first = store.commit_staged_envelope(env.clone()).await;
+        let r = match first {
+            Ok(r) => Ok(r),
+            Err(StoreError::Backend) => match store.commit_staged_envelope(env).await {
+                Ok(r) => Ok(r),
+                // Unknown outcome (possibly committed): keep the blob.
+                Err(_) => {
+                    guard.armed = false;
+                    reg.uncertain(blob_id);
+                    return Err(StoreError::Backend);
+                }
+            },
+            Err(e) => Err(e),
+        };
+        guard.armed = false;
+        match r {
+            Ok(envelope_ref) => {
+                reg.forget(blob_id);
+                Ok(CommittedStaged {
+                    blob_id,
+                    envelope_ref,
+                })
+            }
+            Err(e) => {
+                reg.set(blob_id, State::Orphan);
+                Err(e)
+            }
+        }
+    }
+
+    /// Send `0x01`; possible only with the token of a committed envelope.
+    pub fn acknowledge(&self, sock: BorrowedFd<'_>, committed: CommittedStaged) -> Result<()> {
+        let CommittedStaged { .. } = committed;
+        self.send_byte(sock, STAGED_ACK_COMMITTED)
+    }
+
+    /// Send `0x00` (nothing referencing the hand-over was committed).
+    pub fn refuse(&self, sock: BorrowedFd<'_>) -> Result<()> {
+        self.send_byte(sock, STAGED_ACK_REFUSED)
+    }
+
+    fn send_byte(&self, sock: BorrowedFd<'_>, b: u8) -> Result<()> {
+        set_socket_timeout(sock, Timeout::Send, Some(self.timeout)).map_err(io_err)?;
+        let mut control = SendAncillaryBuffer::default();
+        let n = rustix::net::sendmsg(
+            sock,
+            &[IoSlice::new(&[b])],
+            &mut control,
+            SendFlags::NOSIGNAL,
+        )
+        .map_err(io_err)?;
+        if n != 1 {
+            return Err(StoreError::Backend);
+        }
+        Ok(())
+    }
+
+    /// Remove every orphan blob (copied, envelope definitely not committed).
+    /// Call at each slot boundary with that slot: removals change directory
+    /// times only to `slot`, at a fixed schedule independent of when the
+    /// failures happened, and nothing is written about them anywhere.
+    /// Returns how many were removed; failures stay registered and are
+    /// retried at the next boundary.
+    pub fn sweep_orphans(&self, slot: SlotTime) -> Result<usize> {
+        let orphans: Vec<BlobId> = self
+            .reg
+            .lock()
+            .iter()
+            .filter(|(_, s)| **s == State::Orphan)
+            .map(|(id, _)| *id)
+            .collect();
+        let mut removed = 0usize;
+        let mut failed = false;
+        for id in orphans {
+            let oid = ObjectId::from_bytes(id.0);
+            let r = match self.blobs.exists(&oid) {
+                Ok(true) => self.blobs.remove(&oid, slot).map(|()| true),
+                Ok(false) => Ok(false),
+                Err(e) => Err(e),
+            };
+            match r {
+                Ok(was) => {
+                    self.reg.forget(id);
+                    if was {
+                        removed = removed.saturating_add(1);
+                    }
+                }
+                Err(_) => failed = true,
+            }
+        }
+        if failed {
+            return Err(StoreError::Backend);
+        }
+        Ok(removed)
+    }
+}
+
+/// The bundle object (and only it) names `id`, with size `len`.
+fn references_exactly(env: &CommitEnvelope, id: BlobId, len: u64) -> bool {
+    let mut hits = 0usize;
+    for (i, o) in env.objects.iter().enumerate() {
+        if o.blob.blob_id == id {
+            if i != STAGED_BUNDLE_INDEX || o.blob.padded_size != len {
+                return false;
+            }
+            hits = hits.saturating_add(1);
+        }
+    }
+    hits == 1
+}
+
 fn io_err<E>(_e: E) -> StoreError {
     StoreError::Backend
 }
 
-/// Receive one hand-over message from `sock` and copy the passed file into
-/// `blobs` (a `candor-safefs` blob root), with timestamps normalised to `slot`.
-/// `max_len` bounds the accepted size (also capped at
-/// [`MAX_PART_PADDED_SIZE`]). Nothing is committed unless every check passes;
-/// every received descriptor is closed before return.
-pub fn receive_staged_bundle(
-    sock: BorrowedFd<'_>,
-    blobs: &SafeRoot,
-    slot: SlotTime,
-    max_len: u64,
-) -> Result<StagedBlob> {
-    let (header, fd) = receive_message(sock)?;
-    if header.len > max_len.min(MAX_PART_PADDED_SIZE) {
-        return Err(StoreError::InvalidInput("staged bundle too large"));
-    }
-    let st = rustix::fs::fstat(&fd).map_err(io_err)?; // safefs-lint: allow(fstat on received fd; no path access)
+/// Regular file, all four seals, `fstat` size = `len`.
+fn check_descriptor(fd: &OwnedFd, len: u64) -> Result<()> {
+    let st = fstat(fd).map_err(io_err)?;
     if FileType::from_raw_mode(st.st_mode) != FileType::RegularFile {
         return Err(StoreError::InvalidInput(
             "staged descriptor not a regular file",
         ));
     }
-    if u64::try_from(st.st_size).ok() != Some(header.len) {
+    // F_GET_SEALS fails (EINVAL) on files that cannot be sealed.
+    let seals = fcntl_get_seals(fd)
+        .map_err(|_| StoreError::InvalidInput("staged descriptor not sealed"))?;
+    if !seals.contains(REQUIRED_SEALS) {
+        return Err(StoreError::InvalidInput("staged descriptor not sealed"));
+    }
+    if u64::try_from(st.st_size).ok() != Some(len) {
         return Err(StoreError::InvalidInput("staged size mismatch"));
     }
-    let file = File::from(fd);
-    let mut pending = blobs.create_random().map_err(io_err)?;
+    Ok(())
+}
+
+/// Copy `header.len` bytes with `pread` from offset 0, then require EOF and
+/// the header hash.
+fn copy_verified(fd: &OwnedFd, header: &StagedHeader, out: &mut impl Write) -> Result<()> {
     let mut hasher = Sha256::new();
     let mut buf = Zeroizing::new(vec![0u8; CHUNK]);
     let mut off: u64 = 0;
@@ -174,7 +646,7 @@ pub fn receive_staged_bundle(
         let chunk = buf
             .get_mut(..want)
             .ok_or(StoreError::InvalidInput("staged length"))?;
-        let n = file.read_at(chunk, off).map_err(io_err)?;
+        let n = rustix::io::pread(fd, &mut *chunk, off).map_err(io_err)?;
         if n == 0 {
             return Err(StoreError::InvalidInput("staged file shrank"));
         }
@@ -182,30 +654,28 @@ pub fn receive_staged_bundle(
             .get(..n)
             .ok_or(StoreError::InvalidInput("staged length"))?;
         hasher.update(got);
-        pending.write_all(got).map_err(io_err)?;
+        out.write_all(got).map_err(io_err)?;
         off = off
             .checked_add(u64::try_from(n).map_err(|_| StoreError::Capacity)?)
             .ok_or(StoreError::Capacity)?;
     }
-    // The file must not have grown while it was copied.
+    // The file must not have grown (impossible with the seals; kept as a
+    // second line of defence).
     let mut probe = [0u8; 1];
-    if file.read_at(&mut probe, header.len).map_err(io_err)? != 0 {
+    if rustix::io::pread(fd, &mut probe, header.len).map_err(io_err)? != 0 {
         return Err(StoreError::InvalidInput("staged file grew"));
     }
     let digest: [u8; 32] = hasher.finalize().into();
     if !bool::from(digest.ct_eq(&header.sha256)) {
         return Err(StoreError::InvalidInput("staged hash mismatch"));
     }
-    let id = pending.commit(slot).map_err(io_err)?;
-    Ok(StagedBlob {
-        blob_id: BlobId(*id.as_bytes()),
-        len: header.len,
-    })
+    Ok(())
 }
 
-/// `recvmsg` one message with exactly one descriptor; every descriptor
-/// received is owned (closed on drop), so surplus ones never leak.
-fn receive_message(sock: BorrowedFd<'_>) -> Result<(StagedHeader, OwnedFd)> {
+/// `recvmsg` one message with exactly one control message carrying exactly
+/// one descriptor; every descriptor received is owned (closed on drop), so
+/// surplus ones never leak. `consumed` is set once a message was dequeued.
+fn receive_message(sock: BorrowedFd<'_>, consumed: &mut bool) -> Result<(StagedHeader, OwnedFd)> {
     let mut data = [0u8; STAGED_MSG_LEN + 1];
     let mut space = [MaybeUninit::<u8>::uninit(); rustix::cmsg_space!(ScmRights(MAX_FDS))];
     let mut control = RecvAncillaryBuffer::new(&mut space);
@@ -215,11 +685,22 @@ fn receive_message(sock: BorrowedFd<'_>) -> Result<(StagedHeader, OwnedFd)> {
         &mut control,
         RecvFlags::CMSG_CLOEXEC,
     )
-    .map_err(io_err)?;
+    .map_err(|e| {
+        if e == rustix::io::Errno::AGAIN {
+            StoreError::InvalidInput("staged receive deadline")
+        } else {
+            StoreError::Backend
+        }
+    })?;
+    *consumed = true;
     let mut fds: Vec<OwnedFd> = Vec::new();
+    let mut cmsgs = 0usize;
+    let mut extra = false;
     for m in control.drain() {
-        if let RecvAncillaryMessage::ScmRights(it) = m {
-            fds.extend(it);
+        cmsgs = cmsgs.saturating_add(1);
+        match m {
+            RecvAncillaryMessage::ScmRights(it) => fds.extend(it),
+            _ => extra = true,
         }
     }
     if msg
@@ -227,6 +708,9 @@ fn receive_message(sock: BorrowedFd<'_>) -> Result<(StagedHeader, OwnedFd)> {
         .intersects(ReturnFlags::TRUNC | ReturnFlags::CTRUNC)
     {
         return Err(StoreError::InvalidInput("staged message truncated"));
+    }
+    if extra || cmsgs > 1 {
+        return Err(StoreError::InvalidInput("staged ancillary data"));
     }
     let header = StagedHeader::decode(
         data.get(..msg.bytes)
@@ -239,40 +723,6 @@ fn receive_message(sock: BorrowedFd<'_>) -> Result<(StagedHeader, OwnedFd)> {
         .pop()
         .ok_or(StoreError::InvalidInput("staged descriptor count"))?;
     Ok((header, fd))
-}
-
-fn send_byte(sock: BorrowedFd<'_>, b: u8) -> Result<()> {
-    let mut control = SendAncillaryBuffer::default();
-    let n = rustix::net::sendmsg(
-        sock,
-        &[IoSlice::new(&[b])],
-        &mut control,
-        SendFlags::NOSIGNAL,
-    )
-    .map_err(io_err)?;
-    if n != 1 {
-        return Err(StoreError::Backend);
-    }
-    Ok(())
-}
-
-/// Acknowledge a received bundle after the envelope referencing it was
-/// committed: `committed` is the [`EnvelopeRef`] returned by
-/// [`crate::IntakeStore::commit_envelope`], which returns only after the
-/// database `COMMIT` (durable, ADR-046(1)); the blob itself was fsynced by
-/// `candor-safefs` before. The sealer deletes its staged file on this byte.
-pub fn acknowledge_committed(
-    sock: BorrowedFd<'_>,
-    blob: StagedBlob,
-    committed: &EnvelopeRef,
-) -> Result<()> {
-    let _ = (blob, committed);
-    send_byte(sock, STAGED_ACK_COMMITTED)
-}
-
-/// Refuse a hand-over (nothing referencing it was committed).
-pub fn refuse(sock: BorrowedFd<'_>) -> Result<()> {
-    send_byte(sock, STAGED_ACK_REFUSED)
 }
 
 /// Send a hand-over message with one descriptor (sealer side and tests).

@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Staged-bundle hand-over over a `SOCK_SEQPACKET` socketpair with
-//! `SCM_RIGHTS` (deploy D-33): the store copies the passed file into its own
-//! `candor-safefs` blob root and acknowledges only after the envelope commit;
-//! every hostile variant is refused with nothing committed and every received
-//! descriptor closed.
+//! `SCM_RIGHTS` (deploy D-33, ADR-055(1), AUD-RM2-STO-27): the store copies a
+//! sealed memfd into its own `candor-safefs` blob root, acknowledges only with
+//! the token of a committed envelope, refuses every hostile variant with
+//! nothing committed and every received descriptor closed, and sweeps orphan
+//! blobs at the slot boundary.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -18,14 +19,16 @@ mod common;
 
 use std::io::{IoSlice, IoSliceMut, Write};
 use std::mem::MaybeUninit;
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::time::Duration;
 
 use candor_intake_store::staged::{
-    STAGED_ACK_COMMITTED, STAGED_ACK_REFUSED, StagedHeader, acknowledge_committed,
-    receive_staged_bundle, refuse, send_staged_bundle,
+    STAGED_ACK_COMMITTED, STAGED_ACK_REFUSED, STAGED_BUNDLE_INDEX, STAGED_MAX_IN_FLIGHT,
+    StagedBlob, StagedHeader, StagedReceiver, send_staged_bundle,
 };
 use candor_intake_store::*;
 use candor_safefs::{ObjectId, RootPolicy, SafeRoot, SlotTime};
+use rustix::fs::SealFlags;
 use rustix::net::{
     AddressFamily, RecvAncillaryBuffer, RecvFlags, SendAncillaryBuffer, SendAncillaryMessage,
     SendFlags, SocketFlags, SocketType,
@@ -33,46 +36,77 @@ use rustix::net::{
 use sha2::{Digest, Sha256};
 
 const MAX: u64 = 8 << 20;
+const ALL_SEALS: SealFlags = SealFlags::WRITE
+    .union(SealFlags::GROW)
+    .union(SealFlags::SHRINK)
+    .union(SealFlags::SEAL);
 
 struct Env {
-    _tmp: tempfile::TempDir,
-    root: SafeRoot,
+    tmp: tempfile::TempDir,
+    rx: StagedReceiver,
 }
 
-fn env() -> Env {
+fn env_with(max: u64) -> Env {
     use std::os::unix::fs::DirBuilderExt;
     let tmp = tempfile::tempdir().unwrap();
     let base = std::fs::canonicalize(tmp.path()).unwrap();
     let p = base.join("blobs");
     std::fs::DirBuilder::new().mode(0o700).create(&p).unwrap();
     let root = SafeRoot::open(&p, RootPolicy::BlobStore).unwrap();
-    Env { _tmp: tmp, root }
+    let rx = StagedReceiver::new(root, my_uid(), max)
+        .unwrap()
+        .with_timeout(Duration::from_millis(200));
+    Env { tmp, rx }
+}
+
+fn env() -> Env {
+    env_with(MAX)
+}
+
+/// This process's uid as seen through `SO_PEERCRED` of a socketpair.
+fn my_uid() -> u32 {
+    let (a, _b) = pair();
+    rustix::net::sockopt::socket_peercred(&a)
+        .unwrap()
+        .uid
+        .as_raw()
 }
 
 fn slot() -> SlotTime {
     SlotTime::from_unix_secs(1_790_000_100).unwrap()
 }
 
+fn next_slot() -> SlotTime {
+    SlotTime::from_unix_secs(1_790_000_100 + 3600).unwrap()
+}
+
+fn pair_of(t: SocketType) -> (OwnedFd, OwnedFd) {
+    rustix::net::socketpair(AddressFamily::UNIX, t, SocketFlags::CLOEXEC, None).unwrap()
+}
+
 fn pair() -> (OwnedFd, OwnedFd) {
-    rustix::net::socketpair(
-        AddressFamily::UNIX,
-        SocketType::SEQPACKET,
-        SocketFlags::CLOEXEC,
-        None,
+    pair_of(SocketType::SEQPACKET)
+}
+
+/// An anonymous file holding `data`, sealed with `seals` (the sealer's form
+/// with all four seals).
+fn memfile_sealed(name: &str, data: &[u8], seals: SealFlags) -> OwnedFd {
+    let fd = rustix::fs::memfd_create(
+        name,
+        rustix::fs::MemfdFlags::CLOEXEC | rustix::fs::MemfdFlags::ALLOW_SEALING,
     )
-    .unwrap()
-}
-
-/// An anonymous file (no path) holding `data`, as the sealer's staged file.
-fn memfile(data: &[u8]) -> OwnedFd {
-    memfile_named("staged", data)
-}
-
-fn memfile_named(name: &str, data: &[u8]) -> OwnedFd {
-    let fd = rustix::fs::memfd_create(name, rustix::fs::MemfdFlags::CLOEXEC).unwrap();
+    .unwrap();
     let mut f = std::fs::File::from(fd);
     f.write_all(data).unwrap();
-    f.into()
+    let fd: OwnedFd = f.into();
+    if !seals.is_empty() {
+        rustix::fs::fcntl_add_seals(&fd, seals).unwrap();
+    }
+    fd
+}
+
+fn memfile(data: &[u8]) -> OwnedFd {
+    memfile_sealed("staged", data, ALL_SEALS)
 }
 
 fn bundle(n: usize) -> Vec<u8> {
@@ -88,27 +122,37 @@ fn header(data: &[u8]) -> StagedHeader {
     }
 }
 
-fn recv_byte(sock: &OwnedFd) -> u8 {
+/// The next reply byte, or `None` if nothing is queued.
+fn try_recv_byte(sock: &OwnedFd) -> Option<u8> {
     let mut b = [0u8; 4];
     let mut space = [MaybeUninit::<u8>::uninit(); rustix::cmsg_space!(ScmRights(1))];
     let mut control = RecvAncillaryBuffer::new(&mut space);
-    let m = rustix::net::recvmsg(
+    match rustix::net::recvmsg(
         sock,
         &mut [IoSliceMut::new(&mut b)],
         &mut control,
-        RecvFlags::empty(),
-    )
-    .unwrap();
-    assert_eq!(m.bytes, 1);
-    b[0]
+        RecvFlags::DONTWAIT,
+    ) {
+        Ok(m) => {
+            assert_eq!(m.bytes, 1);
+            Some(b[0])
+        }
+        Err(e) => {
+            assert_eq!(e, rustix::io::Errno::AGAIN);
+            None
+        }
+    }
 }
 
-/// Send raw bytes with the given descriptors (hostile sealer).
-fn send_raw(sock: &OwnedFd, data: &[u8], fds: &[std::os::fd::BorrowedFd<'_>]) {
+/// Send raw bytes with the given descriptors, one control message per entry
+/// of `groups` (hostile sealer).
+fn send_groups(sock: &OwnedFd, data: &[u8], groups: &[&[BorrowedFd<'_>]]) {
     let mut space = [MaybeUninit::<u8>::uninit(); rustix::cmsg_space!(ScmRights(8))];
     let mut control = SendAncillaryBuffer::new(&mut space);
-    if !fds.is_empty() {
-        assert!(control.push(SendAncillaryMessage::ScmRights(fds)));
+    for g in groups {
+        if !g.is_empty() {
+            assert!(control.push(SendAncillaryMessage::ScmRights(g)));
+        }
     }
     rustix::net::sendmsg(
         sock,
@@ -119,9 +163,36 @@ fn send_raw(sock: &OwnedFd, data: &[u8], fds: &[std::os::fd::BorrowedFd<'_>]) {
     .unwrap();
 }
 
-/// D-33: a staged bundle passed as a descriptor is copied into the store's
-/// blob root (content and length exact), referenced by a durably committed
-/// envelope, and only then acknowledged; the sealer's file is untouched.
+fn send_raw(sock: &OwnedFd, data: &[u8], fds: &[BorrowedFd<'_>]) {
+    send_groups(sock, data, &[fds]);
+}
+
+async fn mem_store() -> MemoryStore {
+    let s = MemoryStore::with_config(common::TEST_DEADDROP, Box::new(RandomDummyReplies)).unwrap();
+    s.init(common::TENANT, common::SALT).await.unwrap();
+    s
+}
+
+fn envelope_for(blob: &StagedBlob) -> CommitEnvelope {
+    let mut e = common::envelope(0);
+    e.objects[STAGED_BUNDLE_INDEX].blob = PartRef {
+        blob_id: blob.blob_id(),
+        padded_size: blob.len(),
+    };
+    e
+}
+
+fn assert_clean(e: &Env, why: &str) {
+    assert!(
+        e.rx.blobs().list().unwrap().is_empty(),
+        "{why}: nothing kept"
+    );
+    assert_eq!(e.rx.in_flight(), 0, "{why}: nothing in flight");
+}
+
+/// D-33 / STO-27(3): a sealed bundle passed as a descriptor is copied
+/// exactly, referenced by a committed envelope, and only then acknowledged
+/// with `0x01` (the token exists only after `commit_envelope` returned).
 #[tokio::test]
 async fn staged_bundle_handover_roundtrip() {
     let e = env();
@@ -129,31 +200,99 @@ async fn staged_bundle_handover_roundtrip() {
     let data = bundle(300_000 + 17);
     let file = memfile(&data);
     send_staged_bundle(&sealer, &header(&data), file.as_fd()).unwrap();
-    let blob = receive_staged_bundle(store_sock.as_fd(), &e.root, slot(), MAX).unwrap();
-    assert_eq!(blob.len, data.len() as u64);
-    let id = ObjectId::from_bytes(blob.blob_id.0);
-    assert_eq!(e.root.read_to_vec(&id, MAX).unwrap(), data);
-    // The envelope referencing the blob is committed first (durable on
-    // return), then the sealer gets the acknowledgement.
-    let s = MemoryStore::with_config(common::TEST_DEADDROP, Box::new(RandomDummyReplies)).unwrap();
-    s.init(common::TENANT, common::SALT).await.unwrap();
-    let mut env_in = common::envelope(0);
-    env_in.objects[1].blob.blob_id = blob.blob_id;
-    let r = s.commit_envelope(env_in).await.unwrap();
-    acknowledge_committed(store_sock.as_fd(), blob, &r).unwrap();
-    assert_eq!(recv_byte(&sealer), STAGED_ACK_COMMITTED);
+    let blob = e.rx.receive(store_sock.as_fd(), slot()).unwrap();
+    assert_eq!(blob.len(), data.len() as u64);
+    let id = ObjectId::from_bytes(blob.blob_id().0);
+    assert_eq!(e.rx.blobs().read_to_vec(&id, MAX).unwrap(), data);
+    // Nothing is acknowledged before the commit.
+    assert_eq!(try_recv_byte(&sealer), None);
+    let s = mem_store().await;
+    let env_in = envelope_for(&blob);
+    let c = e.rx.commit_staged(&s, env_in, blob).await.unwrap();
+    assert_eq!(s.pending_count().await.unwrap(), 1);
+    e.rx.acknowledge(store_sock.as_fd(), c).unwrap();
+    assert_eq!(try_recv_byte(&sealer), Some(STAGED_ACK_COMMITTED));
+    // Committed blobs are never swept.
+    assert_eq!(e.rx.in_flight(), 0);
+    assert_eq!(e.rx.sweep_orphans(next_slot()).unwrap(), 0);
+    assert!(e.rx.blobs().exists(&id).unwrap());
     // The sealer's file is unchanged (read-only use with pread).
     let mut back = vec![0u8; data.len()];
     std::os::unix::fs::FileExt::read_exact_at(&std::fs::File::from(file), &mut back, 0).unwrap();
     assert_eq!(back, data);
-    assert_eq!(e.root.list().unwrap().len(), 1);
 }
 
-/// Hostile hand-overs are refused before anything is committed: no
-/// descriptor, two descriptors, short/long/unknown-version messages, size
-/// mismatch, hash mismatch, a non-regular descriptor (a socket), and a
-/// length above the bound. The blob root stays empty and the store can
-/// still receive a good bundle afterwards; a refusal is signalled with 0x00.
+/// STO-27(1): a peer whose `SO_PEERCRED` uid is not the configured sealer
+/// uid is refused before its message is read; a receiver configured for the
+/// right uid then gets the queued message.
+#[test]
+fn staged_wrong_peer_uid_refused() {
+    let e = env();
+    let o = env();
+    let other = StagedReceiver::new(
+        SafeRoot::open(o.rx.blobs_path(), RootPolicy::BlobStore).unwrap(),
+        my_uid().wrapping_add(1),
+        MAX,
+    )
+    .unwrap();
+    let (sealer, store_sock) = pair();
+    let data = bundle(1000);
+    let file = memfile(&data);
+    send_staged_bundle(&sealer, &header(&data), file.as_fd()).unwrap();
+    assert_eq!(
+        other.receive(store_sock.as_fd(), slot()).unwrap_err(),
+        StoreError::InvalidInput("staged peer")
+    );
+    assert_eq!(try_recv_byte(&sealer), None, "no answer to a foreign peer");
+    assert_clean(&e, "wrong uid");
+    let blob = e.rx.receive(store_sock.as_fd(), slot()).unwrap();
+    drop(blob);
+}
+
+/// A stream socket (no message boundaries) is refused.
+#[test]
+fn staged_stream_socket_refused() {
+    let e = env();
+    let (sealer, store_sock) = pair_of(SocketType::STREAM);
+    let data = bundle(1000);
+    let file = memfile(&data);
+    send_staged_bundle(&sealer, &header(&data), file.as_fd()).unwrap();
+    assert_eq!(
+        e.rx.receive(store_sock.as_fd(), slot()).unwrap_err(),
+        StoreError::InvalidInput("staged socket type")
+    );
+    assert_clean(&e, "stream");
+}
+
+/// STO-27(2): a peer that sends nothing cannot hold the receiver: the
+/// receive returns after the socket deadline.
+#[test]
+fn staged_stalled_peer_times_out() {
+    let e = env();
+    let (_sealer, store_sock) = pair();
+    let h = std::thread::spawn(move || {
+        let r = e.rx.receive(store_sock.as_fd(), slot());
+        (r.map(drop), e)
+    });
+    // Generous bound: 200 ms deadline, finishes well within 10 s.
+    for _ in 0..100 {
+        if h.is_finished() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(h.is_finished(), "receive must not block past its deadline");
+    let (r, e) = h.join().unwrap();
+    assert_eq!(
+        r.unwrap_err(),
+        StoreError::InvalidInput("staged receive deadline")
+    );
+    assert_clean(&e, "timeout");
+}
+
+/// STO-27(3)/ADR-055(1): hostile hand-overs are refused before anything is
+/// committed and answered with `0x00`; the receiver still accepts a good
+/// bundle afterwards.
 #[test]
 fn staged_bundle_hostile_variants_refused() {
     let e = env();
@@ -162,6 +301,21 @@ fn staged_bundle_hostile_variants_refused() {
     let good = header(&data);
     let file = memfile(&data);
     let other = memfile(&data);
+    let unsealed = memfile_sealed("staged", &data, SealFlags::empty());
+    let missing: Vec<OwnedFd> = [
+        SealFlags::WRITE,
+        SealFlags::GROW,
+        SealFlags::SHRINK,
+        SealFlags::SEAL,
+    ]
+    .iter()
+    .map(|s| memfile_sealed("staged", &data, ALL_SEALS.difference(*s)))
+    .collect();
+    let disk = {
+        let mut f = tempfile::tempfile_in(e.tmp.path()).unwrap();
+        f.write_all(&data).unwrap();
+        OwnedFd::from(f)
+    };
     let mut bad_hash = good;
     bad_hash.sha256[0] ^= 1;
     let mut bad_len = good;
@@ -170,94 +324,119 @@ fn staged_bundle_hostile_variants_refused() {
     short.len -= 1;
     let mut v2 = good.encode();
     v2[0] = 2;
+    let zero_len = StagedHeader {
+        len: 0,
+        sha256: good.sha256,
+    };
     let (sock_a, _sock_b) = pair();
-    let cases: Vec<(&str, Vec<u8>, Vec<std::os::fd::BorrowedFd<'_>>)> = vec![
-        ("no descriptor", good.encode().to_vec(), vec![]),
+    let g = good.encode().to_vec();
+    let mut cases: Vec<(&str, Vec<u8>, Vec<Vec<BorrowedFd<'_>>>)> = vec![
+        ("no descriptor", g.clone(), vec![vec![]]),
         (
             "two descriptors",
-            good.encode().to_vec(),
-            vec![file.as_fd(), other.as_fd()],
+            g.clone(),
+            vec![vec![file.as_fd(), other.as_fd()]],
         ),
         (
-            "short message",
-            good.encode()[..40].to_vec(),
-            vec![file.as_fd()],
+            "two control messages",
+            g.clone(),
+            vec![vec![file.as_fd()], vec![other.as_fd()]],
         ),
+        ("short message", g[..40].to_vec(), vec![vec![file.as_fd()]]),
+        ("empty message", vec![0], vec![vec![file.as_fd()]]),
         (
             "trailing byte",
-            [good.encode().as_slice(), &[0]].concat(),
-            vec![file.as_fd()],
+            [g.as_slice(), &[0]].concat(),
+            vec![vec![file.as_fd()]],
         ),
-        ("unknown version", v2.to_vec(), vec![file.as_fd()]),
+        ("unknown version", v2.to_vec(), vec![vec![file.as_fd()]]),
+        (
+            "zero length",
+            zero_len.encode().to_vec(),
+            vec![vec![file.as_fd()]],
+        ),
         (
             "size larger than file",
             bad_len.encode().to_vec(),
-            vec![file.as_fd()],
+            vec![vec![file.as_fd()]],
         ),
         (
             "size smaller than file",
             short.encode().to_vec(),
-            vec![file.as_fd()],
+            vec![vec![file.as_fd()]],
         ),
         (
             "hash mismatch",
             bad_hash.encode().to_vec(),
-            vec![file.as_fd()],
+            vec![vec![file.as_fd()]],
         ),
+        ("not a regular file", g.clone(), vec![vec![sock_a.as_fd()]]),
+        ("unsealed memfd", g.clone(), vec![vec![unsealed.as_fd()]]),
         (
-            "not a regular file",
-            good.encode().to_vec(),
-            vec![sock_a.as_fd()],
+            "disk file (unsealable)",
+            g.clone(),
+            vec![vec![disk.as_fd()]],
         ),
     ];
-    for (why, msg, fds) in cases {
-        send_raw(&sealer, &msg, &fds);
+    for (i, m) in missing.iter().enumerate() {
+        let why = [
+            "no SEAL_WRITE",
+            "no SEAL_GROW",
+            "no SEAL_SHRINK",
+            "no SEAL_SEAL",
+        ][i];
+        cases.push((why, g.clone(), vec![vec![m.as_fd()]]));
+    }
+    for (why, msg, groups) in &cases {
+        let gs: Vec<&[BorrowedFd<'_>]> = groups.iter().map(Vec::as_slice).collect();
+        send_groups(&sealer, msg, &gs);
         assert!(
             matches!(
-                receive_staged_bundle(store_sock.as_fd(), &e.root, slot(), MAX),
+                e.rx.receive(store_sock.as_fd(), slot()),
                 Err(StoreError::InvalidInput(_))
             ),
             "{why}"
         );
-        refuse(store_sock.as_fd()).unwrap();
-        assert_eq!(recv_byte(&sealer), STAGED_ACK_REFUSED, "{why}");
-        assert!(
-            e.root.list().unwrap().is_empty(),
-            "{why}: nothing committed"
-        );
+        assert_eq!(try_recv_byte(&sealer), Some(STAGED_ACK_REFUSED), "{why}");
+        assert_eq!(try_recv_byte(&sealer), None, "{why}: one answer");
+        assert_clean(&e, why);
     }
-    // Above the caller's bound.
+    // Above the receiver's bound.
+    let small = env_with(69_999);
     send_staged_bundle(&sealer, &good, file.as_fd()).unwrap();
-    assert!(receive_staged_bundle(store_sock.as_fd(), &e.root, slot(), 69_999).is_err());
-    assert!(e.root.list().unwrap().is_empty());
+    assert!(small.rx.receive(store_sock.as_fd(), slot()).is_err());
+    assert_eq!(try_recv_byte(&sealer), Some(STAGED_ACK_REFUSED));
+    assert_clean(&small, "above bound");
     // A good hand-over still works on the same socket.
     send_staged_bundle(&sealer, &good, file.as_fd()).unwrap();
-    let blob = receive_staged_bundle(store_sock.as_fd(), &e.root, slot(), MAX).unwrap();
+    let blob = e.rx.receive(store_sock.as_fd(), slot()).unwrap();
     assert_eq!(
-        e.root
-            .read_to_vec(&ObjectId::from_bytes(blob.blob_id.0), MAX)
+        e.rx.blobs()
+            .read_to_vec(&ObjectId::from_bytes(blob.blob_id().0), MAX)
             .unwrap(),
         data
     );
-    let _ = refuse(store_sock.as_fd());
-    drop(blob);
 }
 
-/// Surplus descriptors are closed by the store, not leaked: after the
-/// refused two-descriptor message, only the sender's own two descriptors of
-/// the uniquely named files remain open in this process.
+/// Surplus descriptors are closed by the store, not leaked: two in one
+/// message, and more than the control buffer holds (`MSG_CTRUNC`).
 #[test]
 fn staged_surplus_descriptors_closed() {
     let e = env();
     let (sealer, store_sock) = pair();
     let data = bundle(4096);
-    let a = memfile_named("candor-surplus-probe", &data);
-    let b = memfile_named("candor-surplus-probe", &data);
-    send_raw(&sealer, &header(&data).encode(), &[a.as_fd(), b.as_fd()]);
-    assert_eq!(probe_fds(), 2);
-    assert!(receive_staged_bundle(store_sock.as_fd(), &e.root, slot(), MAX).is_err());
-    assert_eq!(probe_fds(), 2, "received descriptors must be closed");
-    drop((a, b));
+    let fds: Vec<OwnedFd> = (0..6)
+        .map(|_| memfile_sealed("candor-surplus-probe", &data, ALL_SEALS))
+        .collect();
+    for n in [2usize, 6] {
+        let b: Vec<BorrowedFd<'_>> = fds[..n].iter().map(AsFd::as_fd).collect();
+        send_raw(&sealer, &header(&data).encode(), &b);
+        assert_eq!(probe_fds(), 6 + n);
+        assert!(e.rx.receive(store_sock.as_fd(), slot()).is_err());
+        assert_eq!(probe_fds(), 6, "received descriptors must be closed ({n})");
+        assert_eq!(try_recv_byte(&sealer), Some(STAGED_ACK_REFUSED));
+        assert_clean(&e, "surplus");
+    }
 }
 
 /// Open descriptors of this process that refer to the probe memfds.
@@ -267,4 +446,104 @@ fn probe_fds() -> usize {
         .filter_map(|d| std::fs::read_link(d.ok()?.path()).ok())
         .filter(|t| t.to_string_lossy().contains("candor-surplus-probe"))
         .count()
+}
+
+/// STO-27(3)/(4): a failed envelope commit yields no token (so no `0x01`);
+/// the copied blob is an orphan and the slot-boundary sweep removes it.
+#[tokio::test]
+async fn staged_commit_failure_refused_and_swept() {
+    let e = env();
+    let (sealer, store_sock) = pair();
+    let data = bundle(5000);
+    let file = memfile(&data);
+    // Not initialised: commit_envelope fails before any transaction.
+    let s = MemoryStore::with_config(common::TEST_DEADDROP, Box::new(RandomDummyReplies)).unwrap();
+    send_staged_bundle(&sealer, &header(&data), file.as_fd()).unwrap();
+    let blob = e.rx.receive(store_sock.as_fd(), slot()).unwrap();
+    let env_in = envelope_for(&blob);
+    assert!(e.rx.commit_staged(&s, env_in, blob).await.is_err());
+    e.rx.refuse(store_sock.as_fd()).unwrap();
+    assert_eq!(try_recv_byte(&sealer), Some(STAGED_ACK_REFUSED));
+    assert_eq!(e.rx.blobs().list().unwrap().len(), 1);
+    assert_eq!(e.rx.sweep_orphans(next_slot()).unwrap(), 1);
+    assert_clean(&e, "commit failure");
+}
+
+/// STO-27(4): a duplicate group commits nothing for the second copy, which
+/// is swept; the first, committed copy stays.
+#[tokio::test]
+async fn staged_duplicate_envelope_orphan_swept() {
+    let e = env();
+    let (sealer, store_sock) = pair();
+    let data = bundle(5000);
+    let file = memfile(&data);
+    let s = mem_store().await;
+    send_staged_bundle(&sealer, &header(&data), file.as_fd()).unwrap();
+    let b1 = e.rx.receive(store_sock.as_fd(), slot()).unwrap();
+    let keep = ObjectId::from_bytes(b1.blob_id().0);
+    let env1 = envelope_for(&b1);
+    let c = e.rx.commit_staged(&s, env1.clone(), b1).await.unwrap();
+    e.rx.acknowledge(store_sock.as_fd(), c).unwrap();
+    assert_eq!(try_recv_byte(&sealer), Some(STAGED_ACK_COMMITTED));
+    send_staged_bundle(&sealer, &header(&data), file.as_fd()).unwrap();
+    let b2 = e.rx.receive(store_sock.as_fd(), slot()).unwrap();
+    let mut env2 = env1;
+    env2.objects[STAGED_BUNDLE_INDEX].blob.blob_id = b2.blob_id();
+    assert_eq!(
+        e.rx.commit_staged(&s, env2, b2).await.unwrap_err(),
+        StoreError::DuplicateEnvelope
+    );
+    assert_eq!(e.rx.sweep_orphans(next_slot()).unwrap(), 1);
+    assert_eq!(e.rx.blobs().list().unwrap(), vec![keep]);
+    assert_eq!(e.rx.in_flight(), 0);
+}
+
+/// STO-27(4): a received blob dropped without a commit attempt (e.g. the
+/// envelope could not be built) is swept at the next slot boundary; the
+/// sweep does nothing when there are no orphans.
+#[test]
+fn staged_dropped_blob_swept() {
+    let e = env();
+    let (sealer, store_sock) = pair();
+    let data = bundle(5000);
+    let file = memfile(&data);
+    assert_eq!(e.rx.sweep_orphans(slot()).unwrap(), 0);
+    send_staged_bundle(&sealer, &header(&data), file.as_fd()).unwrap();
+    let blob = e.rx.receive(store_sock.as_fd(), slot()).unwrap();
+    assert_eq!(e.rx.in_flight(), 1);
+    drop(blob);
+    assert_eq!(e.rx.blobs().list().unwrap().len(), 1);
+    assert_eq!(e.rx.sweep_orphans(next_slot()).unwrap(), 1);
+    assert_clean(&e, "dropped");
+    assert_eq!(e.rx.startup(next_slot()).unwrap(), 0);
+}
+
+/// Bounded in-flight blobs: beyond the limit a hand-over is refused with
+/// `Capacity` and nothing is written; after the sweep it works again.
+#[test]
+fn staged_in_flight_bounded() {
+    let e = env();
+    let (sealer, store_sock) = pair();
+    let data = bundle(64);
+    let file = memfile(&data);
+    let mut held = Vec::new();
+    for _ in 0..STAGED_MAX_IN_FLIGHT {
+        send_staged_bundle(&sealer, &header(&data), file.as_fd()).unwrap();
+        held.push(e.rx.receive(store_sock.as_fd(), slot()).unwrap());
+    }
+    send_staged_bundle(&sealer, &header(&data), file.as_fd()).unwrap();
+    assert_eq!(
+        e.rx.receive(store_sock.as_fd(), slot()).unwrap_err(),
+        StoreError::Capacity
+    );
+    assert_eq!(try_recv_byte(&sealer), Some(STAGED_ACK_REFUSED));
+    assert_eq!(e.rx.blobs().list().unwrap().len(), STAGED_MAX_IN_FLIGHT);
+    drop(held);
+    assert_eq!(
+        e.rx.sweep_orphans(next_slot()).unwrap(),
+        STAGED_MAX_IN_FLIGHT
+    );
+    assert_clean(&e, "capacity");
+    send_staged_bundle(&sealer, &header(&data), file.as_fd()).unwrap();
+    drop(e.rx.receive(store_sock.as_fd(), slot()).unwrap());
 }

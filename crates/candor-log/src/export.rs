@@ -20,7 +20,7 @@ use sha2::Sha256;
 use zeroize::Zeroizing;
 
 use crate::chain::CommittedRecord;
-use crate::codes::{HealthStatus, Service, StreamId};
+use crate::codes::{HealthCheck, HealthStatus, Service, StreamId};
 use crate::envelope::Actor;
 use crate::event::AuditEvent;
 use crate::ids::{DayStamp, MS_PER_HOUR, UserRef, UtcMillis, hex};
@@ -326,7 +326,15 @@ impl ScrubbedExport {
                     return Disposition::Dropped;
                 }
                 self.note_health(day, *service, *status);
-                return Disposition::Batched;
+                if *check_code != HealthCheck::InsecureDevOverride {
+                    return Disposition::Batched;
+                }
+                // Insecure developer override: an integrity alarm of its
+                // own (sealer C-2), besides the daily band.
+                m.insert("ts".into(), self.ts_field(h.ts));
+                m.insert("service".into(), s(service.code()));
+                m.insert("check_code".into(), s(check_code.code()));
+                alarm = true;
             }
             E::SysServiceCrashed { service, .. } => {
                 self.note_health(day, *service, HealthStatus::Degraded);

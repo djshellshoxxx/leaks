@@ -32,6 +32,12 @@ TOOLS="$DEPLOY/tools"
 T=$(mktemp -d /var/tmp/candor-validate.XXXXXX) || exit 1
 chmod 0755 "$T"
 trap 'rm -rf "$T"' EXIT INT TERM
+# AUD-RM2-DEP-27: a per-run work base for config-check, so concurrent validator runs never
+# share (or assert on) /run/candor-config-check.
+CC_WB=()
+WB=""
+if [ "$(id -u)" -eq 0 ]; then WB=$(mktemp -d "$T/wbase.XXXXXX") && chmod 0700 "$WB" && CC_WB=(--work-base "$WB"); fi
+cc() { "$TOOLS/config-check.sh" "${CC_WB[@]}" "$@"; }
 FAIL=0
 pass() { printf 'PASS  %s\n' "$*"; }
 bad()  { printf 'FAIL  %s\n' "$*"; FAIL=1; }
@@ -47,8 +53,16 @@ else skip "shellcheck not installed"; fi
 for s in "$TOOLS"/*.sh "$HERE"/*.sh; do bash -n "$s" || bad "bash -n $s"; done
 
 # ------------------------------------------------------------------------- 2. config-check
+# The compiled reader (ADR-055(3)); its digest is pinned in config-check.manifest.
+if have cargo; then
+  if "$TOOLS/build-safe-read.sh" >/dev/null 2>"$T/build.err"; then pass "candor-safe-read reproducible build"; else bad "build-safe-read.sh: $(head -c 300 "$T/build.err")"; fi
+elif [ -x "$TOOLS/candor-safe-read" ]; then skip "cargo missing: using the existing candor-safe-read"
+else bad "cargo missing and no candor-safe-read binary"; fi
+if [ -x "$TOOLS/candor-safe-read" ] && [ "$(sha256sum < "$TOOLS/candor-safe-read" | cut -c1-64)" = "$(awk '$2=="candor-safe-read" {print $1}' "$TOOLS/config-check.manifest")" ]; then
+  pass "candor-safe-read digest equals the manifest pin"
+else bad "candor-safe-read digest differs from config-check.manifest (re-pin after a reviewed change)"; fi
 for prof in "" ce-single ce-hardened; do
-  if "$TOOLS/config-check.sh" -q --dir "$INTAKE" ${prof:+--profile "$prof"} >/dev/null; then pass "config-check: shipped files ${prof:-(base)}"
+  if cc -q --dir "$INTAKE" ${prof:+--profile "$prof"} >/dev/null; then pass "config-check: shipped files ${prof:-(base)}"
   else bad "config-check: shipped files must pass ${prof:-(base)}"; fi
 done
 
@@ -73,7 +87,7 @@ run_case() { # dir name base rel expr args...
   esac
   case "$expr" in -|@*) ;; *) if [ -f "$src/$rel" ] && cmp -s "$src/$rel" "$d/$rel"; then echo nochange > "$d.rc"; return; fi ;; esac
   while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do wait -n; done
-  ( "$TOOLS/config-check.sh" -q "$@" > "$d.out" 2>&1; echo $? > "$d.rc" ) &
+  ( cc -q "$@" > "$d.out" 2>&1; echo $? > "$d.rc" ) &
 }
 mutate() { local name=$1 rel=$2 expr=$3; shift 3; MUTN=$((MUTN + 1)); run_case "$T/mut.$MUTN" "$name" "$INTAKE" "$rel" "$expr" --dir "$T/mut.$MUTN" "$@"; }
 hmutate() { local name=$1 rel=$2 expr=$3; MUTN=$((MUTN + 1)); run_case "$T/mut.$MUTN" "host: $name" "$HR" "$rel" "$expr" --host --root "$T/mut.$MUTN" --only "$HONLY"; }
@@ -276,8 +290,12 @@ mutate "DEP-17 pg_hba is a symlink"         postgresql/pg_hba.conf "@$T/secret"
 mutate "DEP-17 AppArmor profile symlink"    apparmor/candor-web "@$T/secret"
 mutate "DEP-17 unit drop-in is a symlink"   systemd/candor-intake-web.service.d/zz.conf "@$T/secret.conf"
 mutate "DEP-17 sysctl file is a symlink"    sysctl.d/90-candor-intake.conf "@$T/secret"
-mutate "DEP-19 pg_hba postgres peer line"   postgresql/pg_hba.conf 's|^local   /^candor_intake_  candor_istore |local all postgres peer\n&|'
-mutate "DEP-19 pg_hba migrator to all dbs"  postgresql/pg_hba.conf 's|^local   /^candor_intake_  candor_intake_migrator|local   all               candor_intake_migrator|'
+mutate "DEP-19 pg_hba postgres peer line"   postgresql/pg_hba.conf 's|^local   candor_intake_TENANT  candor_istore |local all postgres peer\n&|'
+mutate "DEP-19 pg_hba migrator to all dbs"  postgresql/pg_hba.conf 's|^local   candor_intake_TENANT  candor_intake_migrator|local   all               candor_intake_migrator|'
+# AUD-RM2-DEP-25 / ADR-054: one exactly named intake database, no regex or second database.
+mutate "DEP-25 pg_hba regex database"        postgresql/pg_hba.conf 's|^local   candor_intake_TENANT  candor_istore |local   /^candor_intake_  candor_istore |'
+mutate "DEP-25 pg_hba maint to another db"   postgresql/pg_hba.conf 's|^local   candor_intake_TENANT  candor_intake_maint|local   candor_intake_other   candor_intake_maint|'
+mutate "DEP-25 pg_hba database list"         postgresql/pg_hba.conf 's|^local   candor_intake_TENANT  candor_intake_migrator|local   candor_intake_TENANT,candor_intake_b  candor_intake_migrator|'
 mutate "DEP-19 pg_ident extra mapping"      postgresql/pg_ident.conf '+candor     root             candor_istore'
 mutate "DEP-19 pg key not on allow-list"    postgresql/candor-intake.conf "+session_replication_role = 'replica'"
 mutate "DEP-19 pg unix_socket_group"        postgresql/candor-intake.conf "s|^unix_socket_group = 'candor-istore'|unix_socket_group = 'candor-web'|"
@@ -350,7 +368,7 @@ mkhost() {
 }
 if is_root && users_exist && have tor && have nft && have jq && have apparmor_parser && [ -d /etc/apparmor.d/abstractions ] && grep -qx 'Package: apparmor' /var/lib/dpkg/status 2>/dev/null; then
   mkhost "$HR"
-  if "$TOOLS/config-check.sh" -q --host --root "$HR" --only "$HONLY" > "$T/host.out" 2>&1; then pass "config-check --host --root: synthetic installed host passes"
+  if cc -q --host --root "$HR" --only "$HONLY" > "$T/host.out" 2>&1; then pass "config-check --host --root: synthetic installed host passes"
   else bad "config-check --host --root on the synthetic host: $(grep ' FAIL ' "$T/host.out" | head -n 3 | tr -s ' ')"; fi
   hmutate "system.control drop-in resets IPAddressDeny" etc/systemd/system.control/candor-sealer.service.d/50-IPAddressDeny.conf $'+[Service]\nIPAddressDeny='
   hmutate "/run drop-in re-enables network"   run/systemd/system/candor-intake-web.service.d/zz.conf $'+[Service]\nPrivateNetwork=no'
@@ -411,8 +429,9 @@ if is_root && users_exist && have tor && have nft && have jq && have apparmor_pa
 else skip "config-check --host --root cases (need root, users, tor, nft, jq, apparmor_parser and a dpkg-installed apparmor)"; fi
 mutate_results
 
-# ---- AUD-RM2-DEP-24: race-free input reader (safe-read.py), directly and under live races.
-if have python3 && have timeout && have mkfifo; then
+# ---- AUD-RM2-DEP-24/26: race-free input reader (compiled candor-safe-read), directly and under
+# live races.
+if [ -x "$TOOLS/candor-safe-read" ] && have timeout && have mkfifo; then
   D="$T/sr"; mkdir -p "$D/real" "$D/secretdir"; chmod 0755 "$D" "$D/real" "$D/secretdir"
   printf 'ok\n' > "$D/real/f"; printf 'CANDORLEAKMARKER\n' > "$D/secretdir/f"; chmod 0644 "$D/real/f" "$D/secretdir/f"
   ln -s "$D/secretdir" "$D/link"; ln -s "$D/secretdir/f" "$D/real/l"; mkfifo "$D/real/fifo"
@@ -420,13 +439,13 @@ if have python3 && have timeout && have mkfifo; then
   srcase() { # name want-status args...
     local name=$1 want=$2 rc; shift 2
     rm -f "$D/out"
-    timeout -k 1 10 python3 -I -S -B "$TOOLS/safe-read.py" "$@" > "$D/stdout" 2>&1; rc=$?
-    if [ "$rc" -ne "$want" ]; then bad "safe-read: $name: status $rc, want $want"
-    elif [ -s "$D/stdout" ] || { [ "$want" -ne 0 ] && [ -e "$D/out" ]; }; then bad "safe-read: $name: printed output or left a copy"
-    else pass "safe-read: $name (status $rc)"; fi
+    timeout -k 1 10 "$TOOLS/candor-safe-read" "$@" > "$D/stdout" 2>&1; rc=$?
+    if [ "$rc" -ne "$want" ]; then bad "candor-safe-read: $name: status $rc, want $want"
+    elif [ -s "$D/stdout" ] || { [ "$want" -ne 0 ] && [ -e "$D/out" ]; }; then bad "candor-safe-read: $name: printed output or left a copy"
+    else pass "candor-safe-read: $name (status $rc)"; fi
   }
   srcase "regular file copied"                0  "$D/real/f" "$D/out" 4096 "$me" 002
-  if cmp -s "$D/real/f" "$D/out"; then pass "safe-read: copy equals the input"; else bad "safe-read: copy differs"; fi
+  if cmp -s "$D/real/f" "$D/out"; then pass "candor-safe-read: copy equals the input"; else bad "candor-safe-read: copy differs"; fi
   srcase "symlinked parent directory refused" 10 "$D/link/f" "$D/out" 4096 "0,$me" 002
   srcase "symlink as last component refused"  10 "$D/real/l" "$D/out" 4096 "0,$me" 002
   srcase "'..' component refused"             10 "$D/real/../secretdir/f" "$D/out" 4096 "0,$me" 002
@@ -438,7 +457,9 @@ if have python3 && have timeout && have mkfifo; then
   ln "$D/real/f" "$D/real/hard"; srcase "hard-linked input refused" 13 "$D/real/f" "$D/out" 4096 "0,$me" 002; rm -f "$D/real/hard"
   srcase "larger than the cap refused"        14 "$D/real/f" "$D/out" 2 "0,$me" 002
   srcase "missing input"                      11 "$D/real/nope" "$D/out" 4096 "0,$me" 002
-  got=$(timeout 10 python3 -I -S -B "$TOOLS/safe-read.py" --md5 4096 "0,$me" 002 "$D/real/f" "$D/link/f" "$D/real/fifo" 2>&1 | tr '\n' ';')
+  timeout 10 "$TOOLS/candor-safe-read" --md5 "$D/md5" 4096 "0,$me" 002 "$D/real/f" "$D/link/f" "$D/real/fifo" > "$D/stdout" 2>&1
+  [ -s "$D/stdout" ] && bad "candor-safe-read --md5 printed output"
+  got=$(tr '\n' ';' < "$D/md5")
   if [ "$got" = "OK $(md5sum < "$D/real/f" | cut -c1-32);ERR 10;ERR 12;" ]; then pass "safe-read --md5: digest of a safe file, status only for refused ones"
   else bad "safe-read --md5: unexpected output"; fi
   # Live races against config-check itself (static mode; the genuine state is broken on
@@ -449,7 +470,7 @@ if have python3 && have timeout && have mkfifo; then
     ( while :; do mv -T "$RD/postgresql" "$RD/pg.real" 2>/dev/null; ln -s "$T/race1.secret" "$RD/postgresql" 2>/dev/null; rm -f "$RD/postgresql"; mv -T "$RD/pg.real" "$RD/postgresql" 2>/dev/null; done ) &
     sw=$!; badrun=""
     for i in $(seq 1 25); do
-      timeout -k 5 60 "$TOOLS/config-check.sh" -q --dir "$RD" --only pg > "$T/race.out" 2>&1; rc=$?
+      timeout -k 5 60 cc -q --dir "$RD" --only pg > "$T/race.out" 2>&1; rc=$?
       if [ "$rc" -ne 30 ] || grep -q CANDORLEAKMARKER "$T/race.out"; then badrun="run $i exit $rc"; break; fi
     done
     kill "$sw" 2>/dev/null; wait "$sw" 2>/dev/null
@@ -458,45 +479,45 @@ if have python3 && have timeout && have mkfifo; then
     ( while :; do rm -f "$RD/torrc.f"; mkfifo "$RD/torrc.f" && mv -f "$RD/torrc.f" "$RD/torrc"; cp "$T/race2.torrc" "$RD/torrc.n" && mv -f "$RD/torrc.n" "$RD/torrc"; done ) &
     sw=$!; badrun=""
     for i in $(seq 1 10); do
-      timeout -k 5 60 "$TOOLS/config-check.sh" -q --dir "$RD" --only tor > "$T/race.out" 2>&1; rc=$?
+      timeout -k 5 60 cc -q --dir "$RD" --only tor > "$T/race.out" 2>&1; rc=$?
       if [ "$rc" -ne 30 ]; then badrun="run $i exit $rc"; break; fi
     done
     kill "$sw" 2>/dev/null; wait "$sw" 2>/dev/null
     if [ -z "$badrun" ]; then pass "config-check under a FIFO swap race: 10 runs, all exit 30, none blocked"; else bad "config-check FIFO swap race: $badrun (124 = hung)"; fi
     # Deterministic end-to-end: a FIFO in place of the torrc fails at once.
     RD="$T/race3"; cp -a "$INTAKE" "$RD"; rm -f "$RD/torrc"; mkfifo "$RD/torrc"
-    timeout -k 5 60 "$TOOLS/config-check.sh" -q --dir "$RD" --only tor > "$T/race.out" 2>&1; rc=$?
+    timeout -k 5 60 cc -q --dir "$RD" --only tor > "$T/race.out" 2>&1; rc=$?
     if [ "$rc" -eq 30 ]; then pass "config-check: torrc replaced by a FIFO fails with exit 30 (no hang)"; else bad "config-check FIFO torrc: exit $rc"; fi
     # Unknown torrc option names are counted, never echoed (AUD-RM2-DEP-24).
     RD="$T/race4"; cp -a "$INTAKE" "$RD"; printf 'CANDORLEAKMARKERxyz 1\n' >> "$RD/torrc"
-    timeout -k 5 60 "$TOOLS/config-check.sh" -q --dir "$RD" --only tor > "$T/race.out" 2>&1; rc=$?
+    timeout -k 5 60 cc -q --dir "$RD" --only tor > "$T/race.out" 2>&1; rc=$?
     if [ "$rc" -eq 30 ] && ! grep -q CANDORLEAKMARKER "$T/race.out"; then pass "config-check: unknown torrc option rejected, its name not printed"; else bad "config-check unknown torrc option: exit $rc or name printed"; fi
   else skip "config-check race tests (need root)"; fi
-else skip "safe-read tests (need python3, timeout, mkfifo)"; fi
+else bad "candor-safe-read tests: binary missing (tools/build-safe-read.sh) or no timeout/mkfifo"; fi
 
 # ---- AUD-RM2-DEP-21: invocation and policy integrity
-"$TOOLS/config-check.sh" -q --dir "$INTAKE" --only typo >/dev/null 2>&1; rc=$?
+cc -q --dir "$INTAKE" --only typo >/dev/null 2>&1; rc=$?
 if [ "$rc" -eq 2 ]; then pass "config-check rejects --only with an unknown section (exit 2)"; else bad "config-check --only typo: exit $rc, want 2"; fi
-"$TOOLS/config-check.sh" -q --dir "$INTAKE" --only tor,typo >/dev/null 2>&1; rc=$?
+cc -q --dir "$INTAKE" --only tor,typo >/dev/null 2>&1; rc=$?
 if [ "$rc" -eq 2 ]; then pass "config-check rejects --only tor,typo (exit 2)"; else bad "config-check --only tor,typo: exit $rc, want 2"; fi
-"$TOOLS/config-check.sh" -q --dir "$INTAKE" --only host >/dev/null 2>&1; rc=$?
+cc -q --dir "$INTAKE" --only host >/dev/null 2>&1; rc=$?
 if [ "$rc" -eq 2 ]; then pass "config-check: a selection that runs no check is an error (static --only host, exit 2)"; else bad "config-check static --only host: exit $rc, want 2"; fi
 mkdir -p "$T/tools.b" "$T/tools.m"
-cp -p "$TOOLS/config-check.sh" "$TOOLS/config-check.baseline" "$TOOLS/config-check.manifest" "$T/tools.b/"
-cp -p "$TOOLS/config-check.sh" "$TOOLS/config-check.baseline" "$TOOLS/config-check.manifest" "$T/tools.m/"
+cp -p "$TOOLS/config-check.sh" "$TOOLS/config-check.baseline" "$TOOLS/config-check.manifest" "$TOOLS/candor-safe-read" "$T/tools.b/"
+cp -p "$TOOLS/config-check.sh" "$TOOLS/config-check.baseline" "$TOOLS/config-check.manifest" "$TOOLS/candor-safe-read" "$T/tools.m/"
 # Baseline edited (a weakened allow-list line): the manifest digest no longer matches.
 sed -i 's/^pg|track_counts|b|off$/pg|track_counts|b|on/' "$T/tools.b/config-check.baseline"
-"$T/tools.b/config-check.sh" -q --dir "$INTAKE" > "$T/int.out" 2>&1; rc=$?
+"$T/tools.b/config-check.sh" "${CC_WB[@]}" -q --dir "$INTAKE" > "$T/int.out" 2>&1; rc=$?
 if [ "$rc" -eq 30 ] && grep -q 'tool.baseline_integrity' "$T/int.out"; then pass "config-check rejects an edited baseline (digest, exit 30)"; else bad "edited baseline: exit $rc"; fi
 # Baseline and manifest edited together: the manifest digest pinned in the script catches it.
 sed -i 's/^pg|track_counts|b|off$/pg|track_counts|b|on/' "$T/tools.m/config-check.baseline"
-printf '%s  config-check.baseline\n' "$(sha256sum < "$T/tools.m/config-check.baseline" | cut -c1-64)" > "$T/tools.m/config-check.manifest"
-"$T/tools.m/config-check.sh" -q --dir "$INTAKE" > "$T/int.out" 2>&1; rc=$?
+printf '%s  config-check.baseline\n%s  candor-safe-read\n' "$(sha256sum < "$T/tools.m/config-check.baseline" | cut -c1-64)" "$(sha256sum < "$T/tools.m/candor-safe-read" | cut -c1-64)" > "$T/tools.m/config-check.manifest"
+"$T/tools.m/config-check.sh" "${CC_WB[@]}" -q --dir "$INTAKE" > "$T/int.out" 2>&1; rc=$?
 if [ "$rc" -eq 30 ] && grep -q 'tool.baseline_integrity' "$T/int.out"; then pass "config-check rejects a re-signed manifest (pinned digest, exit 30)"; else bad "re-written manifest: exit $rc"; fi
 # AUD-RM2-DEP-17: the private work directories are gone after all runs above.
 if is_root; then
-  if [ -z "$(find /run/candor-config-check -mindepth 1 -maxdepth 1 2>/dev/null)" ] && [ "$(stat -c '%u %a' /run/candor-config-check 2>/dev/null)" = "0 700" ]; then
-    pass "config-check work base is root 0700 and every run cleaned up after itself"
+  if [ -z "$(find "$WB" -mindepth 1 -maxdepth 1 2>/dev/null)" ] && [ "$(stat -c '%u %a' "$WB" 2>/dev/null)" = "0 700" ]; then
+    pass "config-check work base (this run's own, DEP-27) is root 0700 and every run cleaned up after itself"
   else bad "config-check left work directories behind or the work base is not root 0700"; fi
 fi
 
@@ -624,7 +645,9 @@ else skip "check-placement tests (need root and the sysusers.d users)"; fi
 PGBIN=/usr/lib/postgresql/16/bin
 if [ -n "${CANDOR_TEST_PG:-}" ] && is_root && users_exist && [ -x "$PGBIN/initdb" ] && getent passwd pgtest >/dev/null; then
   P="$T/pg"; mkdir -p "$P/sock" "$P/etc"
-  cp "$INTAKE/postgresql/pg_hba.conf" "$INTAKE/postgresql/pg_ident.conf" "$P/etc/"
+  cp "$INTAKE/postgresql/pg_ident.conf" "$P/etc/"
+  # Installer step (ADR-054, DEP-25): the placeholder becomes the one tenant database name.
+  sed 's/candor_intake_TENANT/candor_intake_t1/' "$INTAKE/postgresql/pg_hba.conf" > "$P/etc/pg_hba.conf"
   chown -R pgtest "$P"; chgrp candor-istore "$P/sock"; chmod 0750 "$P/sock"
   # The cluster lives inside a synthetic root (config-check --host --root resolves the data
   # directory inside the root only and refuses symlinked components, AUD-RM2-DEP-17).
@@ -677,43 +700,72 @@ if [ -n "${CANDOR_TEST_PG:-}" ] && is_root && users_exist && [ -x "$PGBIN/initdb
     if [ -s "$P/log" ]; then bad "pg: server emitted log output: $(head -c 200 "$P/log" | tr -c '[:print:]' '?')"; else pass "pg: no server log output at all (errors and rejected connections included)"; fi
     # config-check --host: effective settings via `postgres -C` (AUD-RM2-DEP-03(1)), on a
     # synthetic root whose data directory is this cluster's.
-    cp "$INTAKE/postgresql/"* "$PR/etc/candor/intake/postgresql/"; chmod 0755 "$PR/etc" "$PR/etc/candor" "$PR/etc/candor/intake" "$PR/etc/candor/intake/postgresql"; chmod 0644 "$PR/etc/candor/intake/postgresql/"*
-    if "$TOOLS/config-check.sh" -q --host --root "$PR" --only pg --pg-db candor_intake_t1 > "$T/pgc.out" 2>&1; then pass "config-check --host pg: effective settings (postgres -C) match, stats in RAM, maintenance role is DB owner only"
+    cp "$INTAKE/postgresql/"* "$PR/etc/candor/intake/postgresql/"; cp "$P/etc/pg_hba.conf" "$PR/etc/candor/intake/postgresql/pg_hba.conf"; chmod 0755 "$PR/etc" "$PR/etc/candor" "$PR/etc/candor/intake" "$PR/etc/candor/intake/postgresql"; chmod 0644 "$PR/etc/candor/intake/postgresql/"*
+    if cc -q --host --root "$PR" --only pg --pg-db candor_intake_t1 > "$T/pgc.out" 2>&1; then pass "config-check --host pg: effective settings (postgres -C) match, stats in RAM, maintenance role is DB owner only"
     else bad "config-check --host pg on a clean cluster: $(grep ' FAIL ' "$T/pgc.out" | head -n 3 | tr -s ' ')"; fi
     if q candor-imaint candor_intake_maint candor_intake_t1 'select 1' | grep -qx 1; then bad "pg: candor-imaint connected without the socket group"; else pass "pg: maintenance login needs the socket group (SupplementaryGroups=candor-istore)"; fi
     qm() { setpriv --reuid=candor-imaint --regid=candor-imaint --groups="$(getent group candor-istore | cut -d: -f3)" -- psql -X -h "$P/sock" -U "$1" -d candor_intake_t1 -Atc 'select 1' 2>/dev/null; }
     if [ "$(qm candor_intake_maint)" = 1 ]; then pass "pg: candor-imaint (with the socket group) logs in as candor_intake_maint"; else bad "pg: maintenance login failed"; fi
     if [ -z "$(qm candor_istore)" ] && [ -z "$(qm candor_intake_migrator)" ]; then pass "pg: candor-imaint maps to candor_intake_maint only"; else bad "pg: candor-imaint became another role"; fi
-    "$TOOLS/config-check.sh" -q --host --root "$PR" --only pg > "$T/pgc.out" 2>&1; rc=$?
+    cc -q --host --root "$PR" --only pg > "$T/pgc.out" 2>&1; rc=$?
     if [ "$rc" -eq 30 ] && grep -q 'pg.maint_role .*--pg-db' "$T/pgc.out"; then pass "config-check rejects: running server checked without --pg-db (exit 30)"; else bad "config-check without --pg-db on a running server: exit $rc"; fi
     # AUD-RM2-STO-11: pg_stat as a real directory (stats file persisted on disk) is rejected.
     mv "$DD/pg_stat" "$P/pg_stat.link"; mkdir "$DD/pg_stat"
-    "$TOOLS/config-check.sh" -q --host --root "$PR" --only pg > "$T/pgc.out" 2>&1; rc=$?
+    cc -q --host --root "$PR" --only pg > "$T/pgc.out" 2>&1; rc=$?
     if [ "$rc" -eq 30 ] && grep -q 'pg.stats_in_ram' "$T/pgc.out"; then pass "config-check rejects: pg_stat on the data volume (exit 30)"; else bad "config-check accepted pg_stat on disk (exit $rc)"; fi
     rmdir "$DD/pg_stat"; mv "$P/pg_stat.link" "$DD/pg_stat"
     # AUD-RM2-DEP-17: a data directory reached through a symlink inside --root is refused.
     mkdir -p "$T/pgroot2/etc/candor/intake" "$T/pgroot2/var/lib/postgresql/16"; cp -a "$PR/etc/candor/intake/postgresql" "$T/pgroot2/etc/candor/intake/"
     chmod 0755 "$T/pgroot2" "$T/pgroot2/etc" "$T/pgroot2/etc/candor" "$T/pgroot2/etc/candor/intake" "$T/pgroot2/var" "$T/pgroot2/var/lib" "$T/pgroot2/var/lib/postgresql" "$T/pgroot2/var/lib/postgresql/16"
     ln -s "$DD" "$T/pgroot2/var/lib/postgresql/16/candor-intake"
-    "$TOOLS/config-check.sh" -q --host --root "$T/pgroot2" --only pg > "$T/pgc.out" 2>&1; rc=$?
+    cc -q --host --root "$T/pgroot2" --only pg > "$T/pgc.out" 2>&1; rc=$?
     if [ "$rc" -eq 30 ] && grep -q 'symlinked component' "$T/pgc.out"; then pass "config-check rejects: data directory behind a symlink in --root (exit 30)"; else bad "config-check followed a symlinked data directory (exit $rc)"; fi
     printf "log_statement = 'all'\n" >> "$DD/postgresql.auto.conf"
-    "$TOOLS/config-check.sh" -q --host --root "$PR" --only pg > "$T/pgc.out" 2>&1; rc=$?
+    cc -q --host --root "$PR" --only pg > "$T/pgc.out" 2>&1; rc=$?
     if [ "$rc" -eq 30 ] && grep -q 'pg.effective.log_statement' "$T/pgc.out"; then pass "config-check rejects: ALTER SYSTEM log_statement=all in postgresql.auto.conf (exit 30)"
     else bad "config-check accepted postgresql.auto.conf override (exit $rc)"; fi
     : > "$DD/postgresql.auto.conf"; chown pgtest "$DD/postgresql.auto.conf"
+    # AUD-RM2-DEP-25: installer placeholder left in place, or pg_hba naming another database.
+    HBA="$PR/etc/candor/intake/postgresql/pg_hba.conf"; cp "$HBA" "$T/hba.good"
+    cp "$INTAKE/postgresql/pg_hba.conf" "$HBA"
+    cc -q --host --root "$PR" --only pg --pg-db candor_intake_t1 > "$T/pgc.out" 2>&1; rc=$?
+    if [ "$rc" -eq 30 ] && grep -q 'pg.hba_database' "$T/pgc.out"; then pass "config-check rejects: pg_hba placeholder left on a host (exit 30)"; else bad "config-check accepted the pg_hba placeholder on a host (exit $rc)"; fi
+    sed 's/candor_intake_t1/candor_intake_t2/' "$T/hba.good" > "$HBA"
+    cc -q --host --root "$PR" --only pg --pg-db candor_intake_t1 > "$T/pgc.out" 2>&1; rc=$?
+    if [ "$rc" -eq 30 ] && grep -q 'pg.hba_database' "$T/pgc.out"; then pass "config-check rejects: pg_hba names another database than --pg-db (exit 30)"; else bad "config-check accepted pg_hba for another database (exit $rc)"; fi
+    cp "$T/hba.good" "$HBA"
+    # The owner's DoS levers (live, as the maintenance login itself): ALTER DATABASE ... SET and
+    # CONNECTION LIMIT.
+    setpriv --reuid=candor-imaint --regid=candor-imaint --groups="$(getent group candor-istore | cut -d: -f3)" -- psql -X -q -h "$P/sock" -U candor_intake_maint -d candor_intake_t1 -c 'ALTER DATABASE candor_intake_t1 SET statement_timeout = 0' >/dev/null 2>&1
+    cc -q --host --root "$PR" --only pg --pg-db candor_intake_t1 > "$T/pgc.out" 2>&1; rc=$?
+    if [ "$rc" -eq 30 ] && grep -q 'pg.maint_role.no_database_settings' "$T/pgc.out"; then pass "config-check rejects: ALTER DATABASE ... SET by the owner (exit 30)"; else bad "config-check accepted ALTER DATABASE SET (exit $rc)"; fi
+    setpriv --reuid=candor-imaint --regid=candor-imaint --groups="$(getent group candor-istore | cut -d: -f3)" -- psql -X -q -h "$P/sock" -U candor_intake_maint -d candor_intake_t1 -c 'ALTER DATABASE candor_intake_t1 RESET ALL' -c 'ALTER DATABASE candor_intake_t1 CONNECTION LIMIT 5' >/dev/null 2>&1
+    cc -q --host --root "$PR" --only pg --pg-db candor_intake_t1 > "$T/pgc.out" 2>&1; rc=$?
+    if [ "$rc" -eq 30 ] && grep -q 'pg.maint_role.db_connlimit' "$T/pgc.out" && ! grep -q 'no_database_settings.*FAIL\|FAIL.*no_database_settings' "$T/pgc.out"; then pass "config-check rejects: database CONNECTION LIMIT set by the owner (exit 30)"; else bad "config-check accepted a database connection limit (exit $rc)"; fi
+    setpriv --reuid=candor-imaint --regid=candor-imaint --groups="$(getent group candor-istore | cut -d: -f3)" -- psql -X -q -h "$P/sock" -U candor_intake_maint -d candor_intake_t1 -c 'ALTER DATABASE candor_intake_t1 CONNECTION LIMIT -1' >/dev/null 2>&1
+    pgstop
+    printf '%s\n' 'CREATE DATABASE candor_intake_t2;' 'ALTER ROLE candor_intake_maint CONNECTION LIMIT 3;' | pgsingle postgres
+    pgstart
+    cc -q --host --root "$PR" --only pg --pg-db candor_intake_t1 > "$T/pgc.out" 2>&1; rc=$?
+    if [ "$rc" -eq 30 ] && grep -q 'pg.maint_role.single_database' "$T/pgc.out" && grep -q 'pg.maint_role.role_connlimit' "$T/pgc.out"; then pass "config-check rejects: second intake database in the cluster and a role connection limit (ADR-054, exit 30)"
+    else bad "config-check accepted a second database / role connection limit (exit $rc)"; fi
+    pgstop
+    printf '%s\n' 'DROP DATABASE candor_intake_t2;' 'ALTER ROLE candor_intake_maint CONNECTION LIMIT -1;' | pgsingle postgres
+    pgstart
+    cc -q --host --root "$PR" --only pg --pg-db candor_intake_t1 > "$T/pgc.out" 2>&1; rc=$?
+    if [ "$rc" -eq 0 ]; then pass "config-check --host pg passes again after the DEP-25 cases were undone"; else bad "config-check after undoing DEP-25 cases: exit $rc: $(grep ' FAIL ' "$T/pgc.out" | head -n 2 | tr -s ' ')"; fi
     # Lead decision 2026-10-01: the maintenance role must never be a member of the schema
     # owner (the old SET ROLE design). Granted on a stopped cluster, then checked live.
     pgstop
     printf '%s\n' 'GRANT candor_intake_migrator TO candor_intake_maint;' | pgsingle postgres
     pgstart
-    "$TOOLS/config-check.sh" -q --host --root "$PR" --only pg --pg-db candor_intake_t1 > "$T/pgc.out" 2>&1; rc=$?
+    cc -q --host --root "$PR" --only pg --pg-db candor_intake_t1 > "$T/pgc.out" 2>&1; rc=$?
     if [ "$rc" -eq 30 ] && grep -q 'pg.maint_role.memberships' "$T/pgc.out"; then pass "config-check rejects: candor_intake_maint member of the schema owner role (exit 30)"
     else bad "config-check accepted maint membership in the owner role (exit $rc)"; fi
     pgstop
     printf '%s\n' 'REVOKE candor_intake_migrator FROM candor_intake_maint;' 'ALTER DATABASE candor_intake_t1 OWNER TO candor_istore;' | pgsingle postgres
     pgstart
-    "$TOOLS/config-check.sh" -q --host --root "$PR" --only pg --pg-db candor_intake_t1 > "$T/pgc.out" 2>&1; rc=$?
+    cc -q --host --root "$PR" --only pg --pg-db candor_intake_t1 > "$T/pgc.out" 2>&1; rc=$?
     if [ "$rc" -eq 30 ] && grep -q 'pg.maint_role' "$T/pgc.out"; then pass "config-check rejects: tenant database not owned by the maintenance role (exit 30)"
     else bad "config-check accepted a database not owned by candor_intake_maint (exit $rc)"; fi
     pgstop

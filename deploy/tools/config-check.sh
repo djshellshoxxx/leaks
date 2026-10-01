@@ -19,6 +19,8 @@
 #                 (an unknown name, or a selection that runs no check, is a usage error: exit 2)
 #   --emit-baseline   (maintainers) print the effective units/nft/tor/security values of the
 #                     tree as baseline lines for review; performs no check
+#   --work-base DIR  private work base instead of /run/candor-config-check (root-owned 0700,
+#                 not a symlink; validators use one per run, AUD-RM2-DEP-27)
 #   -q            print only failures, skips and the summary
 #
 # Every check evaluates EFFECTIVE configuration, never names in a file (AUD-RM2-DEP-01/02/03):
@@ -52,11 +54,12 @@
 # `--host` without --root is the ST-120 gate.
 #
 # Requirements (fail closed if missing): root, bash, awk, jq, tor, nft, unshare, setpriv,
-# systemd-analyze, sha256sum, dd, timeout, python3; --host additionally the PostgreSQL 16
-# server binary (psql with --pg-db) and apparmor_parser.
+# systemd-analyze, sha256sum, dd, timeout and the compiled reader candor-safe-read next to
+# this script (crates/candor-safe-read; no interpreter, ADR-055(3)); --host additionally the
+# PostgreSQL 16 server binary (psql with --pg-db) and apparmor_parser.
 # Input hygiene (AUD-RM2-DEP-17/24): an input that is a symlink, or whose path has a symlinked
 # component below the tree / --root, is refused and never read; every input is copied once by
-# safe-read.py (openat walk from / with O_NOFOLLOW on every component, O_NONBLOCK|O_NOCTTY,
+# candor-safe-read (openat2 RESOLVE_NO_SYMLINKS|BENEATH from /, O_NOFOLLOW|O_NONBLOCK|O_NOCTTY,
 # fstat: regular file, one link, allowed owner, no group/world write on a host, size cap; under
 # `timeout`) into a private 0700 work directory and only the copy is used. --root paths are
 # resolved inside the root only.
@@ -64,7 +67,8 @@
 # only rule names, counts, line/statement numbers, baseline values and sanitised, length-capped
 # option/key names (AUD-RM2-DEP-17).
 # Policy integrity (AUD-RM2-DEP-21): config-check.manifest (sha256 pinned below) lists the
-# sha256 of config-check.baseline and of safe-read.py; all are verified before any check runs.
+# sha256 of config-check.baseline and of the candor-safe-read binary (reproducible build,
+# tools/build-safe-read.sh); all are verified before any check runs.
 # Exit codes (18 §14): 0 = all OK; 30 = baseline failure (any FAIL, including a policy digest
 # mismatch); 2 = usage / missing input / no check selected.
 
@@ -77,7 +81,7 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd -P)
 BASE="$SCRIPT_DIR/config-check.baseline"
 MANIFEST="$SCRIPT_DIR/config-check.manifest"
 # sha256 of config-check.manifest (release-pinned; update together with the manifest).
-MANIFEST_SHA256=b1024079ddc100984399ee1b1cf2a3e4c729acc17ce7103142f17abe110fb6f7
+MANIFEST_SHA256=6ba431fa3728fd9e0cda329a74e73033b7a634b9aad315ed014bb61601096b82
 SECTIONS="tor nft pg units journald kernel dns apparmor host"
 MODE=static
 DIR="$SCRIPT_DIR/../intake"
@@ -85,6 +89,7 @@ ROOT=""
 PROFILE=""
 ONLY=""
 PGDB=""
+WBASE_OPT=""
 QUIET=0
 EMIT=0
 FAILS=0
@@ -92,7 +97,7 @@ CHECKS=0
 SKIPS=0
 
 usage() {
-  sed -n '4,53p' "$0" | sed 's/^# \{0,1\}//' >&2
+  sed -n '4,25p' "$0" | sed 's/^# \{0,1\}//' >&2
   exit 2
 }
 
@@ -104,6 +109,7 @@ while [ $# -gt 0 ]; do
     --profile) [ $# -ge 2 ] || usage; PROFILE=$2; shift 2 ;;
     --only) [ $# -ge 2 ] || usage; ONLY=$2; shift 2 ;;
     --pg-db) [ $# -ge 2 ] || usage; PGDB=$2; shift 2 ;;
+    --work-base) [ $# -ge 2 ] || usage; WBASE_OPT=$2; shift 2 ;;
     --emit-baseline) EMIT=1; shift ;;
     -q) QUIET=1; shift ;;
     -h|--help) usage ;;
@@ -127,12 +133,13 @@ is_root() { [ "$(id -u)" -eq 0 ]; }
 # Private work directory (AUD-RM2-DEP-17): 0700, below a root-owned 0700 directory when run as
 # root (/run is not world-writable); removed on every exit path.
 if is_root; then
-  WBASE=/run/candor-config-check
-  mkdir -m 0700 "$WBASE" 2>/dev/null
+  WBASE=${WBASE_OPT:-/run/candor-config-check}
+  case "$WBASE" in /*) ;; *) echo "config-check: --work-base must be absolute" >&2; exit 2 ;; esac
+  [ -n "$WBASE_OPT" ] || mkdir -m 0700 "$WBASE" 2>/dev/null
   if [ -L "$WBASE" ] || [ ! -d "$WBASE" ] || [ "$(stat -c '%u %a' -- "$WBASE")" != "0 700" ]; then
     echo "config-check: unsafe work directory base $WBASE (must be root 0700, not a symlink)" >&2; exit 2
   fi
-else WBASE=/tmp; fi
+else [ -z "$WBASE_OPT" ] || { echo "config-check: --work-base needs root" >&2; exit 2; }; WBASE=/tmp; fi
 WORK=$(mktemp -d "$WBASE/run.XXXXXXXX") || exit 2
 chmod 0700 "$WORK" || exit 2
 trap 'rm -rf -- "$WORK"' EXIT
@@ -220,17 +227,17 @@ symlinked_component() { # prefix path -> prints the component, returns 0 if ther
 # Copy one input into the work directory without following symlinks (AUD-RM2-DEP-17/24).
 MAXIN=1048576
 SNAP=""
-SAFE_READ="$SCRIPT_DIR/safe-read.py"
-PY=""
-safe_copy() { # abs-path out [extra-owner-uid] -> safe-read.py status (see there); never prints content
-  [ -n "$PY" ] || return 15
-  timeout -k 2 20 "$PY" -I -S -B "$SAFE_READ" "$1" "$2" "$MAXIN" "$OWNERS${3:+,$3}" "$DENYMODE" </dev/null >/dev/null 2>&1
+SAFE_READ="$SCRIPT_DIR/candor-safe-read"
+SAFE_OK=0
+safe_copy() { # abs-path out [extra-owner-uid] -> candor-safe-read status (see there); never prints content
+  [ "$SAFE_OK" -eq 1 ] || return 15
+  timeout -k 2 20 "$SAFE_READ" "$1" "$2" "$MAXIN" "$OWNERS${3:+,$3}" "$DENYMODE" </dev/null >/dev/null 2>&1
 }
 snap() { # rule path name [extra-owner-uid] -> SNAP=copy; FAIL + return 1 when refused
   local r=$1 p=$2 l rc
   SNAP="$WORK/in/$3"
   mkdir -p "$WORK/in" || { fail "$r" "work directory"; return 1; }
-  # Early, readable refusal; the race-free walk in safe-read.py is the authoritative check.
+  # Early, readable refusal; the race-free open in candor-safe-read is the authoritative check.
   if l=$(symlinked_component "$INPREFIX" "$p"); then fail "$r" "refused: symlinked path component $l (inputs are never followed)"; return 1; fi
   safe_copy "$p" "$SNAP" "${4:-}"; rc=$?
   case "$rc" in
@@ -277,17 +284,18 @@ verify_policy() {
   if [ "$got" != "$MANIFEST_SHA256" ]; then fail tool.baseline_integrity "config-check.manifest digest differs from the release pin"; return 1; fi
   dd if="$BASE" of="$WORK/baseline" iflag=nofollow bs=65536 count=64 status=none 2>/dev/null || { fail tool.baseline_integrity "baseline unreadable"; return 1; }
   want=$(awk '$2=="config-check.baseline" && $1 ~ /^[0-9a-f]{64}$/ {print $1}' "$MANIFEST")
-  extra=$(awk '$2!="config-check.baseline" && $2!="safe-read.py" && NF' "$MANIFEST" | wc -l)
+  extra=$(awk '$2!="config-check.baseline" && $2!="candor-safe-read" && NF' "$MANIFEST" | wc -l)
   got=$(sha256sum < "$WORK/baseline" | cut -c1-64)
   if [ -z "$want" ] || [ "$extra" -ne 0 ] || [ "$got" != "$want" ]; then fail tool.baseline_integrity "config-check.baseline digest differs from the manifest"; return 1; fi
   # The input reader (AUD-RM2-DEP-24) is policy too: pinned by the manifest, run from a copy.
-  want=$(awk '$2=="safe-read.py" && $1 ~ /^[0-9a-f]{64}$/ {print $1}' "$MANIFEST")
-  if [ -L "$SAFE_READ" ] || ! dd if="$SAFE_READ" of="$WORK/safe-read.py" iflag=nofollow bs=65536 count=4 status=none 2>/dev/null ||
-     [ -z "$want" ] || [ "$(sha256sum < "$WORK/safe-read.py" | cut -c1-64)" != "$want" ]; then
-    fail tool.baseline_integrity "safe-read.py missing or its digest differs from the manifest"; return 1
+  # Compiled reader (ADR-055(3)): copied, then the copy's digest checked and only the copy run.
+  want=$(awk '$2=="candor-safe-read" && $1 ~ /^[0-9a-f]{64}$/ {print $1}' "$MANIFEST")
+  if [ -L "$SAFE_READ" ] || ! dd if="$SAFE_READ" of="$WORK/candor-safe-read" iflag=nofollow bs=65536 count=64 status=none 2>/dev/null ||
+     [ -z "$want" ] || [ "$(sha256sum < "$WORK/candor-safe-read" | cut -c1-64)" != "$want" ]; then
+    fail tool.baseline_integrity "candor-safe-read missing or its digest differs from the manifest (build: tools/build-safe-read.sh)"; return 1
   fi
-  SAFE_READ="$WORK/safe-read.py"
-  PY=$(command -v python3) || { fail tool.baseline_integrity "python3 missing (input reader)"; return 1; }
+  chmod 0700 "$WORK/candor-safe-read" || { fail tool.baseline_integrity "reader copy"; return 1; }
+  SAFE_READ="$WORK/candor-safe-read"; SAFE_OK=1
   have timeout || { fail tool.baseline_integrity "timeout missing"; return 1; }
   BASE="$WORK/baseline"
   name=$(sha256sum < "$BASE" | cut -c1-12)
@@ -1245,7 +1253,9 @@ aa_dist_conffiles() {
     if [ -e "$ROOT$path" ] || [ -L "$ROOT$path" ]; then paths+=("$ROOT$path"); sums+=("$i"); fi
   done < "$WORK/aa.conff"
   [ "${#paths[@]}" -gt 0 ] || { fail apparmor.dist_conffiles "none of the apparmor conffiles is present"; return; }
-  mapfile -t got < <(timeout -k 2 60 "$PY" -I -S -B "$SAFE_READ" --md5 "$MAXIN" "$OWNERS" "$DENYMODE" "${paths[@]}" </dev/null 2>/dev/null)
+  rm -f -- "$WORK/aa.md5"
+  if [ "$SAFE_OK" -eq 1 ]; then timeout -k 2 60 "$SAFE_READ" --md5 "$WORK/aa.md5" "$MAXIN" "$OWNERS" "$DENYMODE" "${paths[@]}" </dev/null >/dev/null 2>&1; fi
+  mapfile -t got < <(cat -- "$WORK/aa.md5" 2>/dev/null)
   for i in "${!paths[@]}"; do
     n=$((n + 1))
     [ "${got[$i]:-ERR}" = "OK ${sums[$i]}" ] || bad=$((bad + 1))

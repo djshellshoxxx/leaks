@@ -7,6 +7,10 @@
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects
 )]
+#![allow(
+    clippy::disallowed_methods,
+    reason = "audit/verify tooling tests: build audit.* events from verification failures and reports (Seq::of_failure / SeqRange::within, AUD-RM1-LOG-26)"
+)]
 
 mod common;
 
@@ -77,6 +81,7 @@ fn allowed_keys(ty: &str) -> &'static [&'static str] {
         t if t.starts_with("update.") => &["type", "date", "component", "outcome"],
         t if t.starts_with("backup.") => &["type", "date", "backup_id", "outcome"],
         "sys.health_band" => &["type", "date", "service", "band"],
+        "sys.health" => &["type", "ts", "service", "check_code"],
         t if t.starts_with("breakglass.") => &["type", "date", "reason_code", "count"],
         _ => &[],
     }
@@ -161,7 +166,7 @@ fn full_catalog_replay_respects_allow_list() {
                 "ts coarsened to the hour"
             );
         }
-        assert!(!ty.starts_with("sys.") || ty == "sys.health_band");
+        assert!(!ty.starts_with("sys.") || ty == "sys.health_band" || ty == "sys.health");
     }
     // Integrity alarms are among the immediate lines.
     assert!(
@@ -333,4 +338,44 @@ fn precision_and_profiles() {
     e.ingest(&login);
     let l = e.close_day(login.header().ts.day()).remove(0).0;
     assert!(l.contains("T13:37:42.123Z"), "{l}");
+}
+
+// Sealer C-2: the insecure developer override is distinguishable from an
+// ordinary readiness degradation: its own service and check code, and an
+// immediate SIEM integrity alarm (batched daily on HIGH/GOV).
+#[test]
+fn insecure_dev_override_is_a_distinct_alarm() {
+    let (mut log, _sink, _c) = log_with(HostRole::Intake, CheckpointPolicy::DEFAULT);
+    let ev = |check_code| AuditEvent::SysHealth {
+        service: Service::Sealer,
+        status: HealthStatus::Degraded,
+        check_code,
+    };
+    let over = log
+        .emit(
+            EventContext::system(Service::Sealer),
+            ev(HealthCheck::InsecureDevOverride),
+        )
+        .unwrap()
+        .record
+        .unwrap();
+    let ready = log
+        .emit(
+            EventContext::system(Service::Sealer),
+            ev(HealthCheck::Readiness),
+        )
+        .unwrap()
+        .record
+        .unwrap();
+    let new = |p| ScrubbedExport::new(SiemKey::new([1; 32]), ExportPrecision::Date, p).unwrap();
+    let mut e = new(ExportProfile::Standard);
+    let Disposition::Immediate(l) = e.ingest(&over) else {
+        panic!("override must alarm immediately")
+    };
+    assert!(l.0.contains("INSECURE_DEV_OVERRIDE") && l.0.contains("\"service\":\"sealer\""));
+    assert_eq!(e.ingest(&ready), Disposition::Batched);
+    assert_eq!(
+        new(ExportProfile::HighOrGov).ingest(&over),
+        Disposition::Batched
+    );
 }

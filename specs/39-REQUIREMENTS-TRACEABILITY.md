@@ -992,7 +992,7 @@ Links every requirement: RESEARCH/FINDING (Evidence) → THREAT → REQUIREMENT 
 | SUI-078 | ADR-044 §3; ADR-045; ADR-013; RVW-C-09 | THR-040, THR-018 | C-06, C-03, C-14 | TST: fixtures with each flag → text shown; absent → not shown | 11-FRONTEND-SOURCE.md |
 | SUI-079 | RVW-B-28; ADR-002 | THR-040, THR-001 | C-06 | TST: render with/without alternative; lint no external href | 11-FRONTEND-SOURCE.md |
 | SUI-080 | RVW-B-26; RVW-B-21; ADR-025 | THR-011, THR-017, THR-040 | C-06 | TST: config fixtures (backups on/off, retention n) → matching text | 11-FRONTEND-SOURCE.md |
-| SUI-081 | ADR-038 §5; RVW-A-27 | THR-011, THR-039 | C-06 | TST: byte-diff of S90 across the three causes = identical except `ft` | 11-FRONTEND-SOURCE.md |
+| SUI-081 | ADR-038 §5; RVW-A-27 | THR-011, THR-039 | C-06 | TST: byte-diff of S90 across the three causes = identical except `csrf` | 11-FRONTEND-SOURCE.md |
 | SUI-082 | ADR-047(6); ADR-005; B-SD-16 | THR-034, THR-011 | C-06, C-07, C-03 | TST: per-list entropy check in CI; normalization vectors (full-width, mixed case, double spaces) derive identical keys in Tier W and Tier V; DB/log grep for locale of the list = 0; INSP: wordlist review record per locale (26) | 11-FRONTEND-SOURCE.md |
 | SUI-083 | ADR-047(1); REQ-H-23; INC-23 | THR-048, THR-002 | C-03 | TST (30): forensic image of a device after install-only vs after use → identical vault size, no onion address, tenant name or pin outside the vault | 11-FRONTEND-SOURCE.md |
 | SUI-084 | ADR-047(4); ADR-036(6) | THR-043, THR-046 | C-03, C-06, C-07 | TST: snapshot aged 7 days + 1 min → no envelope, text shown (29 ST-149 fixture) | 11-FRONTEND-SOURCE.md |

@@ -316,6 +316,13 @@ MAC under its own public test key to get reproducible fixtures/seeds).
 | LOG-24 (M) `Seq::of_failure` carries 64 chosen bits | Artefact-derived fields must also lie in the writer's own sequence space: `emit` refuses a `Seq` > the largest `next_seq` of the writer's streams and a `SeqRange` not ending below it (`ForeignArtefact`), in addition to the key binding. A crafted failure (stub with `seq = 0xcb007107000001bb`) can no longer be logged; real failures and ranges still can. Residual: a value below the writer's own counters can encode ~log2(next_seq) bits (same class as LOG-03's bounded fields). | `crafted_failure_seq_cannot_be_logged` |
 | LOG-25 (L) staged events lost on crash | `AuditLog::note_restart()` (C-24 calls it once at start-up) stages one date-only `sys.stage_lost { stream }` per slot stream, written to `sys-slot` at the next slot boundary, so a gap after a restart is always flagged and never reads as "nothing happened"; overflow of the stage now returns `StageFull`. A durable sealed stage was not chosen: it needs typed event decoding and a fixed-size preallocated file to avoid timing, which is not simple; the loss is bounded to one slot. | `restart_marks_possible_stage_loss` |
 
+### Round 4 follow-ups
+
+| Item | Fix | Test |
+|---|---|---|
+| LOG-26 (L) counter bound over the largest stream | `Seq`/`SeqRange` carry the stream they were derived from (checkpoint, `VerifyError`, `VerifyReport`); `emit` bounds each by **that stream's** `next_seq` (`SeqBounds`). Workspace `clippy.toml` bans `candor_log::field::Seq::of_failure` and `SeqRange::within` (audit/verify tooling only; reasoned file-level allows in `tests/chain.rs`, `tests/export.rs`). Residual: ≈log2(next_seq of that stream) bits via a crafted failure, now only at reviewed, allow-listed sites. | `failure_seq_bounded_by_its_own_stream` |
+| Sealer C-2 | `Service::Sealer` (`"sealer"`) and `HealthCheck::InsecureDevOverride` (`"INSECURE_DEV_OVERRIDE"`), emitted as `sys.health {service: sealer, status: DEGRADED, check_code: INSECURE_DEV_OVERRIDE}` (exact-time SYSTEM, allowed on Z-INTAKE). The SIEM export raises it as an immediate integrity alarm (`sys.health` with `ts`, `service`, `check_code`; batched daily on HIGH/GOV) in addition to the daily band. Registry updated. | `insecure_dev_override_is_a_distinct_alarm` |
+
 **Downstream (outside this crate, for the lead):** `candor-sealer` tests and
 fuzz harness call the removed `TenantRef::derive(&AuditIdKey::new([3; 32]),
 b"tenant")` (`tests/common/mod.rs`, `tests/hardening.rs`,

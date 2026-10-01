@@ -24,7 +24,7 @@ error[E0423]: expected function, tuple struct or tuple variant, found struct `Se
 help: you might have meant to use an associated function to build this type
    |
 13 -     let _d = Seq(1);
-13 +     let _d = Seq::bound(_, _);
+13 +     let _d = Seq::bound(_, _, _);
    |
 13 -     let _d = Seq(1);
 13 +     let _d = Seq::of_failure(_);

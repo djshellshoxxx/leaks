@@ -142,12 +142,12 @@ macro_rules! catalog {
             /// Whether every artefact-derived field (sequence numbers,
             /// ranges, checkpoint roots) was derived under checkpoint key
             /// `key` (AUD-RM1-LOG-17).
-            pub(crate) fn origins_ok(&self, key: &[u8; 32], max_seq: u64) -> bool {
+            pub(crate) fn origins_ok(&self, key: &[u8; 32], bounds: &SeqBounds) -> bool {
                 match self {
                     $( Self::$v { $( $f ),* } => {
                         #[allow(unused_mut)]
                         let mut ok = true;
-                        $( ok &= AuditField::origin_ok($f, key, max_seq); )*
+                        $( ok &= AuditField::origin_ok($f, key, bounds); )*
                         ok
                     } ),*
                 }
@@ -468,7 +468,7 @@ mod tests {
         let key = [9u8; 32];
         let n = AuditEvent::samples()
             .iter()
-            .filter(|e| !e.origins_ok(&key, u64::MAX))
+            .filter(|e| !e.origins_ok(&key, &SeqBounds([u64::MAX; 5])))
             .count();
         // checkpoint_signed (range, root), witness_cosigned/failed (seq),
         // verification_failed (seq), exported (range), viewed (range).

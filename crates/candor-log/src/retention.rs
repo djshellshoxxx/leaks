@@ -182,6 +182,7 @@ pub fn plan_interval_deletion(
             first: first_retained,
             last: c.body().end_seq.saturating_sub(1),
             origin: [0; 32],
+            stream,
         },
         anchor_root: c.body().merkle_root,
         anchor_signed_at: c.body().signed_at.0,
