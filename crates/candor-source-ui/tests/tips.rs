@@ -29,7 +29,9 @@ fn render_html(s: Screen, l: Locale, m: Mode, err: bool) -> String {
 }
 
 fn aside(html: &Html) -> ElementRef<'_> {
-    let mut it = html.select(&sel("main aside.tips"));
+    static ASIDE: std::sync::LazyLock<Selector> =
+        std::sync::LazyLock::new(|| Selector::parse("main aside.tips").unwrap());
+    let mut it = html.select(&ASIDE);
     let a = it.next().expect("tips region");
     assert!(it.next().is_none(), "one tips region");
     a
