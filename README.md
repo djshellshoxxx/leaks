@@ -42,3 +42,15 @@ The script exits non-zero if any requirement ID is duplicated or any security re
 ## Status
 
 Draft v1.0 specification (2026-09-30). Research limitations (blocked primary sources, items marked UNVERIFIED) are listed in `specs/00-RESEARCH.md` §1 and must be closed before implementation freezes the affected decisions.
+
+## Preview site
+
+A static design preview (landing page plus every source-interface screen rendered from `candor-source-ui`) lives in `docs/` for GitHub Pages. Regenerate the screens with `cargo run -p candor-source-ui --example render_all` and copy the `en_*` pages into `docs/preview/`. The preview is not a live service and accepts nothing.
+
+## Support
+
+Candor is developed in the open and will stay free. Donations are optional and buy no influence over security decisions. Monero (XMR):
+
+```
+85cSWLFurZj8XbKWX7Kk3u1oUtp5vLGQcLSfXEdGnTUU5P9mik6GCPk8guPfAwzHdFFUCbDKChZEphQyp6BNMQwo5oyPLUD
+```
