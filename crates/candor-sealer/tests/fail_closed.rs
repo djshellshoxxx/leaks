@@ -515,6 +515,80 @@ async fn store_failure_commits_nothing_and_leaves_no_staged_ciphertext() {
     assert!(f.sink.envelopes().is_empty());
     // Only the staged part remains (the sealed bundle file was removed).
     assert_eq!(read_all_files(&f.staging_path).len(), 1);
+    // AUD-RM2-SEA-22: the confirmed passphrase survives a refusal after
+    // derivation, so the source can retry without a new passphrase.
+    f.sink.fail.store(false, Ordering::SeqCst);
+    let r = f
+        .sealer
+        .handle(Request::SealFinish {
+            sess: s,
+            delayed_delivery: false,
+        })
+        .await;
+    assert!(matches!(r, Response::Sealed { .. }), "{r:?}");
+    assert_eq!(f.sink.envelopes().len(), 1);
+}
+
+/// AUD-RM2-SEA-22 (the auditor's PoC): 13,653 × U+0958 is 40,959 bytes as
+/// sent but 81,918 bytes after NFC, which the SUBMISSION carries. DRAFT_SET
+/// refuses it with LIMIT, before any passphrase or Argon2id work; the same
+/// size in characters that do not expand is accepted, as is text whose NFC
+/// form is shorter.
+#[tokio::test]
+async fn nfc_expanding_draft_is_refused_at_draft_set() {
+    let f = fixture();
+    let s = sess(1);
+    ok(
+        &f.sealer,
+        Request::SessionOpen {
+            sess: s,
+            channel_id: CHANNEL,
+        },
+    )
+    .await;
+    let draft = |message: String, fields: Vec<(u16, SecretText)>| {
+        Request::DraftSet(DraftSet {
+            sess: s,
+            mode: Mode::Anonymous,
+            message: SecretText::new(&message),
+            fields,
+            identity: None,
+            coi: None,
+        })
+    };
+    let poc = "\u{0958}".repeat(13_653);
+    assert_eq!(poc.len(), 40_959);
+    assert_eq!(
+        f.sealer.handle(draft(poc, vec![])).await,
+        Response::error(ErrorCode::Limit)
+    );
+    // Expansion that only overflows together with the answers.
+    let half = "\u{0958}".repeat(5_000); // 15,000 B, 30,000 B after NFC
+    assert_eq!(
+        f.sealer
+            .handle(draft(half.clone(), vec![(1, SecretText::new(&"a".repeat(10_961)))]))
+            .await,
+        Response::error(ErrorCode::Limit)
+    );
+    ok(&f.sealer, draft(half, vec![(1, SecretText::new(&"a".repeat(10_960)))])).await;
+    ok(&f.sealer, draft("a".repeat(40_959), vec![])).await;
+    // NFC composes "e" + U+0301 (3 B) into U+00E9 (2 B): fits.
+    ok(&f.sealer, draft("e\u{0301}".repeat(13_653), vec![])).await;
+    // A long identity is checked on its NFC form too.
+    let r = f
+        .sealer
+        .handle(Request::DraftSet(DraftSet {
+            sess: s,
+            mode: Mode::Confidential,
+            message: SecretText::new("m"),
+            fields: vec![],
+            identity: Some(SecretText::new(&"\u{0958}".repeat(1_365))),
+            coi: None,
+        }))
+        .await;
+    assert_eq!(r, Response::error(ErrorCode::Limit));
+    // The refusal happened before any sealing work: nothing written.
+    assert!(f.sink.envelopes().is_empty() && f.sink.accounts().is_empty());
 }
 
 #[tokio::test]

@@ -15,8 +15,39 @@ use std::collections::BTreeSet;
 use candor_log::codes::*;
 use candor_log::export::*;
 use candor_log::ids::UtcMillis;
-use candor_log::{AuditEvent, CheckpointPolicy, EventContext};
+use candor_log::verify::{VerifyParams, verify_stream};
+use candor_log::{AuditEvent, AuditLog, CheckpointPolicy, EventContext, LogError, SoftwareSigner};
 use common::*;
+
+/// A real `audit.verification_failed` (its `seq` must come from a
+/// verification under the log's own key, AUD-RM1-LOG-17).
+fn verification_failed(log: &AuditLog<SoftwareSigner, TestClock>) -> AuditEvent {
+    let key = log.verifying_key();
+    let p = VerifyParams {
+        tenant: tenant(),
+        stream: StreamId::Sec,
+        key: &key,
+        approver_keys: approver_keys(),
+        trusted_latest: None,
+        allow_pruned_prefix: false,
+        min_retention_days: None,
+    };
+    let bogus = candor_log::chain::ChainRecord::Full {
+        bytes: vec![0xff],
+        salt: [0; 32],
+        claimed_hash: None,
+    };
+    let e = verify_stream(&p, &[bogus], &[]).unwrap_err();
+    AuditEvent::AuditVerificationFailed {
+        stream: StreamId::Sec,
+        seq: candor_log::field::Seq::of_failure(&e),
+        failure_code: e.code,
+    }
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
 
 fn allowed_keys(ty: &str) -> &'static [&'static str] {
     match ty {
@@ -53,7 +84,7 @@ fn allowed_keys(ty: &str) -> &'static [&'static str] {
 
 #[test]
 fn full_catalog_replay_respects_allow_list() {
-    let (mut log, _sink, _c) = log_with(HostRole::Core, CheckpointPolicy::DEFAULT);
+    let (mut log, sink, clock) = log_with(HostRole::Core, CheckpointPolicy::DEFAULT);
     let mut exp = ScrubbedExport::new(
         SiemKey::new([9; 32]),
         ExportPrecision::Date,
@@ -63,23 +94,42 @@ fn full_catalog_replay_respects_allow_list() {
     let mut out = Vec::new();
     let mut case_events = 0;
     let mut day = None;
-    for e in AuditEvent::samples() {
-        let rec = log.emit(EventContext::staff(user(0x5a)), e).unwrap().record;
-        day = Some(rec.header().ts.day());
-        let is_case = rec.header().stream == StreamId::Case;
-        match exp.ingest(&rec) {
-            Disposition::Immediate(l) => out.push(l),
-            Disposition::Batched => assert!(!is_case),
-            Disposition::Dropped => {
-                if is_case {
-                    case_events += 1;
+    let mut samples = AuditEvent::samples();
+    samples.push(verification_failed(&log));
+    for e in samples {
+        match log.emit(EventContext::staff(user(0x5a)), e) {
+            Ok(_) | Err(LogError::TombstoneViaApi | LogError::ForeignArtefact) => {}
+            Err(e) => panic!("{e:?}"),
+        }
+    }
+    // Flush the date-only slot streams, then replay every stored record.
+    clock.advance(6 * 3_600_000);
+    log.tick().unwrap();
+    let st = sink.0.lock().unwrap().clone();
+    for s in [
+        StreamId::Sec,
+        StreamId::Case,
+        StreamId::Sys,
+        StreamId::CaseSlot,
+        StreamId::SysSlot,
+    ] {
+        for rec in st.records(s) {
+            day.get_or_insert(rec.header().ts.day());
+            let is_case = matches!(rec.header().stream, StreamId::Case | StreamId::CaseSlot);
+            match exp.ingest(&rec) {
+                Disposition::Immediate(l) => out.push(l),
+                Disposition::Batched => assert!(!is_case),
+                Disposition::Dropped => {
+                    if is_case {
+                        case_events += 1;
+                    }
                 }
             }
         }
     }
     out.extend(exp.close_day(day.unwrap()));
     assert!(case_events > 40, "all CASE events dropped");
-    let user_hex = "5a".repeat(16);
+    let user_hex = hex(user(0x5a).as_bytes());
     let case_hex = "5a".repeat(16);
     for l in &out {
         let v: serde_json::Value = serde_json::from_str(&l.0).unwrap();
@@ -133,7 +183,8 @@ fn pseudonyms_are_per_destination_and_stable() {
             },
         )
         .unwrap()
-        .record;
+        .record
+        .unwrap();
     let line = |key: u8| {
         let mut e = ScrubbedExport::new(
             SiemKey::new([key; 32]),
@@ -157,7 +208,7 @@ fn pseudonyms_are_per_destination_and_stable() {
 
 #[test]
 fn breakglass_and_health_aggregated_daily() {
-    let (mut log, _sink, clock) = log_with(HostRole::Core, CheckpointPolicy::DEFAULT);
+    let (mut log, sink, clock) = log_with(HostRole::Core, CheckpointPolicy::DEFAULT);
     let mut e = ScrubbedExport::new(
         SiemKey::new([1; 32]),
         ExportPrecision::Date,
@@ -176,7 +227,8 @@ fn breakglass_and_health_aggregated_daily() {
                 },
             )
             .unwrap()
-            .record;
+            .record
+            .unwrap();
         assert_eq!(e.ingest(&r), Disposition::Batched);
     }
     for st in [HealthStatus::Ok, HealthStatus::Degraded, HealthStatus::Ok] {
@@ -190,12 +242,14 @@ fn breakglass_and_health_aggregated_daily() {
                 },
             )
             .unwrap()
-            .record;
+            .record
+            .unwrap();
         e.ingest(&r);
         clock.advance(1000);
     }
-    // Source-load-derived detectors and relay/capacity events never export.
-    let r = log
+    // Source-load-derived detectors and relay/capacity events never export
+    // (and are staged for the date-only `sys-slot` stream, AUD-RM1-LOG-02).
+    let staged = log
         .emit(
             EventContext::system(Service::Health),
             AuditEvent::SysHealth {
@@ -204,8 +258,11 @@ fn breakglass_and_health_aggregated_daily() {
                 check_code: HealthCheck::AbuseFlood,
             },
         )
-        .unwrap()
-        .record;
+        .unwrap();
+    assert!(staged.record.is_none());
+    clock.advance(6 * 3_600_000);
+    log.tick().unwrap();
+    let r = sink.0.lock().unwrap().records(StreamId::SysSlot).remove(0);
     assert_eq!(e.ingest(&r), Disposition::Dropped);
     let lines = e.close_day(UtcMillis(T0).day());
     assert_eq!(lines.len(), 2);
@@ -217,7 +274,7 @@ fn breakglass_and_health_aggregated_daily() {
     assert!(
         lines
             .iter()
-            .any(|l| l.0.contains("\"count\":3") && !l.0.contains(&"07".repeat(16)))
+            .any(|l| l.0.contains("\"count\":3") && !l.0.contains(&hex(case(7).as_bytes())))
     );
     assert!(!lines.iter().any(|l| l.0.contains("upload")));
 }
@@ -233,14 +290,12 @@ fn precision_and_profiles() {
         .is_err()
     );
     let (mut log, _sink, _c) = log_with(HostRole::Core, CheckpointPolicy::DEFAULT);
-    let failed = AuditEvent::samples()
-        .into_iter()
-        .find(|e| matches!(e, AuditEvent::AuditVerificationFailed { .. }))
-        .unwrap();
+    let failed = verification_failed(&log);
     let rec = log
         .emit(EventContext::system(Service::Audit), failed)
         .unwrap()
-        .record;
+        .record
+        .unwrap();
     // HIGH/GOV: even alarms are batched daily.
     let mut e = ScrubbedExport::new(
         SiemKey::new([1; 32]),
@@ -267,7 +322,8 @@ fn precision_and_profiles() {
             },
         )
         .unwrap()
-        .record;
+        .record
+        .unwrap();
     let mut e = ScrubbedExport::new(
         SiemKey::new([1; 32]),
         ExportPrecision::Exact,

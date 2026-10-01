@@ -1,30 +1,79 @@
 error[E0624]: associated function `from_bytes` is private
- --> tests/ui/launder_raw_id.rs:8:23
-  |
-8 |     let _c = CaseRef::from_bytes(ip6);
-  |                       ^^^^^^^^^^ private associated function
-  |
- ::: src/ids.rs
-  |
-  |             pub(crate) const fn from_bytes(b: [u8; $len]) -> Self {
-  |             ----------------------------------------------------- private associated function defined here
+  --> tests/ui/launder_raw_id.rs:12:23
+   |
+12 |     let _a = CaseRef::from_bytes(ip6);
+   |                       ^^^^^^^^^^ private associated function
+   |
+  ::: src/ids.rs
+   |
+   |             pub(crate) const fn from_bytes(b: [u8; $len]) -> Self {
+   |             ----------------------------------------------------- private associated function defined here
+
+error[E0599]: no function or associated item named `derive` found for struct `CaseRef` in the current scope
+  --> tests/ui/launder_raw_id.rs:13:23
+   |
+13 |     let _b = CaseRef::derive(&k, &ip6);
+   |                       ^^^^^^ function or associated item not found in `CaseRef`
+   |
+note: if you're trying to build a new `CaseRef` consider using one of the following associated functions:
+      CaseRef::generate
+      CaseRef::unseal
+  --> src/ids.rs
+   |
+   |               pub fn generate() -> Result<Self, RandomError> {
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+   |               pub fn unseal(key: &AuditIdKey, token: &IdToken) -> Option<Self> {
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+   | / random_id!(
+   | |     CaseRef,
+   | |     EvidRef,
+   | |     UserRef,
+...  |
+   | |     WitnessId,
+   | | );
+   | |_- in this macro invocation
+   = note: this error originates in the macro `random_id` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0599]: no function or associated item named `digest` found for struct `Hash32` in the current scope
- --> tests/ui/launder_raw_id.rs:9:22
-  |
-9 |     let _h = Hash32::digest(b"203.0.113.7");
-  |                      ^^^^^^ function or associated item not found in `Hash32`
-  |
-note: if you're trying to build a new `Hash32` consider using one of the following associated functions:
-      Hash32::derive
-      Hash32::checkpoint_root
- --> src/ids.rs
-  |
-  |       pub fn derive(key: &AuditIdKey, purpose: HashPurpose, data: &[u8]) -> Self {
-  |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-...
-  | /     pub fn checkpoint_root(
-  | |         cp: &crate::chain::SignedCheckpoint,
-  | |         key: &ed25519_dalek::VerifyingKey,
-  | |     ) -> Option<Self> {
-  | |_____________________^
+  --> tests/ui/launder_raw_id.rs:14:22
+   |
+14 |     let _c = Hash32::digest(b"203.0.113.7");
+   |                      ^^^^^^ function or associated item not found in `Hash32`
+
+error[E0599]: no function or associated item named `derive` found for struct `Hash32` in the current scope
+  --> tests/ui/launder_raw_id.rs:15:22
+   |
+15 |     let _d = Hash32::derive(&k, HashPurpose::Query, b"203.0.113.7");
+   |                      ^^^^^^ function or associated item not found in `Hash32`
+
+error[E0599]: no function or associated item named `checkpoint_root` found for struct `Hash32` in the current scope
+  --> tests/ui/launder_raw_id.rs:16:22
+   |
+16 |     let _e = Hash32::checkpoint_root(cp, key);
+   |                      ^^^^^^^^^^^^^^^ function or associated item not found in `Hash32`
+
+error[E0599]: no function or associated item named `checkpoint_end` found for struct `Seq` in the current scope
+  --> tests/ui/launder_raw_id.rs:17:19
+   |
+17 |     let _f = Seq::checkpoint_end(cp);
+   |                   ^^^^^^^^^^^^^^ function or associated item not found in `Seq`
+   |
+note: if you're trying to build a new `Seq`, consider using `Seq::of_failure` which returns `Seq`
+  --> src/field.rs
+   |
+   |     pub fn of_failure(e: &crate::verify::VerifyError) -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no function or associated item named `of_checkpoint` found for struct `SeqRange` in the current scope
+  --> tests/ui/launder_raw_id.rs:18:24
+   |
+18 |     let _g = SeqRange::of_checkpoint(cp);
+   |                        ^^^^^^^^^^^^^ function or associated item not found in `SeqRange`
+   |
+note: if you're trying to build a new `SeqRange`, consider using `SeqRange::within` which returns `Option<SeqRange>`
+  --> src/field.rs
+   |
+   |     pub fn within(report: &crate::verify::VerifyReport, first: u64, last: u64) -> Option<Self> {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

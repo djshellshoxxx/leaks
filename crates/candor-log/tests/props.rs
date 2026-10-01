@@ -156,8 +156,10 @@ proptest! {
             tenant: tenant(),
             stream: StreamId::Case,
             key: &key,
+            approver_keys: approver_keys(),
             trusted_latest: Some(&witness),
             allow_pruned_prefix: false,
+            min_retention_days: None,
         };
         prop_assert!(verify_stream(&p, &recs, &cps).is_ok());
         let len = recs.len();
@@ -188,9 +190,16 @@ proptest! {
             Tamper::Stub(i, t) => {
                 let i = i % len;
                 let ChainRecord::Full { bytes, salt, .. } = &recs[i] else { unreachable!() };
-                let commit = candor_log::chain::record_commit(salt, bytes);
+                let inner = candor_log::chain::record_inner(salt, bytes);
                 let seq = cbor::decode(bytes).unwrap().get("seq").unwrap().as_u64().unwrap();
-                recs[i] = ChainRecord::Redacted { seq, commit, tombstone_seq: t % (len as u64 + 2) };
+                // Record i is `case.opened` for case(i): a stub that keeps
+                // the commitment intact.
+                recs[i] = ChainRecord::Redacted {
+                    seq,
+                    case: case(i as u8),
+                    inner,
+                    tombstone_seq: t % (len as u64 + 2),
+                };
             }
             Tamper::SpliceForeign(i) => {
                 // Same position from an independently written chain (other actor).

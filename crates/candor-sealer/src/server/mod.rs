@@ -285,6 +285,37 @@ fn core_err(e: candor_core::Error) -> Response {
     }
 }
 
+/// Length in bytes of the NFC form of `s`, counting only up to `cap + 1`.
+fn nfc_len_capped(s: &str, cap: usize) -> usize {
+    use unicode_normalization::UnicodeNormalization;
+    let mut n = 0usize;
+    for c in s.nfc() {
+        n = n.saturating_add(c.len_utf8());
+        if n > cap {
+            break;
+        }
+    }
+    n
+}
+
+/// The draft as it will be sealed fits the caps (`MAX_DRAFT_TEXT` for the
+/// NFC message plus the answers, `MAX_IDENTITY_LEN` for the NFC identity).
+fn draft_fits(ds: &DraftSet) -> bool {
+    use crate::proto::{MAX_DRAFT_TEXT, MAX_IDENTITY_LEN};
+    let answers = ds
+        .fields
+        .iter()
+        .fold(0usize, |a, (_, t)| a.saturating_add(t.expose().len()));
+    let Some(budget) = MAX_DRAFT_TEXT.checked_sub(answers) else {
+        return false;
+    };
+    let identity_ok = ds
+        .identity
+        .as_ref()
+        .is_none_or(|i| nfc_len_capped(i.expose(), MAX_IDENTITY_LEN) <= MAX_IDENTITY_LEN);
+    identity_ok && nfc_len_capped(ds.message.expose(), budget) <= budget
+}
+
 /// Run blocking work on the blocking pool. In serve mode the work runs only on
 /// a confined thread (AUD-RM2-SEA-20); otherwise the closure is dropped unrun
 /// and the call fails like a panicked job.
@@ -689,6 +720,13 @@ impl Sealer {
                 }
             }
             Phase::Derived => return err(ErrorCode::BadState),
+        }
+        // AUD-RM2-SEA-22: the SUBMISSION carries the NFC form of the message
+        // (§13.4 key 13), which can be up to 3× longer than what was decoded.
+        // Enforce the cap on what will be sealed, here, before any passphrase
+        // or Argon2id work, so an unsealable draft is refused up front.
+        if !draft_fits(&ds) {
+            return err(ErrorCode::Limit);
         }
         g.draft.mode = Some(ds.mode);
         g.draft.message = ds.message;
@@ -1186,7 +1224,9 @@ impl Sealer {
             0
         };
         if initial {
-            // Derive the new account's keys; the passphrase is zeroized right after.
+            // Derive the new account's keys. The confirmed passphrase stays
+            // pending until the commit succeeds (zeroized then), so a refusal
+            // after derivation does not force a new passphrase (SEA-22).
             let phrase = match g.pending.as_ref() {
                 Some(p) => Zeroizing::new(p.phrase.expose().to_owned()),
                 None => return err(ErrorCode::NotConfirmed),
@@ -1195,7 +1235,6 @@ impl Sealer {
                 Ok(k) => k,
                 Err(e) => return e,
             };
-            g.pending = None;
             g.keys = Some(keys);
         }
         let st = self.st.clone();
@@ -1878,6 +1917,8 @@ fn seal_blocking(mut g: OwnedMutexGuard<Session>, st: &State, job: SealJob) -> (
     // removed; a fixed key is never installed (AUD-RM2-SEA-05).
     let drop_session = rekey_after_commit(sess, random_k36);
     if job.initial {
+        // Committed: the passphrase is no longer needed (§11.1).
+        sess.pending = None;
         sess.phase = Phase::Authenticated;
     }
     // Keep the snapshot alive until here (selection consistency).
