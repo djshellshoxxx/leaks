@@ -1685,6 +1685,29 @@ async fn intake_relations(c: &mut PgConnection) -> Vec<(String, i64)> {
     .collect()
 }
 
+/// `(page, offset, pattern, 32 bytes around)` of every hit (diagnostics).
+fn hit_offsets(
+    pages: &[Vec<u8>],
+    a: &HashSet<[u8; 8]>,
+    b: &HashSet<[u8; 8]>,
+    c: &HashSet<[u8; 8]>,
+) -> Vec<(usize, usize, String)> {
+    let mut v = Vec::new();
+    for (pi, p) in pages.iter().enumerate() {
+        for (o, w) in p.windows(8).enumerate() {
+            let w = <[u8; 8]>::try_from(w).unwrap();
+            for (n, set) in [("xmin", a), ("ptr", b), ("seq", c)] {
+                if set.contains(&w) {
+                    let lo = o.saturating_sub(12);
+                    let hi = (o + 20).min(p.len());
+                    v.push((pi, o, format!("{n} {:02x?}", &p[lo..hi])));
+                }
+            }
+        }
+    }
+    v
+}
+
 fn count_hits(pages: &[Vec<u8>], pats: &HashSet<[u8; 8]>) -> usize {
     pages
         .iter()
@@ -1829,13 +1852,23 @@ async fn pg_vacuum_full_erases_old_images() {
         assert_ne!(f0, f1, "{r0}: not rewritten");
     }
     let (mut hx, mut hc) = (0usize, 0usize);
+    let mut residue = Vec::new();
     for (rel, _) in &after_rels {
         let pages = raw_pages(&mut c, rel).await;
-        hx += count_hits(&pages, &xmin_pats);
-        hc += chunk_hits(rel, &pages);
+        let (x, k) = (count_hits(&pages, &xmin_pats), chunk_hits(rel, &pages));
+        if x + k > 0 {
+            residue.push((
+                rel.clone(),
+                x,
+                k,
+                hit_offsets(&pages, &xmin_pats, &ptr_pats, &seq_pats),
+            ));
+        }
+        hx += x;
+        hc += k;
     }
-    assert_eq!(hx, 0, "old tuple headers survive VACUUM FULL");
-    assert_eq!(hc, 0, "old chunk ids survive VACUUM FULL");
+    assert_eq!(hx, 0, "old tuple headers survive VACUUM FULL: {residue:?}");
+    assert_eq!(hc, 0, "old chunk ids survive VACUUM FULL: {residue:?}");
     // Content and the single slot xmin are unchanged.
     assert_eq!(s.export_backup().await.unwrap(), before);
     assert_eq!(distinct_xmin(&mut c).await.1, 1);
