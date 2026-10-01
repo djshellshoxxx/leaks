@@ -1,0 +1,41 @@
+error[E0599]: no associated item named `Code` found for struct `DiagCodeValue` in the current scope
+  --> tests/ui/diag_forged_internals.rs:14:29
+   |
+14 |     let _c = DiagCodeValue::Code("203.0.113.7");
+   |                             ^^^^ associated item not found in `DiagCodeValue`
+
+error[E0015]: cannot call non-const formatting macro in constants
+ --> tests/ui/diag_forged_internals.rs:8:45
+  |
+8 |     const MESSAGE: &'static str = Box::leak(format!("{}", 1).into_boxed_str());
+  |                                             ^^^^^^^^^^^^^^^^
+  |
+  = note: calls in constants are limited to constant functions, tuple structs and tuple variants
+  = note: this error originates in the macro `$crate::__export::format_args` which comes from the expansion of the macro `format` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0015]: cannot call non-const function `format` in constants
+ --> tests/ui/diag_forged_internals.rs:8:45
+  |
+8 |     const MESSAGE: &'static str = Box::leak(format!("{}", 1).into_boxed_str());
+  |                                             ^^^^^^^^^^^^^^^^
+  |
+note: function `format` is not const
+ --> $RUST/alloc/src/fmt.rs
+  = note: calls in constants are limited to constant functions, tuple structs and tuple variants
+  = note: this error originates in the macro `format` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0015]: cannot call non-const method `String::into_boxed_str` in constants
+ --> tests/ui/diag_forged_internals.rs:8:62
+  |
+8 |     const MESSAGE: &'static str = Box::leak(format!("{}", 1).into_boxed_str());
+  |                                                              ^^^^^^^^^^^^^^^^
+  |
+  = note: calls in constants are limited to constant functions, tuple structs and tuple variants
+
+error[E0015]: cannot call non-const associated function `Box::<str>::leak::<'_>` in constants
+ --> tests/ui/diag_forged_internals.rs:8:35
+  |
+8 |     const MESSAGE: &'static str = Box::leak(format!("{}", 1).into_boxed_str());
+  |                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: calls in constants are limited to constant functions, tuple structs and tuple variants

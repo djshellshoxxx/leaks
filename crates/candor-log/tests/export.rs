@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 
 use candor_log::codes::*;
 use candor_log::export::*;
-use candor_log::ids::{CaseRef, UtcMillis};
+use candor_log::ids::UtcMillis;
 use candor_log::{AuditEvent, CheckpointPolicy, EventContext};
 use common::*;
 
@@ -127,8 +127,8 @@ fn pseudonyms_are_per_destination_and_stable() {
         .emit(
             EventContext::staff(user(3)),
             AuditEvent::AuthzDenied {
-                action: Code::new(4),
-                resource_kind: Code::new(1),
+                action: Code::of::<4>(),
+                resource_kind: Code::of::<1>(),
                 reason_code: AuthzDenyReason::NoRelation,
             },
         )
@@ -169,9 +169,9 @@ fn breakglass_and_health_aggregated_daily() {
             .emit(
                 EventContext::staff(user(1)),
                 AuditEvent::BreakglassRequested {
-                    case: CaseRef::from_bytes([7; 16]),
-                    reason_code: Code::new(2),
-                    duration_min: candor_log::field::DurationMin(60),
+                    case: case(7),
+                    reason_code: Code::of::<2>(),
+                    duration_min: candor_log::field::DurationMin::new(60).unwrap(),
                     review_outcome: None,
                 },
             )
@@ -233,15 +233,12 @@ fn precision_and_profiles() {
         .is_err()
     );
     let (mut log, _sink, _c) = log_with(HostRole::Core, CheckpointPolicy::DEFAULT);
+    let failed = AuditEvent::samples()
+        .into_iter()
+        .find(|e| matches!(e, AuditEvent::AuditVerificationFailed { .. }))
+        .unwrap();
     let rec = log
-        .emit(
-            EventContext::system(Service::Audit),
-            AuditEvent::AuditVerificationFailed {
-                stream: StreamId::Case,
-                seq: candor_log::field::Seq(4),
-                failure_code: VerifyFailureCode::ChainMismatch,
-            },
-        )
+        .emit(EventContext::system(Service::Audit), failed)
         .unwrap()
         .record;
     // HIGH/GOV: even alarms are batched daily.

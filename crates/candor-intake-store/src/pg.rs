@@ -41,13 +41,13 @@ use crate::deletion::{
 use crate::error::{Result, StoreError};
 use crate::store::{IntakeMaintenance, IntakeStore};
 use crate::types::{
-    AccountId, AccountLink, AckResult, ApplyRepliesResult, BackupSnapshot, BlobId, ChannelId,
-    ClaimLimits, ClaimedBatch, ClaimedObject, CommitEnvelope, CounterCell, CounterDelta,
-    CounterName, DELETION_LIST_RETENTION_DAYS, Day, EnvelopeRef, ImportSlot, IncomingReply,
-    InstallOutcome, KdHighWater, LookupTag, MAILBOX_SLOTS, MAX_DELETION_LIST_PAGE,
-    MAX_REPLIES_PER_PUSH, MailboxId, MetaSnapshot, ObjectData, PartRef, PartSelector,
-    REPLY_WINDOW_DAYS, ReplyIndex, ReplyRef, SourceAccount, StoredReply, TenantId,
-    VerifiedSnapshot, random_id16,
+    AccountId, AckResult, ApplyRepliesResult, BackupSnapshot, BlobId, ChannelId, ClaimLimits,
+    ClaimedBatch, ClaimedObject, CommitEnvelope, CounterCell, CounterDelta, CounterName,
+    DELETION_LIST_RETENTION_DAYS, Day, EnvelopeRef, GROUP_OBJECTS, INACTIVE_PURGE_DAYS, ImportSlot,
+    IncomingReply, InstallOutcome, KdHighWater, LookupTag, MAILBOX_SLOTS, MAX_DELETION_LIST_PAGE,
+    MAX_REPLIES_PER_PUSH, MAX_SLOT_ACTIVE_ACCOUNTS, MailboxId, MetaSnapshot, NewAccount,
+    ObjectData, PartRef, PartSelector, REPLY_WINDOW_DAYS, ReplyIndex, ReplyRef, SourceAccount,
+    StoredReply, TenantId, VerifiedSnapshot, group_digest, random_id16,
 };
 use crate::validate::{self, SnapshotDecision, day_i32, has_duplicates};
 
@@ -159,61 +159,56 @@ const SQL_ACCOUNT_BY_TAG: &str = "SELECT account_id, locator_hash, auth_pk, xwin
      (activity_month - DATE '1970-01-01')::int4 FROM candor.source_account WHERE locator_hash = $1";
 const SQL_ACCOUNT_TAG_LOCK: &str =
     "SELECT locator_hash FROM candor.source_account WHERE account_id = $1 FOR UPDATE";
-/// Existence check that keeps the row until commit without writing it (the FK
-/// check of the following insert takes the same lock).
-const SQL_ACCOUNT_KEYSHARE: &str =
-    "SELECT 1 FROM candor.source_account WHERE account_id = $1 FOR KEY SHARE";
 const SQL_ACCOUNT_EXISTS: &str =
     "SELECT EXISTS (SELECT 1 FROM candor.source_account WHERE account_id = $1)";
 const SQL_ACCOUNT_DELETE: &str = "DELETE FROM candor.source_account WHERE account_id = $1";
 const SQL_ACCOUNT_INSERT: &str = "INSERT INTO candor.source_account \
      (account_id, locator_hash, auth_pk, xwing_pk, prefs_ct, activity_month) \
      VALUES ($1, $2, $3, $4, $5, DATE '1970-01-01' + $6::int4) ON CONFLICT DO NOTHING";
+/// Passphrase rotation: replace tag, keys and prefs unless the new tag belongs to
+/// another account (no unique-violation error on the expected path).
+const SQL_ACCOUNT_UPDATE: &str = "UPDATE candor.source_account SET locator_hash = $2, auth_pk = $3, \
+     xwing_pk = $4, prefs_ct = $5 WHERE account_id = $1 AND NOT EXISTS (SELECT 1 FROM candor.source_account o \
+     WHERE o.locator_hash = $2 AND o.account_id <> $1)";
+const SQL_ACCOUNTS_PURGE: &str =
+    "DELETE FROM candor.source_account WHERE activity_month <= DATE '1970-01-01' + $1::int4";
 const SQL_ACCOUNTS_ALL: &str = "SELECT account_id, locator_hash, auth_pk, xwing_pk, prefs_ct, \
      (activity_month - DATE '1970-01-01')::int4 FROM candor.source_account ORDER BY account_id";
 
-const SQL_ENV_INSERT: &str = "INSERT INTO candor.envelope (envelope_ref, channel_id, source_account_id, header_ct, \
-     manifest_ct, header_sha256, disposition_ct, epoch_index, received_date, release_day, batch_no, state) \
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, DATE '1970-01-01' + $9::int4, DATE '1970-01-01' + $10::int4, NULL, 'sealed') \
+const SQL_ENV_INSERT: &str = "INSERT INTO candor.envelope (envelope_ref, channel_id, group_sha256, \
+     disposition_ct, epoch_index, received_date, release_day, batch_no, state) \
+     VALUES ($1, $2, $3, $4, $5, DATE '1970-01-01' + $6::int4, DATE '1970-01-01' + $7::int4, NULL, 'sealed') \
      ON CONFLICT DO NOTHING";
-const SQL_PART_INSERT: &str = "INSERT INTO candor.envelope_part (envelope_ref, part_no, blob_id, padded_size) \
-     VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING";
+const SQL_PART_INSERT: &str = "INSERT INTO candor.envelope_part (envelope_ref, part_no, object_hash, slot_block, \
+     blob_id, padded_size) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING";
 const SQL_PENDING: &str = "SELECT count(*) FROM candor.envelope";
 const SQL_INFLIGHT: &str = "SELECT batch_no FROM candor.envelope WHERE state = 'claimed' LIMIT 1";
-const SQL_CANDIDATES: &str = "SELECT envelope_ref, octet_length(header_ct)::int8, octet_length(manifest_ct)::int8 \
-     FROM candor.envelope WHERE state = 'sealed' AND release_day <= DATE '1970-01-01' + $1::int4 \
-     ORDER BY release_day, envelope_ref LIMIT $2";
+/// Oldest release day first, then the random ref (AUD-RM2-STO-16).
+const SQL_CANDIDATES: &str = "SELECT envelope_ref FROM candor.envelope WHERE state = 'sealed' \
+     AND release_day <= DATE '1970-01-01' + $1::int4 ORDER BY release_day, envelope_ref LIMIT $2";
 const SQL_PART_SIZES: &str = "SELECT envelope_ref, padded_size FROM candor.envelope_part \
      WHERE envelope_ref = ANY($1) ORDER BY envelope_ref, part_no";
 const SQL_LAST_BATCH: &str = "SELECT last_batch_no FROM candor.intake_meta";
 const SQL_SET_BATCH_NO: &str = "UPDATE candor.intake_meta SET last_batch_no = $1";
 const SQL_CLAIM: &str =
     "UPDATE candor.envelope SET state = 'claimed', batch_no = $1 WHERE envelope_ref = ANY($2)";
-const SQL_BATCH_OBJECTS: &str = "SELECT envelope_ref, channel_id, epoch_index, octet_length(header_ct)::int8, \
-     octet_length(manifest_ct)::int8, header_sha256, disposition_ct FROM candor.envelope \
-     WHERE batch_no = $1 ORDER BY envelope_ref";
-const SQL_BATCH_PARTS: &str = "SELECT p.envelope_ref, p.padded_size FROM candor.envelope_part p \
-     JOIN candor.envelope e ON e.envelope_ref = p.envelope_ref WHERE e.batch_no = $1 \
-     ORDER BY p.envelope_ref, p.part_no";
-const SQL_OBJ_HEADER: &str =
-    "SELECT header_ct FROM candor.envelope WHERE envelope_ref = $1 AND batch_no = $2";
-const SQL_OBJ_MANIFEST: &str =
-    "SELECT manifest_ct FROM candor.envelope WHERE envelope_ref = $1 AND batch_no = $2";
+const SQL_BATCH_OBJECTS: &str = "SELECT envelope_ref, channel_id, epoch_index, group_sha256, disposition_ct \
+     FROM candor.envelope WHERE batch_no = $1 ORDER BY envelope_ref";
+const SQL_BATCH_PARTS: &str = "SELECT p.envelope_ref, p.part_no, p.object_hash, p.padded_size \
+     FROM candor.envelope_part p JOIN candor.envelope e ON e.envelope_ref = p.envelope_ref \
+     WHERE e.batch_no = $1 ORDER BY p.envelope_ref, p.part_no";
+const SQL_OBJ_SLOT: &str = "SELECT p.slot_block FROM candor.envelope_part p \
+     JOIN candor.envelope e ON e.envelope_ref = p.envelope_ref \
+     WHERE p.envelope_ref = $1 AND e.batch_no = $2 AND p.part_no = $3";
 const SQL_OBJ_PART: &str = "SELECT p.blob_id, p.padded_size FROM candor.envelope_part p \
      JOIN candor.envelope e ON e.envelope_ref = p.envelope_ref \
      WHERE p.envelope_ref = $1 AND e.batch_no = $2 AND p.part_no = $3";
-const SQL_BATCH_DIGESTS: &str = "SELECT header_sha256 FROM candor.envelope WHERE batch_no = $1";
-const SQL_ACK_FOLD: &str = "UPDATE candor.source_account a SET activity_month = GREATEST(a.activity_month, x.m) \
-     FROM (SELECT e.source_account_id AS id, \
-                  max(e.received_date - (EXTRACT(DAY FROM e.received_date)::int4 - 1)) AS m \
-           FROM candor.envelope e WHERE e.batch_no = $1 AND e.header_sha256 = ANY($2) \
-           AND e.source_account_id IS NOT NULL GROUP BY e.source_account_id) x \
-     WHERE a.account_id = x.id";
+const SQL_BATCH_DIGESTS: &str = "SELECT group_sha256 FROM candor.envelope WHERE batch_no = $1";
 const SQL_ACK_BLOBS: &str = "SELECT p.blob_id FROM candor.envelope_part p \
      JOIN candor.envelope e ON e.envelope_ref = p.envelope_ref \
-     WHERE e.batch_no = $1 AND e.header_sha256 = ANY($2) ORDER BY p.envelope_ref, p.part_no";
+     WHERE e.batch_no = $1 AND e.group_sha256 = ANY($2) ORDER BY p.envelope_ref, p.part_no";
 const SQL_ACK_DELETE: &str =
-    "DELETE FROM candor.envelope WHERE batch_no = $1 AND header_sha256 = ANY($2)";
+    "DELETE FROM candor.envelope WHERE batch_no = $1 AND group_sha256 = ANY($2)";
 const SQL_UNCLAIM: &str =
     "UPDATE candor.envelope SET state = 'sealed', batch_no = NULL WHERE batch_no = $1";
 
@@ -249,9 +244,6 @@ const SQL_PUB_PADDING_TRIM: &str = "DELETE FROM candor.reply WHERE reply_ref IN 
 const SQL_PUB_STREAM: &str = "SELECT reply_ref, reply_ct FROM candor.reply \
      WHERE (pub_gen BETWEEN $1 AND $2 OR pub_gen = 0) AND reply_ref > $3 ORDER BY reply_ref LIMIT 256";
 
-const SQL_DEL_COLS: &str = "SELECT d.seq, d.kind::text, d.del_hash, (d.del_day - DATE '1970-01-01')::int4, \
-     d.prev_hash, d.sig, (d.relayed OR d.seq <= m.deletion_acked_seq) \
-     FROM candor.deletion_list d CROSS JOIN candor.intake_meta m";
 const SQL_DEL_HEAD: &str = "SELECT d.seq, d.kind::text, d.del_hash, (d.del_day - DATE '1970-01-01')::int4, \
      d.prev_hash, d.sig, d.relayed FROM candor.deletion_list d ORDER BY d.seq DESC LIMIT 1";
 const SQL_DEL_ALL: &str = "SELECT d.seq, d.kind::text, d.del_hash, (d.del_day - DATE '1970-01-01')::int4, \
@@ -264,7 +256,8 @@ const SQL_DEL_INSERT: &str = "INSERT INTO candor.deletion_list (seq, kind, del_h
      VALUES ($1, $2::text::candor.deletion_kind, $3, DATE '1970-01-01' + $4::int4, $5, $6, $7) \
      ON CONFLICT DO NOTHING";
 const SQL_DEL_ACKED: &str = "SELECT deletion_acked_seq FROM candor.intake_meta";
-const SQL_DEL_ACK: &str = "UPDATE candor.intake_meta SET deletion_acked_seq = $1 WHERE deletion_acked_seq < $1";
+const SQL_DEL_ACK: &str =
+    "UPDATE candor.intake_meta SET deletion_acked_seq = $1 WHERE deletion_acked_seq < $1";
 const SQL_DEL_MARK: &str = "UPDATE candor.deletion_list SET relayed = true WHERE NOT relayed \
      AND seq <= (SELECT deletion_acked_seq FROM candor.intake_meta)";
 const SQL_DEL_PRUNE: &str = "DELETE FROM candor.deletion_list WHERE relayed AND del_day < DATE '1970-01-01' + $1::int4 \
@@ -296,13 +289,13 @@ const SQL_COUNTERS_PRUNE: &str =
 
 /// Import-slot rewrite (AUD-RM2-STO-01): every row of every source-linkable
 /// table gets a new version in one transaction. `source_account` also folds
-/// `activity_month` from its stored envelopes and replies dated ≤ `$1`.
-const SQL_REWRITE: &[&str] = &[
-    "UPDATE candor.source_account a SET activity_month = GREATEST(a.activity_month, \
-       (SELECT max(e.received_date - (EXTRACT(DAY FROM e.received_date)::int4 - 1)) FROM candor.envelope e \
-        WHERE e.source_account_id = a.account_id AND e.received_date <= DATE '1970-01-01' + $1::int4), \
+/// `activity_month`: the slot month `$3` for the accounts in `$2` (recorded
+/// active in RAM since the last slot) and the month of stored replies ≤ `$1`.
+const SQL_REWRITE_ACCOUNTS: &str = "UPDATE candor.source_account a SET activity_month = GREATEST(a.activity_month, \
+       CASE WHEN a.account_id = ANY($2) THEN DATE '1970-01-01' + $3::int4 END, \
        (SELECT max(r.available_day - (EXTRACT(DAY FROM r.available_day)::int4 - 1)) FROM candor.reply r \
-        WHERE r.source_account_id = a.account_id AND r.available_day <= DATE '1970-01-01' + $1::int4))",
+        WHERE r.source_account_id = a.account_id AND r.available_day <= DATE '1970-01-01' + $1::int4))";
+const SQL_REWRITE: &[&str] = &[
     "UPDATE candor.envelope SET state = state",
     "UPDATE candor.envelope_part SET padded_size = padded_size",
     "UPDATE candor.reply SET size_bucket = size_bucket",
@@ -325,9 +318,6 @@ const SQL_META_RESTORE: &str = "UPDATE candor.intake_meta SET \
 const SQL_META_RESTORE_INSERT: &str = "INSERT INTO candor.intake_meta (tenant_id, schema_hash, kdf_salt, \
      relay_req_counter, last_batch_no, kd_tree_size_hwm, kd_checkpoint_day_hwm, directory_version, restore_pending) \
      VALUES ($1, $2, $3, $4, $5, $6, DATE '1970-01-01' + $7::int4, $8, true) ON CONFLICT DO NOTHING";
-
-/// Largest day bound used for the activity fold outside an explicit slot.
-const MAX_DAY_BOUND: i32 = 2_000_000;
 
 /// Re-assert the per-session limits on every connection (the role defaults can be
 /// changed by the role itself, AUD-RM2-STO-08).
@@ -713,13 +703,19 @@ impl PgIntakeStore {
 }
 
 /// Rewrite every row of every source-linkable table (AUD-RM2-STO-01).
-async fn rewrite_all(tx: &mut PgConnection, fold_limit: i32) -> Result<()> {
-    for (i, q) in SQL_REWRITE.iter().enumerate() {
-        let mut query = sqlx::query(q);
-        if i == 0 {
-            query = query.bind(fold_limit);
-        }
-        query.execute(&mut *tx).await.map_err(db_classified)?;
+async fn rewrite_all(tx: &mut PgConnection, slot_day: Day, active: &[Uuid]) -> Result<()> {
+    sqlx::query(SQL_REWRITE_ACCOUNTS)
+        .bind(day_i32(slot_day)?)
+        .bind(active)
+        .bind(day_i32(slot_day.month_start())?)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_classified)?;
+    for q in SQL_REWRITE {
+        sqlx::query(*q)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_classified)?;
     }
     Ok(())
 }
@@ -791,23 +787,31 @@ async fn batch_objects(tx: &mut PgConnection, b: i64) -> Result<Vec<ClaimedObjec
     let mut out = Vec::with_capacity(rows.len());
     for r in &rows {
         let er = get_id(r, 0)?;
-        let mut sizes = Vec::new();
+        let mut hashes = [[0u8; 32]; GROUP_OBJECTS];
+        let mut sizes = [0u64; GROUP_OBJECTS];
+        let mut seen = 0usize;
         for p in &parts {
-            if get_id(p, 0)? == er {
-                sizes.push(get_u64(p, 1)?);
+            if get_id(p, 0)? != er {
+                continue;
             }
+            let pn: i16 = p.try_get(1).map_err(db)?;
+            let i = usize::try_from(pn).map_err(|_| StoreError::Integrity("part"))?;
+            *hashes.get_mut(i).ok_or(StoreError::Integrity("part"))? = get_arr(p, 2)?;
+            *sizes.get_mut(i).ok_or(StoreError::Integrity("part"))? = get_u64(p, 3)?;
+            seen = seen.saturating_add(1);
+        }
+        if seen != GROUP_OBJECTS {
+            return Err(StoreError::Integrity("envelope group shape"));
         }
         let epoch: i32 = r.try_get(2).map_err(db)?;
         out.push(ClaimedObject {
             envelope_ref: EnvelopeRef(er),
             channel_id: ChannelId(get_id(r, 1)?),
             epoch_index: u32::try_from(epoch).map_err(|_| StoreError::Integrity("epoch"))?,
-            header_len: u32::try_from(get_u64(r, 3)?).map_err(|_| StoreError::Integrity("len"))?,
-            manifest_len: u32::try_from(get_u64(r, 4)?)
-                .map_err(|_| StoreError::Integrity("len"))?,
+            object_hashes: hashes,
             parts: sizes,
-            sha256: get_arr(r, 5)?,
-            disposition_ct: r.try_get(6).map_err(db)?,
+            sha256: get_arr(r, 3)?,
+            disposition_ct: r.try_get(4).map_err(db)?,
         });
     }
     Ok(out)
@@ -924,54 +928,89 @@ impl IntakeStore for PgIntakeStore {
         tx.commit().await.map_err(db)
     }
 
+    async fn create_account(&self, account: NewAccount, today: Day) -> Result<AccountId> {
+        validate::new_account(&account)?;
+        let month = day_i32(today.month_start())?;
+        let (mut tx, m) = self.begin(false).await?;
+        m.serving()?;
+        let id = random_id16()?;
+        let inserted = sqlx::query(SQL_ACCOUNT_INSERT)
+            .bind(uuid(&id))
+            .bind(account.lookup_tag.0.as_slice())
+            .bind(account.auth_pk.as_slice())
+            .bind(account.xwing_pk.as_slice())
+            .bind(account.prefs_ct.as_slice())
+            .bind(month)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_classified)?
+            .rows_affected();
+        if inserted != 1 {
+            return Err(StoreError::AccountExists);
+        }
+        tx.commit().await.map_err(db)?;
+        Ok(AccountId(id))
+    }
+
+    async fn update_account(&self, account: AccountId, new: NewAccount) -> Result<()> {
+        validate::new_account(&new)?;
+        // The meta row lock serialises tag changes, so the NOT EXISTS guard
+        // cannot race into a unique-violation error.
+        let (mut tx, m) = self.begin(true).await?;
+        m.serving()?;
+        let n = sqlx::query(SQL_ACCOUNT_UPDATE)
+            .bind(uuid(&account.0))
+            .bind(new.lookup_tag.0.as_slice())
+            .bind(new.auth_pk.as_slice())
+            .bind(new.xwing_pk.as_slice())
+            .bind(new.prefs_ct.as_slice())
+            .execute(&mut *tx)
+            .await
+            .map_err(db_classified)?
+            .rows_affected();
+        if n != 1 {
+            let exists: bool = sqlx::query(SQL_ACCOUNT_EXISTS)
+                .bind(uuid(&account.0))
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(db)?
+                .try_get(0)
+                .map_err(db)?;
+            return Err(if exists {
+                StoreError::AccountExists
+            } else {
+                StoreError::NotFound
+            });
+        }
+        tx.commit().await.map_err(db)
+    }
+
+    async fn purge_inactive_accounts(&self, today: Day) -> Result<u64> {
+        let cutoff = day_i32(today.saturating_minus(INACTIVE_PURGE_DAYS))?;
+        let (mut tx, _) = self.begin(true).await?;
+        let n = sqlx::query(SQL_ACCOUNTS_PURGE)
+            .bind(cutoff)
+            .execute(&mut *tx)
+            .await
+            .map_err(db)?
+            .rows_affected();
+        tx.commit().await.map_err(db)?;
+        Ok(n)
+    }
+
     async fn commit_envelope(&self, env: CommitEnvelope) -> Result<EnvelopeRef> {
         validate::commit(&env)?;
         let received = day_i32(env.received_date)?;
         let release = day_i32(env.received_date.plus(u32::from(env.release_offset_days))?)?;
-        let month = day_i32(env.received_date.month_start())?;
         let epoch =
             i32::try_from(env.epoch_index).map_err(|_| StoreError::InvalidInput("epoch index"))?;
+        let digest = group_digest(&env.objects.clone().map(|o| o.object_hash));
         let (mut tx, m) = self.begin(false).await?;
         m.serving()?;
-        let account: Option<Uuid> = match &env.account {
-            AccountLink::None => None,
-            // No account write per action (AUD-RM2-STO-01).
-            AccountLink::Existing(id) => {
-                sqlx::query(SQL_ACCOUNT_KEYSHARE)
-                    .bind(uuid(&id.0))
-                    .fetch_optional(&mut *tx)
-                    .await
-                    .map_err(db)?
-                    .ok_or(StoreError::NotFound)?;
-                Some(uuid(&id.0))
-            }
-            AccountLink::New(n) => {
-                let id = uuid(&random_id16()?);
-                let inserted = sqlx::query(SQL_ACCOUNT_INSERT)
-                    .bind(id)
-                    .bind(n.lookup_tag.0.as_slice())
-                    .bind(n.auth_pk.as_slice())
-                    .bind(n.xwing_pk.as_slice())
-                    .bind(n.prefs_ct.as_slice())
-                    .bind(month)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(db_classified)?
-                    .rows_affected();
-                if inserted != 1 {
-                    return Err(StoreError::AccountExists);
-                }
-                Some(id)
-            }
-        };
         let er = random_id16()?;
-        let digest: [u8; 32] = Sha256::digest(&env.header_ct).into();
         let inserted = sqlx::query(SQL_ENV_INSERT)
             .bind(uuid(&er))
             .bind(uuid(&env.channel_id.0))
-            .bind(account)
-            .bind(env.header_ct.as_slice())
-            .bind(env.manifest_ct.as_slice())
             .bind(digest.as_slice())
             .bind(env.disposition_ct.as_slice())
             .bind(epoch)
@@ -984,12 +1023,14 @@ impl IntakeStore for PgIntakeStore {
         if inserted != 1 {
             return Err(StoreError::DuplicateEnvelope);
         }
-        for (i, p) in env.parts.iter().enumerate() {
+        for (i, o) in env.objects.iter().enumerate() {
             let inserted = sqlx::query(SQL_PART_INSERT)
                 .bind(uuid(&er))
                 .bind(i16::try_from(i).map_err(|_| StoreError::InvalidInput("part"))?)
-                .bind(uuid(&p.blob_id.0))
-                .bind(i64_of(p.padded_size)?)
+                .bind(o.object_hash.as_slice())
+                .bind(o.slot_block.as_slice())
+                .bind(uuid(&o.blob.blob_id.0))
+                .bind(i64_of(o.blob.padded_size)?)
                 .execute(&mut *tx)
                 .await
                 .map_err(db_classified)?
@@ -1056,7 +1097,7 @@ impl IntakeStore for PgIntakeStore {
                     ps.push(get_u64(p, 1)?);
                 }
             }
-            sizes.push(validate::object_bytes(get_u64(r, 1)?, get_u64(r, 2)?, &ps));
+            sizes.push(validate::group_bytes(&ps));
         }
         let chosen: Vec<Uuid> = validate::fill_batch(&sizes, limits)
             .into_iter()
@@ -1111,27 +1152,22 @@ impl IntakeStore for PgIntakeStore {
         let (mut tx, _) = self.begin(false).await?;
         let er = uuid(&envelope.0);
         let out = match part {
-            PartSelector::Header | PartSelector::Manifest => {
-                let q = if part == PartSelector::Header {
-                    SQL_OBJ_HEADER
-                } else {
-                    SQL_OBJ_MANIFEST
-                };
-                let row = sqlx::query(q)
+            PartSelector::SlotBlock(i) => {
+                let row = sqlx::query(SQL_OBJ_SLOT)
                     .bind(er)
                     .bind(b)
+                    .bind(i16::from(i))
                     .fetch_optional(&mut *tx)
                     .await
                     .map_err(db)?;
                 let row = row.ok_or(StoreError::NotFound)?;
                 ObjectData::Bytes(row.try_get(0).map_err(db)?)
             }
-            PartSelector::Part(i) => {
-                let pn = i16::try_from(i).map_err(|_| StoreError::NotFound)?;
+            PartSelector::Object(i) => {
                 let row = sqlx::query(SQL_OBJ_PART)
                     .bind(er)
                     .bind(b)
-                    .bind(pn)
+                    .bind(i16::from(i))
                     .fetch_optional(&mut *tx)
                     .await
                     .map_err(db)?;
@@ -1162,16 +1198,6 @@ impl IntakeStore for PgIntakeStore {
             return Err(StoreError::InvalidInput("digest not in batch"));
         }
         let digests: Vec<Vec<u8>> = committed.iter().map(|d| d.to_vec()).collect();
-        // Fold the acked envelopes' activity before their rows disappear, then
-        // rewrite every source-linkable row in this (import-slot) transaction so
-        // the fold is not visible per account (AUD-RM2-STO-01).
-        sqlx::query(SQL_ACK_FOLD)
-            .bind(b)
-            .bind(&digests)
-            .execute(&mut *tx)
-            .await
-            .map_err(db_classified)?;
-        rewrite_all(&mut tx, MAX_DAY_BOUND).await?;
         let blobs = sqlx::query(SQL_ACK_BLOBS)
             .bind(b)
             .bind(&digests)
@@ -1666,18 +1692,30 @@ impl IntakeStore for PgIntakeStore {
         .transpose()
     }
 
-    async fn uniform_rewrite(&self, slot: ImportSlot, counters: &[CounterDelta]) -> Result<()> {
-        let limit = day_i32(slot.day)?;
+    async fn uniform_rewrite(
+        &self,
+        slot: ImportSlot,
+        counters: &[CounterDelta],
+        active_accounts: &[AccountId],
+    ) -> Result<()> {
+        day_i32(slot.day)?;
+        if active_accounts.len() > MAX_SLOT_ACTIVE_ACCOUNTS {
+            return Err(StoreError::InvalidInput("too many active accounts"));
+        }
         for c in counters {
             validate::counter_delta(c)?;
         }
+        let active: Vec<Uuid> = active_accounts.iter().map(|a| uuid(&a.0)).collect();
         let (mut tx, _) = self.begin(true).await?;
         for c in counters {
             let n = sqlx::query(SQL_COUNTER_ADD)
                 .bind(day_i32(c.month)?)
                 .bind(uuid(&c.channel_id.0))
                 .bind(c.name.as_str())
-                .bind(i32::try_from(c.delta).map_err(|_| StoreError::InvalidInput("counter overflow"))?)
+                .bind(
+                    i32::try_from(c.delta)
+                        .map_err(|_| StoreError::InvalidInput("counter overflow"))?,
+                )
                 .execute(&mut *tx)
                 .await
                 .map_err(db_classified)?
@@ -1687,7 +1725,7 @@ impl IntakeStore for PgIntakeStore {
                 return Err(StoreError::InvalidInput("counter overflow"));
             }
         }
-        rewrite_all(&mut tx, limit).await?;
+        rewrite_all(&mut tx, slot.day, &active).await?;
         tx.commit().await.map_err(db)
     }
 

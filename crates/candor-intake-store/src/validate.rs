@@ -98,8 +98,7 @@ pub(crate) fn backup(b: &BackupSnapshot) -> Result<()> {
             return Err(StoreError::InvalidInput("duplicate account in backup"));
         }
     }
-    if b
-        .deletion_list
+    if b.deletion_list
         .windows(2)
         .any(|w| matches!(w, [x, y] if y.seq <= x.seq))
     {
@@ -348,7 +347,11 @@ pub(crate) fn merge_pushed(
         }
     }
     // The merged list must be contiguous from its lowest retained seq.
-    let mut seqs: Vec<u64> = map.keys().copied().chain(new.iter().map(|e| e.seq)).collect();
+    let mut seqs: Vec<u64> = map
+        .keys()
+        .copied()
+        .chain(new.iter().map(|e| e.seq))
+        .collect();
     seqs.sort_unstable();
     if seqs
         .windows(2)
@@ -456,7 +459,10 @@ mod tests {
         );
         // Proper: anchored at 2, through the head.
         let new = merge_pushed(local, 0, &all[2..], 8).unwrap();
-        assert_eq!(new.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![3, 4, 5, 6, 7, 8]);
+        assert_eq!(
+            new.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![3, 4, 5, 6, 7, 8]
+        );
         assert!(new.iter().all(|e| e.relayed));
         // Overlapping full copy.
         assert_eq!(merge_pushed(local, 0, &all, 8).unwrap().len(), 6);
@@ -468,7 +474,9 @@ mod tests {
             let s = Ed25519DeletionSigner::new(candor_core::sig::SigningKey::from_seed(&[4u8; 32]));
             let mut v: Vec<DeletionEntry> = Vec::new();
             for i in 0..4 {
-                v.push(make_entry(v.last(), DeletionKind::Reply, [i as u8; 32], Day(9), &s).unwrap());
+                v.push(
+                    make_entry(v.last(), DeletionKind::Reply, [i as u8; 32], Day(9), &s).unwrap(),
+                );
             }
             (v, ())
         };

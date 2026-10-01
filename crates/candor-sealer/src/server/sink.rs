@@ -1,21 +1,23 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Where sealed output goes: the Intake Store (C-08).
 //!
-//! `candor-intake-store` owns the `IntakeStore` trait (RM-2 addendum) but it was
-//! not available when this crate was written, so the sealer defines the minimal
-//! [`EnvelopeSink`] it needs. Integration: implement `EnvelopeSink` for the
-//! store's client (or replace it with the store's trait) — see SPEC-NOTES.
+//! `candor-intake-store` owns the `IntakeStore` trait (RM-2 addendum). The sealer
+//! defines the minimal [`EnvelopeSink`] it needs, shaped after ADR-052(2): an
+//! envelope commit carries **no account reference**, and account creation and
+//! update are a separate operation ([`EnvelopeSink::upsert_account`]) that chaff
+//! performs too, with dummy accounts. Integration: implement `EnvelopeSink` over
+//! the store client (see SPEC-NOTES "Fixes for AUD-RM2-SEA").
 //!
 //! Everything handed to a sink is ciphertext or public: sealed objects, slot
 //! blocks, the disposition marker, `lookup_tag`, `auth_pk`, `prefs_ct`
 //! (AEAD under `K_prefs`), mailbox ids and re-wrapped reply stanzas. No plaintext,
-//! no time value and no peer information is ever passed.
+//! no sub-day time value and no peer information is ever passed.
 
 use candor_core::header::ObjectType;
 use candor_safefs::ObjectId;
 
 /// Where an object's bytes are.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Blob {
     /// In memory (SUBMISSION, IDENTITY, SOURCE_MESSAGE: ≤ 64 KiB).
     Inline(Vec<u8>),
@@ -29,8 +31,14 @@ pub enum Blob {
     },
 }
 
+impl core::fmt::Debug for Blob {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("Blob(<redacted>)")
+    }
+}
+
 /// One sealed object of an envelope.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct EnvelopeObject {
     /// Object type.
     pub object_type: ObjectType,
@@ -42,8 +50,48 @@ pub struct EnvelopeObject {
     pub blob: Blob,
 }
 
-/// A new Tier W account (04 §11.4): only verifier-side, public or encrypted data.
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl core::fmt::Debug for EnvelopeObject {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("EnvelopeObject(<redacted>)")
+    }
+}
+
+/// One intake envelope group (ADR-052(1)): always exactly three objects — the
+/// main object (SUBMISSION or SOURCE_MESSAGE), an ATTACHMENT_BUNDLE and an
+/// IDENTITY — for real and chaff envelopes alike, with dummies where the source
+/// supplied nothing. The text-bearing objects are always padded to the maximum
+/// bucket of their type.
+#[derive(Clone, PartialEq, Eq)]
+pub struct EnvelopeGroup {
+    /// Channel.
+    pub channel_id: [u8; 16],
+    /// SUBMISSION or SOURCE_MESSAGE.
+    pub main: EnvelopeObject,
+    /// ATTACHMENT_BUNDLE (possibly an empty bundle).
+    pub bundle: EnvelopeObject,
+    /// IDENTITY (possibly a dummy).
+    pub identity: EnvelopeObject,
+    /// `disposition_ct` (fixed size Nenc + 48).
+    pub disposition_ct: Vec<u8>,
+}
+
+impl EnvelopeGroup {
+    /// The three objects in commit order (main, bundle, identity).
+    #[must_use]
+    pub fn objects(&self) -> [&EnvelopeObject; 3] {
+        [&self.main, &self.bundle, &self.identity]
+    }
+}
+
+impl core::fmt::Debug for EnvelopeGroup {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("EnvelopeGroup(<redacted>)")
+    }
+}
+
+/// A Tier W account (04 §11.4): only verifier-side, public or encrypted data.
+/// `prefs_ct` has one fixed length for every account, real or dummy.
+#[derive(Clone, PartialEq, Eq)]
 pub struct AccountRecord {
     /// `lookup_tag`.
     pub lookup_tag: [u8; 32],
@@ -55,34 +103,28 @@ pub struct AccountRecord {
     pub mailbox_ids: Vec<[u8; 32]>,
 }
 
-/// `COMMIT_ENVELOPE` (07 §5.3).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommitRequest {
-    /// Channel.
-    pub channel_id: [u8; 16],
-    /// Objects; the first one is the SUBMISSION or SOURCE_MESSAGE.
-    pub objects: Vec<EnvelopeObject>,
-    /// `disposition_ct` (fixed size Nenc + 48).
-    pub disposition_ct: Vec<u8>,
-    /// Delayed-delivery offset in days (0 = none, else 1..=3).
-    pub release_offset_days: u8,
-    /// New account to create in the same transaction (initial Tier W submission).
-    pub account: Option<AccountRecord>,
+impl core::fmt::Debug for AccountRecord {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("AccountRecord(<redacted>)")
+    }
 }
 
-/// `ACCOUNT_ROTATE` (ADR-046(7), 04 §11.7 step 4): atomically replace the
-/// account's verifier and prefs, replace the re-wrapped reply stanzas and commit
-/// the key-update envelopes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RotationRequest {
-    /// Current `lookup_tag`.
-    pub old_lookup_tag: [u8; 32],
-    /// New account values (same mailbox ids).
+/// Create or replace a Tier W account (ADR-052(2); ADR-046(7) for rotation).
+#[derive(Clone, PartialEq, Eq)]
+pub struct AccountUpsert {
+    /// `None`: create a new account. `Some(old)`: atomically replace the account
+    /// with `lookup_tag == old` (passphrase rotation, 04 §11.7 step 4).
+    pub replaces: Option<[u8; 32]>,
+    /// The account values.
     pub account: AccountRecord,
-    /// `(object_hash, new stanza(1))` per pending reply.
+    /// Rotation only: `(object_hash, new stanza(1))` per pending reply.
     pub rewrapped_replies: Vec<([u8; 32], Vec<u8>)>,
-    /// KEY_ROTATION SOURCE_MESSAGE envelopes (one per report).
-    pub envelopes: Vec<CommitRequest>,
+}
+
+impl core::fmt::Debug for AccountUpsert {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("AccountUpsert(<redacted>)")
+    }
 }
 
 /// Sink failure. The sealer reports `INTERNAL` and treats nothing as committed.
@@ -100,10 +142,25 @@ impl std::error::Error for SinkError {}
 /// The Intake Store as seen by the sealer. Calls are blocking and run on a
 /// blocking thread; they return only after the data is durable (`fsync`,
 /// ADR-046(1)), so the source is told "received" only then.
+///
+/// Operation sequences are identical for real and chaff traffic:
+/// * initial Tier W submission / initial-shaped chaff: `upsert_account`
+///   (new; a dummy account for chaff), then `commit_envelope_group`;
+/// * follow-up / follow-up-shaped chaff: `commit_envelope_group` only;
+/// * passphrase rotation: `commit_envelope_group` (KEY_ROTATION), then
+///   `upsert_account` (replace).
 pub trait EnvelopeSink: Send + Sync {
-    /// Commit one envelope (real or chaff; the store cannot and must not
-    /// distinguish them).
-    fn commit(&self, req: CommitRequest) -> Result<(), SinkError>;
-    /// Rotate an account's passphrase-derived values atomically.
-    fn rotate_account(&self, req: RotationRequest) -> Result<(), SinkError>;
+    /// `COMMIT_ENVELOPE` for one envelope group (real or chaff; the store cannot
+    /// and must not distinguish them). No account reference (ADR-052(2)).
+    /// `received_day` is the UTC day number; `release_offset_days` ∈ 0..=3.
+    fn commit_envelope_group(
+        &self,
+        group: EnvelopeGroup,
+        epoch_id: u32,
+        received_day: u32,
+        release_offset_days: u8,
+    ) -> Result<(), SinkError>;
+
+    /// Create or replace an account (separate store operation, ADR-052(2)).
+    fn upsert_account(&self, op: AccountUpsert) -> Result<(), SinkError>;
 }

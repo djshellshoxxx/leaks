@@ -306,7 +306,9 @@ impl PageBuilder {
         }
         let n = usize::from(page_count);
         let mut pages: Vec<Vec<u8>> = Vec::new();
-        pages.try_reserve_exact(n).map_err(|_| StoreError::Capacity)?;
+        pages
+            .try_reserve_exact(n)
+            .map_err(|_| StoreError::Capacity)?;
         for _ in 0..n {
             let mut p: Vec<u8> = Vec::new();
             p.try_reserve_exact(REPLY_PAGE_LEN)
@@ -436,7 +438,13 @@ mod tests {
     /// BE-063 / API-037: page shape is fixed by the configuration only.
     #[test]
     fn page_shape_from_config() {
-        for (spd, k, pages) in [(1u8, 1u16, 1u16), (1, 2, 1), (1, 3, 2), (4, 16, 32), (4, 8, 16)] {
+        for (spd, k, pages) in [
+            (1u8, 1u16, 1u16),
+            (1, 2, 1),
+            (1, 3, 2),
+            (4, 16, 32),
+            (4, 8, 16),
+        ] {
             let c = cfg(spd, k);
             c.validate().unwrap();
             assert_eq!(c.page_count().unwrap(), pages, "spd={spd} k={k}");

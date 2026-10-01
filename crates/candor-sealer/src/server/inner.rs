@@ -32,6 +32,11 @@ pub(crate) const MANIFEST_FORMAT: u64 = 1;
 pub(crate) const MAX_PREFS_REPORTS: usize = 16;
 /// Maximum original eligible members per report (slot limit).
 pub(crate) const MAX_ELIGIBLE: usize = 16;
+/// Maximum categories kept per report (07 §5.2: ≤ 8).
+pub(crate) const MAX_REPORT_CATEGORIES: usize = 8;
+/// Fixed padded length of the `prefs_ct` plaintext, so every account record
+/// (real or dummy) has the same `prefs_ct` length (ADR-052(2)).
+pub(crate) const PREFS_PADDED_LEN: u64 = 2048;
 
 /// SOURCE_MESSAGE kinds (§13.4 key 7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,48 +140,73 @@ fn cbor_err(_: CborError) -> Error {
     Error::Internal
 }
 
+/// Maximum (and, per ADR-052(1), the only) bucket of a text-bearing object type.
+pub(crate) fn max_bucket(object_type: ObjectType) -> Result<u64, Error> {
+    match object_type {
+        ObjectType::Submission | ObjectType::SourceMessage | ObjectType::Reply => {
+            Ok(padding::MESSAGE_MAX)
+        }
+        ObjectType::Identity => Ok(padding::IDENTITY_MAX),
+        _ => Err(Error::Internal),
+    }
+}
+
 /// Build `padded_plaintext = u32be(cbor_len) ‖ cbor ‖ 0x00…` (§13.4) with the
 /// signatures of `sigs` added under their keys. `unsigned` must not contain any
-/// signature key.
+/// signature key. The result always has the maximum bucket length of the type
+/// (ADR-052(1)); `TooLarge` if it does not fit.
 pub(crate) fn signed_payload(
     object_type: ObjectType,
     unsigned: Vec<(u64, Value)>,
     header_bytes: &[u8],
     sigs: &[SigSpec<'_>],
 ) -> Result<Zeroizing<Vec<u8>>, Error> {
-    let body = Value::M(unsigned);
-    let unsigned_cbor = body.encode().map_err(cbor_err)?;
+    let mut body = Value::M(unsigned);
+    let unsigned_cbor = Zeroizing::new(body.encode().map_err(cbor_err)?);
     let h_body = sha256(&[&unsigned_cbor]);
     let h_hdr = sha256(&[header_bytes]);
-    let Value::M(mut entries) = body else {
+    let Value::M(entries) = &mut body else {
         return Err(Error::Internal);
     };
+    // Reserve first so pushing never reallocates (no stale copy of the map).
+    entries.reserve_exact(sigs.len());
     for s in sigs {
         let sig = sign_with_context(s.signer, s.label, &[&h_hdr, &h_body]);
         entries.push((s.key, Value::bytes(&sig)));
     }
-    let cbor = Value::M(entries).encode().map_err(cbor_err)?;
+    let cbor = Zeroizing::new(body.encode().map_err(cbor_err)?);
     length_prefixed_pad(object_type, &cbor)
 }
 
-/// `u32be(len) ‖ cbor`, zero-padded to the object type's bucket.
+/// `u32be(len) ‖ cbor`, zero-padded to `target` bytes.
+pub(crate) fn length_prefixed_pad_to(cbor: &[u8], target: u64) -> Result<Zeroizing<Vec<u8>>, Error> {
+    let len = u32::try_from(cbor.len()).map_err(|_| Error::TooLarge)?;
+    let total = cbor.len().checked_add(4).ok_or(Error::TooLarge)?;
+    let target = usize::try_from(target).map_err(|_| Error::TooLarge)?;
+    if total > target {
+        return Err(Error::TooLarge);
+    }
+    let mut pt = Zeroizing::new(Vec::with_capacity(target));
+    pt.extend_from_slice(&len.to_be_bytes());
+    pt.extend_from_slice(cbor);
+    pt.resize(target, 0);
+    Ok(pt)
+}
+
+/// `u32be(len) ‖ cbor`, zero-padded to the **maximum** bucket of the object type
+/// (ADR-052(1): text-bearing objects never reveal their size).
 pub(crate) fn length_prefixed_pad(
     object_type: ObjectType,
     cbor: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>, Error> {
-    let len = u32::try_from(cbor.len()).map_err(|_| Error::TooLarge)?;
-    let total = cbor.len().checked_add(4).ok_or(Error::TooLarge)?;
-    let mut pt = Zeroizing::new(Vec::with_capacity(total));
-    pt.extend_from_slice(&len.to_be_bytes());
-    pt.extend_from_slice(cbor);
-    padding::pad(object_type, &pt)
+    length_prefixed_pad_to(cbor, max_bucket(object_type)?)
 }
 
 /// IDENTITY inner plaintext: `{1: format, 2: identity text}` (empty text for the
-/// ANONYMOUS-mode dummy, which lands in the most common bucket, §13.6).
+/// ANONYMOUS-mode and follow-up dummies), padded to the maximum IDENTITY bucket.
 pub(crate) fn identity_payload(text: &str) -> Result<Zeroizing<Vec<u8>>, Error> {
     let v = Value::M(vec![(1, Value::U(IDENTITY_FORMAT)), (2, Value::text(text))]);
-    let cbor = v.encode().map_err(cbor_err)?;
+    let cbor = Zeroizing::new(v.encode().map_err(cbor_err)?);
     length_prefixed_pad(ObjectType::Identity, &cbor)
 }
 
@@ -185,12 +215,17 @@ pub(crate) fn identity_payload(text: &str) -> Result<Zeroizing<Vec<u8>>, Error> 
 pub(crate) struct ReportPrefs {
     pub report_index: u32,
     pub mailbox_id: [u8; 32],
-    pub original_eligible: Vec<[u8; 16]>,
+    /// Eligible set of the initial submission (reveals COI ticks by difference:
+    /// zeroized, AUD-RM2-SEA-08).
+    pub original_eligible: Zeroizing<Vec<[u8; 16]>>,
     pub roster_version: u64,
     /// Channel of the report (key 1000; needed to open replies, see SPEC-NOTES).
     pub channel_id: [u8; 16],
     /// `object_hash` of the initial SUBMISSION (key 1001; §13.4 SOURCE_MESSAGE key 9).
     pub original_submission_hash: [u8; 32],
+    /// Categories of the initial report (key 1002), so follow-ups re-apply the
+    /// currently active COI_POLICY (AUD-RM2-SEA-10). Zeroized.
+    pub categories: Zeroizing<Vec<u16>>,
 }
 
 impl core::fmt::Debug for ReportPrefs {
@@ -231,20 +266,28 @@ pub(crate) fn encode_prefs(p: &Prefs) -> Result<Zeroizing<Vec<u8>>, Error> {
                 (4, Value::U(r.roster_version)),
                 (1000, Value::bytes(&r.channel_id)),
                 (1001, Value::bytes(&r.original_submission_hash)),
+                (
+                    1002,
+                    Value::A(r.categories.iter().map(|c| Value::U(u64::from(*c))).collect()),
+                ),
             ])
         })
         .collect();
-    Value::M(vec![
-        (1, Value::U(PREFS_FORMAT)),
-        (2, Value::U(KDF_VERSION)),
-        (3, Value::A(reports)),
-        (4, Value::M(Vec::new())),
-    ])
-    .encode()
-    .map_err(cbor_err)
+    let cbor = Zeroizing::new(
+        Value::M(vec![
+            (1, Value::U(PREFS_FORMAT)),
+            (2, Value::U(KDF_VERSION)),
+            (3, Value::A(reports)),
+            (4, Value::M(Vec::new())),
+        ])
+        .encode()
+        .map_err(cbor_err)?,
+    );
+    length_prefixed_pad_to(&cbor, PREFS_PADDED_LEN)
 }
 
-pub(crate) fn decode_prefs(b: &[u8]) -> Result<Prefs, CborError> {
+pub(crate) fn decode_prefs(padded: &[u8]) -> Result<Prefs, CborError> {
+    let b = unpad(padded)?;
     let mut d = Dec::new(b);
     let mut m = d.map(4)?;
     d.req(&mut m, 1)?;
@@ -259,14 +302,14 @@ pub(crate) fn decode_prefs(b: &[u8]) -> Result<Prefs, CborError> {
     let n = d.array(MAX_PREFS_REPORTS)?;
     let mut reports = Vec::with_capacity(n);
     for _ in 0..n {
-        let mut r = d.map(6)?;
+        let mut r = d.map(7)?;
         d.req(&mut r, 1)?;
         let report_index = d.u32()?;
         d.req(&mut r, 2)?;
         let mailbox_id = d.bytes_n()?;
         d.req(&mut r, 3)?;
         let k = d.array(MAX_ELIGIBLE)?;
-        let mut original_eligible = Vec::with_capacity(k);
+        let mut original_eligible = Zeroizing::new(Vec::with_capacity(k));
         for _ in 0..k {
             original_eligible.push(d.bytes_n()?);
         }
@@ -276,6 +319,12 @@ pub(crate) fn decode_prefs(b: &[u8]) -> Result<Prefs, CborError> {
         let channel_id = d.bytes_n()?;
         d.req(&mut r, 1001)?;
         let original_submission_hash = d.bytes_n()?;
+        d.req(&mut r, 1002)?;
+        let c = d.array(MAX_REPORT_CATEGORIES)?;
+        let mut categories = Zeroizing::new(Vec::with_capacity(c));
+        for _ in 0..c {
+            categories.push(d.u16()?);
+        }
         d.end_map(r)?;
         reports.push(ReportPrefs {
             report_index,
@@ -284,6 +333,7 @@ pub(crate) fn decode_prefs(b: &[u8]) -> Result<Prefs, CborError> {
             roster_version,
             channel_id,
             original_submission_hash,
+            categories,
         });
     }
     d.req(&mut m, 4)?;
@@ -292,6 +342,22 @@ pub(crate) fn decode_prefs(b: &[u8]) -> Result<Prefs, CborError> {
     d.end_map(m)?;
     d.finish()?;
     Ok(Prefs { reports })
+}
+
+/// Strip `u32be(len) ‖ cbor ‖ zero padding`, requiring all-zero padding.
+fn unpad(padded: &[u8]) -> Result<&[u8], CborError> {
+    let (len, rest) = padded
+        .split_first_chunk::<4>()
+        .ok_or(CborError::Truncated)?;
+    let len = usize::try_from(u32::from_be_bytes(*len)).map_err(|_| CborError::Limit)?;
+    let cbor = rest.get(..len).ok_or(CborError::Truncated)?;
+    if rest
+        .get(len..)
+        .is_none_or(|pad| pad.iter().any(|b| *b != 0))
+    {
+        return Err(CborError::Trailing);
+    }
+    Ok(cbor)
 }
 
 /// A decoded REPLY inner map (§13.5).
@@ -313,17 +379,7 @@ pub(crate) const REPLY_FORMAT: u64 = 1;
 /// Parse a verified REPLY padded plaintext strictly (length prefix, canonical
 /// CBOR, zero padding).
 pub(crate) fn decode_reply(padded: &[u8]) -> Result<ReplyInner, CborError> {
-    let (len, rest) = padded
-        .split_first_chunk::<4>()
-        .ok_or(CborError::Truncated)?;
-    let len = usize::try_from(u32::from_be_bytes(*len)).map_err(|_| CborError::Limit)?;
-    let cbor = rest.get(..len).ok_or(CborError::Truncated)?;
-    if rest
-        .get(len..)
-        .is_none_or(|pad| pad.iter().any(|b| *b != 0))
-    {
-        return Err(CborError::Trailing);
-    }
+    let cbor = unpad(padded)?;
     let mut d = Dec::new(cbor);
     let mut m = d.map(8)?;
     d.req(&mut m, 1)?;
@@ -379,21 +435,36 @@ mod tests {
             reports: vec![ReportPrefs {
                 report_index: 0,
                 mailbox_id: [7; 32],
-                original_eligible: vec![[1; 16], [2; 16]],
+                original_eligible: Zeroizing::new(vec![[1; 16], [2; 16]]),
                 roster_version: 5,
                 channel_id: [3; 16],
                 original_submission_hash: [4; 32],
+                categories: Zeroizing::new(vec![7, 9]),
             }],
         };
         let b = encode_prefs(&p).unwrap();
+        assert_eq!(b.len() as u64, PREFS_PADDED_LEN);
         assert!(decode_prefs(&b).unwrap() == p);
         let mut bad = b.to_vec();
-        bad.push(0);
+        bad.push(1);
+        assert!(decode_prefs(&bad).is_err());
+        let mut bad = b.to_vec();
+        bad[3] = bad[3].wrapping_add(1);
         assert!(decode_prefs(&bad).is_err());
     }
 
+    /// ADR-052(1): text-bearing objects always use the maximum bucket.
     #[test]
-    fn identity_dummy_uses_first_bucket() {
-        assert_eq!(identity_payload("").unwrap().len(), 4096);
+    fn text_objects_use_max_bucket() {
+        assert_eq!(identity_payload("").unwrap().len() as u64, padding::IDENTITY_MAX);
+        let big = "x".repeat(4096);
+        assert_eq!(identity_payload(&big).unwrap().len() as u64, padding::IDENTITY_MAX);
+        let p = length_prefixed_pad(ObjectType::Submission, b"abc").unwrap();
+        assert_eq!(p.len() as u64, padding::MESSAGE_MAX);
+        let too_big = vec![0u8; usize::try_from(padding::MESSAGE_MAX).unwrap()];
+        assert_eq!(
+            length_prefixed_pad(ObjectType::SourceMessage, &too_big).unwrap_err(),
+            Error::TooLarge
+        );
     }
 }

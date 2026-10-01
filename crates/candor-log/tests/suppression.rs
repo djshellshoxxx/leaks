@@ -46,20 +46,16 @@ fn simple(rows: usize, cols: usize, vals: &[u64]) -> Table {
     }
 }
 
-/// Independent brute-force attacker: enumerates every non-negative integer
-/// completion of the suppressed cells consistent with the published cells
-/// and totals, and returns the suppressed cells whose value is pinned.
-fn pinned_cells(rel: &Released) -> Vec<usize> {
+/// Equations an attacker reads off a released table over the micro-cells
+/// `0..r*c` of a `simple` table: published cells, row/column/grand totals.
+fn equations(rel: &Released) -> Vec<(Vec<usize>, u64)> {
     let (r, c) = (rel.rows, rel.cols);
-    let sup: Vec<usize> = (0..r * c)
-        .filter(|&i| rel.cells[i] == Published::Suppressed)
-        .collect();
-    let known = |i: usize| match rel.cells[i] {
-        Published::Value(v) => Some(v),
-        _ => None,
-    };
-    // Equations: (cell indices, total).
     let mut eqs: Vec<(Vec<usize>, u64)> = Vec::new();
+    for i in 0..r * c {
+        if let Published::Value(v) = rel.cells[i] {
+            eqs.push((vec![i], v));
+        }
+    }
     for i in 0..r {
         if let Published::Value(t) = rel.row_totals[i] {
             eqs.push(((0..c).map(|j| i * c + j).collect(), t));
@@ -73,77 +69,88 @@ fn pinned_cells(rel: &Released) -> Vec<usize> {
     if let Published::Value(t) = rel.grand_total {
         eqs.push(((0..r * c).collect(), t));
     }
-    let bound = |cell: usize| -> Option<u64> {
+    eqs
+}
+
+/// Independent brute-force attacker with prior knowledge (AUD-RM1-LOG-05):
+/// it knows every published figure (`eqs`, possibly from several releases),
+/// that each primary-suppressed cell is < k and each other cell ≥ k
+/// (worst case: it knows which is which). It enumerates every integer
+/// completion and returns the primary cells whose feasible set is not the
+/// whole `0..k`, i.e. about which it learned anything.
+fn exposed(n: usize, vals: &[u64], eqs: &[(Vec<usize>, u64)]) -> Vec<usize> {
+    let k = 10u64;
+    let fixed: BTreeMap<usize, u64> = eqs
+        .iter()
+        .filter(|(e, _)| e.len() == 1)
+        .map(|(e, v)| (e[0], *v))
+        .collect();
+    let unknown: Vec<usize> = (0..n).filter(|i| !fixed.contains_key(i)).collect();
+    let primary: Vec<usize> = unknown.iter().copied().filter(|&i| vals[i] < k).collect();
+    let bound = |cell: usize| -> u64 {
         eqs.iter()
             .filter(|(e, _)| e.contains(&cell))
             .map(|(_, t)| *t)
             .min()
+            .unwrap_or(k + 40)
     };
-    // Cells in no equation are free (never pinned).
-    let constrained: Vec<usize> = sup
-        .iter()
-        .copied()
-        .filter(|&i| bound(i).is_some())
-        .collect();
     let mut seen: BTreeMap<usize, BTreeSet<u64>> = BTreeMap::new();
-    let mut assign: BTreeMap<usize, u64> = BTreeMap::new();
+    let mut assign: BTreeMap<usize, u64> = fixed.clone();
+    #[allow(clippy::too_many_arguments)]
     fn rec(
         idx: usize,
         cells: &[usize],
+        vals: &[u64],
         assign: &mut BTreeMap<usize, u64>,
         eqs: &[(Vec<usize>, u64)],
-        known: &dyn Fn(usize) -> Option<u64>,
-        bound: &dyn Fn(usize) -> Option<u64>,
+        bound: &dyn Fn(usize) -> u64,
+        primary: &[usize],
         seen: &mut BTreeMap<usize, BTreeSet<u64>>,
-    ) {
-        // Prune: partial sums must not exceed totals; complete lines must match.
+    ) -> bool {
         for (e, t) in eqs {
             let mut s = 0u64;
             let mut complete = true;
             for &i in e {
-                if let Some(v) = known(i).or_else(|| assign.get(&i).copied()) {
-                    s += v;
-                } else {
-                    complete = false;
+                match assign.get(&i) {
+                    Some(v) => s += v,
+                    None => complete = false,
                 }
             }
             if s > *t || (complete && s != *t) {
-                return;
+                return false;
             }
         }
         if idx == cells.len() {
-            for (&i, &v) in assign.iter() {
-                seen.entry(i).or_default().insert(v);
+            for &i in primary {
+                seen.entry(i).or_default().insert(assign[&i]);
             }
-            return;
+            return primary.iter().all(|i| seen.get(i).is_some_and(|s| s.len() == 10));
         }
         let cell = cells[idx];
-        for v in 0..=bound(cell).unwrap_or(0) {
+        let (lo, hi) = if vals[cell] < 10 { (0, 9) } else { (10, bound(cell).max(10)) };
+        for v in lo..=hi {
             assign.insert(cell, v);
-            rec(idx + 1, cells, assign, eqs, known, bound, seen);
+            let done = rec(idx + 1, cells, vals, assign, eqs, bound, primary, seen);
             assign.remove(&cell);
-            // Early exit: everything already shown ambiguous.
-            if cells
-                .iter()
-                .all(|c| seen.get(c).is_some_and(|s| s.len() >= 2))
-            {
-                return;
+            if done {
+                return true;
             }
         }
+        false
     }
-    rec(
-        0,
-        &constrained,
-        &mut assign,
-        &eqs,
-        &known,
-        &bound,
-        &mut seen,
-    );
-    constrained
+    rec(0, &unknown, vals, &mut assign, eqs, &bound, &primary, &mut seen);
+    primary
         .into_iter()
-        .filter(|i| seen.get(i).is_none_or(|s| s.len() < 2))
+        .filter(|i| seen.get(i).is_none_or(|s| s.len() < 10))
         .collect()
+}
+
+fn pinned_cells(rel: &Released, vals: &[u64]) -> Vec<usize> {
+    exposed(rel.rows * rel.cols, vals, &equations(rel))
+}
+
+fn reg() -> PeriodRegistry<MemoryReleaseHistory> {
+    PeriodRegistry::new(MemoryReleaseHistory::new())
 }
 
 #[test]
@@ -162,7 +169,8 @@ fn single_small_cell_fully_hidden() {
     assert_eq!(rel.cells[0], Published::Suppressed);
     assert_eq!(rel.grand_total, Published::Withheld);
     assert_eq!(rel.row_totals[0], Published::Withheld);
-    assert_eq!(rel.cells[0].display(), "0\u{2013}9");
+    assert_eq!(rel.cells[0].display(), "suppressed");
+    assert_eq!(rel.grand_total.display(), "suppressed");
     let rel = suppress(&simple(1, 1, &[14]), k()).unwrap();
     assert_eq!(rel.cells[0], Published::Value(14));
 }
@@ -171,7 +179,8 @@ fn single_small_cell_fully_hidden() {
 fn complementary_suppression_row_with_one_small_cell() {
     // 24 §9.3: a row with exactly one primary-suppressed cell gets the
     // next-smallest non-zero cell suppressed too.
-    let t = simple(2, 3, &[3, 20, 30, 15, 25, 40]);
+    let vals = [3, 20, 30, 15, 25, 40];
+    let t = simple(2, 3, &vals);
     let rel = suppress(&t, k()).unwrap();
     assert_eq!(rel.cells[0], Published::Suppressed);
     assert_eq!(
@@ -179,7 +188,7 @@ fn complementary_suppression_row_with_one_small_cell() {
         Published::Suppressed,
         "next-smallest in row 0"
     );
-    assert!(pinned_cells(&rel).is_empty(), "{rel:?}");
+    assert!(pinned_cells(&rel, &vals).is_empty(), "{rel:?}");
     // Published row totals never allow recovery of the 3.
     let row0_known: u64 = (0..3)
         .filter_map(|j| match rel.cells[j] {
@@ -198,7 +207,7 @@ fn zero_remainder_cannot_reveal_zeros() {
     // to the published cells would reveal them exactly.
     let t = simple(1, 3, &[0, 0, 50]);
     let rel = suppress(&t, k()).unwrap();
-    assert!(pinned_cells(&rel).is_empty(), "{rel:?}");
+    assert!(pinned_cells(&rel, &[0, 0, 50]).is_empty(), "{rel:?}");
     assert_eq!(rel.cells[0], Published::Suppressed);
     assert_eq!(rel.cells[1], Published::Suppressed);
 }
@@ -209,7 +218,23 @@ fn no_small_cell_derivable_two_by_two_rectangle() {
     // ambiguous linearly, but non-negativity can pin it.
     let t = simple(2, 2, &[0, 11, 12, 13]);
     let rel = suppress(&t, k()).unwrap();
-    assert!(pinned_cells(&rel).is_empty(), "{rel:?}");
+    assert!(pinned_cells(&rel, &[0, 11, 12, 13]).is_empty(), "{rel:?}");
+}
+
+// AUD-RM1-LOG-05 regression (the audit PoC; the old audit passed it and
+// labelled the 50 and 60 "0–9"): row 0 = [0, 10, 100] with all margins
+// published let an attacker who knows "primary < k ≤ complementary" pin
+// the 0 exactly.
+#[test]
+fn primary_cell_not_narrowed_by_attacker_priors() {
+    let vals = [0, 10, 100, 50, 60, 70];
+    let rel = suppress(&simple(2, 3, &vals), k()).unwrap();
+    assert_eq!(rel.cells[0], Published::Suppressed);
+    assert!(pinned_cells(&rel, &vals).is_empty(), "{rel:?}");
+    for p in rel.cells.iter().chain(&rel.row_totals).chain(&rel.col_totals) {
+        let d = p.display();
+        assert!(d == "suppressed" || d.parse::<u64>().is_ok(), "{d}");
+    }
 }
 
 // 24 §9.5 "Differencing (filters)": totals with and without one channel.
@@ -245,7 +270,7 @@ fn differencing_attack_across_reports_is_blocked() {
     );
     // Through the period registry, the second release cannot complete the
     // subtraction 29 − 25 = 4.
-    let mut reg = PeriodRegistry::new();
+    let mut reg = reg();
     let a = reg
         .release(m(2026, 8), m(2026, 10), "report.all", &all, k())
         .unwrap();
@@ -295,7 +320,7 @@ fn differencing_via_marginals_is_blocked() {
         micro,
         protected: vec![],
     };
-    let mut reg = PeriodRegistry::new();
+    let mut reg = reg();
     let r1 = reg
         .release(m(2026, 8), m(2026, 9), "by_channel", &by_channel, k())
         .unwrap();
@@ -333,7 +358,7 @@ fn differencing_via_marginals_is_blocked() {
 // 24 §9.5 "Differencing (windows)" and "Rolling/cumulative displays".
 #[test]
 fn tumbling_frozen_periods() {
-    let mut reg = PeriodRegistry::new();
+    let mut reg = reg();
     let t = simple(1, 1, &[40]);
     // No month-to-date figures.
     assert_eq!(
@@ -355,7 +380,7 @@ fn tumbling_frozen_periods() {
 // memory when released; before/after one submission across periods.
 #[test]
 fn counter_aggregation_and_release() {
-    let ch: Vec<ChannelId> = (1..=4).map(|n| ChannelId::from_bytes([n; 16])).collect();
+    let ch: Vec<ChannelId> = (1..=4).map(|n| ChannelId::derive(&candor_log::ids::AuditIdKey::new([1; 32]), &[n])).collect();
     let mut agg = CounterAggregator::new(m(2026, 9));
     let sub = IntakeCounter::Submissions;
     for _ in 0..14 {
@@ -393,7 +418,7 @@ fn counter_aggregation_and_release() {
 
     let pop = BTreeMap::from([(ch[0], 500), (ch[1], 500), (ch[2], 500), (ch[3], 20)]);
     let groups = ChannelGroups::new(vec![vec![ch[0], ch[1]], vec![ch[2], ch[3]]], pop).unwrap();
-    let mut reg = PeriodRegistry::new();
+    let mut reg = reg();
     let rep = release_counters(closed, &groups, &mut reg, m(2026, 10), k()).unwrap();
     // ch[2], ch[3] folded into group 1; ch[0], ch[1] shown individually.
     assert_eq!(
@@ -409,12 +434,13 @@ fn counter_aggregation_and_release() {
     assert_eq!(rep.table.cells[6], Published::Suppressed);
     assert_eq!(rep.table.cells[7], Published::Suppressed);
     assert_eq!(rep.table.cells[2], Published::Suppressed);
-    assert!(pinned_cells(&rep.table).is_empty(), "{:?}", rep.table);
+    let vals = [14, 14, 0, 12, 12, 0, 22, 0, 0];
+    assert!(pinned_cells(&rep.table, &vals).is_empty(), "{:?}", rep.table);
 }
 
 #[test]
 fn group_with_one_folded_channel_absorbs_another() {
-    let ch: Vec<ChannelId> = (1..=3).map(|n| ChannelId::from_bytes([n; 16])).collect();
+    let ch: Vec<ChannelId> = (1..=3).map(|n| ChannelId::derive(&candor_log::ids::AuditIdKey::new([1; 32]), &[n])).collect();
     let pop = BTreeMap::from([(ch[0], 500), (ch[1], 500), (ch[2], 500)]);
     let groups = ChannelGroups::new(vec![ch.clone()], pop).unwrap();
     let closed = ClosedMonth::from_counts(
@@ -441,7 +467,7 @@ fn group_with_one_folded_channel_absorbs_another() {
     let lone = ClosedMonth::from_counts(
         m(2026, 9),
         [(
-            (ChannelId::from_bytes([9; 16]), IntakeCounter::Submissions),
+            (ChannelId::derive(&candor_log::ids::AuditIdKey::new([1; 32]), &[9]), IntakeCounter::Submissions),
             50,
         )],
     );
@@ -452,7 +478,7 @@ fn group_with_one_folded_channel_absorbs_another() {
 fn folded_channel_not_recoverable_from_second_report() {
     // A later report showing the group's other channel individually must not
     // reveal the folded small channel by subtraction.
-    let ch: Vec<ChannelId> = (1..=2).map(|n| ChannelId::from_bytes([n; 16])).collect();
+    let ch: Vec<ChannelId> = (1..=2).map(|n| ChannelId::derive(&candor_log::ids::AuditIdKey::new([1; 32]), &[n])).collect();
     let pop = BTreeMap::from([(ch[0], 500), (ch[1], 10)]);
     let groups = ChannelGroups::new(vec![ch.clone()], pop).unwrap();
     let closed = ClosedMonth::from_counts(
@@ -462,7 +488,7 @@ fn folded_channel_not_recoverable_from_second_report() {
             ((ch[1], IntakeCounter::Submissions), 12),
         ],
     );
-    let mut reg = PeriodRegistry::new();
+    let mut reg = reg();
     let rep = release_counters(closed, &groups, &mut reg, m(2026, 10), k()).unwrap();
     assert_eq!(rep.rows, vec![RowLabel::Group(0)]);
     // Attacker-chosen second table: ch[0] alone.
@@ -484,7 +510,7 @@ fn folded_channel_not_recoverable_from_second_report() {
 
 #[test]
 fn scalar_coi_exhausted_release() {
-    let mut reg = PeriodRegistry::new();
+    let mut reg = reg();
     assert_eq!(
         release_scalar(&mut reg, m(2026, 9), m(2026, 10), "coi_exhausted", 3, k()).unwrap(),
         Published::Suppressed
@@ -495,25 +521,159 @@ fn scalar_coi_exhausted_release() {
     );
 }
 
-// TEL-015 magnitude statistics.
+fn pop(vals: &[u64]) -> Vec<(MicroKey, u64)> {
+    vals.iter()
+        .enumerate()
+        .map(|(i, v)| (MicroKey([7; 16], i as u16), *v))
+        .collect()
+}
+
+// TEL-015 magnitude statistics, only through the registry (AUD-RM1-LOG-06).
 #[test]
 fn magnitude_rules() {
     let nine: Vec<u64> = (1..=9).collect();
     let ten: Vec<u64> = (1..=10).collect();
-    assert_eq!(median(&nine, k()), None);
-    assert_eq!(median(&ten, k()), Some(5));
-    assert_eq!(percentile(&ten, 90, k()), Some(9));
-    assert_eq!(mean(&nine, k()), None);
-    assert_eq!(mean(&ten, k()), Some(5));
-    assert_eq!(median_duration_weeks(&[10; 9], k()), None);
-    assert_eq!(median_duration_weeks(&[10; 10], k()), Some(1));
-    assert_eq!(median_duration_weeks(&[11; 10], k()), Some(2));
-    // Ratios: denominator ≥ k, numerator ∉ {0, denominator}.
-    assert_eq!(ratio_permille(1, 1, k()), None);
-    assert_eq!(ratio_permille(3, 9, k()), None);
-    assert_eq!(ratio_permille(0, 20, k()), None);
-    assert_eq!(ratio_permille(20, 20, k()), None);
-    assert_eq!(ratio_permille(5, 20, k()), Some(250));
+    let mut r = reg();
+    let p = m(2026, 8);
+    let cur = m(2026, 10);
+    assert_eq!(r.release_magnitude(p, cur, "med9", Magnitude::Median, &pop(&nine), k()).unwrap(), None);
+    let mut r = reg();
+    assert_eq!(r.release_magnitude(p, cur, "med10", Magnitude::Median, &pop(&ten), k()).unwrap(), Some(5));
+    assert_eq!(r.release_magnitude(p, cur, "p90", Magnitude::Percentile(90), &pop(&ten), k()).unwrap(), Some(9));
+    assert_eq!(r.release_magnitude(p, cur, "mean", Magnitude::Mean, &pop(&ten), k()).unwrap(), Some(5));
+    // Min/max (single-case values) are not percentiles we publish.
+    for q in [0, 5, 95, 100] {
+        assert_eq!(
+            r.release_magnitude(p, cur, "pq", Magnitude::Percentile(q), &pop(&ten), k()).unwrap_err(),
+            ReleaseError::BadStatistic
+        );
+    }
+    let mut r = reg();
+    assert_eq!(r.release_magnitude(p, cur, "w", Magnitude::MedianDurationWeeks, &pop(&[10; 9]), k()).unwrap(), None);
+    let mut r = reg();
+    assert_eq!(r.release_magnitude(p, cur, "w", Magnitude::MedianDurationWeeks, &pop(&[10; 10]), k()).unwrap(), Some(1));
+    let mut r = reg();
+    assert_eq!(r.release_magnitude(p, cur, "w", Magnitude::MedianDurationWeeks, &pop(&[11; 10]), k()).unwrap(), Some(2));
+    // Ratios: every contributing cell (num, den − num) ≥ k.
+    let mut r = reg();
+    for (i, (num, den, want)) in [
+        (1, 1, None),
+        (3, 9, None),
+        (0, 20, None),
+        (20, 20, None),
+        (5, 20, None),
+        (15, 20, None),
+        (10, 20, Some(500)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let name: &'static str = ["r0", "r1", "r2", "r3", "r4", "r5", "r6"][i];
+        assert_eq!(r.release_ratio(p, cur, name, num, den, k()).unwrap(), want);
+    }
+}
+
+// AUD-RM1-LOG-06 regression: mean over n = 10 and later n = 11 cases
+// (different reports, same period) would reveal the 11th case exactly.
+#[test]
+fn magnitude_differencing_blocked() {
+    let mut r = reg();
+    let ten: Vec<u64> = (1..=10).map(|x| x * 7).collect();
+    let mut eleven = ten.clone();
+    eleven.push(1000);
+    let p = m(2026, 8);
+    let cur = m(2026, 9);
+    assert!(r.release_magnitude(p, cur, "kpi.a", Magnitude::Mean, &pop(&ten), k()).unwrap().is_some());
+    assert_eq!(
+        r.release_magnitude(p, cur, "kpi.b", Magnitude::Mean, &pop(&eleven), k()).unwrap(),
+        None
+    );
+    // The same holds after a restart (history persisted).
+    let mut r2 = PeriodRegistry::new(r.history().clone());
+    assert_eq!(
+        r2.release_magnitude(p, cur, "kpi.c", Magnitude::Median, &pop(&eleven), k()).unwrap(),
+        None
+    );
+    // A population differing by ≥ k is fine.
+    let other: Vec<(MicroKey, u64)> =
+        (0..20u16).map(|i| (MicroKey([8; 16], i), u64::from(i))).collect();
+    assert!(r2.release_magnitude(p, cur, "kpi.d", Magnitude::Median, &other, k()).unwrap().is_some());
+}
+
+// AUD-RM1-LOG-06 regression: the differencing defence survives a restart
+// (the old in-memory registry forgot report.all and published 25).
+#[test]
+fn differencing_blocked_across_restart() {
+    let c = |n: u8| MicroKey([n; 16], 0);
+    let micro = BTreeMap::from([(c(1), 12), (c(2), 13), (c(3), 4)]);
+    let one = |v: u64, members: Vec<MicroKey>| Table {
+        rows: 1,
+        cols: 1,
+        cells: vec![TableCell { value: v, members }],
+        micro: micro.clone(),
+        protected: vec![],
+    };
+    let mut r = reg();
+    let a = r
+        .release(m(2026, 8), m(2026, 10), "report.all", &one(29, vec![c(1), c(2), c(3)]), k())
+        .unwrap();
+    assert_eq!(a.cells[0], Published::Value(29));
+    let history = r.history().clone();
+    drop(r);
+    let mut restarted = PeriodRegistry::new(history);
+    let b = restarted
+        .release(m(2026, 8), m(2026, 10), "report.without3", &one(25, vec![c(1), c(2)]), k())
+        .unwrap();
+    assert_eq!(b.cells[0], Published::Suppressed);
+    // Frozen across restarts too.
+    assert_eq!(
+        restarted
+            .release(m(2026, 8), m(2026, 10), "report.all", &one(29, vec![c(1), c(2), c(3)]), k())
+            .unwrap_err(),
+        ReleaseError::AlreadyReleased
+    );
+}
+
+/// History that fails on demand.
+struct BrokenHistory {
+    load_fails: bool,
+}
+
+impl ReleaseHistory for BrokenHistory {
+    fn load(&self, _: candor_log::ids::MonthStamp) -> Result<Option<Vec<u8>>, HistoryError> {
+        if self.load_fails { Err(HistoryError) } else { Ok(Some(vec![0xff, 0x00])) }
+    }
+    fn store(&mut self, _: candor_log::ids::MonthStamp, _: &[u8]) -> Result<(), HistoryError> {
+        Err(HistoryError)
+    }
+}
+
+// AUD-RM1-LOG-06: an unreadable, corrupt or unwritable history fails the
+// release closed.
+#[test]
+fn history_errors_fail_closed() {
+    let t = simple(1, 1, &[40]);
+    for load_fails in [true, false] {
+        let mut r = PeriodRegistry::new(BrokenHistory { load_fails });
+        assert_eq!(
+            r.release(m(2026, 8), m(2026, 9), "x", &t, k()).unwrap_err(),
+            ReleaseError::History
+        );
+    }
+    struct WriteFails(MemoryReleaseHistory);
+    impl ReleaseHistory for WriteFails {
+        fn load(&self, p: candor_log::ids::MonthStamp) -> Result<Option<Vec<u8>>, HistoryError> {
+            self.0.load(p)
+        }
+        fn store(&mut self, _: candor_log::ids::MonthStamp, _: &[u8]) -> Result<(), HistoryError> {
+            Err(HistoryError)
+        }
+    }
+    let mut r = PeriodRegistry::new(WriteFails(MemoryReleaseHistory::new()));
+    assert_eq!(
+        r.release(m(2026, 8), m(2026, 9), "x", &t, k()).unwrap_err(),
+        ReleaseError::History
+    );
 }
 
 #[test]
@@ -533,29 +693,79 @@ fn shape_errors() {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(512))]
+    #![proptest_config(ProptestConfig::with_cases(256))]
 
-    // stats-inference (24 §9.6): for random small tables no suppressed cell
-    // is pinned by any completion-based attacker, and every published cell
-    // is ≥ k.
+    // stats-inference (24 §9.6): for random small tables no primary cell is
+    // narrowed below [0, k-1] by a completion attacker with prior
+    // knowledge, and every published cell is ≥ k.
     #[test]
     fn no_suppressed_cell_is_derivable(
         shape in prop_oneof![Just((1usize, 3usize)), Just((2, 2)), Just((2, 3)), Just((3, 2)), Just((3, 3))],
         vals in proptest::collection::vec(prop_oneof![0u64..10, 10u64..18], 9),
     ) {
         let (r, c) = shape;
-        let t = simple(r, c, &vals[..r * c]);
+        let vals = &vals[..r * c];
+        let t = simple(r, c, vals);
         let rel = suppress(&t, k()).unwrap();
         for p in &rel.cells {
             if let Published::Value(v) = p {
                 prop_assert!(*v >= 10);
             }
         }
-        for (i, v) in vals[..r * c].iter().enumerate() {
+        for (i, v) in vals.iter().enumerate() {
             if *v < 10 {
                 prop_assert_eq!(rel.cells[i], Published::Suppressed);
             }
         }
-        prop_assert!(pinned_cells(&rel).is_empty(), "{:?} {:?}", vals, rel);
+        prop_assert!(pinned_cells(&rel, vals).is_empty(), "{:?} {:?}", vals, rel);
+    }
+
+    // Attacker test (AUD-RM1-LOG-05/06): margin arithmetic plus
+    // differencing across two releases of the same period, with a process
+    // restart in between (history persisted), using all published figures
+    // of both releases and the prior knowledge.
+    #[test]
+    fn margins_and_differencing_across_releases_and_restarts(
+        shape in prop_oneof![Just((2usize, 2usize)), Just((2, 3)), Just((3, 2))],
+        vals in proptest::collection::vec(prop_oneof![0u64..10, 10u64..16], 6),
+        second_rows in any::<bool>(),
+    ) {
+        let (r, c) = shape;
+        let vals = &vals[..r * c];
+        let full = simple(r, c, vals);
+        let mut first = reg();
+        let rel1 = first.release(m(2026, 8), m(2026, 9), "full", &full, k()).unwrap();
+        // Restart: a new registry over the same durable history.
+        let mut second = PeriodRegistry::new(first.history().clone());
+        // Second report: the same micro-cells collapsed along one dimension.
+        let (lines, n2): (Vec<Vec<usize>>, usize) = if second_rows {
+            ((0..r).map(|i| (0..c).map(|j| i * c + j).collect()).collect(), r)
+        } else {
+            ((0..c).map(|j| (0..r).map(|i| i * c + j).collect()).collect(), c)
+        };
+        let coarse = Table {
+            rows: 1,
+            cols: n2,
+            cells: lines
+                .iter()
+                .map(|l| TableCell {
+                    value: l.iter().map(|&i| vals[i]).sum(),
+                    members: l.iter().map(|&i| MicroKey([0; 16], i as u16)).collect(),
+                })
+                .collect(),
+            micro: full.micro.clone(),
+            protected: vec![],
+        };
+        let rel2 = second.release(m(2026, 8), m(2026, 9), "coarse", &coarse, k()).unwrap();
+        let mut eqs = equations(&rel1);
+        for (j, p) in rel2.cells.iter().enumerate() {
+            if let Published::Value(v) = p {
+                eqs.push((lines[j].clone(), *v));
+            }
+        }
+        if let Published::Value(t) = rel2.grand_total {
+            eqs.push(((0..r * c).collect(), t));
+        }
+        prop_assert!(exposed(r * c, vals, &eqs).is_empty(), "{:?} {:?} {:?}", vals, rel1, rel2);
     }
 }

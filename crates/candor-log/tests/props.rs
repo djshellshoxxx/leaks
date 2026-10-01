@@ -14,7 +14,6 @@ mod common;
 use candor_log::cbor::{self, Value};
 use candor_log::chain::ChainRecord;
 use candor_log::codes::{HostRole, StreamId};
-use candor_log::ids::CaseRef;
 use candor_log::verify::{VerifyParams, verify_stream};
 use candor_log::{AuditEvent, CheckpointPolicy, EventContext};
 use common::*;
@@ -84,6 +83,8 @@ enum Tamper {
     Truncate(usize),
     DropCheckpoint(usize),
     SpliceForeign(usize),
+    /// Replace a record by a redaction stub computed from it (AUD-RM1-LOG-01).
+    Stub(usize, u64),
 }
 
 fn arb_tamper() -> impl Strategy<Value = Tamper> {
@@ -99,6 +100,7 @@ fn arb_tamper() -> impl Strategy<Value = Tamper> {
         any::<usize>().prop_map(Tamper::Truncate),
         any::<usize>().prop_map(Tamper::DropCheckpoint),
         any::<usize>().prop_map(Tamper::SpliceForeign),
+        (any::<usize>(), any::<u64>()).prop_map(|(i, t)| Tamper::Stub(i, t)),
     ]
 }
 
@@ -111,21 +113,20 @@ fn build(
     Vec<candor_log::SignedCheckpoint>,
     ed25519_dalek::VerifyingKey,
 ) {
-    let (mut log, sink, _c) = log_with(
-        HostRole::Core,
-        CheckpointPolicy::new(every, 300_000).unwrap(),
-    );
+    let (mut log, sink, clock) = log_with(HostRole::Core, CheckpointPolicy::DEFAULT);
     for i in 0..n {
         log.emit(
             EventContext::staff(user(seed)),
-            AuditEvent::CaseOpened {
-                case: CaseRef::from_bytes([i; 16]),
-            },
+            AuditEvent::CaseOpened { case: case(i) },
         )
         .unwrap();
+        if u64::from(i + 1) % every == 0 {
+            clock.advance(DAY);
+        }
     }
     // Attest the tail so every record is covered by a signed checkpoint.
-    log.checkpoint_now(StreamId::Case).unwrap();
+    clock.advance(DAY);
+    log.tick().unwrap();
     let st = sink.0.lock().unwrap();
     (
         st.chain(StreamId::Case),
@@ -179,6 +180,13 @@ proptest! {
             Tamper::Truncate(k) => recs.truncate(k % len),
             Tamper::DropCheckpoint(i) => {
                 cps.remove(i % cps.len());
+            }
+            Tamper::Stub(i, t) => {
+                let i = i % len;
+                let ChainRecord::Full { bytes, salt, .. } = &recs[i] else { unreachable!() };
+                let commit = candor_log::chain::record_commit(salt, bytes);
+                let seq = cbor::decode(bytes).unwrap().get("seq").unwrap().as_u64().unwrap();
+                recs[i] = ChainRecord::Redacted { seq, commit, tombstone_seq: t % (len as u64 + 2) };
             }
             Tamper::SpliceForeign(i) => {
                 // Same position from an independently written chain (other actor).

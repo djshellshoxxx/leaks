@@ -297,7 +297,10 @@ fn every_control_is_labelled() {
                     "action",
                     "part_index",
                     "reply_index",
-                    "page"
+                    "page",
+                    // AUD-RM1-SUI-01: questions shown on a part, and the byte range of a piece.
+                    "shown",
+                    "piece"
                 ]
                 .contains(&n),
                 "{id}: hidden field {n}"
@@ -933,8 +936,23 @@ fn security_critical_strings_flagged() {
 #[test]
 fn locale_allow_list() {
     for l in Locale::ALL {
-        assert_eq!(Locale::from_tag(l.tag()), Some(l));
+        assert_eq!(Locale::from_tag_including_pseudo(l.tag()), Some(l));
+        // AUD-RM1-SUI-04: production routing never resolves a pseudo-locale.
+        let prod = Locale::from_tag(l.tag());
+        assert_eq!(prod.is_some(), !l.is_pseudo(), "{}", l.tag());
     }
+    assert_eq!(Locale::PRODUCTION.to_vec(), vec![Locale::En]);
+    assert!(Locale::PRODUCTION.iter().all(|l| !l.is_pseudo()));
+    // The default language list offers production locales only.
+    let mut vm = sample_view_model(Screen::Landing, Mode::Anonymous, false);
+    vm.ctx.offered_locales.clear();
+    let b = body(&render(Screen::Landing, &vm, &Locale::En).unwrap());
+    let h = Html::parse_document(&b);
+    let tags: Vec<_> = h
+        .select(&sel("footer a[hreflang]"))
+        .map(|a| a.value().attr("hreflang").unwrap().to_owned())
+        .collect();
+    assert_eq!(tags, vec!["en"]);
     for bad in ["", "EN", "en-us", "fr", "../en", "en/", "ar"] {
         assert_eq!(Locale::from_tag(bad), None);
     }
@@ -1053,4 +1071,64 @@ fn s02_budget_report() {
             SizeClass::P1.max_unpadded()
         );
     }
+}
+
+// ST: AUD-RM1-SUI-07 — the one-line passphrase field carries the clipboard warning, linked with
+// aria-describedby.
+#[test]
+fn passphrase_copy_warning() {
+    for s in [Screen::Credential, Screen::RotateCredential] {
+        let (_, b) = render_ok(s, Locale::En, Mode::Anonymous, false);
+        let h = Html::parse_document(&b);
+        let line = h.select(&sel("#f-phrase_line")).next().unwrap();
+        assert_eq!(line.value().attr("aria-describedby"), Some("h-phrase_line"));
+        let hint = h.select(&sel("#h-phrase_line")).next().unwrap();
+        assert!(text_of(hint).contains("keep or sync what you copy"));
+    }
+    assert_eq!(
+        string_class("sui-cred-copy-warning"),
+        Some(StringClass::Tier0)
+    );
+}
+
+// ST: AUD-RM1-SUI-10 — bidi controls in team messages and sender labels are shown as U+FFFD,
+// and each message is framed (`article.msg`).
+#[test]
+fn team_message_bidi_neutralised() {
+    let mut vm = sample_view_model(Screen::Inbox, Mode::Anonymous, false);
+    vm.inbox.messages[0].text = "a\u{202E}b\u{2066}c\u{202A}d".into();
+    vm.inbox.messages[0].sender = "Team\u{202E}\u{2069}".into();
+    let b = body(&render(Screen::Inbox, &vm, &Locale::En).unwrap());
+    let h = Html::parse_document(&b);
+    let arts: Vec<_> = h.select(&sel("article.msg")).collect();
+    assert_eq!(arts.len(), 2);
+    let t = arts[0].text().collect::<String>();
+    assert!(t.contains("a\u{FFFD}b\u{FFFD}c\u{FFFD}d"), "{t:?}");
+    assert!(t.contains("Team\u{FFFD}\u{FFFD}"));
+    for c in ['\u{202A}', '\u{202E}', '\u{2066}', '\u{2069}'] {
+        assert!(!t.contains(c));
+    }
+    assert!(stylesheet().contains("article.msg{border:"));
+}
+
+// ST: AUD-RM1-SUI-10 — the password-manager tip names a device only the source uses.
+#[test]
+fn password_manager_tip_wording() {
+    let (_, b) = render_ok(Screen::SafetyTips, Locale::En, Mode::Anonymous, false);
+    assert!(has_text(
+        &b,
+        "A password manager is fine only on a device only you use, and only if it does not sync online."
+    ));
+}
+
+// ST: AUD-RM1-SUI-03 — a page larger than its class fails closed (the fixed render buffer never
+// grows); it is not truncated or moved to a larger class.
+#[test]
+fn oversized_chrome_fails_closed() {
+    let mut vm = sample_view_model(Screen::Safety, Mode::Anonymous, false);
+    vm.deployment.jurisdiction_rights_text = Some("x".repeat(70_000));
+    assert!(matches!(
+        render(Screen::Safety, &vm, &Locale::En),
+        Err(RenderError::OverBudget(_))
+    ));
 }

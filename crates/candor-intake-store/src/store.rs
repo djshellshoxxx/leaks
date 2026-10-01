@@ -17,8 +17,7 @@ use crate::types::{
     AccountId, AckResult, ApplyRepliesResult, BackupSnapshot, ClaimLimits, ClaimedBatch,
     CommitEnvelope, CounterCell, CounterDelta, Day, EnvelopeRef, ImportSlot, IncomingReply,
     InstallOutcome, KdHighWater, LookupTag, MailboxId, NewAccount, ObjectData, PartSelector,
-    ReplyIndex,
-    ReplyRef, SourceAccount, StoredReply, TenantId, VerifiedSnapshot,
+    ReplyIndex, ReplyRef, SourceAccount, StoredReply, TenantId, VerifiedSnapshot,
 };
 
 /// `(version, body, signatures)` of the installed Key Directory snapshot.

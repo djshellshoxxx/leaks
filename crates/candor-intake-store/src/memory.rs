@@ -21,11 +21,11 @@ use crate::store::{IntakeMaintenance, IntakeStore};
 use crate::types::{
     AccountId, AckResult, ApplyRepliesResult, BackupSnapshot, BlobId, ChannelId, ClaimLimits,
     ClaimedBatch, ClaimedObject, CommitEnvelope, CounterCell, CounterDelta, CounterName,
-    DELETION_LIST_RETENTION_DAYS, Day, EnvelopeRef, GROUP_OBJECTS, GroupObject, ImportSlot,
-    INACTIVE_PURGE_DAYS, IncomingReply, InstallOutcome, KdHighWater, LookupTag, MAILBOX_SLOTS,
-    MAX_DELETION_LIST_PAGE, MAX_REPLIES_PER_PUSH, MAX_SLOT_ACTIVE_ACCOUNTS, MailboxId,
-    MetaSnapshot, NewAccount, ObjectData, PartSelector, REPLY_WINDOW_DAYS, ReplyIndex, ReplyRef,
-    SourceAccount, StoredReply, TenantId, VerifiedSnapshot, group_digest, random_id16,
+    DELETION_LIST_RETENTION_DAYS, Day, EnvelopeRef, GROUP_OBJECTS, GroupObject,
+    INACTIVE_PURGE_DAYS, ImportSlot, IncomingReply, InstallOutcome, KdHighWater, LookupTag,
+    MAILBOX_SLOTS, MAX_DELETION_LIST_PAGE, MAX_REPLIES_PER_PUSH, MAX_SLOT_ACTIVE_ACCOUNTS,
+    MailboxId, MetaSnapshot, NewAccount, ObjectData, PartSelector, REPLY_WINDOW_DAYS, ReplyIndex,
+    ReplyRef, SourceAccount, StoredReply, TenantId, VerifiedSnapshot, group_digest, random_id16,
 };
 use crate::validate::{self, SnapshotDecision, has_duplicates};
 
@@ -157,11 +157,6 @@ impl MemoryStore {
             cfg,
         })
     }
-}
-
-fn sha256(b: &[u8]) -> [u8; 32] {
-    use sha2::Digest;
-    sha2::Sha256::digest(b).into()
 }
 
 fn delete_replies_where(st: &mut State, pred: impl Fn(&ReplyRow) -> bool) -> u64 {
@@ -789,10 +784,8 @@ impl IntakeStore for MemoryStore {
                 st.replies.remove(r);
             }
             for _ in padding.len()..want {
-                let (body, bucket) = deaddrop::dummy_row(
-                    self.dummies.as_ref(),
-                    deaddrop::DEFAULT_DUMMY_BODY_LEN,
-                )?;
+                let (body, bucket) =
+                    deaddrop::dummy_row(self.dummies.as_ref(), deaddrop::DEFAULT_DUMMY_BODY_LEN)?;
                 st.replies.insert(
                     ReplyRef(random_id16()?),
                     ReplyRow {
@@ -1039,7 +1032,10 @@ impl IntakeStore for MemoryStore {
         if prior.as_ref().is_some_and(|p| p.tenant != b.meta.tenant_id) {
             return Err(StoreError::TenantMismatch);
         }
-        if prior.as_ref().is_some_and(|p| p.kdf_salt != b.meta.kdf_salt) {
+        if prior
+            .as_ref()
+            .is_some_and(|p| p.kdf_salt != b.meta.kdf_salt)
+        {
             return Err(StoreError::Conflict("kdf salt differs"));
         }
         validate::backup(&b)?;

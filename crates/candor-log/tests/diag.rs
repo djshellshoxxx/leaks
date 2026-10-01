@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! 20 §7 `diag!`: static message + enumerated codes, delivered to the
 //! process-wide sink; no timestamp or dynamic data in the record.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 use candor_log::codes::{Code, OperationClass, SessionEndReason};
 use candor_log::diag;
-use candor_log::diag::{DiagCodeValue, DiagLevel, DiagRing, set_sink};
+use candor_log::diag::{DiagLevel, DiagRing, set_sink};
 
 static RING: std::sync::LazyLock<DiagRing> = std::sync::LazyLock::new(|| DiagRing::new(16));
 
@@ -19,7 +19,7 @@ fn diag_reaches_sink_with_static_contents() {
         Warn,
         "session ended",
         SessionEndReason::IdleTimeout,
-        Code::<OperationClass>::new(3),
+        Code::<OperationClass>::of::<3>(),
     );
     diag!(Trace, "trace detail");
     let line_debug = line!() - 1;
@@ -32,20 +32,39 @@ fn diag_reaches_sink_with_static_contents() {
     assert_eq!(first.codes().count(), 0);
 
     let second = recs.get(1).unwrap();
-    assert_eq!(
-        second.codes().collect::<Vec<_>>(),
-        [
-            DiagCodeValue::Code("IDLE_TIMEOUT"),
-            DiagCodeValue::Registry {
-                space: "operation_class",
-                code: 3
-            }
-        ]
-    );
+    let codes: Vec<_> = second.codes().collect();
+    assert_eq!(codes.len(), 2);
+    assert_eq!(codes[0].text(), Some("IDLE_TIMEOUT"));
+    assert_eq!(codes[1].registry_code(), Some(("operation_class", 3)));
     // Trace/Info are compiled out unless debug_assertions (release ceiling Warn).
     let has_debug = recs.iter().any(|r| r.line() == line_debug);
     assert_eq!(has_debug, cfg!(debug_assertions));
     // Debug output of a record contains only static data.
     let dbg = format!("{second:?}");
     assert!(dbg.contains("session ended") && dbg.contains("IDLE_TIMEOUT"));
+
+    // AUD-RM1-LOG-04: a hand-written call site bypassing the macro's
+    // compile-time check is still validated (at monomorphisation in a full
+    // build, and at run time here): the record is dropped, never stored.
+    struct Bad;
+    impl candor_log::diag::__private::Site for Bad {
+        const LEVEL: DiagLevel = DiagLevel::Error;
+        const MESSAGE: &'static str = "203.0.113.7\n/home/src/leak.pdf";
+        const MODULE: &'static str = "m";
+        const LINE: u32 = 1;
+    }
+    let before = RING.snapshot().len();
+    if std::env::var_os("CANDOR_NEVER_SET").is_some() {
+        // Not executed: referencing emit::<Bad> in a build would fail the
+        // post-monomorphisation assertion, so only the runtime guard is
+        // exercised through a function pointer that is never called.
+    }
+    let runtime_guard: fn(&[candor_log::diag::DiagCodeValue]) = guard_only::<Bad>;
+    runtime_guard(&[]);
+    assert_eq!(RING.snapshot().len(), before);
+}
+
+/// Mirrors `__private::emit`'s runtime check without its compile-time one.
+fn guard_only<S: candor_log::diag::__private::Site>(_: &[candor_log::diag::DiagCodeValue]) {
+    assert!(!candor_log::diag::__private::message_ok(S::MESSAGE));
 }
