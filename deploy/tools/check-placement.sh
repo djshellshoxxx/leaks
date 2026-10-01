@@ -53,7 +53,8 @@ if [ ! -f "$MANIFEST" ] || [ ! -r "$MANIFEST" ]; then echo "check-placement: man
 
 report() {
   if [ "$2" = FAIL ]; then FAILS=$((FAILS + 1)); fi
-  if [ "$QUIET" -eq 0 ] || [ "$2" = FAIL ]; then printf '%-44s %-5s %s\n' "$1" "$2" "${3:-}"; fi
+  # Paths are attacker-influenced: printable ASCII only (no terminal control sequences).
+  if [ "$QUIET" -eq 0 ] || [ "$2" = FAIL ]; then printf '%-44s %-5s %s\n' "$1" "$2" "$(printf '%s' "${3:-}" | tr -c '[:print:]' '?')"; fi
 }
 
 WORK=$(mktemp -d) || exit 2
@@ -219,6 +220,11 @@ if [ "${#rootargs[@]}" -eq 0 ]; then report scan.roots FAIL "no scan root exists
   done
   IFS=$oldifs
 
+  # A newline in a file name could split one hit into several report lines; such names are
+  # never legitimate on H-INTAKE, so they are violations in themselves.
+  nl=$(tr '\0' '\n' < "$WORK/files" | grep -c '^' || true)
+  nf=$(tr -cd '\0' < "$WORK/files" | wc -c)
+  if [ "$nl" -ne "$nf" ]; then report scan.newline_in_name FAIL "a scanned file name contains a newline"; else report scan.newline_in_name OK; fi
   sort -u "$WORK/hits" > "$WORK/hits.s"
   nscanned=$(tr -cd '\0' < "$WORK/files" | wc -c)
   unlisted=0

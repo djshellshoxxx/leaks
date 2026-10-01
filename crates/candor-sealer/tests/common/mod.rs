@@ -32,9 +32,7 @@ use candor_sealer::server::clock::{Clock, ClockError};
 use candor_sealer::server::directory::{
     ChannelView, CoiPolicy, DirectorySnapshot, MemberEpochKey, RosterMember, UserKeyEntry,
 };
-use candor_sealer::server::sink::{
-    Blob, CommitRequest, EnvelopeSink, RotationRequest, SinkError,
-};
+use candor_sealer::server::sink::{Blob, CommitRequest, EnvelopeSink, RotationRequest, SinkError};
 use candor_sealer::server::{ChaffConfig, Limits, Sealer, SealerConfig};
 
 pub const TENANT: [u8; 16] = [0x11; 16];
@@ -249,6 +247,10 @@ pub fn staging_root(dir: &Path) -> (PathBuf, &'static SafeRoot) {
 }
 
 pub fn fixture_with(chaff: ChaffConfig, limits: Limits) -> Fixture {
+    fixture_full(chaff, limits, rustix_uid())
+}
+
+pub fn fixture_full(chaff: ChaffConfig, limits: Limits, peer_uid: u32) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap(); // safefs-lint: allow(test fixture setup)
     let (staging_path, staging) = staging_root(dir.path());
@@ -277,7 +279,7 @@ pub fn fixture_with(chaff: ChaffConfig, limits: Limits) -> Fixture {
         tenant_id: TENANT,
         deployment_salt: SALT,
         suite: Suite::CandorStd1,
-        allowed_peer_uid: rustix_uid(),
+        allowed_peer_uid: peer_uid,
         limits,
         chaff,
     };
@@ -524,7 +526,12 @@ pub fn parse_padded(pt: &[u8]) -> (Item, Vec<u8>) {
 /// `H(cbor of all keys except `skip`)`.
 pub fn hash_without(item: &Item, skip: &[u64]) -> [u8; 32] {
     let Item::M(m) = item else { panic!() };
-    let kept = Item::M(m.iter().filter(|(k, _)| !skip.contains(k)).cloned().collect());
+    let kept = Item::M(
+        m.iter()
+            .filter(|(k, _)| !skip.contains(k))
+            .cloned()
+            .collect(),
+    );
     let mut out = Vec::new();
     encode_item(&kept, &mut out);
     sha256(&[&out])
@@ -583,7 +590,8 @@ pub fn read_all_files(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
-        for e in std::fs::read_dir(&d).unwrap() { // safefs-lint: allow(test scans its own tempdir)
+        let entries = std::fs::read_dir(&d).unwrap(); // safefs-lint: allow(test scans its own tempdir)
+        for e in entries {
             let e = e.unwrap();
             let ft = e.file_type().unwrap();
             if ft.is_dir() {

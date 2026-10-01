@@ -302,6 +302,19 @@ fn word_indices(list: &Wordlist, phrase: &str) -> Result<Zeroizing<Vec<u16>>, Re
     Ok(out)
 }
 
+/// Lossy UTF-8 decoding into a buffer sized once (each invalid byte becomes at
+/// most one 3-byte U+FFFD), so no reallocation leaves a passphrase copy behind.
+fn lossy_utf8(b: &[u8]) -> Zeroizing<String> {
+    let mut s = Zeroizing::new(String::with_capacity(b.len().saturating_mul(3)));
+    for chunk in b.utf8_chunks() {
+        s.push_str(chunk.valid());
+        if !chunk.invalid().is_empty() {
+            s.push(char::REPLACEMENT_CHARACTER);
+        }
+    }
+    s
+}
+
 fn band(used: usize, max: usize) -> u8 {
     if max == 0 {
         return 4;
@@ -770,7 +783,7 @@ impl Sealer {
             return err(ErrorCode::Busy);
         }
         // Invalid UTF-8 is derived like any other input (same work, no oracle).
-        let text = Zeroizing::new(String::from_utf8_lossy(&passphrase.0).into_owned());
+        let text = lossy_utf8(&passphrase.0);
         drop(passphrase);
         let keys = match self.derive(text).await {
             Ok(k) => k,
@@ -1720,4 +1733,42 @@ fn rotate_blocking(
     sess.pending = None;
     drop(job.snap);
     Response::Locator { lookup_tag }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
+    use super::*;
+
+    #[test]
+    fn lossy_utf8_never_reallocates() {
+        let input = b"abc\xff\xfe def\xc3";
+        let s = lossy_utf8(input);
+        assert_eq!(s.as_str(), String::from_utf8_lossy(input));
+        assert_eq!(s.capacity(), input.len() * 3);
+        let s = lossy_utf8(b"plain words");
+        assert_eq!(s.as_str(), "plain words");
+    }
+
+    #[test]
+    fn bands_are_coarse() {
+        assert_eq!(band(0, 64), 0);
+        assert_eq!(band(63, 64), 3);
+        assert_eq!(band(64, 64), 4);
+        assert_eq!(band(1000, 64), 4);
+        assert_eq!(band(1, 0), 4);
+    }
+
+    #[test]
+    fn word_indices_round_trip() {
+        let list = Wordlist::eff_large().unwrap();
+        let p = passphrase::generate(list).unwrap();
+        let idx = word_indices(list, p.expose()).unwrap();
+        let back: Vec<&str> = idx
+            .iter()
+            .map(|i| list.get(usize::from(*i)).unwrap())
+            .collect();
+        assert_eq!(back.join(" "), p.expose());
+        assert!(word_indices(list, "notaword").is_err());
+    }
 }

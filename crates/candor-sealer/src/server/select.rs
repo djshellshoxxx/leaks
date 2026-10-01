@@ -162,3 +162,177 @@ pub(crate) fn select(
         root_hash: snap.root_hash,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
+    use super::*;
+    use crate::server::directory::{CoiPolicy, MemberEpochKey, RosterMember};
+    use candor_core::Suite;
+    use candor_core::kem::KemKeyPair;
+
+    const T: u32 = 1000;
+    const CH: [u8; 16] = [1; 16];
+
+    fn snap(n: u8) -> (DirectorySnapshot, Vec<KemKeyPair>) {
+        let keys: Vec<KemKeyPair> = (0..n)
+            .map(|_| KemKeyPair::generate(Suite::CandorStd1).unwrap())
+            .collect();
+        let members = (0..n)
+            .map(|i| RosterMember {
+                user_id: [i + 1; 16],
+                role_label: u16::from(i) + 1,
+                read_intake: true,
+                effective_day: T - 10,
+            })
+            .collect();
+        let meks = keys
+            .iter()
+            .enumerate()
+            .map(|(i, k)| MemberEpochKey {
+                user_id: [u8::try_from(i).unwrap() + 1; 16],
+                epoch_id: 0,
+                valid_from_day: T,
+                valid_until_day: T + 7,
+                revoked: false,
+                public_key: k.public.to_bytes(),
+            })
+            .collect();
+        let s = DirectorySnapshot {
+            snapshot_version: 1,
+            tree_size: 1,
+            root_hash: [0; 32],
+            issued_hour: u64::from(T) * 24,
+            suite: Suite::CandorStd1,
+            epoch_origin_day: T,
+            custodian_pk: vec![],
+            disposition_pk: vec![],
+            channels: vec![ChannelView {
+                channel_id: CH,
+                enabled: true,
+                roster_entry_hash: [2; 32],
+                roster_version: 1,
+                members,
+                coi_policies: vec![
+                    CoiPolicy {
+                        entry_hash: [3; 32],
+                        effective_day: T - 5,
+                        categories: vec![(9, vec![1])],
+                    },
+                    // Loosening not yet effective (time lock): ignored.
+                    CoiPolicy {
+                        entry_hash: [4; 32],
+                        effective_day: T + 1,
+                        categories: vec![],
+                    },
+                ],
+                meks,
+                independent_route: Some([5; 16]),
+            }],
+            user_keys: vec![],
+        };
+        (s, keys)
+    }
+
+    fn choice<'a>(f: &'a [u16], c: &'a [u16], o: Option<&'a [[u8; 16]]>) -> Choice<'a> {
+        Choice {
+            flagged_labels: f,
+            categories: c,
+            original_eligible: o,
+        }
+    }
+
+    /// 07 BE-051 COI matrix: every subset of flags × category on a 3-member set.
+    #[test]
+    fn coi_matrix() {
+        let (s, _) = snap(3);
+        for mask in 0u8..8 {
+            for cat in [None, Some(9u16)] {
+                let flags: Vec<u16> = (1..=3u16).filter(|l| mask & (1 << (l - 1)) != 0).collect();
+                let cats: Vec<u16> = cat.into_iter().collect();
+                let mut expect: Vec<[u8; 16]> = (1..=3u8)
+                    .filter(|i| !flags.contains(&u16::from(*i)))
+                    .filter(|i| !(cat.is_some() && *i == 1))
+                    .map(|i| [i; 16])
+                    .collect();
+                expect.sort_unstable();
+                match select(&s, &CH, T, choice(&flags, &cats, None)) {
+                    Ok(sel) => {
+                        assert_eq!(sel.eligible_user_ids, expect);
+                        assert_eq!(sel.recipients.len(), expect.len());
+                        assert_eq!(sel.coi_policy_entry_hash, [3; 32]);
+                        let mut ids: Vec<_> = sel.recipients.iter().map(|r| r.key_id).collect();
+                        let sorted = {
+                            let mut v = ids.clone();
+                            v.sort_unstable();
+                            v
+                        };
+                        assert_eq!(ids, sorted);
+                        ids.dedup();
+                        assert_eq!(ids.len(), expect.len());
+                    }
+                    Err(e) => {
+                        assert!(expect.is_empty());
+                        assert_eq!(
+                            e,
+                            SelectError::NoEligible {
+                                alternative: Some([5; 16])
+                            }
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn time_locks_validity_and_invariants() {
+        let (mut s, _) = snap(3);
+        // A time-locked addition is not yet a recipient.
+        s.channels[0].members[2].effective_day = T + 1;
+        let sel = select(&s, &CH, T, choice(&[], &[], None)).unwrap();
+        assert_eq!(sel.eligible_user_ids, vec![[1; 16], [2; 16]]);
+        // A revoked or duplicated MEK counts as missing.
+        s.channels[0].meks[0].revoked = true;
+        let dup = s.channels[0].meks[1].clone();
+        s.channels[0].meks.push(dup);
+        let e = select(&s, &CH, T, choice(&[], &[], None));
+        assert_eq!(
+            e.unwrap_err(),
+            SelectError::NoEligible {
+                alternative: Some([5; 16])
+            }
+        );
+        // Follow-up rule: intersection with the original set.
+        let (s, _) = snap(3);
+        let sel = select(&s, &CH, T, choice(&[], &[], Some(&[[2; 16], [9; 16]]))).unwrap();
+        assert_eq!(sel.eligible_user_ids, vec![[2; 16]]);
+        // Disabled channel and > 16 Triage Set members: unavailable.
+        let (mut s, _) = snap(3);
+        s.channels[0].enabled = false;
+        assert!(matches!(
+            select(&s, &CH, T, choice(&[], &[], None)),
+            Err(SelectError::Unavailable { .. })
+        ));
+        let (mut s, _) = snap(1);
+        for i in 0..17u8 {
+            s.channels[0].members.push(RosterMember {
+                user_id: [100 + i; 16],
+                role_label: 50,
+                read_intake: true,
+                effective_day: 0,
+            });
+        }
+        assert!(matches!(
+            select(&s, &CH, T, choice(&[], &[], None)),
+            Err(SelectError::Unavailable { .. })
+        ));
+        // Before the epoch origin there is no epoch.
+        let (s, _) = snap(1);
+        assert!(select(&s, &CH, T - 1, choice(&[], &[], None)).is_err());
+    }
+}

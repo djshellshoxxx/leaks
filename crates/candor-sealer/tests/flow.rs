@@ -62,7 +62,9 @@ fn make_reply(
             labels::SIG_REPLY,
             &[&sha256(&[pc.header_bytes]), &sha256(&[&ub])],
         );
-        let Item::M(mut entries) = unsigned else { panic!() };
+        let Item::M(mut entries) = unsigned else {
+            panic!()
+        };
         entries.push((8, Item::B(sig.to_vec())));
         let mut cbor = Vec::new();
         encode_item(&Item::M(entries), &mut cbor);
@@ -78,20 +80,41 @@ fn make_reply(
         channel_id: CHANNEL,
         mailbox_id,
     };
-    let stanza = WrapStanza::seal_hpke_ck(Suite::CandorStd1, &pk, [0; 32], obj.object_hash, &ctx, &ck)
-        .unwrap()
-        .encode()
-        .unwrap();
-    let mut entry = ((obj.bytes.len() + stanza.len()) as u32).to_be_bytes().to_vec();
+    let stanza =
+        WrapStanza::seal_hpke_ck(Suite::CandorStd1, &pk, [0; 32], obj.object_hash, &ctx, &ck)
+            .unwrap()
+            .encode()
+            .unwrap();
+    let mut entry = ((obj.bytes.len() + stanza.len()) as u32)
+        .to_be_bytes()
+        .to_vec();
     entry.extend_from_slice(&obj.bytes);
     entry.extend_from_slice(&stanza);
     (entry, obj.object_hash, obj.bytes, stanza)
 }
 
-async fn new_account_submission(f: &Fixture, s: SessionHandle, coi: Option<Coi>, attachment: &[u8]) -> SecretWords {
+async fn new_account_submission(
+    f: &Fixture,
+    s: SessionHandle,
+    coi: Option<Coi>,
+    attachment: &[u8],
+) -> SecretWords {
     let sl = &f.sealer;
-    ok(sl, Request::Hello { proto: PROTO_VERSION }).await;
-    ok(sl, Request::SessionOpen { sess: s, channel_id: CHANNEL }).await;
+    ok(
+        sl,
+        Request::Hello {
+            proto: PROTO_VERSION,
+        },
+    )
+    .await;
+    ok(
+        sl,
+        Request::SessionOpen {
+            sess: s,
+            channel_id: CHANNEL,
+        },
+    )
+    .await;
     ok(
         sl,
         Request::DraftSet(DraftSet {
@@ -133,33 +156,66 @@ async fn new_account_submission(f: &Fixture, s: SessionHandle, coi: Option<Coi>,
     // The staging root holds only ciphertext, padded to a bucket (ADR-038(5)).
     for (_, bytes) in read_all_files(&f.staging_path) {
         assert!(!contains(&bytes, MARKER.as_bytes()));
-        assert_eq!(bytes.len() % 65_552, 0, "staged part not a whole number of chunks");
+        assert_eq!(
+            bytes.len() % 65_552,
+            0,
+            "staged part not a whole number of chunks"
+        );
     }
     // No passphrase exists before Submit; SEAL_FINISH refuses (ADR-034).
-    let r = sl.handle(Request::SealFinish { sess: s, delayed_delivery: false }).await;
+    let r = sl
+        .handle(Request::SealFinish {
+            sess: s,
+            delayed_delivery: false,
+        })
+        .await;
     assert_eq!(r, Response::error(ErrorCode::NotConfirmed));
-    let Response::Words { words, confirm_positions } = ok(sl, Request::GenAccount { sess: s }).await else {
+    let Response::Words {
+        words,
+        confirm_positions,
+    } = ok(sl, Request::GenAccount { sess: s }).await
+    else {
         panic!()
     };
     assert_eq!(words.0.len(), 10);
     // A wrong confirmation draws new positions.
     let wrong = SecretWords(zeroize::Zeroizing::new(vec![u16::MAX - 1; 3]));
-    let Response::Confirm { ok: false, confirm_positions: Some(p2) } =
-        ok(sl, Request::ConfirmPassphrase { sess: s, words: wrong }).await
+    let Response::Confirm {
+        ok: false,
+        confirm_positions: Some(p2),
+    } = ok(
+        sl,
+        Request::ConfirmPassphrase {
+            sess: s,
+            words: wrong,
+        },
+    )
+    .await
     else {
         panic!()
     };
     let _ = confirm_positions;
     let Response::Confirm { ok: true, .. } = ok(
         sl,
-        Request::ConfirmPassphrase { sess: s, words: confirm_words(&words, p2) },
+        Request::ConfirmPassphrase {
+            sess: s,
+            words: confirm_words(&words, p2),
+        },
     )
     .await
     else {
         panic!("confirmation failed")
     };
-    let Response::Sealed { release_offset_days } =
-        ok(sl, Request::SealFinish { sess: s, delayed_delivery: true }).await
+    let Response::Sealed {
+        release_offset_days,
+    } = ok(
+        sl,
+        Request::SealFinish {
+            sess: s,
+            delayed_delivery: true,
+        },
+    )
+    .await
     else {
         panic!()
     };
@@ -171,7 +227,10 @@ async fn new_account_submission(f: &Fixture, s: SessionHandle, coi: Option<Coi>,
 async fn full_tier_w_flow() {
     let f = fixture();
     let s = sess(1);
-    let attachment: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).chain(MARKER.bytes()).collect();
+    let attachment: Vec<u8> = (0..300_000u32)
+        .map(|i| (i % 251) as u8)
+        .chain(MARKER.bytes())
+        .collect();
     // COI: the source flags role label 3 and picks the category whose policy
     // excludes label 2 → only member 1 remains (ADR-030/037).
     let coi = Coi {
@@ -188,7 +247,14 @@ async fn full_tier_w_flow() {
     let env = &envs[0];
     assert_eq!(env.channel_id, CHANNEL);
     let types: Vec<_> = env.objects.iter().map(|o| o.object_type).collect();
-    assert_eq!(types, [ObjectType::Submission, ObjectType::AttachmentBundle, ObjectType::Identity]);
+    assert_eq!(
+        types,
+        [
+            ObjectType::Submission,
+            ObjectType::AttachmentBundle,
+            ObjectType::Identity
+        ]
+    );
     // No plaintext anywhere in what the store receives.
     for o in &env.objects {
         assert!(!contains(&o.bytes, MARKER.as_bytes()));
@@ -213,7 +279,8 @@ async fn full_tier_w_flow() {
     assert_eq!(rl.get(3).unwrap().u(), 0, "no member skipped");
     assert_eq!(rl.get(4).unwrap().b(), &[0x66; 32]);
     // Full slot-block verification (ADR-050(3)) for all three objects.
-    let mek_keys: Vec<(KeyKind, &KemKeyPair)> = f.members.iter().map(|m| (KeyKind::Mek, &m.mek)).collect();
+    let mek_keys: Vec<(KeyKind, &KemKeyPair)> =
+        f.members.iter().map(|m| (KeyKind::Mek, &m.mek)).collect();
     let list = entries(rl.get(2).unwrap());
     assert_eq!(list.len(), 1);
     verify_block(sub, &ck, member_ctx(0), &list, &mek_keys);
@@ -235,7 +302,13 @@ async fn full_tier_w_flow() {
     let bundle = &env.objects[1];
     assert_eq!(map.get(10).unwrap().b(), &bundle.object_hash);
     let (bck, bpt) = open_intake(bundle, member_ctx(0), &f.members[0].mek.private).unwrap();
-    verify_block(bundle, &bck, member_ctx(0), &entries(rl.get(1000).unwrap()), &mek_keys);
+    verify_block(
+        bundle,
+        &bck,
+        member_ctx(0),
+        &entries(rl.get(1000).unwrap()),
+        &mek_keys,
+    );
     assert_eq!(&bpt[..4], b"CBDL");
     assert_eq!(u32::from_be_bytes(bpt[4..8].try_into().unwrap()), 1);
     let manifest = map.get(18).unwrap();
@@ -250,12 +323,30 @@ async fn full_tier_w_flow() {
     let cctx = SlotContext::Custodian { tenant_id: TENANT };
     assert!(open_intake(ident, cctx.clone(), &f.members[0].mek.private).is_none());
     let (ick, ipt) = open_intake(ident, cctx.clone(), &f.custodian.private).unwrap();
-    verify_block(ident, &ick, cctx, &entries(rl.get(1001).unwrap()), &[(KeyKind::Custodian, &f.custodian)]);
+    verify_block(
+        ident,
+        &ick,
+        cctx,
+        &entries(rl.get(1001).unwrap()),
+        &[(KeyKind::Custodian, &f.custodian)],
+    );
     let (imap, _) = parse_padded(&ipt);
     assert!(imap.get(2).unwrap().t().contains("Jane"));
     // Disposition marker: real (kind 0) for K41.
-    let info = [labels::WRAP_DISPOSITION, &Suite::CandorStd1.to_be_bytes(), &TENANT].concat();
-    let d = kem::open_base(&f.disposition.private, &env.disposition_ct[..1120], &info, &sub.object_hash, &env.disposition_ct[1120..]).unwrap();
+    let info = [
+        labels::WRAP_DISPOSITION,
+        &Suite::CandorStd1.to_be_bytes(),
+        &TENANT,
+    ]
+    .concat();
+    let d = kem::open_base(
+        &f.disposition.private,
+        &env.disposition_ct[..1120],
+        &info,
+        &sub.object_hash,
+        &env.disposition_ct[1120..],
+    )
+    .unwrap();
     assert_eq!(d[0], 0);
 
     // --- Login with the passphrase (same sealer, new web session) -------------
@@ -263,15 +354,23 @@ async fn full_tier_w_flow() {
     let l = sess(2);
     let Response::Locator { lookup_tag } = ok(
         &f.sealer,
-        Request::LoginDerive { sess: l, passphrase: SecretBytes::from_slice(phrase.to_uppercase().as_bytes()) },
+        Request::LoginDerive {
+            sess: l,
+            passphrase: SecretBytes::from_slice(phrase.to_uppercase().as_bytes()),
+        },
     )
     .await
     else {
         panic!()
     };
-    assert_eq!(lookup_tag, account.lookup_tag, "normalization (NFKC, lowercase)");
+    assert_eq!(
+        lookup_tag, account.lookup_tag,
+        "normalization (NFKC, lowercase)"
+    );
     let challenge = [9u8; 32];
-    let Response::Signature { sig } = ok(&f.sealer, Request::LoginSign { sess: l, challenge }).await else {
+    let Response::Signature { sig } =
+        ok(&f.sealer, Request::LoginSign { sess: l, challenge }).await
+    else {
         panic!()
     };
     let mut m = labels::SIG_SOURCE_AUTH.to_vec();
@@ -279,26 +378,70 @@ async fn full_tier_w_flow() {
     m.extend_from_slice(&TENANT);
     m.extend_from_slice(AUTH_AUDIENCE);
     verify_strict(&account.auth_pk, &m, &sig).unwrap();
-    ok(&f.sealer, Request::LoadPrefs { sess: l, prefs_ct: account.prefs_ct.clone() }).await;
+    ok(
+        &f.sealer,
+        Request::LoadPrefs {
+            sess: l,
+            prefs_ct: account.prefs_ct.clone(),
+        },
+    )
+    .await;
 
     // A Desk reply, decrypted for rendering.
     let src_pk = map.get(4).unwrap().b().to_vec();
     let mailbox: [u8; 32] = map.get(3).unwrap().b().try_into().unwrap();
     assert_eq!(account.mailbox_ids, vec![mailbox]);
-    let (entry, _, _, _) = make_reply(&f.members[0], &src_pk, mailbox, 1, "Thank you, we are looking into it.");
-    let Response::Reply(Some(view)) = ok(&f.sealer, Request::OpenReply { sess: l, entry: entry.clone() }).await else {
+    let (entry, _, _, _) = make_reply(
+        &f.members[0],
+        &src_pk,
+        mailbox,
+        1,
+        "Thank you, we are looking into it.",
+    );
+    let Response::Reply(Some(view)) = ok(
+        &f.sealer,
+        Request::OpenReply {
+            sess: l,
+            entry: entry.clone(),
+        },
+    )
+    .await
+    else {
         panic!("reply did not open")
     };
     assert_eq!(view.body.expose(), "Thank you, we are looking into it.");
     assert_eq!(view.reply_seq, 1);
     // Replay and garbage are indistinguishable "not verified".
-    assert_eq!(ok(&f.sealer, Request::OpenReply { sess: l, entry }).await, Response::Reply(None));
-    assert_eq!(ok(&f.sealer, Request::OpenReply { sess: l, entry: vec![0; 300] }).await, Response::Reply(None));
+    assert_eq!(
+        ok(&f.sealer, Request::OpenReply { sess: l, entry }).await,
+        Response::Reply(None)
+    );
+    assert_eq!(
+        ok(
+            &f.sealer,
+            Request::OpenReply {
+                sess: l,
+                entry: vec![0; 300]
+            }
+        )
+        .await,
+        Response::Reply(None)
+    );
     // A reply signed by a key not in the directory does not verify.
     let mut rogue = member(9, 1, true);
     rogue.entry_hash = [0xee; 32];
     let (bad, _, _, _) = make_reply(&rogue, &src_pk, mailbox, 2, "spoof");
-    assert_eq!(ok(&f.sealer, Request::OpenReply { sess: l, entry: bad }).await, Response::Reply(None));
+    assert_eq!(
+        ok(
+            &f.sealer,
+            Request::OpenReply {
+                sess: l,
+                entry: bad
+            }
+        )
+        .await,
+        Response::Reply(None)
+    );
 
     // --- Follow-up: sealed only to the original eligible set (ADR-036(4)) ----
     // Member 5 joins the Triage Set later; it must get no slot.
@@ -318,7 +461,14 @@ async fn full_tier_w_flow() {
         }),
     )
     .await;
-    ok(&f.sealer, Request::SealFinish { sess: l, delayed_delivery: false }).await;
+    ok(
+        &f.sealer,
+        Request::SealFinish {
+            sess: l,
+            delayed_delivery: false,
+        },
+    )
+    .await;
     let envs = f.sink.envelopes();
     let fu = &envs[1];
     assert_eq!(fu.objects.len(), 1);
@@ -337,17 +487,39 @@ async fn full_tier_w_flow() {
     // A reply still pending for the old key, to be re-wrapped.
     let (_, pending_hash, pending_obj, pending_stanza) =
         make_reply(&members[0], &src_pk, mailbox, 2, "rewrap me");
-    let Response::Words { words: w2, confirm_positions: p } = ok(&f.sealer, Request::RotatePassphrase { sess: l }).await else {
+    let Response::Words {
+        words: w2,
+        confirm_positions: p,
+    } = ok(&f.sealer, Request::RotatePassphrase { sess: l }).await
+    else {
         panic!()
     };
-    let r = f.sealer.handle(Request::RotateFinish { sess: l, replies: vec![] }).await;
+    let r = f
+        .sealer
+        .handle(Request::RotateFinish {
+            sess: l,
+            replies: vec![],
+        })
+        .await;
     assert_eq!(r, Response::error(ErrorCode::NotConfirmed));
-    ok(&f.sealer, Request::ConfirmPassphrase { sess: l, words: confirm_words(&w2, p) }).await;
-    let Response::Locator { lookup_tag: new_tag } = ok(
+    ok(
+        &f.sealer,
+        Request::ConfirmPassphrase {
+            sess: l,
+            words: confirm_words(&w2, p),
+        },
+    )
+    .await;
+    let Response::Locator {
+        lookup_tag: new_tag,
+    } = ok(
         &f.sealer,
         Request::RotateFinish {
             sess: l,
-            replies: vec![PendingReply { object_hash: pending_hash, stanza: pending_stanza }],
+            replies: vec![PendingReply {
+                object_hash: pending_hash,
+                stanza: pending_stanza,
+            }],
         },
     )
     .await
@@ -361,7 +533,8 @@ async fn full_tier_w_flow() {
     assert_eq!(req.account.lookup_tag, new_tag);
     assert_eq!(req.account.mailbox_ids, vec![mailbox]);
     // The key-update follow-up carries the new keys, signed by old and new key.
-    let (_, kpt) = open_intake(&kenvs[0].objects[0], member_ctx(0), &members[0].mek.private).unwrap();
+    let (_, kpt) =
+        open_intake(&kenvs[0].objects[0], member_ctx(0), &members[0].mek.private).unwrap();
     let (kmap, _) = parse_padded(&kpt);
     assert_eq!(kmap.get(7).unwrap().u(), 1);
     let nk = kmap.get(10).unwrap();
@@ -372,29 +545,60 @@ async fn full_tier_w_flow() {
     msg.extend_from_slice(&h);
     msg.extend_from_slice(&hb);
     verify_strict(&sign_pk, &msg, kmap.get(6).unwrap().b().try_into().unwrap()).unwrap();
-    verify_strict(&new_sign, &msg, kmap.get(13).unwrap().b().try_into().unwrap()).unwrap();
+    verify_strict(
+        &new_sign,
+        &msg,
+        kmap.get(13).unwrap().b().try_into().unwrap(),
+    )
+    .unwrap();
     // The new passphrase logs in and reads the re-wrapped reply.
     let l2 = sess(3);
     let Response::Locator { lookup_tag: t2 } = ok(
         &f.sealer,
-        Request::LoginDerive { sess: l2, passphrase: SecretBytes::from_slice(words_to_phrase(&w2).as_bytes()) },
+        Request::LoginDerive {
+            sess: l2,
+            passphrase: SecretBytes::from_slice(words_to_phrase(&w2).as_bytes()),
+        },
     )
     .await
     else {
         panic!()
     };
     assert_eq!(t2, new_tag);
-    ok(&f.sealer, Request::LoadPrefs { sess: l2, prefs_ct: req.account.prefs_ct.clone() }).await;
+    ok(
+        &f.sealer,
+        Request::LoadPrefs {
+            sess: l2,
+            prefs_ct: req.account.prefs_ct.clone(),
+        },
+    )
+    .await;
     assert_eq!(req.rewrapped_replies[0].0, pending_hash);
     let new_stanza = &req.rewrapped_replies[0].1;
-    let mut orig_entry = ((pending_obj.len() + new_stanza.len()) as u32).to_be_bytes().to_vec();
+    let mut orig_entry = ((pending_obj.len() + new_stanza.len()) as u32)
+        .to_be_bytes()
+        .to_vec();
     orig_entry.extend_from_slice(&pending_obj);
     orig_entry.extend_from_slice(new_stanza);
-    let Response::Reply(Some(v2)) = ok(&f.sealer, Request::OpenReply { sess: l2, entry: orig_entry }).await else {
+    let Response::Reply(Some(v2)) = ok(
+        &f.sealer,
+        Request::OpenReply {
+            sess: l2,
+            entry: orig_entry,
+        },
+    )
+    .await
+    else {
         panic!("re-wrapped reply did not open")
     };
     assert_eq!(v2.body.expose(), "rewrap me");
     // The old passphrase's prefs no longer open under the new session keys.
-    let r = f.sealer.handle(Request::LoadPrefs { sess: l2, prefs_ct: account.prefs_ct }).await;
+    let r = f
+        .sealer
+        .handle(Request::LoadPrefs {
+            sess: l2,
+            prefs_ct: account.prefs_ct,
+        })
+        .await;
     assert!(matches!(r, Response::Error { .. }));
 }

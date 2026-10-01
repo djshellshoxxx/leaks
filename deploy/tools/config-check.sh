@@ -14,7 +14,11 @@
 #                                        next to this script)
 #   config-check.sh --host [--root DIR]  check the installed files on an intake host
 #                                        (+ host-only checks: tor version/PoW module, nft -c)
+#   --profile ce-single|ce-hardened      (static mode) also apply deploy/intake/profiles/NAME
+#                                        drop-ins before checking units
 #   -q   print only failures and the summary
+# Units are checked as "effective" files: the unit plus every drop-in (*.d/*.conf; on a host
+# from /usr/lib, /run and /etc), so a drop-in cannot silently weaken a setting.
 #
 # Output: "HOST RULE CLASS STATUS DETAIL" table (18 §14). Details never contain secrets or
 # source-related data - only file names, option names and expected values.
@@ -29,6 +33,7 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 MODE=static
 DIR="$SCRIPT_DIR/../intake"
 ROOT=""
+PROFILE=""
 QUIET=0
 FAILS=0
 CHECKS=0
@@ -43,6 +48,7 @@ while [ $# -gt 0 ]; do
     --dir) [ $# -ge 2 ] || usage; DIR=$2; shift 2 ;;
     --host) MODE=host; shift ;;
     --root) [ $# -ge 2 ] || usage; ROOT=$2; shift 2 ;;
+    --profile) [ $# -ge 2 ] || usage; PROFILE=$2; shift 2 ;;
     -q) QUIET=1; shift ;;
     -h|--help) usage ;;
     *) echo "config-check: unknown argument" >&2; usage ;;
@@ -60,6 +66,8 @@ if [ "$MODE" = host ]; then
   RESOLV="$ROOT/etc/resolv.conf"
 else
   [ -d "$DIR" ] || { echo "config-check: no such directory: $DIR" >&2; exit 2; }
+  case "$PROFILE" in ""|ce-single|ce-hardened) ;; *) echo "config-check: unknown profile" >&2; exit 2 ;; esac
+  if [ -n "$PROFILE" ] && [ ! -d "$DIR/profiles/$PROFILE" ]; then echo "config-check: profile directory missing" >&2; exit 2; fi
   TORRC="$DIR/torrc"
   NFT="$DIR/nftables.conf"
   PGCONF="$DIR/postgresql/candor-intake.conf"
@@ -70,11 +78,16 @@ else
   RESOLV="$DIR/resolv.conf"
 fi
 
+WORK=$(mktemp -d) || exit 2
+trap 'rm -rf "$WORK"' EXIT INT TERM
+
 report() { # rule class status detail
   CHECKS=$((CHECKS + 1))
   if [ "$3" = FAIL ]; then FAILS=$((FAILS + 1)); fi
   if [ "$QUIET" -eq 0 ] || [ "$3" != OK ]; then
-    printf '%-7s %-40s %-9s %-6s %s\n' intake "$1" "$2" "$3" "$4"
+    # Details may echo values from (possibly tampered) config files: printable ASCII only, so
+    # no terminal control sequence can reach the operator's terminal.
+    printf '%-7s %-40s %-9s %-6s %s\n' intake "$1" "$2" "$3" "$(printf '%s' "$4" | tr -c '[:print:]' '?' | cut -c1-400)"
   fi
 }
 ok()   { report "$1" baseline OK "${2:-}"; }
@@ -92,7 +105,8 @@ trim() { sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'; }
 
 # =============================================================================== torrc
 # torrc keys are case-insensitive; values compared exactly. Comments start at '#'.
-tor_clean() { sed -e 's/#.*$//' "$TORRC" | trim | grep -v '^$'; }
+tor_clean() { cat "$WORK/torrc.clean"; }
+if [ -r "$TORRC" ]; then sed -e 's/#.*$//' "$TORRC" | trim | grep -v '^$' > "$WORK/torrc.clean"; else : > "$WORK/torrc.clean"; fi
 tor_vals() { # key -> one value per occurrence
   tor_clean | awk -v k="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" '
     { key=tolower($1); if (key==k) { $1=""; sub(/^[ \t]+/, ""); print } }'
@@ -415,6 +429,26 @@ unit_expect() { # rule-prefix file key value  (all occurrences must equal value,
   fi
 }
 
+unit_expect_many() { # rule-prefix file key=value... : unit_expect semantics, one awk pass
+  local p=$1 f=$2 st k msg
+  shift 2
+  awk -v specs="$*" '
+    BEGIN { n=split(specs, sp, " ")
+            for (i=1;i<=n;i++) { e=index(sp[i],"="); key[i]=substr(sp[i],1,e-1); want[i]=substr(sp[i],e+1) } }
+    { line=$0; sub(/^[ \t]+/, "", line)
+      for (i=1;i<=n;i++) {
+        if (line ~ ("^" key[i] "[ \t]*=")) {
+          v=line; sub(/^[^=]*=/, "", v); gsub(/^[ \t]+|[ \t]+$/, "", v)
+          cnt[i]++; if (v != want[i]) badv[i]=badv[i] "[" v "] " } } }
+    END { for (i=1;i<=n;i++) {
+            if (!cnt[i]) printf "FAIL\t%s\tmissing (%s=%s)\n", key[i], key[i], want[i]
+            else if (badv[i] != "") printf "FAIL\t%s\texpected [%s], found %s\n", key[i], want[i], badv[i]
+            else printf "OK\t%s\t%s\n", key[i], (want[i]=="" ? "<empty>" : want[i]) } }' "$f" > "$WORK/expect"
+  while IFS="$(printf '\t')" read -r st k msg; do
+    if [ "$st" = OK ]; then ok "$p.$k" "$msg"; else fail "$p.$k" "$msg"; fi
+  done < "$WORK/expect"
+}
+
 COMMON_KEYS="NoNewPrivileges=yes ProtectSystem=strict ProtectHome=yes PrivateTmp=yes PrivateDevices=yes
 PrivateIPC=yes PrivateMounts=yes ProtectKernelTunables=yes ProtectKernelModules=yes ProtectKernelLogs=yes
 ProtectControlGroups=yes ProtectClock=yes ProtectHostname=yes ProtectProc=invisible RestrictNamespaces=yes
@@ -424,12 +458,10 @@ SystemCallArchitectures=native LimitCORE=0 NoExecPaths=/ ExecPaths=/usr SocketBi
 StandardOutput=null StandardError=journal LogNamespace=candor-intake LogLevelMax=warning"
 
 check_service() { # unit-file kind(tor|candor|pg) user
-  local f="$UNITDIR/$1" p="unit.${1%.service}" kv k v
+  local f="$UNITDIR/$1" p="unit.${1%.service}"
   need_file "$p.file" "$f" || return
-  for kv in $COMMON_KEYS; do
-    k=${kv%%=*}; v=${kv#*=}
-    unit_expect "$p" "$f" "$k" "$v"
-  done
+  # shellcheck disable=SC2086 # word splitting of the key=value list is intended
+  unit_expect_many "$p" "$f" $COMMON_KEYS
   unit_expect "$p" "$f" User "$3"
   if ! unit_vals "$f" Requires | grep -qw nftables.service; then fail "$p.requires_nftables" "Requires= must include nftables.service"; else ok "$p.requires_nftables"; fi
 
@@ -446,13 +478,29 @@ check_service() { # unit-file kind(tor|candor|pg) user
     ok "$p.no_privileged_exec"
   fi
 
+  # A unit must not hide its own credentials (they would be unreadable: fail at start, or a
+  # silently degraded service). PID 1 reads /etc/credstore.encrypted for LoadCredentialEncrypted=.
+  if unit_vals "$f" InaccessiblePaths | tr ' ' '\n' | sed 's/^-//' | grep -qxE "/run/credentials/$1|/run/credentials|/etc/credstore.encrypted" &&
+     grep -qE '^[[:space:]]*LoadCredentialEncrypted[[:space:]]*=' "$f"; then
+    fail "$p.own_credentials_visible" "InaccessiblePaths hides this unit's own credentials"
+  else
+    ok "$p.own_credentials_visible"
+  fi
+
+  # An empty assignment of a list setting resets it (e.g. "SystemCallFilter=" = no filter).
+  if grep -qE '^[[:space:]]*(SystemCallFilter|RestrictAddressFamilies|IPAddressDeny|NoExecPaths|InaccessiblePaths|ReadOnlyPaths)[[:space:]]*=[[:space:]]*$' "$f"; then
+    fail "$p.no_list_reset" "empty (resetting) assignment of a sandbox list setting"
+  else
+    ok "$p.no_list_reset"
+  fi
+
   # Syscall filter: allow-list mode based on @system-service, with the 07 §4.2 deny groups;
   # only a fixed set of individual syscalls may be re-added.
   local scf first denyl readd
   scf=$(unit_vals "$f" SystemCallFilter)
   first=$(printf '%s\n' "$scf" | head -n 1)
   denyl=$(printf '%s\n' "$scf" | grep '^~' | tr '\n' ' ')
-  readd=$(printf '%s\n' "$scf" | tail -n +2 | grep -v '^~' | tr ' ' '\n' | grep -v '^$' | grep -vxE 'seccomp|setrlimit|fchown|fchownat|chown' | tr '\n' ' ')
+  readd=$(printf '%s\n' "$scf" | tail -n +2 | grep -v '^~' | tr ' ' '\n' | grep -v '^$' | grep -vxE 'seccomp|landlock_create_ruleset|landlock_add_rule|landlock_restrict_self|setrlimit|fchown|fchownat|chown' | tr '\n' ' ')
   if [ "$first" != "@system-service" ]; then
     fail "$p.syscall_filter" "first SystemCallFilter= must be @system-service"
   elif [ -n "$readd" ]; then
@@ -503,8 +551,40 @@ check_service() { # unit-file kind(tor|candor|pg) user
   fi
 }
 
+ALL_UNITS="tor@candor-intake.service candor-intake-web.service candor-sealer.service candor-intake-store.service
+candor-intake-pg.service candor-intake-web.socket candor-sealer.socket candor-intake-store.socket
+candor-intake-store-relay.socket run-candor-staging.mount"
+
+build_effective_units() { # unit + all drop-ins concatenated into $WORK/units/<unit>
+  local u main d c
+  local -a drops
+  mkdir -p "$WORK/units"
+  for u in $ALL_UNITS; do
+    main=""
+    if [ "$MODE" = host ]; then
+      for d in "$ROOT/etc/systemd/system" "$ROOT/run/systemd/system" "$ROOT/usr/lib/systemd/system"; do
+        if [ -f "$d/$u" ]; then main="$d/$u"; break; fi
+      done
+      drops=("$ROOT/usr/lib/systemd/system/$u.d" "$ROOT/run/systemd/system/$u.d" "$ROOT/etc/systemd/system/$u.d")
+    else
+      [ -f "$DIR/systemd/$u" ] && main="$DIR/systemd/$u"
+      drops=("$DIR/systemd/$u.d")
+      [ -n "$PROFILE" ] && drops+=("$DIR/profiles/$PROFILE/$u.d")
+    fi
+    [ -n "$main" ] || continue
+    {
+      cat "$main"
+      for d in "${drops[@]}"; do
+        for c in "$d"/*.conf; do [ -f "$c" ] && { echo; cat "$c"; }; done
+      done
+    } > "$WORK/units/$u"
+  done
+  UNITDIR="$WORK/units"
+}
+
 check_units() {
   if [ ! -d "$UNITDIR" ]; then fail unit.dir "missing unit directory"; return; fi
+  build_effective_units
   check_service tor@candor-intake.service tor _tor-candor-intake
   check_service candor-intake-web.service candor candor-web
   check_service candor-sealer.service candor candor-sealer

@@ -44,21 +44,38 @@ else skip "shellcheck not installed"; fi
 for s in "$TOOLS"/*.sh "$HERE"/*.sh; do bash -n "$s" || bad "bash -n $s"; done
 
 # ------------------------------------------------------------------------- 2. config-check
-if "$TOOLS/config-check.sh" -q --dir "$INTAKE"; then pass "config-check: shipped files"; else bad "config-check: shipped files must pass"; fi
+for prof in "" ce-single ce-hardened; do
+  if "$TOOLS/config-check.sh" -q --dir "$INTAKE" ${prof:+--profile "$prof"} >/dev/null; then pass "config-check: shipped files ${prof:-(base)}"
+  else bad "config-check: shipped files must pass ${prof:-(base)}"; fi
+done
 
 # mutate <name> <relative file> <sed-expression | +append-text>
+# Each mutation runs config-check on its own copy of the tree, in parallel (bounded).
+MUTN=0
+JOBS=$( (nproc 2>/dev/null || echo 2) | head -n 1)
 mutate() {
-  local name=$1 rel=$2 expr=$3 d="$T/mut"
-  rm -rf "$d"; cp -a "$INTAKE" "$d"
+  local name=$1 rel=$2 expr=$3 d
+  shift 3
+  MUTN=$((MUTN + 1)); d="$T/mut.$MUTN"
+  cp -a "$INTAKE" "$d"
   case "$expr" in
-    +*) printf '%s\n' "${expr#+}" >> "$d/$rel" ;;
+    +*) mkdir -p "$(dirname "$d/$rel")"; printf '%s\n' "${expr#+}" >> "$d/$rel" ;;
     *)  sed -i -e "$expr" "$d/$rel" ;;
   esac
-  if cmp -s "$INTAKE/$rel" "$d/$rel"; then bad "mutation '$name' did not change $rel (test bug)"; return; fi
-  "$TOOLS/config-check.sh" -q --dir "$d" > "$T/mut.out" 2>&1
-  local rc=$?
-  if [ "$rc" -eq 30 ]; then pass "config-check rejects: $name ($(grep -c ' FAIL ' "$T/mut.out") rule(s))"
-  else bad "config-check accepted broken copy: $name (exit $rc)"; fi
+  printf '%s\n' "$name" > "$d.name"
+  if cmp -s "$INTAKE/$rel" "$d/$rel"; then echo nochange > "$d.rc"; return; fi
+  while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do wait -n; done
+  ( "$TOOLS/config-check.sh" -q --dir "$d" "$@" > "$d.out" 2>&1; echo $? > "$d.rc" ) &
+}
+mutate_results() {
+  wait
+  local i rc name
+  for i in $(seq 1 "$MUTN"); do
+    name=$(cat "$T/mut.$i.name"); rc=$(cat "$T/mut.$i.rc" 2>/dev/null || echo none)
+    if [ "$rc" = nochange ]; then bad "mutation '$name' did not change its file (test bug)"
+    elif [ "$rc" = 30 ]; then pass "config-check rejects: $name ($(grep -c ' FAIL ' "$T/mut.$i.out") rule(s))"
+    else bad "config-check accepted broken copy: $name (exit $rc)"; fi
+  done
 }
 # torrc (16 §7.1/§7.4, NET-002/005/006/008/009/011, LOG-005)
 mutate "tor log to file"               torrc 's|^Log warn stderr$|Log notice file /var/log/tor/notices.log|'
@@ -127,18 +144,23 @@ mutate "AppArmor soft-fail"            systemd/candor-intake-web.service 's|^App
 mutate "stdout to journal"             systemd/candor-sealer.service 's|^StandardOutput=null$|StandardOutput=journal|'
 mutate "no log namespace"              systemd/candor-intake-store.service '/^LogNamespace=candor-intake$/d'
 mutate "syscall re-allow ptrace"       systemd/candor-sealer.service 's|^SystemCallFilter=seccomp$|SystemCallFilter=seccomp ptrace|'
+mutate "sealer hides own credentials"  systemd/candor-sealer.service 's|^InaccessiblePaths=-/run/candor/source-web$|InaccessiblePaths=-/run/candor/source-web -/run/credentials/candor-sealer.service|'
 mutate "capability granted"            systemd/candor-sealer.service 's|^CapabilityBoundingSet=$|CapabilityBoundingSet=CAP_IPC_LOCK|'
 mutate "no nftables dependency"        systemd/candor-intake-web.service 's|^Requires=candor-intake-web.socket nftables.service$|Requires=candor-intake-web.socket|'
 mutate "IP allow on istore"            systemd/candor-intake-store.service 's|^IPAddressDeny=any$|IPAddressDeny=any\nIPAddressAllow=10.20.0.3|'
 mutate "world-writable socket"         systemd/candor-intake-web.socket 's|^SocketMode=0660$|SocketMode=0666|'
 mutate "web socket path != onion"      systemd/candor-intake-web.socket 's|^ListenStream=/run/candor/source-web/http.sock$|ListenStream=/run/candor/source-web/other.sock|'
 mutate "relay on all interfaces"       systemd/candor-intake-store-relay.socket '/^BindToDevice=relay0$/d'
+mutate "drop-in resets syscall filter" systemd/candor-sealer.service.d/zz-local.conf $'+[Service]\nSystemCallFilter='
+mutate "drop-in re-enables network"    systemd/candor-intake-web.service.d/zz-local.conf $'+[Service]\nPrivateNetwork=no'
+mutate "profile drop-in allows swap"   profiles/ce-hardened/run-candor-staging.mount.d/50-profile.conf 's|,noswap,|,|' --profile ce-hardened
 mutate "staging may swap"              systemd/run-candor-staging.mount 's|,noswap,|,|'
 # journald / DNS (NET-008, LOG-007, 17 §4.5/§5.5)
 mutate "journald persistent"           journald/journald@candor-intake.conf 's|^Storage=volatile$|Storage=persistent|'
 mutate "journald 7 days"               journald/journald@candor-intake.conf 's|^MaxRetentionSec=24h$|MaxRetentionSec=7d|'
 mutate "journald forwards to syslog"   journald/candor-intake-host.conf 's|^ForwardToSyslog=no$|ForwardToSyslog=yes|'
 mutate "public DNS resolver"           resolv.conf 's|^nameserver 127.0.0.1$|nameserver 9.9.9.9|'
+mutate_results
 
 # ------------------------------------------------------------------------- 3./4. systemd-analyze
 UNITS=(tor@candor-intake.service candor-intake-web.service candor-sealer.service candor-intake-store.service candor-intake-pg.service
@@ -269,8 +291,10 @@ if [ -n "${CANDOR_TEST_PG:-}" ] && is_root && users_exist && [ -x "$PGBIN/initdb
     if [ "$got" = "$want" ]; then pass "PostgreSQL effective settings"; else bad "PostgreSQL settings: $got"; fi
     if [ -z "$(q candor-istore candor_istore postgres 'select 1')" ]; then pass "pg: candor_istore limited to candor_intake_* databases"; else bad "pg: candor_istore reached postgres db"; fi
     if [ -z "$(q candor-istore postgres postgres 'select 1')" ]; then pass "pg: peer map refuses role switch"; else bad "pg: candor-istore became postgres"; fi
+    if [ -z "$(q postgres postgres postgres "select 1")" ]; then pass "pg: superuser has no socket access (09 §10)"; else bad "pg: postgres connected"; fi
     if [ -z "$(q candor-web candor_istore candor_intake_t1 'select 1')" ]; then pass "pg: other OS users cannot reach the socket"; else bad "pg: candor-web connected"; fi
-    if grep -qE '([0-9]{1,3}\.){3}[0-9]{1,3}|select|candor_intake_t1' "$P/log"; then bad "pg: log contains address/SQL/db name"; else pass "pg: log free of SQL text and addresses"; fi
+    # Unix socket only: no client address can exist; assert no connection/statement/duration lines.
+    if grep -qiE 'connection (received|authorized)|statement:|duration:|select 1|pg_settings' "$P/log"; then bad "pg: log contains connection or SQL records"; else pass "pg: log free of connection records and SQL text"; fi
     pkill -INT -u pgtest -f "$PGBIN/postgres" >/dev/null 2>&1; sleep 2
   else bad "initdb failed"; fi
 else skip "PostgreSQL run (set CANDOR_TEST_PG=1; needs root, users, user pgtest, $PGBIN)"; fi

@@ -20,7 +20,14 @@ use common::*;
 /// Open a session, draft, generate and confirm a passphrase.
 async fn confirmed(f: &Fixture, s: SessionHandle, coi: Option<Coi>) {
     let sl = &f.sealer;
-    ok(sl, Request::SessionOpen { sess: s, channel_id: CHANNEL }).await;
+    ok(
+        sl,
+        Request::SessionOpen {
+            sess: s,
+            channel_id: CHANNEL,
+        },
+    )
+    .await;
     ok(
         sl,
         Request::DraftSet(DraftSet {
@@ -33,12 +40,19 @@ async fn confirmed(f: &Fixture, s: SessionHandle, coi: Option<Coi>) {
         }),
     )
     .await;
-    let Response::Words { words, confirm_positions } = ok(sl, Request::GenAccount { sess: s }).await else {
+    let Response::Words {
+        words,
+        confirm_positions,
+    } = ok(sl, Request::GenAccount { sess: s }).await
+    else {
         panic!()
     };
     let Response::Confirm { ok: true, .. } = ok(
         sl,
-        Request::ConfirmPassphrase { sess: s, words: confirm_words(&words, confirm_positions) },
+        Request::ConfirmPassphrase {
+            sess: s,
+            words: confirm_words(&words, confirm_positions),
+        },
     )
     .await
     else {
@@ -48,7 +62,10 @@ async fn confirmed(f: &Fixture, s: SessionHandle, coi: Option<Coi>) {
 
 fn assert_nothing_written(f: &Fixture) {
     assert!(f.sink.envelopes().is_empty(), "an envelope was committed");
-    assert!(read_all_files(&f.staging_path).is_empty(), "staging not empty");
+    assert!(
+        read_all_files(&f.staging_path).is_empty(),
+        "staging not empty"
+    );
 }
 
 #[tokio::test]
@@ -61,10 +78,19 @@ async fn coi_excluding_every_triage_member_redirects_to_alternative() {
         categories: zeroize::Zeroizing::new(vec![CATEGORY_FRAUD]),
     };
     confirmed(&f, s, Some(coi)).await;
-    let r = f.sealer.handle(Request::SealFinish { sess: s, delayed_delivery: false }).await;
+    let r = f
+        .sealer
+        .handle(Request::SealFinish {
+            sess: s,
+            delayed_delivery: false,
+        })
+        .await;
     assert_eq!(
         r,
-        Response::Error { code: ErrorCode::NoEligibleTriage, alternative_channel_id: Some(ALT_CHANNEL) }
+        Response::Error {
+            code: ErrorCode::NoEligibleTriage,
+            alternative_channel_id: Some(ALT_CHANNEL)
+        }
     );
     assert_nothing_written(&f);
     // The draft survives the refusal (the source is redirected, nothing is lost
@@ -84,10 +110,19 @@ async fn no_valid_member_epoch_key_fails_closed() {
     f.sealer.install_snapshot(snap).unwrap();
     let s = sess(1);
     confirmed(&f, s, None).await;
-    let r = f.sealer.handle(Request::SealFinish { sess: s, delayed_delivery: false }).await;
+    let r = f
+        .sealer
+        .handle(Request::SealFinish {
+            sess: s,
+            delayed_delivery: false,
+        })
+        .await;
     assert_eq!(
         r,
-        Response::Error { code: ErrorCode::NoEligibleTriage, alternative_channel_id: Some(ALT_CHANNEL) }
+        Response::Error {
+            code: ErrorCode::NoEligibleTriage,
+            alternative_channel_id: Some(ALT_CHANNEL)
+        }
     );
     assert_nothing_written(&f);
 }
@@ -99,16 +134,40 @@ async fn stale_snapshot_fails_closed() {
     f.clock.day.store(TODAY + 7, Ordering::SeqCst);
     let s = sess(1);
     confirmed(&f, s, None).await;
-    let r = f.sealer.handle(Request::SealFinish { sess: s, delayed_delivery: false }).await;
+    let r = f
+        .sealer
+        .handle(Request::SealFinish {
+            sess: s,
+            delayed_delivery: false,
+        })
+        .await;
     assert_eq!(
         r,
-        Response::Error { code: ErrorCode::Unavailable, alternative_channel_id: Some(ALT_CHANNEL) }
+        Response::Error {
+            code: ErrorCode::Unavailable,
+            alternative_channel_id: Some(ALT_CHANNEL)
+        }
     );
     assert_nothing_written(&f);
     // Six days is still fresh enough to reach selection.
     f.clock.day.store(TODAY + 6, Ordering::SeqCst);
-    let r = f.sealer.handle(Request::SealFinish { sess: s, delayed_delivery: false }).await;
-    assert!(!matches!(r, Response::Error { code: ErrorCode::Unavailable, .. }), "{r:?}");
+    let r = f
+        .sealer
+        .handle(Request::SealFinish {
+            sess: s,
+            delayed_delivery: false,
+        })
+        .await;
+    assert!(
+        !matches!(
+            r,
+            Response::Error {
+                code: ErrorCode::Unavailable,
+                ..
+            }
+        ),
+        "{r:?}"
+    );
 }
 
 #[tokio::test]
@@ -117,7 +176,13 @@ async fn independent_time_failure_fails_closed() {
     let s = sess(1);
     confirmed(&f, s, None).await;
     f.clock.fail.store(true, Ordering::SeqCst);
-    let r = f.sealer.handle(Request::SealFinish { sess: s, delayed_delivery: false }).await;
+    let r = f
+        .sealer
+        .handle(Request::SealFinish {
+            sess: s,
+            delayed_delivery: false,
+        })
+        .await;
     assert_eq!(r, Response::error(ErrorCode::Unavailable));
     assert_nothing_written(&f);
 }
@@ -127,10 +192,16 @@ async fn snapshot_rollback_and_suite_mismatch_rejected() {
     let f = fixture();
     let mut older = f.snapshot.clone();
     older.tree_size -= 1;
-    assert_eq!(f.sealer.install_snapshot(older), Err(SnapshotError::Rollback));
+    assert_eq!(
+        f.sealer.install_snapshot(older),
+        Err(SnapshotError::Rollback)
+    );
     let mut older = f.snapshot.clone();
     older.issued_hour -= 1;
-    assert_eq!(f.sealer.install_snapshot(older), Err(SnapshotError::Rollback));
+    assert_eq!(
+        f.sealer.install_snapshot(older),
+        Err(SnapshotError::Rollback)
+    );
     let mut fips = f.snapshot.clone();
     fips.suite = candor_core::Suite::CandorFips1;
     assert_eq!(f.sealer.install_snapshot(fips), Err(SnapshotError::Suite));
@@ -144,16 +215,48 @@ async fn snapshot_rollback_and_suite_mismatch_rejected() {
 async fn seal_requires_confirmation_and_five_failures_zeroize() {
     let f = fixture();
     let s = sess(1);
-    ok(&f.sealer, Request::SessionOpen { sess: s, channel_id: CHANNEL }).await;
-    let r = f.sealer.handle(Request::SealFinish { sess: s, delayed_delivery: false }).await;
+    ok(
+        &f.sealer,
+        Request::SessionOpen {
+            sess: s,
+            channel_id: CHANNEL,
+        },
+    )
+    .await;
+    let r = f
+        .sealer
+        .handle(Request::SealFinish {
+            sess: s,
+            delayed_delivery: false,
+        })
+        .await;
     assert_eq!(r, Response::error(ErrorCode::NotConfirmed));
     ok(&f.sealer, Request::GenAccount { sess: s }).await;
-    let r = f.sealer.handle(Request::SealFinish { sess: s, delayed_delivery: false }).await;
+    let r = f
+        .sealer
+        .handle(Request::SealFinish {
+            sess: s,
+            delayed_delivery: false,
+        })
+        .await;
     assert_eq!(r, Response::error(ErrorCode::NotConfirmed));
     let wrong = || SecretWords(zeroize::Zeroizing::new(vec![7777, 7777, 7777]));
     for i in 0..5 {
-        let r = ok(&f.sealer, Request::ConfirmPassphrase { sess: s, words: wrong() }).await;
-        let Response::Confirm { ok: false, confirm_positions } = r else { panic!() };
+        let r = ok(
+            &f.sealer,
+            Request::ConfirmPassphrase {
+                sess: s,
+                words: wrong(),
+            },
+        )
+        .await;
+        let Response::Confirm {
+            ok: false,
+            confirm_positions,
+        } = r
+        else {
+            panic!()
+        };
         assert_eq!(confirm_positions.is_none(), i == 4);
     }
     // Draft and passphrase are gone with the session (07 §5.2).
@@ -166,7 +269,14 @@ async fn seal_requires_confirmation_and_five_failures_zeroize() {
 async fn regeneration_is_bounded() {
     let f = fixture();
     let s = sess(1);
-    ok(&f.sealer, Request::SessionOpen { sess: s, channel_id: CHANNEL }).await;
+    ok(
+        &f.sealer,
+        Request::SessionOpen {
+            sess: s,
+            channel_id: CHANNEL,
+        },
+    )
+    .await;
     for _ in 0..5 {
         ok(&f.sealer, Request::GenAccount { sess: s }).await;
     }
@@ -178,7 +288,14 @@ async fn regeneration_is_bounded() {
 async fn store_failure_commits_nothing_and_leaves_no_staged_ciphertext() {
     let f = fixture();
     let s = sess(1);
-    ok(&f.sealer, Request::SessionOpen { sess: s, channel_id: CHANNEL }).await;
+    ok(
+        &f.sealer,
+        Request::SessionOpen {
+            sess: s,
+            channel_id: CHANNEL,
+        },
+    )
+    .await;
     let Response::Part { part } = ok(
         &f.sealer,
         Request::PartBegin {
@@ -192,13 +309,39 @@ async fn store_failure_commits_nothing_and_leaves_no_staged_ciphertext() {
     else {
         panic!()
     };
-    ok(&f.sealer, Request::PartChunk { sess: s, part, data: SecretBytes::from_slice(b"0123456789"), last: true }).await;
-    let Response::Words { words, confirm_positions } = ok(&f.sealer, Request::GenAccount { sess: s }).await else {
+    ok(
+        &f.sealer,
+        Request::PartChunk {
+            sess: s,
+            part,
+            data: SecretBytes::from_slice(b"0123456789"),
+            last: true,
+        },
+    )
+    .await;
+    let Response::Words {
+        words,
+        confirm_positions,
+    } = ok(&f.sealer, Request::GenAccount { sess: s }).await
+    else {
         panic!()
     };
-    ok(&f.sealer, Request::ConfirmPassphrase { sess: s, words: confirm_words(&words, confirm_positions) }).await;
+    ok(
+        &f.sealer,
+        Request::ConfirmPassphrase {
+            sess: s,
+            words: confirm_words(&words, confirm_positions),
+        },
+    )
+    .await;
     f.sink.fail.store(true, Ordering::SeqCst);
-    let r = f.sealer.handle(Request::SealFinish { sess: s, delayed_delivery: false }).await;
+    let r = f
+        .sealer
+        .handle(Request::SealFinish {
+            sess: s,
+            delayed_delivery: false,
+        })
+        .await;
     assert_eq!(r, Response::error(ErrorCode::Internal));
     assert!(f.sink.envelopes().is_empty());
     // Only the staged part remains (the sealed bundle file was removed).
@@ -208,18 +351,52 @@ async fn store_failure_commits_nothing_and_leaves_no_staged_ciphertext() {
 #[tokio::test]
 async fn unknown_or_disabled_channel_and_bad_states() {
     let f = fixture();
-    let r = f.sealer.handle(Request::SessionOpen { sess: sess(1), channel_id: [0x99; 16] }).await;
+    let r = f
+        .sealer
+        .handle(Request::SessionOpen {
+            sess: sess(1),
+            channel_id: [0x99; 16],
+        })
+        .await;
     assert_eq!(r, Response::error(ErrorCode::Unavailable));
-    ok(&f.sealer, Request::SessionOpen { sess: sess(2), channel_id: CHANNEL }).await;
+    ok(
+        &f.sealer,
+        Request::SessionOpen {
+            sess: sess(2),
+            channel_id: CHANNEL,
+        },
+    )
+    .await;
     // Duplicate handle.
-    let r = f.sealer.handle(Request::SessionOpen { sess: sess(2), channel_id: CHANNEL }).await;
+    let r = f
+        .sealer
+        .handle(Request::SessionOpen {
+            sess: sess(2),
+            channel_id: CHANNEL,
+        })
+        .await;
     assert_eq!(r, Response::error(ErrorCode::BadState));
     // Drafting sessions cannot sign, open replies or load prefs.
-    let r = f.sealer.handle(Request::LoginSign { sess: sess(2), challenge: [0; 32] }).await;
+    let r = f
+        .sealer
+        .handle(Request::LoginSign {
+            sess: sess(2),
+            challenge: [0; 32],
+        })
+        .await;
     assert_eq!(r, Response::error(ErrorCode::BadState));
-    let r = f.sealer.handle(Request::OpenReply { sess: sess(2), entry: vec![1, 2, 3] }).await;
+    let r = f
+        .sealer
+        .handle(Request::OpenReply {
+            sess: sess(2),
+            entry: vec![1, 2, 3],
+        })
+        .await;
     assert_eq!(r, Response::error(ErrorCode::BadState));
-    let r = f.sealer.handle(Request::RotatePassphrase { sess: sess(2) }).await;
+    let r = f
+        .sealer
+        .handle(Request::RotatePassphrase { sess: sess(2) })
+        .await;
     assert_eq!(r, Response::error(ErrorCode::BadState));
     // Oversize part declaration.
     let r = f
@@ -248,7 +425,12 @@ async fn unknown_or_disabled_channel_and_bad_states() {
     };
     let r = f
         .sealer
-        .handle(Request::PartChunk { sess: sess(2), part, data: SecretBytes::from_slice(b"12345"), last: true })
+        .handle(Request::PartChunk {
+            sess: sess(2),
+            part,
+            data: SecretBytes::from_slice(b"12345"),
+            last: true,
+        })
         .await;
     assert_eq!(r, Response::error(ErrorCode::Limit));
     assert!(read_all_files(&f.staging_path).is_empty());
@@ -259,18 +441,47 @@ async fn unknown_or_disabled_channel_and_bad_states() {
 
 #[tokio::test]
 async fn session_capacity_gives_busy() {
-    let limits = candor_sealer::server::Limits { max_sessions: 2, ..Default::default() };
+    let limits = candor_sealer::server::Limits {
+        max_sessions: 2,
+        ..Default::default()
+    };
     let f = fixture_with(
-        candor_sealer::server::ChaffConfig { enabled: false, ..Default::default() },
+        candor_sealer::server::ChaffConfig {
+            enabled: false,
+            ..Default::default()
+        },
         limits,
     );
-    ok(&f.sealer, Request::SessionOpen { sess: sess(1), channel_id: CHANNEL }).await;
-    ok(&f.sealer, Request::SessionOpen { sess: sess(2), channel_id: CHANNEL }).await;
-    let r = f.sealer.handle(Request::SessionOpen { sess: sess(3), channel_id: CHANNEL }).await;
+    ok(
+        &f.sealer,
+        Request::SessionOpen {
+            sess: sess(1),
+            channel_id: CHANNEL,
+        },
+    )
+    .await;
+    ok(
+        &f.sealer,
+        Request::SessionOpen {
+            sess: sess(2),
+            channel_id: CHANNEL,
+        },
+    )
+    .await;
+    let r = f
+        .sealer
+        .handle(Request::SessionOpen {
+            sess: sess(3),
+            channel_id: CHANNEL,
+        })
+        .await;
     assert_eq!(r, Response::error(ErrorCode::Busy));
     let r = f
         .sealer
-        .handle(Request::LoginDerive { sess: sess(4), passphrase: SecretBytes::from_slice(b"x") })
+        .handle(Request::LoginDerive {
+            sess: sess(4),
+            passphrase: SecretBytes::from_slice(b"x"),
+        })
         .await;
     assert_eq!(r, Response::error(ErrorCode::Busy));
 }

@@ -41,10 +41,10 @@ async fn write_msg(stream: &mut UnixStream, op: Op, rid: u32, resp: &Response) -
     stream.flush().await.map_err(|_| ())
 }
 
-async fn bad_frame(stream: &mut UnixStream) {
+async fn bad_frame(stream: &mut UnixStream, rid: u32) {
     // The op of an undecodable request is unknown; error responses carry op 0.
     let resp = Response::error(ErrorCode::BadFrame);
-    if let Ok(f) = encode_response(Op::Hello, 0, &resp).and_then(|b| frame(&b)) {
+    if let Ok(f) = encode_response(Op::Hello, rid, &resp).and_then(|b| frame(&b)) {
         let _ = stream.write_all(&f).await;
     }
 }
@@ -57,7 +57,7 @@ async fn connection(sealer: Sealer, mut stream: UnixStream) -> Result<(), ()> {
             return Ok(()); // EOF or reset
         }
         let Ok(n) = frame_len(prefix) else {
-            bad_frame(&mut stream).await;
+            bad_frame(&mut stream, 0).await;
             return Err(());
         };
         let mut buf = Zeroizing::new(vec![0u8; n]);
@@ -67,12 +67,12 @@ async fn connection(sealer: Sealer, mut stream: UnixStream) -> Result<(), ()> {
         let decoded = decode_request(&buf);
         drop(buf);
         let Ok((rid, req)) = decoded else {
-            bad_frame(&mut stream).await;
+            bad_frame(&mut stream, 0).await;
             return Err(());
         };
         let op = req.op();
         if (op == Op::Hello) == hello {
-            bad_frame(&mut stream).await;
+            bad_frame(&mut stream, rid).await;
             return Err(());
         }
         let is_hello = matches!(req, Request::Hello { .. });

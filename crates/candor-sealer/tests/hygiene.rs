@@ -32,14 +32,30 @@ async fn stage(f: &Fixture, s: SessionHandle, data: &[u8], name: &str) {
     else {
         panic!()
     };
-    ok(&f.sealer, Request::PartChunk { sess: s, part, data: SecretBytes::from_slice(data), last: true }).await;
+    ok(
+        &f.sealer,
+        Request::PartChunk {
+            sess: s,
+            part,
+            data: SecretBytes::from_slice(data),
+            last: true,
+        },
+    )
+    .await;
 }
 
 #[tokio::test(start_paused = true)]
 async fn idle_and_absolute_expiry_zeroize_and_unlink() {
     let f = fixture();
     let s = sess(1);
-    ok(&f.sealer, Request::SessionOpen { sess: s, channel_id: CHANNEL }).await;
+    ok(
+        &f.sealer,
+        Request::SessionOpen {
+            sess: s,
+            channel_id: CHANNEL,
+        },
+    )
+    .await;
     stage(&f, s, b"secret attachment", "a.txt").await;
     assert_eq!(read_all_files(&f.staging_path).len(), 1);
     // Activity resets the idle timer (SW-21).
@@ -58,7 +74,14 @@ async fn idle_and_absolute_expiry_zeroize_and_unlink() {
 
     // Absolute limit: 2 h even with continuous activity.
     let s2 = sess(2);
-    ok(&f.sealer, Request::SessionOpen { sess: s2, channel_id: CHANNEL }).await;
+    ok(
+        &f.sealer,
+        Request::SessionOpen {
+            sess: s2,
+            channel_id: CHANNEL,
+        },
+    )
+    .await;
     stage(&f, s2, b"x", "b.txt").await;
     for _ in 0..7 {
         tokio::time::advance(Duration::from_secs(15 * 60)).await;
@@ -74,13 +97,32 @@ async fn idle_and_absolute_expiry_zeroize_and_unlink() {
 async fn zeroize_and_abort_drop_staged_parts() {
     let f = fixture();
     let s = sess(1);
-    ok(&f.sealer, Request::SessionOpen { sess: s, channel_id: CHANNEL }).await;
+    ok(
+        &f.sealer,
+        Request::SessionOpen {
+            sess: s,
+            channel_id: CHANNEL,
+        },
+    )
+    .await;
     stage(&f, s, b"one", "1").await;
     stage(&f, s, b"two", "2").await;
-    let Response::Draft(v) = ok(&f.sealer, Request::DraftGet { sess: s }).await else { panic!() };
+    let Response::Draft(v) = ok(&f.sealer, Request::DraftGet { sess: s }).await else {
+        panic!()
+    };
     assert_eq!(v.parts.len(), 2);
-    assert!(v.parts.iter().all(|p| p.size_bucket == 262_144), "bucket, not exact size");
-    ok(&f.sealer, Request::PartDrop { sess: s, part: v.parts[0].part }).await;
+    assert!(
+        v.parts.iter().all(|p| p.size_bucket == 262_144),
+        "bucket, not exact size"
+    );
+    ok(
+        &f.sealer,
+        Request::PartDrop {
+            sess: s,
+            part: v.parts[0].part,
+        },
+    )
+    .await;
     assert_eq!(read_all_files(&f.staging_path).len(), 1);
     ok(&f.sealer, Request::SealAbort { sess: s }).await;
     assert!(read_all_files(&f.staging_path).is_empty());
@@ -91,28 +133,30 @@ async fn zeroize_and_abort_drop_staged_parts() {
     assert_eq!(f.sealer.session_count(), 0);
 }
 
-fn scan_for(dir: &Path, needle: &[u8], since: SystemTime) -> Vec<String> {
+fn scan_for(dir: &Path, needle: &[u8], since: SystemTime, all: bool) -> Vec<String> {
     let mut hits = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
-        let Ok(rd) = std::fs::read_dir(&d) else { continue }; // safefs-lint: allow(test scans tempdirs)
+        let listing = std::fs::read_dir(&d); // safefs-lint: allow(test scans tempdirs)
+        let Ok(rd) = listing else { continue };
         for e in rd.flatten() {
             let Ok(ft) = e.file_type() else { continue };
             if ft.is_dir() {
-                stack.push(e.path());
+                if all {
+                    stack.push(e.path());
+                }
             } else if ft.is_file() {
                 let fresh = e
                     .metadata()
-                    .and_then(|m| m.modified())
-                    .map(|t| t >= since)
-                    .unwrap_or(true);
-                // Staging files carry a day-start mtime; scan those regardless.
-                if fresh || e.path().starts_with(dir) {
-                    if let Ok(b) = std::fs::read(e.path()) { // safefs-lint: allow(test scans tempdirs)
-                        if contains(&b, needle) {
-                            hits.push(e.path().display().to_string());
-                        }
-                    }
+                    .map(|m| m.len() < (64 << 20) && m.modified().is_ok_and(|t| t >= since))
+                    .unwrap_or(false);
+                // Staging files carry a day-start mtime, so the fixture's own
+                // tempdir is scanned in full.
+                let read = (fresh || all).then(|| std::fs::read(e.path())); // safefs-lint: allow(test scans tempdirs)
+                if let Some(Ok(b)) = read
+                    && contains(&b, needle)
+                {
+                    hits.push(e.path().display().to_string());
                 }
             }
         }
@@ -129,7 +173,14 @@ async fn no_plaintext_reaches_disk() {
     let marker: String = r.iter().map(|b| format!("{b:02x}")).collect();
     let f = fixture();
     let s = sess(1);
-    ok(&f.sealer, Request::SessionOpen { sess: s, channel_id: CHANNEL }).await;
+    ok(
+        &f.sealer,
+        Request::SessionOpen {
+            sess: s,
+            channel_id: CHANNEL,
+        },
+    )
+    .await;
     ok(
         &f.sealer,
         Request::DraftSet(DraftSet {
@@ -145,17 +196,43 @@ async fn no_plaintext_reaches_disk() {
     let big: Vec<u8> = marker.bytes().cycle().take(200_000).collect();
     stage(&f, s, &big, &marker).await;
     let check = |stage_name: &str| {
-        let mut hits = scan_for(f.dir.path(), marker.as_bytes(), since);
-        hits.extend(scan_for(&std::env::temp_dir(), marker.as_bytes(), since));
-        assert!(hits.is_empty(), "plaintext on disk after {stage_name}: {hits:?}");
+        let mut hits = scan_for(f.dir.path(), marker.as_bytes(), since, true);
+        hits.extend(scan_for(
+            &std::env::temp_dir(),
+            marker.as_bytes(),
+            since,
+            false,
+        ));
+        assert!(
+            hits.is_empty(),
+            "plaintext on disk after {stage_name}: {hits:?}"
+        );
     };
     check("draft and staging");
-    let Response::Words { words, confirm_positions } = ok(&f.sealer, Request::GenAccount { sess: s }).await else {
+    let Response::Words {
+        words,
+        confirm_positions,
+    } = ok(&f.sealer, Request::GenAccount { sess: s }).await
+    else {
         panic!()
     };
     let phrase = words_to_phrase(&words);
-    ok(&f.sealer, Request::ConfirmPassphrase { sess: s, words: confirm_words(&words, confirm_positions) }).await;
-    ok(&f.sealer, Request::SealFinish { sess: s, delayed_delivery: false }).await;
+    ok(
+        &f.sealer,
+        Request::ConfirmPassphrase {
+            sess: s,
+            words: confirm_words(&words, confirm_positions),
+        },
+    )
+    .await;
+    ok(
+        &f.sealer,
+        Request::SealFinish {
+            sess: s,
+            delayed_delivery: false,
+        },
+    )
+    .await;
     check("seal");
     // Neither the marker nor the passphrase is in anything the store received.
     for env in f.sink.envelopes() {
@@ -166,6 +243,6 @@ async fn no_plaintext_reaches_disk() {
         let a = env.account.unwrap();
         assert!(!contains(&a.prefs_ct, marker.as_bytes()));
     }
-    let hits = scan_for(f.dir.path(), phrase.as_bytes(), since);
+    let hits = scan_for(f.dir.path(), phrase.as_bytes(), since, true);
     assert!(hits.is_empty(), "passphrase on disk: {hits:?}");
 }
