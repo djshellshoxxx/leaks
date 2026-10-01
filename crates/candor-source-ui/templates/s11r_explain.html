@@ -1,0 +1,18 @@
+{% extends "layout.html" %}
+{#- S11r explanation and current-passphrase re-entry (ADR-046 §7; 08 SW-22/27). -#}
+{% block main %}
+<h1>{{ p.t("sui-rot-h1") }}</h1>
+{% include "errors.html" %}
+<p class="honesty">{{ p.t("sui-rotate-explain") }}</p>
+<form method="post" action="{{ p.href(Route::Inbox) }}">
+{% include "ft.html" %}
+<input type="hidden" name="action" value="rotate-passphrase">
+{%- let fid = "passphrase" %}
+<div class="field">
+<label for="f-passphrase">{{ p.t("sui-rot-current") }}</label>
+{% include "field_error.html" %}
+<input type="text" id="f-passphrase" name="passphrase" autocomplete="off" autocapitalize="none" spellcheck="false" dir="ltr" maxlength="256"{% if p.has_field_error(fid) %} aria-invalid="true" aria-describedby="e-passphrase"{% endif %}>
+</div>
+<div class="actions"><button type="submit" class="btn-primary">{{ p.t("sui-rot-start") }}</button><a href="{{ p.href(Route::Inbox) }}">{{ p.t("sui-back-inbox") }}</a></div>
+</form>
+{% endblock %}

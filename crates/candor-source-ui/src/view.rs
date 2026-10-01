@@ -157,6 +157,41 @@ impl<'a> PageView<'a> {
         self.fmt_args(key, &[(n1, v1.into()), (n2, v2.into())])
     }
 
+    pub(crate) fn t3(
+        &self,
+        key: &str,
+        n1: &str,
+        v1: impl Into<Arg>,
+        n2: &str,
+        v2: impl Into<Arg>,
+        n3: &str,
+        v3: impl Into<Arg>,
+    ) -> String {
+        self.fmt_args(key, &[(n1, v1.into()), (n2, v2.into()), (n3, v3.into())])
+    }
+
+    /// `<title>`: "{Mode} · {Step} · {Org} secure reporting" (11 §5.1).
+    pub(crate) fn fmt_title(&self, mode: &str, step: &str) -> String {
+        self.t3("sui-title", "mode", mode, "step", step, "org", self.org())
+    }
+
+    /// One identity-hint notice (05 §8.5).
+    pub(crate) fn fmt_hint(&self, h: &crate::model::IdentityHint) -> String {
+        let kind = self.t(h.kind.key());
+        let field = self.text_plain(&h.field);
+        self.t3("sui-review-hint", "kind", kind, "field", field, "line", h.line)
+    }
+
+    /// The three S10c fields with their 1-based word positions.
+    pub(crate) fn confirm_fields(&self) -> Vec<(&'static str, u64)> {
+        let [a, b, c] = self.vm.confirm.positions;
+        vec![
+            ("w_a", u64::from(a)),
+            ("w_b", u64::from(b)),
+            ("w_c", u64::from(c)),
+        ]
+    }
+
     /// Marked message: returns escaped HTML with `<strong>`; templates use `|safe`.
     pub(crate) fn tm(&self, key: &str) -> String {
         escape_marked(&self.t(key))
@@ -514,10 +549,8 @@ impl<'a> PageView<'a> {
     }
 
     pub(crate) fn card(&self, id: &str) -> Option<Card> {
-        if id == "GC-01" {
-            return Some(crate::guidance::GC01);
-        }
         match id {
+            "GC-01" => Some(crate::guidance::GC01),
             "GC-03" => Some(crate::guidance::GC03),
             "GC-30" => Some(crate::guidance::GC30),
             "GC-32" => Some(crate::guidance::GC32),

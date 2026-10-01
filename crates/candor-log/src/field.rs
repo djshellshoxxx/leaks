@@ -25,6 +25,67 @@ pub trait AuditField: sealed::Sealed {
     }
 }
 
+/// Deterministic sample values for catalog-wide tests (not for production use).
+#[doc(hidden)]
+pub trait Sample {
+    /// A representative value.
+    fn sample() -> Self;
+}
+
+impl Sample for bool {
+    fn sample() -> Self {
+        true
+    }
+}
+impl<T: Sample> Sample for Option<T> {
+    fn sample() -> Self {
+        Some(T::sample())
+    }
+}
+impl Sample for DayStamp {
+    fn sample() -> Self {
+        DayStamp(20_000)
+    }
+}
+impl Sample for StaffTimer {
+    fn sample() -> Self {
+        StaffTimer(UtcMillis(1_790_000_000_000))
+    }
+}
+impl Sample for SeqRange {
+    fn sample() -> Self {
+        SeqRange { first: 0, last: 9 }
+    }
+}
+impl Sample for Version {
+    fn sample() -> Self {
+        Version { major: 1, minor: 2, patch: 3 }
+    }
+}
+impl Sample for Percent {
+    fn sample() -> Self {
+        Percent(100)
+    }
+}
+impl Sample for PercentBucket {
+    fn sample() -> Self {
+        PercentBucket(50)
+    }
+}
+impl Sample for DcCode {
+    fn sample() -> Self {
+        DcCode(10)
+    }
+}
+impl Sample for Approvers {
+    fn sample() -> Self {
+        Approvers(vec![
+            crate::ids::UserRef::from_bytes([0xa1; 16]),
+            crate::ids::UserRef::from_bytes([0xa2; 16]),
+        ])
+    }
+}
+
 impl sealed::Sealed for bool {}
 impl AuditField for bool {
     fn to_value(&self) -> Value {
@@ -74,6 +135,11 @@ macro_rules! bounded_count {
         impl AuditField for $name {
             fn to_value(&self) -> Value {
                 Value::Uint(u64::from(self.0))
+            }
+        }
+        impl Sample for $name {
+            fn sample() -> Self {
+                Self(7)
             }
         }
     };

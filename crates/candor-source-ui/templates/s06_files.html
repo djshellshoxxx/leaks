@@ -5,7 +5,7 @@
 <h1>{{ p.t("sui-files-h1") }}</h1>
 {% include "errors.html" %}
 <p>{{ p.t("sui-files-describe") }}</p>
-<p>{{ p.t2("sui-files-limits", "max_files", p.vm.files.max_files, "max_file", p.size(p.vm.files.max_file_bytes)) }}</p>
+<p>{{ p.t3("sui-files-limits", "max_files", p.vm.files.max_files, "max_file", p.size(p.vm.files.max_file_bytes), "max_total", p.size(p.vm.files.max_total_bytes)) }}</p>
 <p>{{ p.t("sui-files-time") }}</p>
 <p class="honesty">{{ p.t("sui-files-size-visible") }}</p>
 <form method="post" action="{{ p.href(Route::Files) }}" enctype="multipart/form-data">

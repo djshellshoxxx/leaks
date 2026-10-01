@@ -1,0 +1,6 @@
+{% extends "layout.html" %}
+{% block main %}
+<h1>{{ p.t("sui-rot-done-h1") }}</h1>
+<p>{{ p.t("sui-rot-done-text") }}</p>
+<div class="actions"><a class="btn btn-primary" href="{{ p.href(Route::Inbox) }}">{{ p.t("sui-back-inbox") }}</a></div>
+{% endblock %}

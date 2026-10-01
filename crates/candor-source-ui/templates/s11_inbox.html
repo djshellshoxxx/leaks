@@ -1,0 +1,24 @@
+{% extends "layout.html" %}
+{#- S11 inbox (11 §7 S11). Not shown: unread markers, last visit, receipts, presence. -#}
+{% block main %}
+<h1>{{ p.t("sui-inbox-h1") }}</h1>
+<p>{{ p.t1("sui-inbox-status", "status", p.t(p.vm.inbox.status.key())) }}</p>
+{%- if p.vm.inbox.rotation_offer %}
+<div class="box"><p>{{ p.t("sui-inbox-offer") }}</p>
+<div class="actions pair"><a class="btn" href="{{ p.href(Route::Rotate) }}">{{ p.t("sui-inbox-offer-yes") }}</a><a class="btn" href="{{ p.href(Route::Inbox) }}">{{ p.t("sui-inbox-offer-no") }}</a></div></div>
+{%- endif %}
+<p class="note">{{ p.t("sui-inbox-retention") }}</p>
+<h2>{{ p.t("sui-inbox-messages") }}</h2>
+{%- let msgs = p.vm.inbox.messages %}
+{%- let deletable = false %}
+{% include "messages.html" %}
+<h2>{{ p.t("sui-inbox-actions") }}</h2>
+<ul>
+<li><a href="{{ p.href(Route::Conversation) }}">{{ p.t("sui-inbox-write") }}</a></li>
+<li><a href="{{ p.href(Route::Conversation) }}#reply">{{ p.t("sui-inbox-files") }}</a></li>
+<li><a href="{{ p.href(Route::Rotate) }}">{{ p.t("sui-inbox-rotate") }}</a></li>
+<li><a href="{{ p.href(Route::End) }}">{{ p.t("sui-inbox-close") }}</a></li>
+</ul>
+<form method="post" action="{{ p.href(Route::End) }}">{% include "ft.html" %}<button type="submit" name="action" value="ask-delete">{{ p.t("sui-inbox-delete") }}</button></form>
+<form method="post" action="{{ p.href(Route::Leave) }}">{% include "ft.html" %}<div class="actions"><button type="submit">{{ p.t("sui-inbox-logout") }}</button></div></form>
+{% endblock %}

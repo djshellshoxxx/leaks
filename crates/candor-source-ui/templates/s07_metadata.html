@@ -1,0 +1,29 @@
+{% extends "layout.html" %}
+{#- S07 Metadata Warning: class by extension only (ADR-012); explicit choice, no checkbox (ADP-10). -#}
+{% block main %}
+<h1>{{ p.t("sui-meta-h1") }}</h1>
+<p class="honesty">{{ p.t("sui-meta-honest") }}</p>
+<table>
+<caption>{{ p.t("sui-meta-caption") }}</caption>
+<thead><tr><th scope="col">{{ p.t("sui-meta-col-file") }}</th><th scope="col">{{ p.t("sui-meta-col-type") }}</th><th scope="col">{{ p.t("sui-meta-col-risks") }}</th></tr></thead>
+<tbody>
+{%- for f in p.vm.files.files %}
+<tr><th scope="row"><bdi class="mono">{{ f.name }}</bdi></th><td>{{ p.file_class_names(f) }}</td>
+<td><ul>{% for c in p.file_classes(f) %}{% for k in c.risk_keys() %}<li>{{ p.t(k) }}</li>{% endfor %}{% endfor %}</ul></td></tr>
+{%- endfor %}
+</tbody>
+</table>
+<p>{{ p.t("sui-meta-also") }}</p>
+<ul>
+<li>{{ p.t("sui-meta-also-canary") }}</li>
+<li>{{ p.t("sui-meta-also-watermark") }}</li>
+<li>{{ p.t("sui-meta-also-dots") }}</li>
+</ul>
+<form method="post" action="{{ p.href(Route::FilesCheck) }}">
+{% include "ft.html" %}
+<div class="actions pair">
+<button type="submit" name="action" value="change">{{ p.t("sui-meta-change") }}</button>
+<button type="submit" name="action" value="continue">{{ p.t("sui-meta-continue") }}</button>
+</div>
+</form>
+{% endblock %}

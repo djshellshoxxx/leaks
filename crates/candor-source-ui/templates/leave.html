@@ -1,0 +1,7 @@
+{% extends "layout.html" %}
+{#- Leave page: no links except "Back to start"; Clear-Site-Data is sent (05 §8.11). -#}
+{% block main %}
+<h1>{{ p.t("sui-leave-h1") }}</h1>
+<p>{{ p.tm("sui-new-identity")|safe }}</p>
+<p><a href="{{ p.href(Route::Landing) }}">{{ p.t("sui-leave-back") }}</a></p>
+{% endblock %}

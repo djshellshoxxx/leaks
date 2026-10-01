@@ -1,0 +1,51 @@
+{% extends "layout.html" %}
+{#- S11 login (also the wrong-passphrase page; same size class). Paste allowed, no CAPTCHA
+    (WCAG 3.3.8); the page never echoes words (SUI-031). -#}
+{% block main %}
+<h1>{{ p.t("sui-login-h1") }}</h1>
+{% include "errors.html" %}
+{%- if p.vm.deployment.failover_notice && p.has_error_summary() %}
+<p class="warn">{{ p.t1("sui-login-failover", "info", p.vm.deployment.info_site_address.as_str()) }}</p>
+{%- endif %}
+{%- if p.vm.login.restored_draft %}
+<div class="warn"><p>{{ p.t("sui-login-restored") }}</p><p>{{ p.t("sui-login-files-lost") }}</p></div>
+{%- endif %}
+{% include "js_warning.html" %}
+<p class="box">{{ p.t("sui-login-reminder") }}</p>
+<p class="honesty">{{ p.t("sui-login-honesty") }}</p>
+<p class="honesty">{{ p.t("sui-tier-w-honesty") }} {{ p.t("sui-passphrase-honesty") }}</p>
+<form method="post" action="{{ p.href(Route::Login) }}">
+{% include "ft.html" %}
+{%- let fid = "passphrase" %}
+{%- if p.vm.login.ten_boxes %}
+<fieldset aria-describedby="h-passphrase{% if p.has_field_error(fid) %} e-passphrase{% endif %}">
+<legend>{{ p.t1("sui-login-label", "n", p.words()) }}</legend>
+<p class="hint" id="h-passphrase">{{ p.t("sui-login-wait") }}</p>
+{% include "field_error.html" %}
+<div class="inline-fields">
+{%- for i in p.login_boxes() %}
+<div><label for="f-passphrase{% if !loop.first %}-{{ i }}{% endif %}">{{ p.t1("sui-login-word", "i", *i) }}</label>
+<input type="text" id="f-passphrase{% if !loop.first %}-{{ i }}{% endif %}" name="passphrase" autocomplete="off" autocapitalize="none" spellcheck="false" dir="ltr" maxlength="64"{% if p.has_field_error(fid) %} aria-invalid="true"{% endif %}></div>
+{%- endfor %}
+</div>
+</fieldset>
+{%- else %}
+<div class="field">
+<label for="f-passphrase">{{ p.t1("sui-login-label", "n", p.words()) }}</label>
+<p class="hint" id="h-passphrase">{{ p.t("sui-login-wait") }}</p>
+{% include "field_error.html" %}
+<input type="text" id="f-passphrase" name="passphrase" autocomplete="off" autocapitalize="none" spellcheck="false" dir="ltr" maxlength="256" aria-describedby="{{ p.describedby(fid, true) }}"{% if p.has_field_error(fid) %} aria-invalid="true"{% endif %}>
+</div>
+{%- endif %}
+<div class="actions">
+<button type="submit" name="action" value="login" class="btn-primary">{{ p.t("sui-login-open") }}</button>
+{%- if p.vm.login.ten_boxes %}
+<button type="submit" name="layout" value="one">{{ p.t("sui-login-one") }}</button>
+{%- else %}
+<button type="submit" name="layout" value="ten">{{ p.t1("sui-login-ten", "n", p.words()) }}</button>
+{%- endif %}
+</div>
+</form>
+{%- let c = crate::guidance::GC39 %}
+<details><summary>{{ p.t("sui-login-lost") }}</summary>{% for b in c.normal %}{{ p.block_html(b)|safe }}{% endfor %}</details>
+{% endblock %}

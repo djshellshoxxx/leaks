@@ -1,0 +1,17 @@
+{% extends "layout.html" %}
+{#- S10s Report sent: day only, never a clock time (ADR-010); SLA from configuration (SUI-053). -#}
+{% block main %}
+<h1>{{ p.t("sui-sent-h1") }}</h1>
+{%- if let Some(s) = p.vm.sent %}
+<p>{{ p.t1("sui-sent-date", "date", s.sent.to_string()) }}</p>
+{%- if s.delayed %}<p>{{ p.t("sui-sent-delayed") }}</p>{% endif %}
+{%- endif %}
+<p>{{ p.t1("sui-sent-next", "days", p.vm.deployment.ack_days) }}</p>
+<p>{{ p.t("sui-sent-mailbox") }}</p>
+<p>{{ p.tm1("sops-return-n1", "days", p.vm.deployment.ack_days)|safe }}</p>
+<p>{{ p.tm("sops-return-n2")|safe }}</p>
+<div class="actions pair">
+<a class="btn btn-primary" href="{{ p.href(Route::Login) }}">{{ p.t("sui-sent-open") }}</a>
+<form method="post" action="{{ p.href(Route::Leave) }}">{% include "ft.html" %}<button type="submit">{{ p.t("sui-footer-leave") }}</button></form>
+</div>
+{% endblock %}

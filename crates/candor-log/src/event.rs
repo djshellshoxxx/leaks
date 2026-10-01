@@ -100,6 +100,12 @@ macro_rules! catalog {
                     } ),*
                 }
             }
+            /// One sample instance of every catalog type (tests and
+            /// schema-registry tooling; not for production emission).
+            #[doc(hidden)]
+            pub fn samples() -> Vec<AuditEvent> {
+                vec![ $( Self::$v { $( $f: <$t as Sample>::sample() ),* } ),* ]
+            }
             /// Payload field names of this event's schema.
             pub fn field_names(&self) -> &'static [&'static str] {
                 match self { $( Self::$v { .. } => &[ $( stringify!($f) ),* ] ),* }

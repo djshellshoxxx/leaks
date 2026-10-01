@@ -1,0 +1,12 @@
+{% extends "layout.html" %}
+{#- S90 Busy: identical for every cause; no queue position, estimate or load (SUI-081). No auto-refresh. -#}
+{% block main %}
+<h1>{{ p.t("sui-busy-h1") }}</h1>
+<p>{{ p.t("sui-busy-text") }}</p>
+{%- if p.vm.busy.at_submit %}
+<p>{{ p.t("sui-busy-submit") }}</p>
+{%- endif %}
+{%- if let Some(r) = p.vm.busy.retry %}
+<form method="post" action="{{ p.href(*r) }}">{% include "ft.html" %}<input type="hidden" name="nav" value="retry"><div class="actions"><button type="submit" class="btn-primary">{{ p.t("sui-busy-retry") }}</button></div></form>
+{%- endif %}
+{% endblock %}

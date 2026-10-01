@@ -1,0 +1,38 @@
+{% extends "layout.html" %}
+{#- S10c Confirm and send (and S11r confirmation). Paste allowed (WCAG 3.3.8); mode-labelled send
+    button (SUI-016); after 3 failures only "Get a new passphrase" and "Discard" remain. -#}
+{% block main %}
+{%- let rotation = p.screen == Screen::RotateConfirm %}
+<h1>{{ p.t("sui-confirm-h1") }}</h1>
+{% include "errors.html" %}
+{%- if p.vm.confirm.attempts_exhausted %}
+<p class="warn">{{ p.t("sui-confirm-exhausted") }}</p>
+{%- else %}
+{%- if !rotation %}
+<p class="honesty">{{ p.t("sui-tier-w-honesty") }} {{ p.t("sui-passphrase-honesty") }}</p>
+{%- endif %}
+<form method="post" action="{% if rotation %}{{ p.href(Route::RotateConfirm) }}{% else %}{{ p.href(Route::Submit) }}{% endif %}">
+{% include "ft.html" %}
+{%- for (name, pos) in p.confirm_fields() %}
+{%- let fid = *name %}
+<div class="field">
+<label for="f-{{ name }}">{{ p.t1("sui-confirm-word", "p", *pos) }}</label>
+{% include "field_error.html" %}
+<input type="text" id="f-{{ name }}" name="{{ name }}" autocomplete="off" autocapitalize="none" spellcheck="false" dir="ltr" lang="{{ p.wordlist_lang() }}" maxlength="64"{% if p.has_field_error(fid) %} aria-invalid="true" aria-describedby="e-{{ name }}"{% endif %}>
+</div>
+{%- endfor %}
+<div class="actions"><button type="submit" class="btn-primary">{% if rotation %}{{ p.t("sui-rot-confirm-btn") }}{% else %}{{ p.t(p.mode().send_key()) }}{% endif %}</button></div>
+{%- if !rotation %}
+<p class="note">{{ p.t("sui-confirm-note") }}</p>
+{%- endif %}
+</form>
+{%- endif %}
+<div class="actions">
+<form method="post" action="{{ p.href(Route::NewPhrase) }}">{% include "ft.html" %}<button type="submit">{{ p.t("sui-confirm-new") }}</button></form>
+{%- if rotation %}
+<a href="{{ p.href(Route::Inbox) }}">{{ p.t("sui-back-inbox") }}</a>
+{%- else %}
+<a href="{{ p.href(Route::End) }}">{{ p.t("sui-review-discard") }}</a>
+{%- endif %}
+</div>
+{% endblock %}

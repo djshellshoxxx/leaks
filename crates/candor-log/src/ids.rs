@@ -71,6 +71,12 @@ macro_rules! opaque_id {
             }
         }
 
+        impl crate::field::Sample for $name {
+            fn sample() -> Self {
+                Self([0x5a; $len])
+            }
+        }
+
         impl crate::field::sealed::Sealed for $name {}
         impl crate::field::AuditField for $name {
             fn to_value(&self) -> Value {

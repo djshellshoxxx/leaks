@@ -2,8 +2,9 @@
 //! HKDF label and domain-separation registry (§10, CRYPTO-012).
 //!
 //! Every `candor/...` byte string used anywhere in this crate is defined here and
-//! nowhere else. The unit tests reject duplicate values and any `candor/` string
-//! literal that appears in another source file of this crate ("unregistered literal").
+//! nowhere else. The unit tests reject duplicate values; `tests/label_registry.rs`
+//! rejects any `candor/` string literal in another source file of this crate
+//! ("unregistered literal", CI job `label-registry`).
 //! Labels that are a prefix followed by a fixed-width suffix (suite, index, table id)
 //! are registered as their prefix.
 
@@ -170,7 +171,7 @@ pub fn lookup(value: &[u8]) -> Option<&'static Label> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::indexing_slicing, clippy::arithmetic_side_effects, clippy::panic)]
+    #![allow(clippy::indexing_slicing)]
     use super::*;
     use std::collections::HashSet;
 
@@ -205,37 +206,5 @@ mod tests {
             }
             assert!(!l.uses.is_empty());
         }
-    }
-
-    /// CRYPTO-012: no `candor/...` string literal outside this registry.
-    #[test]
-    fn no_unregistered_literals_in_sources() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut stack = vec![dir];
-        let mut checked = 0;
-        while let Some(d) = stack.pop() {
-            for e in std::fs::read_dir(&d).unwrap_or_else(|_| panic!("read_dir")) {
-                let p = e.unwrap_or_else(|_| panic!("entry")).path();
-                if p.is_dir() {
-                    stack.push(p);
-                    continue;
-                }
-                if p.extension().and_then(|x| x.to_str()) != Some("rs") || p.ends_with("labels.rs") {
-                    continue;
-                }
-                let src = std::fs::read_to_string(&p).unwrap_or_default();
-                checked += 1;
-                for (n, line) in src.lines().enumerate() {
-                    let code = line.split("//").next().unwrap_or("");
-                    assert!(
-                        !code.contains("\"candor/"),
-                        "unregistered label literal in {}:{}",
-                        p.display(),
-                        n + 1
-                    );
-                }
-            }
-        }
-        assert!(checked > 5);
     }
 }

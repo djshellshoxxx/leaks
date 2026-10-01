@@ -10,7 +10,7 @@
 use core::marker::PhantomData;
 
 use crate::cbor::Value;
-use crate::field::{AuditField, sealed::Sealed};
+use crate::field::{AuditField, Sample, sealed::Sealed};
 
 macro_rules! code_enum {
     ($(#[$m:meta])* $name:ident { $( $(#[$vm:meta])* $v:ident => $s:literal ),+ $(,)? }) => {
@@ -33,7 +33,19 @@ macro_rules! code_enum {
                 Value::text(self.code())
             }
         }
+        impl Sample for $name {
+            fn sample() -> Self {
+                Self::ALL.first().copied().unwrap_or_else(|| unreachable_first())
+            }
+        }
     };
+}
+
+#[allow(clippy::panic)]
+#[cold]
+fn unreachable_first<T>() -> T {
+    // code_enum! requires at least one variant, so ALL is never empty.
+    panic!("empty code enum")
 }
 
 /// Marker for a numeric code registry (`Code<T>`).
@@ -76,6 +88,11 @@ impl<S: CodeSpace> core::hash::Hash for Code<S> {
 impl<S: CodeSpace> core::fmt::Debug for Code<S> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}#{}", S::NAME, self.0)
+    }
+}
+impl<S: CodeSpace> Sample for Code<S> {
+    fn sample() -> Self {
+        Self::new(3)
     }
 }
 impl<S: CodeSpace> Sealed for Code<S> {}
@@ -441,6 +458,11 @@ pub enum CaseOrBucket {
     PendingBucket(CountBucket),
 }
 
+impl Sample for CaseOrBucket {
+    fn sample() -> Self {
+        Self::Case(crate::ids::CaseRef::sample())
+    }
+}
 impl Sealed for CaseOrBucket {}
 impl AuditField for CaseOrBucket {
     fn to_value(&self) -> Value {
@@ -460,6 +482,11 @@ pub enum CaseOrChannel {
     Channel(crate::ids::ChannelId),
 }
 
+impl Sample for CaseOrChannel {
+    fn sample() -> Self {
+        Self::Case(crate::ids::CaseRef::sample())
+    }
+}
 impl Sealed for CaseOrChannel {}
 impl AuditField for CaseOrChannel {
     fn to_value(&self) -> Value {
@@ -483,6 +510,11 @@ pub enum ConfigValue {
     Hash(crate::ids::Hash32),
 }
 
+impl Sample for ConfigValue {
+    fn sample() -> Self {
+        Self::Bool(true)
+    }
+}
 impl Sealed for ConfigValue {}
 impl AuditField for ConfigValue {
     fn to_value(&self) -> Value {

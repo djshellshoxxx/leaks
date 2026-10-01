@@ -3,8 +3,7 @@
 
 use askama::Template;
 
-use crate::guidance::Block;
-use crate::model::{Mode, QuestionKind, ViewModel};
+use crate::model::{Mode, OperatorStatement, QuestionKind, ViewModel};
 use crate::routes::Route;
 use crate::view::PageView;
 
@@ -378,6 +377,3 @@ pub(crate) fn render_template(p: &PageView<'_>) -> Result<String, askama::Error>
     }
 }
 
-// Names used inside templates.
-#[allow(unused_imports)]
-use {Block as TplBlock, Mode as TplMode, QuestionKind as TplKind};

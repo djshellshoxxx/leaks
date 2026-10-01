@@ -4,9 +4,7 @@
 //! every byte a sink writes went through the typed API.
 
 use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
+use std::io::BufRead;
 use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
@@ -138,50 +136,84 @@ impl AuditSink for MemorySink {
     }
 }
 
-/// Append-only JSON-lines file sink, one file per stream
-/// (`audit-<stream>.jsonl`) plus `checkpoints-<stream>.jsonl`.
-///
-/// Lines contain only static type names, integers and hex; the payload is
-/// the canonical CBOR in hex. Files are created mode 0600 on Unix.
-#[derive(Debug)]
-pub struct JsonlFileSink {
-    dir: PathBuf,
-    durable: bool,
-    files: BTreeMap<String, File>,
+/// One JSON-lines file of the audit store.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum JsonlFile {
+    /// `audit-<stream>.jsonl`.
+    Records(StreamId),
+    /// `checkpoints-<stream>.jsonl`.
+    Checkpoints(StreamId),
 }
 
-impl JsonlFileSink {
-    /// Sink writing under `dir`; `durable` fsyncs after every line.
-    pub fn new(dir: impl Into<PathBuf>, durable: bool) -> Self {
-        Self {
-            dir: dir.into(),
-            durable,
-            files: BTreeMap::new(),
+impl JsonlFile {
+    /// Conventional file name (static, no caller data).
+    pub fn file_name(self) -> &'static str {
+        match self {
+            Self::Records(StreamId::Sec) => "audit-sec.jsonl",
+            Self::Records(StreamId::Case) => "audit-case.jsonl",
+            Self::Records(StreamId::Sys) => "audit-sys.jsonl",
+            Self::Checkpoints(StreamId::Sec) => "checkpoints-sec.jsonl",
+            Self::Checkpoints(StreamId::Case) => "checkpoints-case.jsonl",
+            Self::Checkpoints(StreamId::Sys) => "checkpoints-sys.jsonl",
         }
     }
+}
 
-    fn append(&mut self, name: String, line: &str) -> Result<(), SinkError> {
-        let f = match self.files.get_mut(&name) {
-            Some(f) => f,
-            None => {
-                let path = self.dir.join(&name);
-                let mut oo = OpenOptions::new();
-                oo.create(true).append(true);
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::OpenOptionsExt;
-                    oo.mode(0o600);
-                }
-                let f = oo.open(path).map_err(|_| SinkError::Io)?;
-                self.files.entry(name).or_insert(f)
-            }
-        };
-        f.write_all(line.as_bytes()).map_err(|_| SinkError::Io)?;
-        f.write_all(b"\n").map_err(|_| SinkError::Io)?;
-        if self.durable {
-            f.sync_data().map_err(|_| SinkError::Io)?;
-        }
+/// Append-only storage behind [`JsonlFileSink`]. The C-24 service
+/// implements it over files it opened through the single audited safe-path
+/// API (`candor-safefs`, ADR-027) with mode 0600, append-only flags and
+/// `fsync` per line; this crate performs no path handling itself.
+pub trait JsonlTarget {
+    /// Durably append one line (without the newline) to `file`.
+    fn append_line(&mut self, file: JsonlFile, line: &[u8]) -> std::io::Result<()>;
+}
+
+/// In-memory [`JsonlTarget`] (tests, support tooling).
+#[derive(Clone, Debug, Default)]
+pub struct MemoryJsonl {
+    files: BTreeMap<JsonlFile, Vec<u8>>,
+}
+
+impl MemoryJsonl {
+    /// Contents of one file.
+    pub fn contents(&self, f: JsonlFile) -> &[u8] {
+        self.files.get(&f).map(Vec::as_slice).unwrap_or_default()
+    }
+    /// Mutable contents (tamper tests).
+    pub fn contents_mut(&mut self, f: JsonlFile) -> &mut Vec<u8> {
+        self.files.entry(f).or_default()
+    }
+}
+
+impl JsonlTarget for MemoryJsonl {
+    fn append_line(&mut self, file: JsonlFile, line: &[u8]) -> std::io::Result<()> {
+        let v = self.files.entry(file).or_default();
+        v.extend_from_slice(line);
+        v.push(b'\n');
         Ok(())
+    }
+}
+
+/// Append-only JSON-lines sink, one file per stream plus one checkpoint
+/// file per stream (class-separated). Lines contain only static type names,
+/// integers and hex; the payload is the canonical CBOR in hex.
+#[derive(Debug)]
+pub struct JsonlFileSink<T: JsonlTarget> {
+    target: T,
+}
+
+impl<T: JsonlTarget> JsonlFileSink<T> {
+    /// Sink over `target`.
+    pub fn new(target: T) -> Self {
+        Self { target }
+    }
+    /// Borrow the target.
+    pub fn target(&self) -> &T {
+        &self.target
+    }
+    /// Recover the target.
+    pub fn into_target(self) -> T {
+        self.target
     }
 }
 
@@ -228,14 +260,39 @@ pub fn checkpoint_line(cp: &SignedCheckpoint) -> String {
     )
 }
 
-impl AuditSink for JsonlFileSink {
+impl<T: JsonlTarget> AuditSink for JsonlFileSink<T> {
     fn write_record(&mut self, r: &CommittedRecord) -> Result<(), SinkError> {
-        let name = format!("audit-{}.jsonl", r.header().stream.code());
-        self.append(name, &record_line(r))
+        self.target
+            .append_line(JsonlFile::Records(r.header().stream), record_line(r).as_bytes())
+            .map_err(|_| SinkError::Io)
     }
     fn write_checkpoint(&mut self, cp: &SignedCheckpoint) -> Result<(), SinkError> {
-        let name = format!("checkpoints-{}.jsonl", cp.body().stream.code());
-        self.append(name, &checkpoint_line(cp))
+        self.target
+            .append_line(
+                JsonlFile::Checkpoints(cp.body().stream),
+                checkpoint_line(cp).as_bytes(),
+            )
+            .map_err(|_| SinkError::Io)
+    }
+}
+
+/// A [`JsonlFileSink`] shared between the log and a reader.
+#[derive(Clone, Debug, Default)]
+pub struct SharedJsonl(pub Arc<Mutex<MemoryJsonl>>);
+
+impl AuditSink for SharedJsonl {
+    fn write_record(&mut self, r: &CommittedRecord) -> Result<(), SinkError> {
+        let mut g = self.0.lock().map_err(|_| SinkError::Poisoned)?;
+        g.append_line(JsonlFile::Records(r.header().stream), record_line(r).as_bytes())
+            .map_err(|_| SinkError::Io)
+    }
+    fn write_checkpoint(&mut self, cp: &SignedCheckpoint) -> Result<(), SinkError> {
+        let mut g = self.0.lock().map_err(|_| SinkError::Poisoned)?;
+        g.append_line(
+            JsonlFile::Checkpoints(cp.body().stream),
+            checkpoint_line(cp).as_bytes(),
+        )
+        .map_err(|_| SinkError::Io)
     }
 }
 
@@ -277,18 +334,24 @@ fn h32(s: Option<&String>) -> Result<[u8; 32], ReadError> {
         .ok_or(ReadError::Malformed)
 }
 
-fn read_lines(path: &Path) -> Result<Vec<Line>, ReadError> {
-    let f = match File::open(path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(_) => return Err(ReadError::Io),
-    };
+fn read_lines(r: impl BufRead) -> Result<Vec<Line>, ReadError> {
     let mut out = Vec::new();
-    for line in BufReader::new(f).lines() {
-        let line = line.map_err(|_| ReadError::Io)?;
-        if line.len() > MAX_LINE {
+    let mut r = r;
+    loop {
+        let mut buf = Vec::new();
+        // Bounded read: never buffer more than MAX_LINE + 1 bytes per line.
+        let n = std::io::Read::take(&mut r, u64::try_from(MAX_LINE).unwrap_or(u64::MAX).saturating_add(1))
+            .read_until(b'\n', &mut buf)
+            .map_err(|_| ReadError::Io)?;
+        if n == 0 {
+            break;
+        }
+        if buf.last() == Some(&b'\n') {
+            buf.pop();
+        } else if buf.len() > MAX_LINE {
             return Err(ReadError::LineTooLong);
         }
+        let line = String::from_utf8(buf).map_err(|_| ReadError::Malformed)?;
         if line.is_empty() {
             continue;
         }
@@ -297,13 +360,15 @@ fn read_lines(path: &Path) -> Result<Vec<Line>, ReadError> {
     Ok(out)
 }
 
-/// Read a stream written by [`JsonlFileSink`] back for verification.
+/// Read a stream written by [`JsonlFileSink`] back for verification, from
+/// the record file and the checkpoint file of `stream`.
 pub fn read_stream(
-    dir: &Path,
     stream: StreamId,
+    records: impl BufRead,
+    checkpoints: impl BufRead,
 ) -> Result<(Vec<ChainRecord>, Vec<SignedCheckpoint>), ReadError> {
     let mut recs = Vec::new();
-    for l in read_lines(&dir.join(format!("audit-{}.jsonl", stream.code())))? {
+    for l in read_lines(records)? {
         if l.stream != stream.code() {
             return Err(ReadError::WrongStream);
         }
@@ -325,7 +390,7 @@ pub fn read_stream(
         }
     }
     let mut cps = Vec::new();
-    for l in read_lines(&dir.join(format!("checkpoints-{}.jsonl", stream.code())))? {
+    for l in read_lines(checkpoints)? {
         if l.stream != stream.code() || l.k != "cp" || l.last_seq.is_none() {
             return Err(ReadError::Malformed);
         }

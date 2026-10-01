@@ -1,0 +1,6 @@
+{% extends "layout.html" %}
+{% block main %}
+<h1>{{ p.t("sui-signedout-h1") }}</h1>
+<p>{{ p.t("sui-signedout-text") }}</p>
+<div class="actions"><a class="btn" href="{{ p.href(Route::Login) }}">{{ p.t("sui-landing-return") }}</a><a class="btn" href="{{ p.href(Route::Landing) }}">{{ p.t("sui-nav-start") }}</a></div>
+{% endblock %}

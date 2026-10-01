@@ -22,6 +22,13 @@ const EFF_LARGE_TXT: &str = include_str!("../data/eff_large_wordlist.txt");
 /// provenance).
 pub const EFF_LARGE_WORDLIST_SHA256: &str = "addd35536511597a02fa0a9ff1e5284677b8883b83e986e43f15a3db996b903e";
 
+/// The four entries of the official EFF large list that contain a hyphen and are
+/// therefore excluded under §11.1(b) (a hyphen is a separator after normalization).
+pub const EFF_LARGE_EXCLUDED: [&str; 4] = ["drop-down", "felt-tip", "t-shirt", "yo-yo"];
+
+/// Words used from the EFF large list (7,776 − 4). `10 × log2(7772) ≈ 129.24` bits.
+pub const EFF_LARGE_USED_LEN: usize = 7772;
+
 /// Minimum wordlist size (§11.1).
 pub const MIN_WORDLIST_LEN: usize = 2048;
 
@@ -83,8 +90,14 @@ impl Wordlist {
                 hex_lower(&sha256(&[EFF_LARGE_TXT.as_bytes()])).as_bytes(),
                 EFF_LARGE_WORDLIST_SHA256.as_bytes(),
             ) {
-                let words: Vec<&str> = EFF_LARGE_TXT.lines().filter_map(|l| l.split('\t').nth(1)).collect();
-                if words.len() != 7776 {
+                let all: Vec<&str> = EFF_LARGE_TXT.lines().filter_map(|l| l.split('\t').nth(1)).collect();
+                if all.len() != 7776 {
+                    return Err(Error::InvalidWordlist);
+                }
+                // §11.1(b): entries containing a separator after normalization are
+                // excluded (Implementation decision, SPEC-NOTES).
+                let words: Vec<&str> = all.into_iter().filter(|w| !EFF_LARGE_EXCLUDED.contains(w)).collect();
+                if words.len() != EFF_LARGE_USED_LEN {
                     return Err(Error::InvalidWordlist);
                 }
                 Wordlist::from_words(&words)
@@ -342,10 +355,14 @@ mod tests {
     #[test]
     fn eff_list_loads_and_hash_matches() {
         let l = Wordlist::eff_large().unwrap();
-        assert_eq!(l.len(), 7776);
+        assert_eq!(l.len(), 7772);
+        for w in EFF_LARGE_EXCLUDED {
+            assert!(!l.check(w));
+            assert!(EFF_LARGE_TXT.contains(&format!("\t{w}\n")));
+        }
         assert_eq!(l.word_count(), 10);
         assert_eq!(l.get(0), Some("abacus"));
-        assert_eq!(l.get(7775), Some("zoom"));
+        assert_eq!(l.get(7771), Some("zoom"));
         assert_eq!(hex_lower(&sha256(&[EFF_LARGE_TXT.as_bytes()])), EFF_LARGE_WORDLIST_SHA256);
     }
 
