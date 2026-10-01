@@ -52,6 +52,7 @@ Every requirement is a row in a Markdown table with EXACTLY these columns:
 | 09-DATABASE | DB- |
 | 10-FILE-EVIDENCE-PIPELINE | FILE-, EVID- |
 | 11-FRONTEND-SOURCE | SUI- |
+| 11a-SOURCE-SAFETY-TIPS | TIP- |
 | 12-FRONTEND-RECIPIENT | RUI- |
 | 13-FRONTEND-ADMIN | AUI-, SOCUI-, EMUI- |
 | 14-CASE-MANAGEMENT | CASE-, ROUTE- |

@@ -151,6 +151,51 @@ specs disagreed, the stricter or more specific rule won, as recorded below.
       * move the card set to P2.
     * CI should run `s02_budget_report` for every enabled locale.
 
+## Safety tips on every screen (`specs/11a-SOURCE-SAFETY-TIPS.md`)
+
+34. **Prefix registration (for the lead).** New document and prefix to add to DECISIONS §3:
+
+    | Doc | Prefixes |
+    |---|---|
+    | 11a-SOURCE-SAFETY-TIPS | TIP- |
+
+    TIP-001..TIP-013 also need rows in `39-REQUIREMENTS-TRACEABILITY.md`.
+35. **New route and screen (spec feedback for 11 §5.5 and 08 SW-*).** S02b "Safety tips for each
+    step" is `GET /{lang}/safety/tips` (`Route::SafetyTips`, `Screen::SafetyTips`, spec id
+    `S02b`). It is stateless, has no query string and takes its size class from 11 §5.4 like any
+    other GET (P1 without a session cookie). C-06 must add the route. `Screen::ALL` now has 37
+    entries.
+36. **Implementation decision: S02 shows NORMAL tip text only.** S02 already carries every GC
+    card and measures 60,839 of 61,440 bytes in `en-XA` with worst-case content (600 bytes of
+    headroom, down from about 1 KB). Its tip has no `<details>`; the region links to S02b, as
+    ADR-051(2) allows. S02b lists **every** tip with both tracks, so opening it shows interest in
+    safety, not the higher-risk track (05 GP-1). The S02 risk in note 33 still stands for real
+    translations; the S02 tip can be dropped first if a locale overflows.
+37. **Implementation decision: placement.** The tips region (`<aside class="box tips">`, `<h2>`
+    "Staying safe on this page") is rendered by `layout.html` after each screen's own content and
+    before the session notes. It never sits between the `<h1>`/error summary and the form, and it
+    reuses existing CSS (no stylesheet or CSP-hash change). Tips are a static function of the
+    screen (`Screen::tips()`), never of mode, content or input, so they cannot vary page size.
+38. **Leave page.** Its tip has no link, which keeps "no links except Back to start".
+39. **Readability check.** `tests/tips.rs` uses a heuristic Flesch–Kincaid grade (vowel-group
+    syllables). It is English-only and approximate; translations still need human review
+    (26 §12.2).
+
+### Security self-review (tips)
+
+* No JavaScript, no new form controls, no `open` details, no query strings. Links in tips are
+  only the allow-listed same-origin `/safety/tips` route (tested). Tip strings contain no URLs
+  or domain names (tested). Tool names are plain text (05 GP-7).
+* `<details>` state never reaches the server, so the risk track is not observable. Visiting S02b
+  is observable to a compelled C-06, which is why S02b holds both tracks.
+* Tips do not depend on the view model, so they add a constant number of bytes per screen and
+  locale and do not affect the size-class invariant. Budgets were checked for every screen and
+  locale with worst-case content.
+* Wording lint: no absolute claims, fear words, exclamation marks or all-caps. The seizure tip
+  says not to destroy anything the source may be legally required to keep (05 GP-6).
+* Residual: placing tips at the end of `<main>` puts them below the fold on long forms. The
+  inline JIT warnings that 11 already requires (S06, S07, S10) are unchanged.
+
 ## Dependencies (exact versions)
 
 * `askama =0.16.1` (derive, std): compile-time-checked templates with auto-escaping, as required

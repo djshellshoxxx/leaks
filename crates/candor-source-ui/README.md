@@ -62,8 +62,13 @@ The server must add only the `__Host-cs` cookie (§5.6). It must not add `Date`,
   * The session timeout warnings use 0 s animations delayed to `T_IDLE − 5 min` and
     `T_ABS − 10 min`.
   * Guidance cards use `<details>`, and the higher-risk text sits in a nested `<details>`.
-* **Catalogs**: Fluent (`locales/en/sui.ftl`, `locales/en/sops.ftl`), compiled in. Each message
+* **Catalogs**: Fluent (`locales/en/sui.ftl`, `locales/en/sops.ftl`, `locales/en/tips.ftl`), compiled in. Each message
   carries `# @class tier0` or `# @class critical`; messages without one are `ui`.
+
+* **Safety tips** (`specs/11a-SOURCE-SAFETY-TIPS.md`): every screen ends its content with a
+  "Staying safe on this page" region (`tips.html`, `tip.html`). It holds one to three tips
+  (`Screen::tips()`, `Tip`), each with a short NORMAL text and a higher-risk `<details>`. S02
+  shows NORMAL text only and links to S02b (`/safety/tips`), which lists every tip.
 
 ## Previews
 

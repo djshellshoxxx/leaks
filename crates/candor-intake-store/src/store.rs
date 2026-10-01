@@ -153,7 +153,9 @@ pub trait IntakeStore: Send + Sync {
     /// `cutoff ≥ today − 30` (enforced by [`IntakeStore::expire_replies`]).
     fn purge_replies_before(&self, cutoff: Day) -> impl Future<Output = Result<u64>> + Send;
 
-    /// `reply_expiry` with `retention_days ≤ 30` (ADR-039).
+    /// `reply_expiry` with `retention_days ≤ 30` (ADR-039): deletes replies whose
+    /// age `today − available_day` is ≥ the retention (the same boundary as the
+    /// published window).
     fn expire_replies(
         &self,
         today: Day,

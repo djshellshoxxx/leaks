@@ -193,6 +193,7 @@ Rules:
 |---|---|---|
 | `/` | GET | S01 Landing |
 | `/safety` | GET | S02 Safety Check |
+| `/safety/tips` | GET | S02b Safety tips (all tips, both tracks; 11a-SOURCE-SAFETY-TIPS.md; P1) |
 | `/status` | GET | S03 Anonymity Status |
 | `/new` | GET, POST | S04 Create Report |
 | `/concerns` | GET, POST | S04b "Is your report about any of these people?" (ADR-030, ADR-037) |
