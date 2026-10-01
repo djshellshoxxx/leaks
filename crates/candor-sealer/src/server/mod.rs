@@ -70,7 +70,11 @@ const MAX_SEEN_REPLIES: usize = 4096;
 /// Operational limits (07 §11, ADR-034, ADR-046(7)).
 #[derive(Debug, Clone)]
 pub struct Limits {
-    /// Concurrent sessions (07 §11: 64).
+    /// Concurrent sessions (`CANDOR_SEALER_MAX_SESSIONS`, ADR-056: default
+    /// 512, required in production). Must not exceed `upload_slots`, so a
+    /// session never meets slot exhaustion. Idle baseline ≈ 6.6 KB each
+    /// (≈ 3.3 MiB at 512, inside the base working set); Argon2 derivations
+    /// stay bounded by `argon_permits`, independent of this.
     pub max_sessions: usize,
     /// Idle timeout (ADR-034: 20 min).
     pub idle: Duration,
@@ -98,12 +102,12 @@ pub struct Limits {
     /// Share of `memory_budget_bytes` that is guaranteed to admitted drafts,
     /// in permille (AUD-RM2-SEA-31); the rest is the shared pool. Default 500.
     pub guaranteed_permille: u16,
-    /// Admission slots (`CANDOR_SEALER_UPLOAD_SLOTS`, default 64; at least 10×
-    /// the design peak of concurrent uploading drafts). A draft's first
-    /// `PART_BEGIN` takes a slot and its guaranteed slice
-    /// (guaranteed half / slots ≈ 30 MiB at the defaults); the session-level
-    /// `BUSY` (ADR-038) happens only when every slot is taken. Within its
-    /// slice a draft only ever gets `LIMIT`.
+    /// Admission slots (`CANDOR_SEALER_UPLOAD_SLOTS`, default 512, ADR-056:
+    /// at least `max_sessions`, and the slice must be at least 1 MiB). A
+    /// draft's first `PART_BEGIN` takes a slot and its guaranteed slice
+    /// (guaranteed half / slots = 3.75 MiB at the defaults); since every
+    /// session can hold a slot, within its slice a draft only ever gets
+    /// `LIMIT`.
     pub upload_slots: u32,
     /// Per-draft cap on shared-pool use (`CANDOR_SEALER_SESSION_UPLOAD_MIB`,
     /// default 768 MiB). Attachments that do not fit in the slice reserve the
@@ -135,7 +139,7 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_sessions: 64,
+            max_sessions: 512,
             idle: Duration::from_secs(20 * 60),
             absolute: Duration::from_secs(2 * 60 * 60),
             argon_permits: 4,
@@ -146,7 +150,7 @@ impl Default for Limits {
             max_parts: 20,
             memory_budget_bytes: 3_840 << 20,
             guaranteed_permille: 500,
-            upload_slots: 64,
+            upload_slots: 512,
             per_session_upload_bytes: 768 << 20,
             part_stall_timeout: Duration::from_secs(120),
             max_confirm_failures: 5,
@@ -209,18 +213,33 @@ pub const SESSION_UPLOAD_ENV: &str = "CANDOR_SEALER_SESSION_UPLOAD_MIB";
 /// Environment variable with the number of upload admission slots (SEA-31).
 pub const UPLOAD_SLOTS_ENV: &str = "CANDOR_SEALER_UPLOAD_SLOTS";
 /// Largest accepted slot count.
-pub const MAX_UPLOAD_SLOTS: u32 = 4_096;
+pub const MAX_UPLOAD_SLOTS: u32 = 65_536;
+/// Environment variable with the session cap (ADR-056; required in
+/// production, default 512 with the developer override).
+pub const MAX_SESSIONS_ENV: &str = "CANDOR_SEALER_MAX_SESSIONS";
+/// Largest accepted session cap.
+pub const MAX_MAX_SESSIONS: u32 = 65_536;
+
+/// Strictly parse a count variable (decimal, digits only, 1 ..= `max`).
+fn parse_count(v: &str, max: u32) -> Result<u32, StartError> {
+    if v.is_empty() || v.len() > 5 || !v.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(StartError::Config);
+    }
+    match v.parse::<u32>() {
+        Ok(n) if (1..=max).contains(&n) => Ok(n),
+        _ => Err(StartError::Config),
+    }
+}
+
+/// Strictly parse `CANDOR_SEALER_MAX_SESSIONS` (1 ..= [`MAX_MAX_SESSIONS`]).
+pub fn parse_max_sessions(v: &str) -> Result<u32, StartError> {
+    parse_count(v, MAX_MAX_SESSIONS)
+}
 
 /// Strictly parse `CANDOR_SEALER_UPLOAD_SLOTS` (decimal, digits only,
 /// 1 ..= [`MAX_UPLOAD_SLOTS`]); any problem is [`StartError::Config`].
 pub fn parse_upload_slots(v: &str) -> Result<u32, StartError> {
-    if v.is_empty() || v.len() > 4 || !v.bytes().all(|b| b.is_ascii_digit()) {
-        return Err(StartError::Config);
-    }
-    match v.parse::<u32>() {
-        Ok(n) if (1..=MAX_UPLOAD_SLOTS).contains(&n) => Ok(n),
-        _ => Err(StartError::Config),
-    }
+    parse_count(v, MAX_UPLOAD_SLOTS)
 }
 
 /// Largest accepted value of either variable: 256 GiB.
@@ -543,6 +562,16 @@ impl Sealer {
         if let Ok(v) = std::env::var(UPLOAD_SLOTS_ENV) {
             cfg.limits.upload_slots = parse_upload_slots(&v)?;
         }
+        // ADR-056: the session cap comes from the unit (required in
+        // production; with the override the configured default is kept).
+        match std::env::var(MAX_SESSIONS_ENV) {
+            Ok(v) => {
+                cfg.limits.max_sessions =
+                    usize::try_from(parse_max_sessions(&v)?).map_err(|_| StartError::Config)?;
+            }
+            Err(_) if cfg.insecure_dev.is_none() => return Err(StartError::Config),
+            Err(_) => {}
+        }
         Wordlist::eff_large().map_err(|_| StartError::Wordlist)?;
         cfg.suite
             .require_supported()
@@ -563,6 +592,10 @@ impl Sealer {
             || cfg.limits.guaranteed_permille > 1000
             || cfg.limits.upload_slots == 0
             || cfg.limits.upload_slots > MAX_UPLOAD_SLOTS
+            || cfg.limits.max_sessions == 0
+            // ADR-056(2): every session can hold a slot, so no draft ever
+            // gets BUSY within its own guaranteed slice.
+            || usize::try_from(cfg.limits.upload_slots).map_or(true, |n| n < cfg.limits.max_sessions)
             || pools(&cfg.limits).is_none_or(|p| p.slice < (1 << 20))
             || cfg.limits.part_stall_timeout.is_zero()
             || cfg.directory_trust.tenant_id != cfg.tenant_id
@@ -2616,11 +2649,29 @@ mod tests {
         assert_eq!(parse_upload_slots("64"), Ok(64));
         assert_eq!(parse_upload_slots("1"), Ok(1));
         assert_eq!(parse_upload_slots("4096"), Ok(4096));
+        assert_eq!(parse_upload_slots("65536"), Ok(65_536));
+        assert_eq!(parse_max_sessions("512"), Ok(512));
         for v in [
-            "", "0", "4097", "10000", "-1", "+64", " 64", "64 ", "6e1", "0x40", "sixty",
+            "", "0", "65537", "100000", "-1", "+64", " 64", "64 ", "6e1", "0x40", "sixty",
         ] {
             assert_eq!(parse_upload_slots(v), Err(StartError::Config), "{v:?}");
+            assert_eq!(parse_max_sessions(v), Err(StartError::Config), "{v:?}");
         }
+    }
+
+    /// ADR-056: per-session baseline state (table key and entry, the shared
+    /// session allocation with its tokio mutex, and the empty session) stays
+    /// small, so 512 idle sessions fit the base budget.
+    #[test]
+    fn session_baseline_is_small() {
+        let per = core::mem::size_of::<Session>()
+            .saturating_add(core::mem::size_of::<tokio::sync::Mutex<()>>())
+            .saturating_add(core::mem::size_of::<Entry>())
+            .saturating_add(core::mem::size_of::<SessionHandle>())
+            .saturating_add(2 * core::mem::size_of::<usize>());
+        // 6,616 B on x86_64 at the time of writing (≈ 3.3 MiB for 512).
+        assert!(per <= 16 * 1024, "{per}");
+        assert!(per.saturating_mul(512) <= 8 << 20);
     }
 
     fn upsert(tag: u8, replaces: Option<u8>) -> AccountUpsert {

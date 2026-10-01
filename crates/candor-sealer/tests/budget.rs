@@ -35,6 +35,7 @@ fn limits(budget: u64, cap: u64, slots: u32) -> Limits {
         memory_budget_bytes: budget,
         per_session_upload_bytes: cap,
         upload_slots: slots,
+        max_sessions: slots as usize,
         ..Limits::default()
     }
 }
@@ -101,8 +102,15 @@ async fn tiny_part_holders_do_not_block_admission() {
 /// idle part is aborted (120 s).
 #[tokio::test(start_paused = true)]
 async fn slices_never_busy_and_the_shared_pool_recovers() {
-    // 16 MiB: 8 MiB guaranteed for 2 slots (4 MiB slices), 8 MiB shared.
-    let f = fixture_with(no_chaff(), limits(16 * MIB, 8 * MIB, 2));
+    // 20 MiB: 12 MiB guaranteed for 3 slots (4 MiB slices), 8 MiB shared;
+    // ADR-056: one slot per session, so a slot is never BUSY.
+    let f = fixture_with(
+        no_chaff(),
+        Limits {
+            guaranteed_permille: 600,
+            ..limits(20 * MIB, 8 * MIB, 3)
+        },
+    );
     for i in 1..=3u8 {
         open(&f, sess(i)).await;
     }
@@ -112,11 +120,11 @@ async fn slices_never_busy_and_the_shared_pool_recovers() {
         begin(&f, sess(2), 5 * MIB).await,
         Response::Part { .. }
     ));
-    // Both slots taken: admission BUSY for C.
-    assert_eq!(
-        begin(&f, sess(3), 1).await,
-        Response::error(ErrorCode::Busy)
-    );
+    // C still gets its slot and slice.
+    let Response::Part { part: c } = begin(&f, sess(3), 1).await else {
+        panic!("slot refused")
+    };
+    drop_part(&f, sess(3), c).await;
     // A keeps uploading within its slice: never BUSY.
     for _ in 0..5 {
         let Response::Part { part } = begin(&f, sess(1), MIB).await else {
@@ -134,16 +142,15 @@ async fn slices_never_busy_and_the_shared_pool_recovers() {
         begin(&f, sess(1), 7 * MIB).await,
         Response::error(ErrorCode::Limit)
     );
-    assert!(f.sealer.memory_reserved() <= 16 * MIB);
+    assert!(f.sealer.memory_reserved() <= 20 * MIB);
     // B's part receives nothing; after 120 s it is aborted, its slot and pool
-    // reservation are released, and both A and C proceed.
+    // reservation are released, and A proceeds.
     tokio::time::advance(std::time::Duration::from_secs(121)).await;
     f.sealer.reap_expired();
     assert!(matches!(
         begin(&f, sess(1), 3 * MIB).await,
         Response::Part { .. }
     ));
-    assert!(matches!(begin(&f, sess(3), 1).await, Response::Part { .. }));
     for i in 1..=3u8 {
         ok(&f.sealer, Request::Zeroize { sess: sess(i) }).await;
     }
@@ -229,4 +236,50 @@ async fn known_store_outage_keeps_the_attachments() {
         Response::Sealed { .. }
     ));
     assert!(f.sink.envelopes()[0].objects[1].bytes.len() > 1_000);
+}
+
+/// ADR-056: the sealer refuses to start with fewer upload slots than
+/// sessions (a draft could then get BUSY within its own slice).
+#[test]
+fn startup_refused_when_slots_below_sessions() {
+    let f = fixture();
+    let l = Limits {
+        max_sessions: 20,
+        upload_slots: 10,
+        ..Limits::default()
+    };
+    let r = candor_sealer::server::Sealer::new(
+        config(no_chaff(), l, rustix_uid()),
+        candor_core::sig::SigningKey::from_seed(&[0x35; 32]),
+        f.staging,
+        f.clock.clone(),
+        f.sink.clone(),
+    );
+    assert!(matches!(r, Err(candor_sealer::server::StartError::Config)));
+}
+
+/// ADR-056: with the defaults (512 / 512) 512 sessions are held open at
+/// once, each starts an upload within its guaranteed slice, the reservation
+/// stays within the budget, and the 513th session is BUSY.
+#[tokio::test]
+async fn five_hundred_twelve_sessions_are_admitted() {
+    let f = fixture_with(no_chaff(), Limits::default());
+    for i in 0..512u16 {
+        let mut h = [0xaa; 16];
+        h[..2].copy_from_slice(&i.to_be_bytes());
+        let s = SessionHandle(h);
+        open(&f, s).await;
+        let part = begin(&f, s, 1).await;
+        assert!(matches!(part, Response::Part { .. }), "{i}: {part:?}");
+    }
+    assert!(f.sealer.memory_reserved() <= Limits::default().memory_budget_bytes);
+    assert_eq!(
+        f.sealer
+            .handle(Request::SessionOpen {
+                sess: sess(7),
+                channel_id: CHANNEL,
+            })
+            .await,
+        Response::error(ErrorCode::Busy)
+    );
 }

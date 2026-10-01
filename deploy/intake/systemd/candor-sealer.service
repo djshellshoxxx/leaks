@@ -38,11 +38,13 @@ MemoryMax=6656M
 # without a valid value. config-check requires budget <= MemoryMax - 1024 MiB, and staging
 # tmpfs size >= budget, so the budget (not ENOSPC) refuses uploads. Per-draft upload quota
 # (Limits::per_session_upload_bytes): at most half the budget, which is the shared pool.
-# Upload slots: 16..4096 (sealer default 64). None of these is a secret; secrets never go
+# Sessions (ADR-056): MAX_SESSIONS 16..65536; UPLOAD_SLOTS 16..4096 and >= MAX_SESSIONS;
+# guaranteed slice (budget / 2) / slots >= 1 MiB. None of these is a secret; secrets never go
 # through Environment= (see top). One variable per line.
 Environment=CANDOR_SEALER_MEMORY_BUDGET_MIB=3840
 Environment=CANDOR_SEALER_SESSION_UPLOAD_MIB=768
-Environment=CANDOR_SEALER_UPLOAD_SLOTS=64
+Environment=CANDOR_SEALER_UPLOAD_SLOTS=512
+Environment=CANDOR_SEALER_MAX_SESSIONS=512
 MemorySwapMax=0
 LimitMEMLOCK=2G
 TasksMax=64

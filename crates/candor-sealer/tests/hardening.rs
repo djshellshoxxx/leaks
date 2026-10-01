@@ -78,6 +78,7 @@ fn main() {
             .env(candor_sealer::server::MEMORY_BUDGET_ENV, "64")
             .env(candor_sealer::server::SESSION_UPLOAD_ENV, "16")
             .env(candor_sealer::server::UPLOAD_SLOTS_ENV, "8")
+            .env(candor_sealer::server::MAX_SESSIONS_ENV, "8")
             .status()
             .unwrap();
         assert!(status.success(), "hardening scenarios failed");

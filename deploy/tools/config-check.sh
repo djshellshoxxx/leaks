@@ -85,7 +85,7 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd -P)
 BASE="$SCRIPT_DIR/config-check.baseline"
 MANIFEST="$SCRIPT_DIR/config-check.manifest"
 # sha256 of config-check.manifest (release-pinned; update together with the manifest).
-MANIFEST_SHA256=91b73d36d2e4a6e259c670cac7ccf90c7ce3283325ea74ee776847868be12ba6
+MANIFEST_SHA256=297a77cd8d0bd10310bd18872dad889ddd6f97f1a394f4b4869fd9d4131f45db
 SECTIONS="tor nft pg units journald kernel dns apparmor host"
 MODE=static
 DIR="$SCRIPT_DIR/../intake"
@@ -906,7 +906,9 @@ check_units() {
 #   (b) staging tmpfs size= >= budget (staged parts are budget-counted, so the budget and not
 #       ENOSPC refuses an upload);
 #   CANDOR_SEALER_SESSION_UPLOAD_MIB present and <= budget / 2 (the shared pool);
-#   CANDOR_SEALER_UPLOAD_SLOTS present, an integer in 16..4096.
+#   CANDOR_SEALER_UPLOAD_SLOTS present, an integer in 16..4096;
+#   CANDOR_SEALER_MAX_SESSIONS present, 16..65536, and <= UPLOAD_SLOTS (ADR-056);
+#   guaranteed slice (budget / 2) / UPLOAD_SLOTS >= 1 MiB.
 # Environment= is evaluated with systemd semantics: last assignment per variable wins, an
 # empty assignment clears all.
 # Unparseable values (infinity, %, missing size=) fail.
@@ -944,7 +946,13 @@ check_sealer_memory() { # eff-sealer eff-mount
       else printf "OK\tunit.candor-sealer.session_upload\tper-draft quota %d MiB <= budget %d MiB / 2\n", q, b
       n=num("CANDOR_SEALER_UPLOAD_SLOTS")
       if (n < 16 || n > 4096) print "FAIL\tunit.candor-sealer.upload_slots\tCANDOR_SEALER_UPLOAD_SLOTS missing or not an integer in 16..4096"
-      else printf "OK\tunit.candor-sealer.upload_slots\t%d upload slots (16..4096)\n", n }' "$1" "$2" 2>/dev/null)
+      else printf "OK\tunit.candor-sealer.upload_slots\t%d upload slots (16..4096)\n", n
+      x=num("CANDOR_SEALER_MAX_SESSIONS")
+      if (x < 16 || x > 65536) print "FAIL\tunit.candor-sealer.max_sessions\tCANDOR_SEALER_MAX_SESSIONS missing or not an integer in 16..65536"
+      else if (n < x) printf "FAIL\tunit.candor-sealer.max_sessions\tUPLOAD_SLOTS < MAX_SESSIONS %d (ADR-056)\n", x
+      else printf "OK\tunit.candor-sealer.max_sessions\t%d sessions <= upload slots\n", x
+      if (b < 0 || n < 16 || b < 2 * n) print "FAIL\tunit.candor-sealer.upload_slice\t(budget / 2) / UPLOAD_SLOTS < 1 MiB"
+      else printf "OK\tunit.candor-sealer.upload_slice\t(budget %d MiB / 2) / %d slots >= 1 MiB\n", b, n }' "$1" "$2" 2>/dev/null)
   if [ -z "$res" ]; then fail unit.candor-sealer.memory_budget "effective sealer/staging units not available"; return; fi
   report_lines <<< "$res"
 }
