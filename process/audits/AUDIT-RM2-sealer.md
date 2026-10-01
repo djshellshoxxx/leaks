@@ -564,3 +564,65 @@ Fixed and re-tested in round 3: SEA-19, SEA-20, SEA-22, SEA-23, SEA-24(b–d); S
     The residual crash loss is documented to sources in 11a §7.
   - **Info:** await_ack gets a receive timeout. `signer_key_id` is 32 bytes; spec 09 is amended under ADR-055(2).
 - **C-2:** done in candor-log (`Service::Sealer`, `HealthCheck::InsecureDevOverride`); the sealer is switching to it.
+
+---
+
+## Re-test (round 4)
+
+| Item | Value |
+|---|---|
+| Re-tested revision | Live tree at HEAD `aa2683b`. The working tree was clean for the sealer, `Cargo.lock` and `supply-chain`. The sealer changes since round 3 are in `4be7f7d`…`ff8b5c4` |
+| Results | `cargo test -p candor-sealer --locked`: 78 pass (29 unit + 49 integration, 14 binaries), plus the hardening binary. `clippy --all-targets --all-features -D warnings`: clean. `cargo audit` (1,278 advisories): clean. `cargo deny --offline check` advisories, bans, licenses and sources: all ok. **`cargo vet --locked`: FAIL**, because `ml-dsa 0.1.1` and `signal-hook-registry 1.4.8` lack `safe-to-deploy`. Scratch build and target directories were removed after the run |
+
+### Status
+
+| ID | Status | Evidence / note |
+|---|---|---|
+| SEA-25 | **Fixed** | `kd.rs::revocation_authorized` accepts:<br>• K01 for any key;<br>• for a MEK: the member's current K08, or the CIK plus a K15;<br>• for a user key: the key itself, or a K15 plus an OVERSIGHT K08;<br>• for a K15 or CIK: the key itself.<br>Anything else (LOG_KEY, K01, unknown keys) → `Entry`. `objection_authorized` accepts a latest-roster member's K08 or an OVERSIGHT K08. My PoC (attacker-signed revocation) now returns `Entry` (`directory.rs`) |
+| SEA-26 | **Fixed**, with residual SEA-29 | Parts are taken out of the session and freed while the bundle memfd is written, so the peak is the bundle plus one part. `PART_BEGIN` reserves the ciphertext of every declared part plus the bundle bucket of the declared total; when it does not fit, the source gets the uniform `BUSY`. My answers to the coordinator's questions:<br>• **Declared length enforced?** Yes. `part_chunk_blocking` aborts the part with `LIMIT` once `received + n > declared_len`. Padding goes to `bucket(declared_len)`, and `staged` uses each part's `real_len`, which is at most its declared length. An upload cannot exceed its reservation.<br>• **Budget below `MemoryMax`?** Yes, by arithmetic: 3,840 MiB + 2,560 MiB (07 §4.2 baseline) = 6,400 ≤ 6,656 MiB. The baseline has to absorb Argon2id (4 × 64 MiB), up to 128 × 128 KiB frames, ≤ 8 MiB chaff memfds and a KD bundle of up to 512 MiB plus its derived view. That leaves roughly 1.5 GiB margin under normal sizes. The budget is a fixed default and is not checked against the unit or a profile's `MemoryMax`, so a profile that lowers `MemoryMax` must lower `memory_budget_bytes` too; config-check rule recommended (Info).<br>• **Lost attachments after a failed seal: fail-closed and uniform?** Fail-closed, yes. `parts_lost` makes `SEAL_FINISH` return `BAD_STATE` until `DRAFT_GET`, `PART_BEGIN` or `SEAL_ABORT`, so nothing is ever committed silently without its attachments. The source sees the usual failure page, then a draft without parts. Note that the parts are taken before **any** failure in `seal_blocking`, including store outages before a single byte was copied, so every store hiccup costs the attachments. Acceptable as disclosed; Info |
+| SEA-27 | **Fixed (code)** | K01 entries need both halves; every ML-DSA half present must verify; `alg` 3 is refused (`directory.rs::k01_entries_need_both_signature_halves`). **Dependency:** `ml-dsa =0.1.1` (RustCrypto/signatures, Apache-2.0/MIT, crates.io checksum `add6b9d9…`, `default-features = false`, verify-only use). It is the first stable line after the rc series and is not affected by RUSTSEC-2025-0144 (patched ≥ 0.1.0-rc.3). As far as I know it has no third-party audit. It is unvetted, so the PR vet gate is red → SEA-30 |
+| SEA-28 | **Fixed (a)(b)(c); (d) residual documented** | (a) `LOGIN_DERIVE` consults the queue and returns a random locator for a pending-replaced account; this is the same work for every login. (b) Merge by object hash, newer wrap wins (`flow.rs::double_rotation_keeps_replies_readable`). (c) SIGTERM flush with 1–4 dummy creates (`tests/shutdown.rs`). Residual (crash or kill loses queued creates; a rotation reverts to the old passphrase after a crash) is per the lead disposition and the 11a §7 wording. **Accepted by lead** |
+| Info: `await_ack` | **Fixed**, with a note | `SO_RCVTIMEO` of 60 s. Note: the acknowledgement byte is not bound to the bundle (no hash echo). An integrator that reuses `istore.sock` after a timeout could read a late `0x01` as the acknowledgement of the *next* bundle, and a timed-out commit may still land in the store as an orphan envelope with no queued account. Close the socket after any `await_ack` error, or echo the SHA-256 in the acknowledgement (Low, integration; fold into C-5) |
+| Info: `signer_key_id` | **Fixed** | 32 bytes, no truncation (SPEC-NOTES; 09 amended under ADR-055(2) per the lead) |
+| DEP-29 | **Fixed** | `MFD_NOEXEC_SEAL`; seals include `F_SEAL_EXEC`; start-up check refuses kernels below 6.3 (`StartError::Memfd`). `handover.rs` tests cover the seals, no exec bits, and `fchmod +x` being refused |
+| C-2 / SEA-24(a) | **Fixed** | `sys.health{service=sealer, DEGRADED, INSECURE_DEV_OVERRIDE}` |
+| SEA-16 / STO-27 receiver | Store-side, closed in the store audit | — |
+| SEA-17 | Open (workspace) | see SEA-30 |
+
+### New findings (round 4)
+
+**AUD-RM2-SEA-29 — Attachment reservations are held without data and never shrink: cheap global upload denial and a probe of other sources' uploads (Medium).** `budget.rs` / `mod.rs::part_begin`. A `Grant` only grows (`grow_to`) and is released only when the draft is dropped: submit, abort, zeroize, or the 20 min idle / 2 h absolute expiry, which `TOUCH` keeps alive.
+- **Denial.** `PART_BEGIN` reserves on the *declared* length (the web's `Content-Length`) before any byte arrives. A stalled or aborted upload, or a `PART_DROP`, leaves the reservation in place. Two sessions declaring about 1.9 GiB each, then stalling, therefore exhaust the 3,840 MiB budget, and every other source gets `BUSY` on uploads for up to 2 h. This costs only session-open PoW and two partial requests.
+- **Probe.** The budget is at most about 2 per-session maxima wide, far below the "≥ 10× design peak" rule of ADR-038(5) / IMPL-RM2 §2.7. A `PART_BEGIN` probe with size X tells the prober whether other sessions currently hold more than `cap − X`, which leaks the presence and rough size of other sources' ongoing attachment uploads.
+
+Fix:
+- Shrink the grant on `PART_DROP`, on an aborted or over-declared upload, and when a part completes (re-reserve on `real_len` buckets).
+- Reserve incrementally as bytes arrive (with the bundle term computed at seal time against a separate seal reservation), or cap the share of the budget held per session and expire reservations of stalled uploads quickly (for example after the web's body timeout).
+- Size the budget, or the per-session cap, so that one probe cannot observe other sessions, per ADR-038(5).
+
+Regression: a stalled `PART_BEGIN` followed by `PART_DROP` returns the budget, and N concurrent maximal declarations below the cap leave the probe answer unchanged.
+
+**AUD-RM2-SEA-30 — `cargo vet` gate fails on the new dependencies (Medium, B11.3).** `ml-dsa 0.1.1` (crypto, T0 verification path) and `signal-hook-registry 1.4.8` (from tokio `signal` for the SIGTERM flush) have neither an audit nor an exemption. Under ADR-052(8), PR CI requires `safe-to-deploy`, and `ml-dsa` additionally needs `candor-crypto-reviewed` before release. Fix: record a reasoned safe-to-deploy audit or exemption for both now, and schedule the Crypto Reviewer audit of `ml-dsa` (its FIPS 204 verify path, with KAT/Wycheproof vectors run in CI) before RM-6. Alternatively, move ML-DSA verification into candor-core under C-1 with its own vetting.
+
+### Gate (round 4)
+
+| Severity | Open |
+|---|---|
+| Critical / High | 0 / 0 |
+| Medium | 2 (SEA-29, SEA-30) |
+| Low | `await_ack` acknowledgement binding / socket reuse (integration note, C-5) |
+| Info | budget vs profile `MemoryMax` config-check rule; attachments lost on any seal failure; SEA-17 |
+
+**Gate: FAIL 2026-10-01 aa2683b.** There are no open Critical or High findings. SEA-29 and SEA-30 (Medium) each need a fix or the lead's written acceptance with an expiry. Once both are fixed or accepted, the sealer meets §F.
+
+## Lead dispositions after round 4 (2026-10-01)
+- **No Critical/High open; gate FAIL pending SEA-29.**
+- **SEA-29 (Medium): fix assigned.**
+  - Per-session upload quota reserved at draft admission, with max drafts = budget / quota. Admission BUSY is capacity-revealing by design (ADR-038).
+  - Uploads within a session's own quota never return BUSY.
+  - A part that receives no bytes for 120 s is aborted.
+  - Reservations are released on abort or at draft end.
+- **SEA-30 (Medium): accepted for PR CI.** `ml-dsa 0.1.1` and `signal-hook-registry 1.4.8` get safe-to-deploy exemptions (expiry 2027-03-30, 28 §5.2). `ml-dsa` is added to `supply-chain/crypto-set.txt`, so the release gate requires a real `candor-crypto-reviewed` audit before any release. `cargo vet` passes.
+- **Low (ack binding):** the sealer closes the socket on any error or timeout. Hash echo comes with C-5 (wave 2).
+- **Budget vs MemoryMax:** config-check rule assigned to deploy (budget + staging ≤ MemoryMax − 256 MiB).
+- **Info (seal failure loses parts):** the sealer keeps the parts if no byte was handed over, where that is simple; otherwise documented.

@@ -25,6 +25,9 @@ criteria = "safe-to-deploy"
 [policy.candor-log]
 criteria = "safe-to-deploy"
 
+[policy.candor-safe-read]
+criteria = "safe-to-deploy"
+
 [policy.candor-safefs]
 criteria = "safe-to-deploy"
 
@@ -579,6 +582,11 @@ version = "1.2.3"
 criteria = "safe-to-deploy"
 notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
+[[exemptions.ml-dsa]]
+version = "0.1.1"
+criteria = "safe-to-deploy"
+notes = "RustCrypto; verify-only use for KD signatures (ADR-055, AUD-RM2-SEA-27/30); not yet audited; crypto-reviewed audit required before release; expires 2027-03-30 (28 §5.2)"
+
 [[exemptions.ml-kem]]
 version = "0.3.2"
 criteria = "safe-to-deploy"
@@ -818,6 +826,11 @@ notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 version = "0.1.0"
 criteria = "safe-to-deploy"
 notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.signal-hook-registry]]
+version = "1.4.8"
+criteria = "safe-to-deploy"
+notes = "sealer SIGTERM flush (SEA-28c); not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.signature]]
 version = "3.0.0"

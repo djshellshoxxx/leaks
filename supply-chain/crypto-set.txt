@@ -16,6 +16,7 @@ getrandom
 hkdf
 hmac
 hpke
+ml-dsa
 ml-kem
 rand_chacha
 rand_core
