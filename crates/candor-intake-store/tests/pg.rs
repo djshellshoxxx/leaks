@@ -1154,9 +1154,7 @@ async fn pg_uniform_rewrite_toast() {
             })
             .collect()
     };
-    let reply_rank = |rows: &[ChunkRow],
-                      cts: &[(Vec<u8>, Vec<u8>)]|
-     -> Vec<(usize, u32)> {
+    let reply_rank = |rows: &[ChunkRow], cts: &[(Vec<u8>, Vec<u8>)]| -> Vec<(usize, u32)> {
         rows.iter()
             .filter_map(|(k, _, id)| {
                 let ct = &cts.iter().find(|(r, _)| r == k)?.1;
