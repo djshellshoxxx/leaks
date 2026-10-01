@@ -200,10 +200,24 @@ pub fn send(sock: impl AsFd, b: &StagedBundle) -> Result<(), SinkError> {
     if n == MSG_LEN { Ok(()) } else { Err(SinkError) }
 }
 
-/// Wait for the store's acknowledgement. `Ok` only for [`ACK_COMMITTED`];
-/// a refusal, EOF, a longer message or any descriptor sent back is an error
-/// (received descriptors are closed).
+/// Longest wait for the store's acknowledgement (its commit includes an
+/// `fsync`); a hung store fails the commit instead of pinning a thread.
+pub const ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Wait for the store's acknowledgement, at most [`ACK_TIMEOUT`]. `Ok` only
+/// for [`ACK_COMMITTED`]; a refusal, a timeout, EOF, a longer message or any
+/// descriptor sent back is an error (received descriptors are closed).
 pub fn await_ack(sock: impl AsFd) -> Result<(), SinkError> {
+    await_ack_within(sock, ACK_TIMEOUT)
+}
+
+/// [`await_ack`] with an explicit bound (`SO_RCVTIMEO` on the socket).
+pub fn await_ack_within(sock: impl AsFd, timeout: std::time::Duration) -> Result<(), SinkError> {
+    if timeout.is_zero() {
+        return Err(SinkError);
+    }
+    rustix::net::sockopt::set_socket_timeout(&sock, rustix::net::sockopt::Timeout::Recv, Some(timeout))
+        .map_err(|_| SinkError)?;
     let mut data = [0u8; 2];
     let mut space = [MaybeUninit::<u8>::uninit(); rustix::cmsg_space!(ScmRights(1))];
     let mut control = RecvAncillaryBuffer::new(&mut space);

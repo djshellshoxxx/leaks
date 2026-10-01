@@ -173,20 +173,19 @@ impl core::fmt::Debug for InsecureDevMode {
 }
 
 impl InsecureDevMode {
-    /// Emit the typed `sys.health` event (service `upload`, status `DEGRADED`,
-    /// check `READINESS`; candor-log has no sealer service code yet, see
-    /// SPEC-NOTES) and return the token only if the event was accepted.
+    /// Emit the typed `sys.health` event (service `sealer`, status `DEGRADED`,
+    /// check `INSECURE_DEV_OVERRIDE`) and return the token only if the event
+    /// was accepted.
     pub fn acknowledge<S, C>(log: &mut candor_log::AuditLog<S, C>) -> Result<Self, HardeningError>
     where
         S: candor_log::chain::CheckpointSigner,
         C: candor_log::chain::AuditClock,
     {
         use candor_log::codes::{HealthCheck, HealthStatus, Service};
-        // candor-log has no sealer service or developer-override code yet
-        // (AUD-RM2-SEA-24(a), coordination item for the candor-log owner);
-        // switch these two constants when it does.
-        const SERVICE: Service = Service::Upload;
-        const CHECK: HealthCheck = HealthCheck::Readiness;
+        // A dedicated service and check code, distinct from any ordinary
+        // readiness degradation (AUD-RM2-SEA-24(a), C-2).
+        const SERVICE: Service = Service::Sealer;
+        const CHECK: HealthCheck = HealthCheck::InsecureDevOverride;
         log.emit(
             candor_log::EventContext::system(SERVICE),
             candor_log::AuditEvent::SysHealth {

@@ -513,11 +513,25 @@ async fn store_failure_commits_nothing_and_leaves_no_staged_ciphertext() {
         .await;
     assert_eq!(r, Response::error(ErrorCode::Internal));
     assert!(f.sink.envelopes().is_empty());
-    // Only the staged part remains (the sealed bundle file was removed).
-    assert_eq!(read_all_files(&f.staging_path).len(), 1);
+    // SEA-26: the staged part was freed as soon as it was written into the
+    // bundle, so nothing is left; the seal cannot be retried silently
+    // without the attachment.
+    assert!(read_all_files(&f.staging_path).is_empty());
+    f.sink.fail.store(false, Ordering::SeqCst);
+    let r = f
+        .sealer
+        .handle(Request::SealFinish {
+            sess: s,
+            delayed_delivery: false,
+        })
+        .await;
+    assert_eq!(r, Response::error(ErrorCode::BadState));
+    let Response::Draft(view) = ok(&f.sealer, Request::DraftGet { sess: s }).await else {
+        panic!()
+    };
+    assert!(view.parts.is_empty(), "the lost attachment is not shown");
     // AUD-RM2-SEA-22: the confirmed passphrase survives a refusal after
     // derivation, so the source can retry without a new passphrase.
-    f.sink.fail.store(false, Ordering::SeqCst);
     let r = f
         .sealer
         .handle(Request::SealFinish {

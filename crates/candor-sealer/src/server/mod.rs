@@ -1620,6 +1620,41 @@ impl Sealer {
         Ok(total)
     }
 
+    /// Graceful-shutdown flush (SEA-28(c)): queue 1–4 dummy account creates
+    /// and write everything queued as one shuffled batch, so the last batch
+    /// before a restart looks like any other. Blocking.
+    pub fn shutdown_flush(&self) -> Result<usize, sink::SinkError> {
+        let n = rand::uniform_below(4)
+            .map_err(|_| sink::SinkError)?
+            .saturating_add(1);
+        for _ in 0..n {
+            let a = dummy_account(&self.st).map_err(|_| sink::SinkError)?;
+            let tag = a.account.lookup_tag;
+            enqueue_account(&self.st, a);
+            remember_dummy(&self.st, tag);
+        }
+        self.flush_accounts()
+    }
+
+    /// Install a SIGTERM handler (call inside the runtime, at start, so a
+    /// failure is a start-up error) and return a task that, on SIGTERM, runs
+    /// [`Sealer::shutdown_flush`] and then completes; the integrator awaits it
+    /// and exits (SEA-28(c)).
+    pub fn spawn_sigterm_flush(
+        &self,
+    ) -> std::io::Result<tokio::task::JoinHandle<Result<usize, sink::SinkError>>> {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = signal(SignalKind::terminate())?;
+        let me = self.clone();
+        Ok(tokio::spawn(async move {
+            term.recv().await;
+            let m = me.clone();
+            blocking(move || m.shutdown_flush())
+                .await
+                .unwrap_or(Err(sink::SinkError))
+        }))
+    }
+
     /// Attachment memory reserved now (SEA-26; health reporting and tests).
     #[must_use]
     pub fn memory_reserved(&self) -> u64 {

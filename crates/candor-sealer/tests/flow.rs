@@ -669,3 +669,138 @@ async fn full_tier_w_flow() {
         .await;
     assert!(matches!(r, Response::Error { .. }));
 }
+
+/// Rotate the passphrase of the authenticated session `l`, re-sending the
+/// given pending replies; returns the new words and lookup tag.
+async fn rotate(f: &Fixture, l: SessionHandle, replies: Vec<PendingReply>) -> (SecretWords, [u8; 32]) {
+    let Response::Words {
+        words,
+        confirm_positions,
+    } = ok(&f.sealer, Request::RotatePassphrase { sess: l }).await
+    else {
+        panic!()
+    };
+    ok(
+        &f.sealer,
+        Request::ConfirmPassphrase {
+            sess: l,
+            words: confirm_words(&words, confirm_positions),
+        },
+    )
+    .await;
+    let Response::Locator { lookup_tag } =
+        ok(&f.sealer, Request::RotateFinish { sess: l, replies }).await
+    else {
+        panic!()
+    };
+    (words, lookup_tag)
+}
+
+async fn login(f: &Fixture, s: SessionHandle, words: &SecretWords) -> [u8; 32] {
+    let Response::Locator { lookup_tag } = ok(
+        &f.sealer,
+        Request::LoginDerive {
+            sess: s,
+            passphrase: SecretBytes::from_slice(words_to_phrase(words).as_bytes()),
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    lookup_tag
+}
+
+fn entry_with(obj: &[u8], stanza: &[u8]) -> Vec<u8> {
+    let mut e = ((obj.len() + stanza.len()) as u32).to_be_bytes().to_vec();
+    e.extend_from_slice(obj);
+    e.extend_from_slice(stanza);
+    e
+}
+
+/// AUD-RM2-SEA-28 (a)/(b): a rotation blocks the old passphrase at once
+/// (login consults the queue), and two rotations inside one batch window
+/// coalesce: the second re-wraps from the queued (latest) stanza, so the reply
+/// stays readable with the final passphrase after the batch is written.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn double_rotation_keeps_replies_readable() {
+    let f = fixture();
+    let words = new_account_submission(&f, sess(1), None, b"attachment").await;
+    assert_eq!(f.sealer.flush_accounts(), Ok(1));
+    let account = f.sink.accounts()[0].account.clone();
+    // The source's keys and mailbox, as a Desk sees them.
+    let sub = &f.sink.envelopes()[0].objects[0];
+    let (_, pt) = open_intake(sub, member_ctx(0), &f.members[0].mek.private).unwrap();
+    let (map, _) = parse_padded(&pt);
+    let src_pk = map.get(4).unwrap().b().to_vec();
+    let mailbox: [u8; 32] = map.get(3).unwrap().b().try_into().unwrap();
+    let (_, hash, obj, stanza0) = make_reply(&f.members[0], &src_pk, mailbox, 1, "keep me");
+    let pending = || {
+        vec![PendingReply {
+            object_hash: hash,
+            stanza: stanza0.clone(),
+        }]
+    };
+    // Log in and unlock the inbox.
+    let l = sess(2);
+    assert_eq!(login(&f, l, &words).await, account.lookup_tag);
+    ok(
+        &f.sealer,
+        Request::LoadPrefs {
+            sess: l,
+            prefs_ct: account.prefs_ct.clone(),
+        },
+    )
+    .await;
+    // First rotation (queued).
+    let (_w1, t1) = rotate(&f, l, pending()).await;
+    // (a) The old passphrase no longer logs in, although the store still
+    // holds the old account until the batch is written.
+    assert_ne!(login(&f, sess(3), &words).await, account.lookup_tag);
+    // The reply stays readable in the session (the queued re-wrap is used).
+    let Response::Reply(Some(v)) = ok(
+        &f.sealer,
+        Request::OpenReply {
+            sess: l,
+            entry: entry_with(&obj, &stanza0),
+        },
+    )
+    .await
+    else {
+        panic!("reply unreadable after the first rotation")
+    };
+    assert_eq!(v.body.expose(), "keep me");
+    // (b) Second rotation in the same window; the caller still sends the
+    // store's stale stanza (wrapped to the original key).
+    let (w2, t2) = rotate(&f, l, pending()).await;
+    assert_ne!(t1, t2);
+    assert_eq!(f.sealer.flush_accounts(), Ok(1), "rotations coalesce");
+    let req = f.sink.accounts().last().unwrap().clone();
+    assert_eq!(req.replaces, Some(account.lookup_tag));
+    assert_eq!(req.account.lookup_tag, t2);
+    assert_eq!(req.rewrapped_replies.len(), 1);
+    assert_eq!(req.rewrapped_replies[0].0, hash);
+    // The final passphrase reads the reply from the re-wrapped stanza.
+    let l2 = sess(4);
+    assert_eq!(login(&f, l2, &w2).await, t2);
+    ok(
+        &f.sealer,
+        Request::LoadPrefs {
+            sess: l2,
+            prefs_ct: req.account.prefs_ct.clone(),
+        },
+    )
+    .await;
+    let Response::Reply(Some(v2)) = ok(
+        &f.sealer,
+        Request::OpenReply {
+            sess: l2,
+            entry: entry_with(&obj, &req.rewrapped_replies[0].1),
+        },
+    )
+    .await
+    else {
+        panic!("re-wrapped reply unreadable after a double rotation")
+    };
+    assert_eq!(v2.body.expose(), "keep me");
+}
