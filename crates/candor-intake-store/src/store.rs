@@ -224,8 +224,9 @@ pub trait IntakeStore: Send + Sync {
     /// received after copying entries. The head's signature must verify under
     /// `core_pk` and the head must be part of the local chain (seq ≤ local head,
     /// chain hash equal); it is stored monotonically with its signature, which
-    /// the maintenance role re-verifies before flagging or pruning anything. An
-    /// older head changes nothing.
+    /// the maintenance role re-verifies before flagging or pruning anything. A
+    /// head older (by attestation counter) than the acknowledged one is refused
+    /// (AUD-RM2-STO-24); an identical one changes nothing.
     fn acknowledge_deletion_head(
         &self,
         head: &SignedDeletionHead,
@@ -233,7 +234,9 @@ pub trait IntakeStore: Send + Sync {
     ) -> impl Future<Output = Result<()>> + Send;
 
     /// RL-12 / restore: verify the pushed Z-CORE copy (Z-CORE head signature
-    /// under `core_pk`; chain and K31 signatures; contiguous from the local head;
+    /// under `core_pk`; the head fresh for `today` (± [`crate::deletion::MAX_HEAD_AGE_DAYS`]) and
+    /// not older, by attestation counter, than the last verified head, which
+    /// backups carry (AUD-RM2-STO-24); chain and K31 signatures; contiguous from the local head;
     /// ending exactly at the signed head; no fork with local entries; containing
     /// the last verified head, which backups carry), merge newer entries, delete
     /// every listed account and reply, record the head as acknowledged, then
@@ -247,6 +250,7 @@ pub trait IntakeStore: Send + Sync {
         core_pk: &[u8; 32],
         k31_pk: &[u8; 32],
         hasher: &dyn ReplyObjectHasher,
+        today: Day,
     ) -> impl Future<Output = Result<u64>> + Send;
 
     // ----- key directory -----

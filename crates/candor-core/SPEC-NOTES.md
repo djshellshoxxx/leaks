@@ -236,3 +236,5 @@ Reviewed the diff as an attacker (OWASP ASVS 5.0 L3 mindset):
 - **Timing:** comparisons on secrets use `subtle`; measured by `ct_timing` (|t| ≤ 2.05). `verify_slot_block`'s new duplicate-`key_id` check runs on the (CK-holder-visible) list and is not secret-dependent.
 - **Dependencies:** no new crates; `sha2`/`blake3` gain their `zeroize` features; `x25519-dalek` is a dev-dependency already in the lockfile.
 - **Residual risk:** memory locking is the process's job (CORE-02); compiler stack temporaries and `unicode-normalization`'s spill buffer are not wiped (CORE-03/07); CORE-13 typestate, CORE-15 AAD v2 and CORE-16(a) CBOR decoder are deferred as recorded above; ST-027 zeroization scan is not automated.
+
+Miri (`nightly-2026-09-28`, `MIRIFLAGS=-Zmiri-disable-isolation PROPTEST_CASES=4`): 37 decoder/parser tests (`bytes`, `header`, `labels`, `padding`, `rand`, `record`, `secret`, `suite`, `stream` incl. `arbitrary_ct`/`staged_part_id_is_single_use`, `passphrase` normalization/lowercase/over-long) passed with no UB reported (2,284 s). X-Wing/Argon2-heavy tests were excluded as infeasible under Miri.

@@ -562,6 +562,13 @@ check_pg() {
   # Resolved inside --root only: no symlinked component (AUD-RM2-DEP-17).
   if l=$(symlinked_component "$INPREFIX" "$ROOT$dd"); then fail pg.effective "data directory path has a symlinked component: $l"; return; fi
   if [ ! -d "$ROOT$dd" ]; then fail pg.effective "data directory missing"; return; fi
+  # Cumulative statistics never on disk (AUD-RM2-STO-11): pg_stat is a symlink to the RAM-only
+  # /run/candor/intake-pg-stat (the link is read, never followed).
+  if [ -L "$ROOT$dd/pg_stat" ] && [ "$(readlink -- "$ROOT$dd/pg_stat")" = /run/candor/intake-pg-stat ]; then
+    if [ "$LIVE" -eq 1 ] && { [ -L /run/candor/intake-pg-stat ] || [ "$(stat -f -c %T /run/candor/intake-pg-stat 2>/dev/null)" != tmpfs ]; }; then
+      fail pg.stats_in_ram "/run/candor/intake-pg-stat is not a tmpfs directory"
+    else ok pg.stats_in_ram "pg_stat -> /run/candor/intake-pg-stat"; fi
+  else fail pg.stats_in_ram "data_directory/pg_stat must be a symlink to /run/candor/intake-pg-stat (stats file would persist on disk)"; fi
   if snap_opt pg.auto_conf_empty "$ROOT$dd/postgresql.auto.conf" pg.auto.conf; then
     if [ -n "$(pg_norm "$SNAP")" ]; then fail pg.auto_conf_empty "postgresql.auto.conf contains settings (ALTER SYSTEM)"; else ok pg.auto_conf_empty; fi
   fi

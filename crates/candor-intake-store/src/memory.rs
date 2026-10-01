@@ -862,6 +862,7 @@ impl IntakeStore for MemoryStore {
         core_pk: &[u8; 32],
         k31_pk: &[u8; 32],
         hasher: &dyn ReplyObjectHasher,
+        today: Day,
     ) -> Result<u64> {
         let mut st = self.state.lock().await;
         let (tenant, verified) = {
@@ -869,7 +870,7 @@ impl IntakeStore for MemoryStore {
             (m.tenant, m.ack_head)
         };
         let local: Vec<DeletionEntry> = st.deletion.values().copied().collect();
-        let merged = validate::verify_pushed(entries, k31_pk, head, &tenant, core_pk)
+        let merged = validate::verify_pushed(entries, k31_pk, head, &tenant, core_pk, today)
             .and_then(|()| validate::merge_pushed(&local, verified.as_ref(), entries, head));
         let new = match merged {
             Ok(n) => n,
@@ -912,8 +913,9 @@ impl IntakeStore for MemoryStore {
         let through = st.head().map_or(0, |e| e.seq);
         let m = st.meta_mut()?;
         // The pushed head is verified and contained in the merged chain: it is
-        // the new acknowledged head (never lowered).
-        if m.acked_seq() < head.seq {
+        // the new acknowledged head when its attestation is newer (never
+        // lowered; AUD-RM2-STO-24).
+        if head.seq > 0 && m.ack_head.is_none_or(|v| v.counter < head.counter) {
             m.ack_head = Some(*head);
         }
         m.restore_pending = false;
