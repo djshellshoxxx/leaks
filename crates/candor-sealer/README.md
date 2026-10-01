@@ -8,6 +8,7 @@
 - **Passphrases** (10 EFF words) are generated in the sealer, confirmed by 3 random words and zeroized after derivation. Argon2id derivations wait behind a semaphore of 4.
 - **Logged-in sources** can read verified replies, send follow-ups (only to the original eligible set) and rotate their passphrase.
 - **Chaff** follows a Poisson schedule per channel (mean 2 h). It uses the same format and write path as real envelopes, with every slot a dummy and a chaff-kind `disposition_ct`.
+- **Uniform shape (ADR-052(1)/(2)).** Every envelope group, real or chaff, is SUBMISSION/SOURCE_MESSAGE + ATTACHMENT_BUNDLE + IDENTITY, with the text objects at their maximum bucket and dummies where nothing was supplied. Accounts are a separate store operation; chaff writes dummy accounts and draws delivery delays like real traffic.
 
 Licence: AGPL-3.0-or-later. No `unsafe`. Nothing is logged, printed or written to disk in plaintext. Read `SPEC-NOTES.md` first: it covers the spec findings, the implementation decisions, the security self-review and the integration notes.
 
@@ -50,15 +51,15 @@ let staging: &'static SafeRoot = Box::leak(Box::new(SafeRoot::open(&staging_path
 let k35 = SigningKey::from_seed(&credential_bytes);       // from $CREDENTIALS_DIRECTORY, never env
 let sealer = Sealer::new(config, k35, staging, clock, store_sink)?;  // self-test, empties staging
 sealer.set_high_water_mark(persisted_hwm);
-sealer.install_snapshot(verified_snapshot)?;               // rollback-checked
+sealer.install_snapshot(bundle, |hwm| persist(hwm))?;     // VerifiedSnapshot: signatures, proof, HWM
 sealer.spawn_background();                                 // reaper + chaff
-sealer.serve(listener).await?;                             // socket-activated UnixListener
+sealer.serve(listener).await?;                             // refuses unless hardened (self-check)
 ```
 
 The integrator supplies four things:
 - `Clock` (16 §14.3): the independent day clock, built from the Tor consensus and Roughtime.
-- `EnvelopeSink`: the store client. It covers `COMMIT_ENVELOPE` and `ACCOUNT_ROTATE`.
-- The verified `DirectorySnapshot`, refreshed hourly by the relay control cycle.
+- `EnvelopeSink`: the store client: `commit_envelope_group` (no account reference) and `upsert_account` (ADR-052(2)).
+- `SnapshotBundle`s (flattened, entry-verified view + signed checkpoint + consistency proof), refreshed hourly; the pinned `DirectoryTrust` in the config.
 - K35, loaded from a systemd credential.
 
 ## systemd unit (07 §4.2/4.3, BE-003; R7 §B)
@@ -83,8 +84,10 @@ PrivateTmp=yes
 PrivatePIDs=yes
 MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
-# 07 §4.3 list plus what tmpfs staging needs (SPEC-NOTES item 7):
-SystemCallFilter=read write recvmsg sendmsg accept4 close epoll_wait epoll_pwait epoll_ctl epoll_create1 futex mmap munmap mremap madvise brk rt_sigreturn rt_sigprocmask rt_sigaction clock_gettime getrandom exit exit_group sched_yield nanosleep clock_nanosleep restart_syscall fstat newfstatat statx getsockopt mlock munlock mlockall prctl setrlimit prlimit64 openat unlinkat renameat2 linkat fsync fdatasync fchmod utimensat getdents64 lseek pread64 sigaltstack landlock_create_ruleset landlock_add_rule landlock_restrict_self clone3 set_robust_list rseq
+# 07 §4.3 list plus what tmpfs staging needs (SPEC-NOTES item 7). The shipped unit
+# (deploy/intake/systemd/candor-sealer.service) expresses the same allow-list as the
+# @system-service baseline minus every other call (config-check.sh requires that form):
+SystemCallFilter=read write readv writev pread64 pwrite64 preadv pwritev lseek _llseek recvmsg sendmsg recvfrom sendto recv send accept accept4 socket connect getsockopt setsockopt getsockname getpeername shutdown close close_range fcntl fcntl64 ioctl dup dup3 epoll_create epoll_create1 epoll_ctl epoll_wait epoll_pwait epoll_pwait2 eventfd2 poll ppoll ppoll_time64 futex futex_time64 futex_waitv mmap mmap2 munmap mremap madvise mprotect brk mlock mlock2 mlockall munlock membarrier rt_sigreturn sigreturn rt_sigprocmask rt_sigaction sigaltstack tgkill tkill getpid gettid clock_gettime clock_gettime64 clock_getres clock_getres_time64 clock_nanosleep clock_nanosleep_time64 nanosleep gettimeofday time getrandom exit exit_group restart_syscall sched_yield sched_getaffinity clone clone3 set_robust_list get_robust_list rseq set_tid_address arch_prctl set_thread_area set_tls execve prctl prlimit64 getrlimit ugetrlimit fstat fstat64 newfstatat fstatat64 statx fstatfs fstatfs64 openat unlinkat renameat2 linkat mkdirat fsync fdatasync fchmod fchmodat utimensat utimensat_time64 getdents64 readlinkat getuid geteuid getgid getegid getuid32 geteuid32 getgid32 getegid32 uname sysinfo access faccessat faccessat2 landlock_create_ruleset landlock_add_rule landlock_restrict_self
 SystemCallErrorNumber=EPERM
 Restart=on-failure
 RestartSec=2s
@@ -94,9 +97,11 @@ RestartSec=2s
 
 ```
 cargo fmt --all
-cargo clippy -p candor-sealer --all-targets -- -D warnings
+cargo clippy -p candor-sealer --all-targets --all-features -- -D warnings
 cargo clippy -p candor-sealer --no-default-features --lib -- -D warnings   # proto only
 cargo test -p candor-sealer
 ```
+
+Fuzzing (ST-043): `cd crates/candor-sealer && cargo +nightly fuzz run fuzz_sealer_ipc -- -max_total_time=600 -rss_limit_mb=2048`.
 
 The full flow test runs four Argon2id derivations at m = 64 MiB, so it takes about 20–30 s in debug builds.

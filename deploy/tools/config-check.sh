@@ -431,7 +431,7 @@ check_pg() {
   if [ -e "$auto" ] && [ -n "$(pg_norm "$auto")" ]; then fail pg.auto_conf_empty "postgresql.auto.conf contains settings (ALTER SYSTEM)"; else ok pg.auto_conf_empty; fi
   [ -x "$pgbin" ] || { fail pg.effective "PostgreSQL 16 server binary missing"; return; }
   if ! is_root || ! have setpriv; then fail pg.effective "must run as root with setpriv"; return; fi
-  owner=$(stat -c %U -- "$ROOT$dd")
+  owner=$(stat -L -c %U -- "$ROOT$dd")
   if [ "$owner" = root ]; then fail pg.effective "data directory owned by root"; return; fi
   if [ "$LIVE" -eq 1 ] && [ "$owner" != postgres ]; then fail pg.datadir_owner "data directory must be owned by postgres, found $owner"; fi
   local -a extra=()
@@ -528,15 +528,15 @@ check_units() {
                   if (!(k in mode)) { order[++n]=k; mode[k]=a[5]; ex[k]=v }
                   else if (a[5]=="=") ex[k]=ex[k] " ;; " v } next }
       { e=index($0, "|"); s=substr($0, 1, e-1); r=substr($0, e+1); e=index(r, "|"); k=s "|" substr(r, 1, e-1); got[k]=substr(r, e+1); seen[k]=1
-        if (!(k in mode)) printf "FAIL\tunit.%s.%s\tdirective not allowed: [%s] %s=%s\n", u, k, s, substr(r, 1, e-1), got[k] }
-      END { for (i=1; i<=n; i++) { k=order[i]; m=mode[k]
-        if (m=="*") { if (k in seen) printf "OK\tunit.%s.%s\t(semantic check)\n", u, k; else printf "FAIL\tunit.%s.%s\tmissing\n", u, k; continue }
+        if (!(k in mode)) { dk=k; sub(/\|/, ".", dk); printf "FAIL\tunit.%s.%s\tdirective not allowed: [%s] %s=%s\n", u, dk, s, substr(r, 1, e-1), got[k] } }
+      END { for (i=1; i<=n; i++) { k=order[i]; m=mode[k]; dk=k; sub(/\|/, ".", dk)
+        if (m=="*") { if (k in seen) printf "OK\tunit.%s.%s\t(semantic check)\n", u, dk; else printf "FAIL\tunit.%s.%s\tmissing\n", u, dk; continue }
         g=(k in seen) ? got[k] : ""
-        if (m=="=") { if (!(k in seen)) printf "FAIL\tunit.%s.%s\tmissing (expected %s)\n", u, k, ex[k]
-                      else if (g==ex[k]) printf "OK\tunit.%s.%s\t%s\n", u, k, (g=="" ? "<empty>" : g)
-                      else printf "FAIL\tunit.%s.%s\texpected [%s], effective [%s]\n", u, k, ex[k], g }
-        else if (m=="~") { if (g ~ ex[k]) printf "OK\tunit.%s.%s\t%s\n", u, k, (k in seen ? g : "<absent>")
-                           else printf "FAIL\tunit.%s.%s\teffective [%s] does not match %s\n", u, k, g, ex[k] } } }' "$BASE" "$WORK/eff/$u" > "$WORK/rl"; report_lines < "$WORK/rl"
+        if (m=="=") { if (!(k in seen)) printf "FAIL\tunit.%s.%s\tmissing (expected %s)\n", u, dk, ex[k]
+                      else if (g==ex[k]) printf "OK\tunit.%s.%s\t%s\n", u, dk, (g=="" ? "<empty>" : g)
+                      else printf "FAIL\tunit.%s.%s\texpected [%s], effective [%s]\n", u, dk, ex[k], g }
+        else if (m=="~") { if (g ~ ex[k]) printf "OK\tunit.%s.%s\t%s\n", u, dk, (k in seen ? g : "<absent>")
+                           else printf "FAIL\tunit.%s.%s\teffective [%s] does not match %s\n", u, dk, g, ex[k] } } }' "$BASE" "$WORK/eff/$u" > "$WORK/rl"; report_lines < "$WORK/rl"
   done
 
   # Sealer syscall filter (its lines are owned by the sealer work, AUD-RM2-SEA-06): allow-list

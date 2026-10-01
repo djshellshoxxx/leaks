@@ -79,6 +79,17 @@ fn equations(rel: &Released) -> Vec<(Vec<usize>, u64)> {
 /// completion and returns the primary cells whose feasible set is not the
 /// whole `0..k`, i.e. about which it learned anything.
 fn exposed(n: usize, vals: &[u64], eqs: &[(Vec<usize>, u64)]) -> Vec<usize> {
+    exposed_with(n, vals, eqs, &[])
+}
+
+/// As [`exposed`], plus interval knowledge `lo ≤ Σ cells ≤ hi` (e.g. "this
+/// suppressed cell of another release is < k").
+fn exposed_with(
+    n: usize,
+    vals: &[u64],
+    eqs: &[(Vec<usize>, u64)],
+    ranges: &[(Vec<usize>, u64, u64)],
+) -> Vec<usize> {
     let k = 10u64;
     let fixed: BTreeMap<usize, u64> = eqs
         .iter()
@@ -87,77 +98,94 @@ fn exposed(n: usize, vals: &[u64], eqs: &[(Vec<usize>, u64)]) -> Vec<usize> {
         .collect();
     let unknown: Vec<usize> = (0..n).filter(|i| !fixed.contains_key(i)).collect();
     let primary: Vec<usize> = unknown.iter().copied().filter(|&i| vals[i] < k).collect();
-    let bound = |cell: usize| -> u64 {
-        eqs.iter()
-            .filter(|(e, _)| e.contains(&cell))
-            .map(|(_, t)| *t)
-            .min()
-            .unwrap_or(k + 40)
+    // Per-cell prior range: primary [0, k-1], others [k, smallest total].
+    let range = |cell: usize| -> (u64, u64) {
+        if let Some(v) = fixed.get(&cell) {
+            return (*v, *v);
+        }
+        if vals[cell] < k {
+            (0, k - 1)
+        } else {
+            let b = eqs
+                .iter()
+                .filter(|(e, _)| e.contains(&cell))
+                .map(|(_, t)| *t)
+                .min()
+                .unwrap_or(k + 40);
+            (k, b.max(k))
+        }
     };
-    let mut seen: BTreeMap<usize, BTreeSet<u64>> = BTreeMap::new();
-    let mut assign: BTreeMap<usize, u64> = fixed.clone();
-    #[allow(clippy::too_many_arguments)]
-    fn rec(
+    /// Depth-first search for one completion, with interval pruning on
+    /// every equation (sum of assigned + bounds of unassigned must bracket
+    /// the published total).
+    fn feasible(
         idx: usize,
         cells: &[usize],
-        vals: &[u64],
         assign: &mut BTreeMap<usize, u64>,
         eqs: &[(Vec<usize>, u64)],
-        bound: &dyn Fn(usize) -> u64,
-        primary: &[usize],
-        seen: &mut BTreeMap<usize, BTreeSet<u64>>,
+        ranges: &[(Vec<usize>, u64, u64)],
+        range: &dyn Fn(usize) -> (u64, u64),
     ) -> bool {
+        for (e, rlo, rhi) in ranges {
+            let (mut lo, mut hi) = (0u64, 0u64);
+            for &i in e {
+                let (a, b) = assign.get(&i).map_or_else(|| range(i), |v| (*v, *v));
+                lo += a;
+                hi += b;
+            }
+            if lo > *rhi || hi < *rlo {
+                return false;
+            }
+        }
         for (e, t) in eqs {
-            let mut s = 0u64;
-            let mut complete = true;
+            let (mut lo, mut hi) = (0u64, 0u64);
             for &i in e {
                 match assign.get(&i) {
-                    Some(v) => s += v,
-                    None => complete = false,
+                    Some(v) => {
+                        lo += v;
+                        hi += v;
+                    }
+                    None => {
+                        let (a, b) = range(i);
+                        lo += a;
+                        hi += b;
+                    }
                 }
             }
-            if s > *t || (complete && s != *t) {
+            if lo > *t || hi < *t {
                 return false;
             }
         }
         if idx == cells.len() {
-            for &i in primary {
-                seen.entry(i).or_default().insert(assign[&i]);
-            }
-            return primary
-                .iter()
-                .all(|i| seen.get(i).is_some_and(|s| s.len() == 10));
+            return true;
         }
         let cell = cells[idx];
-        let (lo, hi) = if vals[cell] < 10 {
-            (0, 9)
-        } else {
-            (10, bound(cell).max(10))
-        };
+        if assign.contains_key(&cell) {
+            return feasible(idx + 1, cells, assign, eqs, ranges, range);
+        }
+        let (lo, hi) = range(cell);
         for v in lo..=hi {
             assign.insert(cell, v);
-            let done = rec(idx + 1, cells, vals, assign, eqs, bound, primary, seen);
-            assign.remove(&cell);
-            if done {
+            if feasible(idx + 1, cells, assign, eqs, ranges, range) {
+                assign.remove(&cell);
                 return true;
             }
+            assign.remove(&cell);
         }
         false
     }
-    rec(
-        0,
-        &unknown,
-        vals,
-        &mut assign,
-        eqs,
-        &bound,
-        &primary,
-        &mut seen,
-    );
-    primary
-        .into_iter()
-        .filter(|i| seen.get(i).is_none_or(|s| s.len() < 10))
-        .collect()
+    let mut out = Vec::new();
+    for &p in &primary {
+        for v in 0..k {
+            let mut assign = fixed.clone();
+            assign.insert(p, v);
+            if !feasible(0, &unknown, &mut assign, eqs, ranges, &range) {
+                out.push(p);
+                break;
+            }
+        }
+    }
+    out
 }
 
 fn pinned_cells(rel: &Released, vals: &[u64]) -> Vec<usize> {
@@ -882,6 +910,22 @@ proptest! {
         if let Published::Value(t) = rel2.grand_total {
             eqs.push(((0..r * c).collect(), t));
         }
-        prop_assert!(exposed(r * c, vals, &eqs).is_empty(), "{:?} {:?} {:?}", vals, rel1, rel2);
+        // Prior knowledge from the second release's suppression pattern
+        // (unless it is the value-independent "everything hidden" pattern).
+        let hidden = |p: &Published| !matches!(p, Published::Value(_));
+        let blind = rel2.cells.iter().all(hidden)
+            && hidden(&rel2.grand_total)
+            && rel2.row_totals.iter().all(hidden)
+            && rel2.col_totals.iter().all(hidden);
+        let mut ranges = Vec::new();
+        if !blind {
+            for (j, p) in rel2.cells.iter().enumerate() {
+                if *p == Published::Suppressed {
+                    let v: u64 = lines[j].iter().map(|&i| vals[i]).sum();
+                    ranges.push(if v < 10 { (lines[j].clone(), 0, 9) } else { (lines[j].clone(), 10, u64::MAX / 4) });
+                }
+            }
+        }
+        prop_assert!(exposed_with(r * c, vals, &eqs, &ranges).is_empty(), "{:?} {:?} {:?}", vals, rel1, rel2);
     }
 }

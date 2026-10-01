@@ -40,6 +40,8 @@ mod rand;
 
 #[cfg(test)]
 mod vectors;
+#[cfg(test)]
+mod wycheproof;
 
 pub use error::{Error, Result};
 /// Fill a buffer from the OS CSPRNG (the only randomness source, CRYPTO-033).

@@ -28,6 +28,7 @@ use crate::slots::{RecipientSlotBlock, SlotBinding, SlotContext};
 use crate::stanza::{HpkeWrapContext, StanzaType, WrapStanza};
 use crate::stream;
 use crate::suite::Suite;
+use crate::kem::seal_base_with;
 use serde_json::{Value, json};
 
 const STD: Suite = Suite::CandorStd1;
@@ -63,7 +64,7 @@ fn passphrase_vectors() -> Value {
         cases.push(json!({
             "passphrase": p.expose(),
             "input_as_typed": messy,
-            "normalized": normalize(&messy).as_str(),
+            "normalized": normalize(&messy).unwrap().as_str(),
             "deployment_salt": h(&deployment_salt),
             "tenant_id": h(&tenant_id),
             "suite": STD.id(),
@@ -157,14 +158,14 @@ fn sealed_object_vectors() -> Value {
         let mut v = inner.clone();
         v.push(pc.recipient_list.len() as u8);
         for e in pc.recipient_list {
-            v.extend_from_slice(&e.to_bytes());
+            v.extend_from_slice(e.to_bytes().as_slice());
         }
         pad(ObjectType::Submission, &v)
     };
-    let obj = seal_with_ck_rng(&mut rng, &ck, &req, build).unwrap();
+    let (list, obj) = seal_with_ck_rng(&mut rng, &ck, &req, build).unwrap();
     let blk = obj.slot_block.clone().unwrap();
     let list_hex = |l: &[crate::slots::RecipientListEntry]| {
-        l.iter().map(|e| h(&e.to_bytes())).collect::<Vec<_>>()
+        l.iter().map(|e| h(e.to_bytes().as_slice())).collect::<Vec<_>>()
     };
 
     // Hidden-recipient negative: three real slots, Recipient List names only two.
@@ -173,7 +174,7 @@ fn sealed_object_vectors() -> Value {
         recipients: Some((ctx.clone(), &pks3)),
         ..req
     };
-    let obj3 = seal_with_ck_rng(&mut rng, &ck, &req3, build).unwrap();
+    let (list3, obj3) = seal_with_ck_rng(&mut rng, &ck, &req3, build).unwrap();
 
     // Swapped-recipient negative (ADR-050(3)): slot sealed to member 2 ("attacker"),
     // list names member 0's key id at that slot.
@@ -182,9 +183,10 @@ fn sealed_object_vectors() -> Value {
         recipients: Some((ctx.clone(), &attacker)),
         ..req
     };
-    let obj4 = seal_with_ck_rng(&mut rng, &ck, &req4, build).unwrap();
-    let mut swapped_list = obj4.recipient_list.clone();
-    swapped_list[0].key_id = key_id(STD, KeyKind::Mek, &mems[0].public.to_bytes());
+    let (list4, obj4) = seal_with_ck_rng(&mut rng, &ck, &req4, build).unwrap();
+    let mut swapped = list4.as_slice()[0].to_bytes();
+    swapped[1..33].copy_from_slice(&key_id(STD, KeyKind::Mek, &mems[0].public.to_bytes()));
+    let swapped_list = [crate::slots::RecipientListEntry::from_bytes(swapped.as_slice()).unwrap()];
 
     // All-dummy block: fully deterministic from (CK, object_id, payload_nonce, context) — dummy-slot KAT.
     let dummy_binding = SlotBinding {
@@ -207,7 +209,7 @@ fn sealed_object_vectors() -> Value {
         "ck": h(ck.expose()),
         "inner_layout": "u32be(5) || 'hello' || u8 n || n x 97-byte Recipient List entries || zero padding",
         "inner_prefix": h(&inner),
-        "recipient_list": list_hex(&obj.recipient_list),
+        "recipient_list": list_hex(list.as_slice()),
         "sealed_object": h(&obj.bytes),
         "object_hash": h(&obj.object_hash),
         "slot_block": h(&blk.encode()),
@@ -228,7 +230,7 @@ fn sealed_object_vectors() -> Value {
             "hidden_recipient": {
                 "sealed_object": h(&obj3.bytes),
                 "slot_block": h(&obj3.slot_block.unwrap().encode()),
-                "recipient_list": list_hex(&obj3.recipient_list[..2]),
+                "recipient_list": list_hex(&list3.as_slice()[..2]),
                 "expect": "slot verification failure (unlisted non-dummy slot)"
             },
             "swapped_recipient": {
@@ -392,6 +394,212 @@ fn misc_vectors() -> Value {
         "lookup_tag": {"lookup_id": h(&lookup_id), "lookup_tag": h(&lookup_tag(&lookup_id))},
         "evidence_abc": {"sha256": h(&ev.sha256), "blake3": h(&ev.blake3)},
     })
+}
+
+/// Fixed keys shared with the fuzz targets in `fuzz/fuzz_targets/` (AUD-RM1-CORE-06):
+/// the committed seeds in `fuzz/seeds/<target>/` are valid under these keys, so the
+/// structure-aware targets reach MAC verification, decryption, trial-open and full
+/// slot verification. Keep in sync with `fuzz/fuzz_targets/common.rs`.
+pub(crate) mod fuzzkeys {
+    pub const CK: [u8; 32] = [0x5A; 32];
+    pub const MEMBER_IKM: [u8; 32] = [0x6B; 32];
+    pub const TENANT: [u8; 16] = [1; 16];
+    pub const CHANNEL: [u8; 16] = [2; 16];
+    pub const EPOCH: u32 = 3;
+    pub const CASE_ID: [u8; 16] = [4; 16];
+    pub const VERSION: u32 = 1;
+    pub const CASE_KEY: [u8; 32] = [0x7C; 32];
+    pub const EK: [u8; 32] = [0x8D; 32];
+    pub const OBJECT_HASH: [u8; 32] = [0x9E; 32];
+    pub const MAILBOX: [u8; 32] = [0xAF; 32];
+    pub const HPKE_INFO: &[u8] = b"fuzz-info";
+    pub const HPKE_AAD: &[u8] = b"fuzz-aad";
+    pub const STREAM_KEY: [u8; 32] = [3; 32];
+    pub const RECORD_KEY: [u8; 32] = [7; 32];
+}
+
+/// Seed inputs per fuzz target: `(target, file name, bytes)`.
+fn fuzz_seeds() -> Vec<(&'static str, String, Vec<u8>)> {
+    use fuzzkeys as fk;
+    let mut rng = TestRng::new(0xF0);
+    let mut out = Vec::new();
+    let member = KemKeyPair::derive(STD, &fk::MEMBER_IKM).unwrap();
+    let ck = ContentKey::from_bytes(fk::CK);
+    let ctx = SlotContext::MemberEpoch {
+        tenant_id: fk::TENANT,
+        channel_id: fk::CHANNEL,
+        epoch_id: fk::EPOCH,
+    };
+    // Envelope: slot block ‖ sealed object; inner = u32be(5) ‖ "hello" ‖ u8 n ‖ n × entry.
+    let pks = [member.public.clone()];
+    for (name, ty, recips) in [
+        ("submission", ObjectType::Submission, Some((ctx.clone(), &pks[..]))),
+        ("reply", ObjectType::Reply, None),
+    ] {
+        let req = SealRequest {
+            suite: STD,
+            object_type: ty,
+            tenant_id: fk::TENANT,
+            channel_id: if recips.is_some() { fk::CHANNEL } else { [0; 16] },
+            epoch_id: if recips.is_some() { fk::EPOCH } else { 0 },
+            day_stamp: 0,
+            recipients: recips,
+            padded_len: 4096,
+        };
+        let (_, obj) = seal_with_ck_rng(&mut rng, &ck, &req, |pc| {
+            let mut v = 5u32.to_be_bytes().to_vec();
+            v.extend_from_slice(b"hello");
+            v.push(pc.recipient_list.len() as u8);
+            for e in pc.recipient_list {
+                v.extend_from_slice(e.to_bytes().as_slice());
+            }
+            pad(ty, &v)
+        })
+        .unwrap();
+        out.push(("fuzz_header", name.to_string(), obj.bytes[..128].to_vec()));
+        if let Some(b) = &obj.slot_block {
+            let enc = b.encode();
+            out.push(("fuzz_slot_block", name.to_string(), enc.clone()));
+            let mut env = enc;
+            env.extend_from_slice(&obj.bytes);
+            out.push(("fuzz_envelope_parse", format!("{name}_with_block"), env));
+        }
+        out.push(("fuzz_envelope_parse", name.to_string(), obj.bytes.clone()));
+    }
+    let (dummy, list) = RecipientSlotBlock::build_with(
+        &mut rng,
+        &ck,
+        &SlotBinding {
+            suite: STD,
+            object_id: [9; 16],
+            payload_nonce: [8; 16],
+            context: ctx.clone(),
+        },
+        &pks,
+    )
+    .unwrap();
+    // `slot block ‖ entry`: trial-open with the fuzz member succeeds under the target's
+    // fixed binding (object_id [9; 16], payload_nonce [8; 16]) and full verification
+    // passes, so mutations start from the deepest path.
+    let mut one = dummy.encode();
+    one.extend_from_slice(list.as_slice()[0].to_bytes().as_slice());
+    out.push(("fuzz_slot_block", "one_member".into(), one));
+    out.push((
+        "fuzz_recipient_entry",
+        "entry".into(),
+        list.as_slice()[0].to_bytes().to_vec(),
+    ));
+    // HPKE open: enc (1120) ‖ ct, sealed to the fuzz member with the fixed info/aad.
+    for (name, pt) in [("ck", &[0x11u8; 32][..]), ("empty", &[][..])] {
+        let (enc, ct) = seal_base_with(&mut rng, &member.public, fk::HPKE_INFO, fk::HPKE_AAD, pt)
+            .unwrap();
+        let mut v = enc;
+        v.extend_from_slice(&ct);
+        out.push(("fuzz_hpke_open", name.into(), v));
+    }
+    // Stanzas valid under the fixed keys/contexts.
+    let reply_ctx = HpkeWrapContext::Reply {
+        tenant_id: fk::TENANT,
+        channel_id: fk::CHANNEL,
+        mailbox_id: fk::MAILBOX,
+    };
+    let hpke = WrapStanza::seal_hpke_with(
+        &mut rng,
+        STD,
+        &member.public,
+        [0; 32],
+        fk::OBJECT_HASH,
+        &reply_ctx,
+        &fk::CK,
+    )
+    .unwrap();
+    let case_key = CaseKey::from_bytes(fk::CASE_KEY);
+    let aead = WrapStanza::seal_case_aead_with(
+        &mut rng,
+        &case_key,
+        fk::TENANT,
+        fk::CASE_ID,
+        fk::VERSION,
+        fk::OBJECT_HASH,
+        &ck,
+    )
+    .unwrap();
+    let inner = WrapStanza::seal_hpke_with(
+        &mut rng,
+        STD,
+        &member.public,
+        key_id(STD, KeyKind::UserEnc, &member.public.to_bytes()),
+        casekey_bound_hash(&fk::CASE_ID, fk::VERSION),
+        &HpkeWrapContext::CaseKey {
+            tenant_id: fk::TENANT,
+            case_id: fk::CASE_ID,
+            version: fk::VERSION,
+            recipient_key_id: key_id(STD, KeyKind::UserEnc, &member.public.to_bytes()),
+        },
+        &fk::CASE_KEY,
+    )
+    .unwrap();
+    let ek = WrapStanza::seal_casekey_ek_with(
+        &mut rng,
+        &ErasureKey::from_bytes(fk::EK),
+        fk::TENANT,
+        fk::CASE_ID,
+        fk::VERSION,
+        &inner,
+    )
+    .unwrap();
+    for (name, st) in [("hpke_reply", &hpke), ("case_aead", &aead), ("casekey_ek", &ek)] {
+        out.push(("fuzz_stanza", name.into(), st.encode().unwrap()));
+    }
+    // Records under the fixed key and the zero Case AAD used by the target.
+    let aad = RecordAad::Case {
+        tenant_id: [0; 16],
+        case_id: [0; 16],
+        table_id: 0,
+        column_id: 0,
+        record_id: [0; 16],
+        row_version: 0,
+    };
+    let rec = seal_record_with(&mut rng, &AeadKey::from_bytes(fk::RECORD_KEY), 0, &aad, b"seed")
+        .unwrap();
+    out.push(("fuzz_record", "case".into(), rec));
+    // STREAM: u16be(L) ‖ ciphertext of pattern(4·L) under the fixed key.
+    for l in [0u16, 1, 16_384, 16_385] {
+        let len = usize::from(l) * 4;
+        let ct = stream::encrypt(AeadKey::from_bytes(fk::STREAM_KEY), &pattern(len)).unwrap();
+        let mut v = l.to_be_bytes().to_vec();
+        v.extend_from_slice(&ct);
+        out.push(("fuzz_stream_decrypt", format!("len{len}"), v));
+    }
+    // Passphrase normalization / membership.
+    for (name, p) in [
+        ("plain", "abacus zoom abacus zoom abacus zoom abacus zoom abacus zoom"),
+        ("messy", "  ABACUS -\u{2014}\tzoom,, kiwi  "),
+        ("unicode", "\u{FF21}bacus \u{FB01}ve \u{0130}ΟΔΟΣ \u{FDFA}"),
+    ] {
+        out.push(("fuzz_normalize", name.into(), p.as_bytes().to_vec()));
+    }
+    out
+}
+
+#[test]
+fn fuzz_seeds_are_current() {
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/fuzz/seeds/");
+    let regen = std::env::var("CANDOR_REGEN_VECTORS").is_ok_and(|v| v == "1");
+    for (target, name, bytes) in fuzz_seeds() {
+        let tdir = format!("{dir}{target}");
+        let path = format!("{tdir}/{name}");
+        if regen {
+            std::fs::create_dir_all(&tdir).unwrap(); // safefs-lint: allow(test-only fuzz seed generation into this crate's fuzz/seeds)
+            std::fs::write(&path, &bytes).unwrap(); // safefs-lint: allow(test-only fuzz seed generation into this crate's fuzz/seeds)
+        } else {
+            let committed = std::fs::read(&path).unwrap_or_default(); // safefs-lint: allow(test-only fuzz seed check)
+            assert!(
+                committed == bytes,
+                "fuzz seed {target}/{name} is stale; regenerate with CANDOR_REGEN_VECTORS=1"
+            );
+        }
+    }
 }
 
 #[test]

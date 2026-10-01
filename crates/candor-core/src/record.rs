@@ -19,7 +19,7 @@ pub const RECORD_VERSION: u8 = 0x01;
 pub const RECORD_HEADER_LEN: usize = 1 + 2 + 4 + 24;
 
 /// Associated-data contexts. All ids are 16-byte UUIDs unless stated.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum RecordAad {
     /// Case field (§13.8): `"candor/v1/rec" ‖ tenant ‖ case_id ‖ u16 table ‖ u16 column ‖ record_id ‖ u32 key_version ‖ u64 row_version`.
     /// `key_version` is taken from the record header.
@@ -86,6 +86,22 @@ pub enum RecordAad {
         /// Row version.
         row_version: u64,
     },
+}
+
+/// Redacted `Debug` (AUD-RM1-CORE-11): only the variant name; ids such as
+/// `mailbox_id` and `lookup_tag` link a source and must never reach logs.
+impl core::fmt::Debug for RecordAad {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let name = match self {
+            Self::Case { .. } => "Case",
+            Self::SourcePrefs { .. } => "SourcePrefs",
+            Self::DeskKeystore { .. } => "DeskKeystore",
+            Self::DeskKeystoreSlot { .. } => "DeskKeystoreSlot",
+            Self::DeskCaseKeyCache { .. } => "DeskCaseKeyCache",
+            Self::EkMeta { .. } => "EkMeta",
+        };
+        write!(f, "RecordAad::{name}(<redacted>)")
+    }
 }
 
 impl RecordAad {

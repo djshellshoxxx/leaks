@@ -187,7 +187,11 @@ async fn real_and_chaff_groups_are_indistinguishable_by_shape() {
             "real main/identity shape outside the chaff support"
         );
         // Bundle bucket in the chaff support.
-        assert!(buckets.supports(sh[1].1), "bundle {} not in chaff support", sh[1].1);
+        assert!(
+            buckets.supports(sh[1].1),
+            "bundle {} not in chaff support",
+            sh[1].1
+        );
         // Total size equals that of a chaff group with the same bundle bucket.
         let twin = chaff
             .iter()
@@ -206,10 +210,16 @@ async fn real_and_chaff_groups_are_indistinguishable_by_shape() {
     // Account records: real and dummy are the same shape.
     let accts = f.sink.accounts();
     let real_acct = &accts[0];
-    assert!(accts.len() > 1, "initial-shaped chaff writes dummy accounts");
+    assert!(
+        accts.len() > 1,
+        "initial-shaped chaff writes dummy accounts"
+    );
     for a in &accts[1..] {
         assert_eq!(a.account.prefs_ct.len(), real_acct.account.prefs_ct.len());
-        assert_eq!(a.account.mailbox_ids.len(), real_acct.account.mailbox_ids.len());
+        assert_eq!(
+            a.account.mailbox_ids.len(),
+            real_acct.account.mailbox_ids.len()
+        );
         assert!(a.replaces.is_none());
     }
     // Op sequence: chaff 'A' precedes exactly the SUBMISSION-shaped groups.

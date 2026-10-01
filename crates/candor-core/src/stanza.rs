@@ -52,7 +52,7 @@ impl StanzaType {
 }
 
 /// HPKE `info` contexts for HPKE_BASE stanzas (§9.9). All fields are fixed-length.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum HpkeWrapContext {
     /// Reply CK to the source: `"candor/v1/wrap/reply" ‖ suite ‖ tenant ‖ channel ‖ mailbox_id`.
     Reply {
@@ -109,6 +109,23 @@ pub enum HpkeWrapContext {
         /// Connector id (16 bytes, Implementation decision).
         connector_id: [u8; 16],
     },
+}
+
+/// Redacted `Debug` (AUD-RM1-CORE-11): only the variant name; ids such as
+/// `mailbox_id` and `lookup_tag` link a source and must never reach logs.
+impl core::fmt::Debug for HpkeWrapContext {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let name = match self {
+            Self::Reply { .. } => "Reply",
+            Self::ViewerJob { .. } => "ViewerJob",
+            Self::CaseKey { .. } => "CaseKey",
+            Self::Channel { .. } => "Channel",
+            Self::CustodianGroup { .. } => "CustodianGroup",
+            Self::Routing { .. } => "Routing",
+            Self::Connector { .. } => "Connector",
+        };
+        write!(f, "HpkeWrapContext::{name}(<redacted>)")
+    }
 }
 
 impl HpkeWrapContext {

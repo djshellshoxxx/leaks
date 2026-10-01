@@ -60,7 +60,10 @@ pub fn chankey_bound_hash(channel_id: &[u8; 16], wrapped_key_id: &[u8; 32]) -> [
 }
 
 /// Evidence hashes over decrypted file bytes (ADR-012, CRYPTO-050).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Debug` is redacted (AUD-RM1-CORE-11): the hashes identify a document and can be
+/// matched against a leaked copy.
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct EvidenceHashes {
     /// SHA-256.
     pub sha256: [u8; 32],
@@ -68,7 +71,14 @@ pub struct EvidenceHashes {
     pub blake3: [u8; 32],
 }
 
-/// Incremental SHA-256 + BLAKE3 hasher.
+impl core::fmt::Debug for EvidenceHashes {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("EvidenceHashes(<redacted>)")
+    }
+}
+
+/// Incremental SHA-256 + BLAKE3 hasher. Its state (which includes buffered file
+/// plaintext) is zeroized on drop (AUD-RM1-CORE-07; `sha2`/`blake3` `zeroize`).
 #[derive(Default)]
 pub struct EvidenceHasher {
     sha: Sha256,
@@ -78,6 +88,14 @@ pub struct EvidenceHasher {
 impl core::fmt::Debug for EvidenceHasher {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("EvidenceHasher")
+    }
+}
+
+impl Drop for EvidenceHasher {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        // SHA-256 core state zeroizes itself on drop (`sha2/zeroize`).
+        self.b3.zeroize();
     }
 }
 
@@ -96,9 +114,9 @@ impl EvidenceHasher {
 
     /// Finish.
     #[must_use]
-    pub fn finalize(self) -> EvidenceHashes {
+    pub fn finalize(mut self) -> EvidenceHashes {
         let mut sha256 = [0u8; 32];
-        sha256.copy_from_slice(self.sha.finalize().as_slice());
+        sha256.copy_from_slice(self.sha.finalize_reset().as_slice());
         EvidenceHashes {
             sha256,
             blake3: *self.b3.finalize().as_bytes(),
@@ -135,6 +153,7 @@ mod tests {
         h.update(b"a");
         h.update(b"bc");
         assert_eq!(h.finalize(), EvidenceHasher::digest(b"abc"));
+        assert_eq!(format!("{e:?}"), "EvidenceHashes(<redacted>)");
     }
 
     #[test]

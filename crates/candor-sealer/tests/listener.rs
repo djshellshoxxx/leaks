@@ -123,7 +123,10 @@ async fn timeouts_close_stalled_and_idle_connections() {
         let mut c = client(&path);
         hello(&mut c);
         let d = wait_closed(&mut c);
-        assert!(d >= Duration::from_millis(500) && d < Duration::from_secs(5), "{d:?}");
+        assert!(
+            d >= Duration::from_millis(500) && d < Duration::from_secs(5),
+            "{d:?}"
+        );
     })
     .await
     .unwrap();

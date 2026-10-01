@@ -928,7 +928,8 @@ mod tests {
         /// lowercase mappings).
         #[test]
         fn normalize_matches_reference(s in "[\\PC\u{0130}\u{023A}\u{023E}ΣΑΒ'\u{0301} -]{0,40}") {
-            proptest::prop_assert_eq!(normalize(&s).unwrap().as_str(), normalize_reference(&s));
+            let got = normalize(&s).unwrap();
+            proptest::prop_assert_eq!(got.as_str(), normalize_reference(&s));
         }
     }
 

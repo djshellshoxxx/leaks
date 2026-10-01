@@ -161,7 +161,10 @@ async fn chaff_triple_is_structurally_identical_to_a_real_submission() {
     assert_eq!(ra.account.mailbox_ids.len(), ca.account.mailbox_ids.len());
     assert_ne!(ra.account.lookup_tag, ca.account.lookup_tag);
     assert!(ca.rewrapped_replies.is_empty());
-    assert_eq!((chaff.epoch_id, chaff.received_day), (real.epoch_id, real.received_day));
+    assert_eq!(
+        (chaff.epoch_id, chaff.received_day),
+        (real.epoch_id, real.received_day)
+    );
     assert!(chaff.release_offset_days <= 3);
     assert_eq!(chaff.channel_id, real.channel_id);
     assert_eq!(chaff.disposition_ct.len(), real.disposition_ct.len());
@@ -267,14 +270,24 @@ async fn chaff_gated_like_real_sealing() {
         chaff_cfg(0, Duration::from_secs(7200), false),
         Limits::default(),
     );
-    f.clock.day.store(TODAY + 7, std::sync::atomic::Ordering::SeqCst);
-    assert_eq!(f.sealer.chaff_event(CHANNEL).await, Err(ErrorCode::Unavailable));
-    f.clock.day.store(TODAY, std::sync::atomic::Ordering::SeqCst);
+    f.clock
+        .day
+        .store(TODAY + 7, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        f.sealer.chaff_event(CHANNEL).await,
+        Err(ErrorCode::Unavailable)
+    );
+    f.clock
+        .day
+        .store(TODAY, std::sync::atomic::Ordering::SeqCst);
     let mut snap = f.snapshot.clone();
     snap.snapshot_version = 2;
     snap.channels[0].enabled = false;
     f.install(snap).unwrap();
-    assert_eq!(f.sealer.chaff_event(CHANNEL).await, Err(ErrorCode::Unavailable));
+    assert_eq!(
+        f.sealer.chaff_event(CHANNEL).await,
+        Err(ErrorCode::Unavailable)
+    );
     assert!(f.sink.envelopes().is_empty() && f.sink.accounts().is_empty());
 }
 
@@ -308,7 +321,9 @@ async fn chaff_fails_closed_without_time_or_directory() {
         "failed chaff left staged data"
     );
     // An account-write failure also leaves nothing behind.
-    f.sink.fail.store(false, std::sync::atomic::Ordering::SeqCst);
+    f.sink
+        .fail
+        .store(false, std::sync::atomic::Ordering::SeqCst);
     f.sink
         .fail_accounts
         .store(true, std::sync::atomic::Ordering::SeqCst);

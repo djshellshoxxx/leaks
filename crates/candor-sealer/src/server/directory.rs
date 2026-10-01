@@ -477,12 +477,12 @@ pub mod merkle {
         if first == second {
             return proof.is_empty() && candor_core::kdf::ct_eq(first_hash, second_hash);
         }
-        let mut path: Vec<[u8; 32]> = Vec::with_capacity(proof.len().saturating_add(1));
+        let mut nodes: Vec<[u8; 32]> = Vec::with_capacity(proof.len().saturating_add(1));
         if first.is_power_of_two() {
-            path.push(*first_hash);
+            nodes.push(*first_hash);
         }
-        path.extend_from_slice(proof);
-        let Some((start, rest)) = path.split_first() else {
+        nodes.extend_from_slice(proof);
+        let Some((start, rest)) = nodes.split_first() else {
             return false;
         };
         let (Some(mut fn_), Some(mut sn)) = (first.checked_sub(1), second.checked_sub(1)) else {

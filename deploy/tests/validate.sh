@@ -5,17 +5,20 @@
 #
 #   1. shellcheck + bash -n on deploy/tools and deploy/tests
 #   2. config-check.sh on the shipped tree (must pass) and on deliberately broken copies
-#      (every mutation must fail with exit 30)
+#      (every mutation must fail with exit 30): static tree mutations, plus --host --root
+#      mutations on a synthetic installed host (drop-ins in system.control, /usr/lib, prefix
+#      and template directories, transient units, sysctl.d/journald.conf.d overrides, ...)
 #   3. systemd-analyze verify (--man=no) on every unit; only the documented expected messages
 #      (missing Candor binaries at their future install paths) are tolerated
 #   4. systemd-analyze security --offline --threshold per unit (R7 SI-B-01): achieved scores
 #      are printed; budgets: Candor services and PostgreSQL <= 0.5, tor <= 1.5 (17 §5.3)
 #   5. nft -c -f nftables.conf          (needs root and the users from sysusers.d)
-#   6. apparmor_parser -Q -K profiles   (parse/compile only, nothing loaded)
+#   6. apparmor_parser -Q -K profiles   (parse/compile only, nothing loaded; exit status checked)
 #   7. tor --verify-config on the torrc (as _tor-candor-intake when that user exists)
 #   8. check-placement.sh positive and negative cases on a synthetic root (needs root + users)
 #   9. PostgreSQL: start a throw-away cluster with candor-intake.conf, check effective settings
-#      and peer-only access - only when CANDOR_TEST_PG is set (needs root, the users, initdb)
+#      and peer-only access, and config-check's `postgres -C` path (postgresql.auto.conf) -
+#      only when CANDOR_TEST_PG is set (needs root, the users, initdb)
 # Tools that are absent are reported as SKIP; any executed check that fails makes the script
 # exit 1. Nothing is installed or changed on the host; temporary files live in a mktemp dir.
 
@@ -49,24 +52,27 @@ for prof in "" ce-single ce-hardened; do
   else bad "config-check: shipped files must pass ${prof:-(base)}"; fi
 done
 
-# mutate <name> <relative file> <sed-expression | +append-text>
+# mutate <name> <relative file> <sed-expression | +append-text | - (delete)> [config-check args...]
 # Each mutation runs config-check on its own copy of the tree, in parallel (bounded).
+# hmutate does the same on a copy of the synthetic installed host root ($HR, --host --root).
 MUTN=0
 JOBS=$( (nproc 2>/dev/null || echo 2) | head -n 1)
-mutate() {
-  local name=$1 rel=$2 expr=$3 d
-  shift 3
-  MUTN=$((MUTN + 1)); d="$T/mut.$MUTN"
-  cp -a "$INTAKE" "$d"
+run_case() { # dir name base rel expr args...
+  local d=$1 name=$2 src=$3 rel=$4 expr=$5
+  shift 5
+  cp -a "$src" "$d"
+  printf '%s\n' "$name" > "$d.name"
   case "$expr" in
+    -)  if [ -e "$d/$rel" ] || [ -L "$d/$rel" ]; then rm -f "$d/$rel"; else echo nochange > "$d.rc"; return; fi ;;
     +*) mkdir -p "$(dirname "$d/$rel")"; printf '%s\n' "${expr#+}" >> "$d/$rel" ;;
     *)  sed -i -e "$expr" "$d/$rel" ;;
   esac
-  printf '%s\n' "$name" > "$d.name"
-  if cmp -s "$INTAKE/$rel" "$d/$rel"; then echo nochange > "$d.rc"; return; fi
+  if [ "$expr" != - ] && [ -f "$src/$rel" ] && cmp -s "$src/$rel" "$d/$rel"; then echo nochange > "$d.rc"; return; fi
   while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do wait -n; done
-  ( "$TOOLS/config-check.sh" -q --dir "$d" "$@" > "$d.out" 2>&1; echo $? > "$d.rc" ) &
+  ( "$TOOLS/config-check.sh" -q "$@" > "$d.out" 2>&1; echo $? > "$d.rc" ) &
 }
+mutate() { local name=$1 rel=$2 expr=$3; shift 3; MUTN=$((MUTN + 1)); run_case "$T/mut.$MUTN" "$name" "$INTAKE" "$rel" "$expr" --dir "$T/mut.$MUTN" "$@"; }
+hmutate() { local name=$1 rel=$2 expr=$3; MUTN=$((MUTN + 1)); run_case "$T/mut.$MUTN" "host: $name" "$HR" "$rel" "$expr" --host --root "$T/mut.$MUTN" --only "$HONLY"; }
 mutate_results() {
   wait
   local i rc name
@@ -77,6 +83,9 @@ mutate_results() {
     else bad "config-check accepted broken copy: $name (exit $rc)"; fi
   done
 }
+# An nft file for the include bypass (AUD-RM2-DEP-02): would open egress for every UID.
+printf 'insert rule inet candor_intake output accept\n' > "$T/extra.nft"
+FP=0123456789ABCDEF0123456789ABCDEF01234567
 # torrc (16 §7.1/§7.4, NET-002/005/006/008/009/011, LOG-005)
 mutate "tor log to file"               torrc 's|^Log warn stderr$|Log notice file /var/log/tor/notices.log|'
 mutate "tor extra log file"            torrc '+Log warn file /var/log/tor/warn.log'
@@ -145,7 +154,8 @@ mutate "privileged ExecStartPre"       systemd/candor-intake-web.service 's|^Exe
 mutate "AppArmor soft-fail"            systemd/candor-intake-web.service 's|^AppArmorProfile=candor-web$|AppArmorProfile=-candor-web|'
 mutate "stdout to journal"             systemd/candor-sealer.service 's|^StandardOutput=null$|StandardOutput=journal|'
 mutate "no log namespace"              systemd/candor-intake-store.service '/^LogNamespace=candor-intake$/d'
-mutate "syscall re-allow ptrace"       systemd/candor-sealer.service 's|^SystemCallFilter=seccomp landlock|SystemCallFilter=ptrace seccomp landlock|'
+# (retargeted from the sealer to web: the sealer's syscall lines are owned by AUD-RM2-SEA-06)
+mutate "syscall re-allow ptrace"       systemd/candor-intake-web.service 's|^SystemCallFilter=seccomp landlock|SystemCallFilter=ptrace seccomp landlock|'
 mutate "sealer hides own credentials"  systemd/candor-sealer.service 's|^InaccessiblePaths=-/run/candor/source-web$|InaccessiblePaths=-/run/candor/source-web -/run/credentials/candor-sealer.service|'
 mutate "capability granted"            systemd/candor-sealer.service 's|^CapabilityBoundingSet=$|CapabilityBoundingSet=CAP_IPC_LOCK|'
 mutate "no nftables dependency"        systemd/candor-intake-web.service 's|^Requires=candor-intake-web.socket nftables.service$|Requires=candor-intake-web.socket|'
@@ -162,6 +172,126 @@ mutate "journald persistent"           journald/journald@candor-intake.conf 's|^
 mutate "journald 7 days"               journald/journald@candor-intake.conf 's|^MaxRetentionSec=24h$|MaxRetentionSec=7d|'
 mutate "journald forwards to syslog"   journald/candor-intake-host.conf 's|^ForwardToSyslog=no$|ForwardToSyslog=yes|'
 mutate "public DNS resolver"           resolv.conf 's|^nameserver 127.0.0.1$|nameserver 9.9.9.9|'
+# ---- AUD-RM2-DEP-01: torrc forms that a name denylist missed (tor accepts all of them)
+mutate "DEP-01 /Sandbox reset"         torrc '+/Sandbox'
+mutate "DEP-01 /CookieAuthentication"  torrc '+/CookieAuthentication'
+mutate "DEP-01 abbreviation SafeLog 0" torrc '+SafeLog 0'
+mutate "DEP-01 +Log info stderr"       torrc '++Log info stderr'
+mutate "DEP-01 HiddenServicePor TCP"   torrc '+HiddenServicePor 81 127.0.0.1:8080'
+mutate "DEP-01 HSLayer2Nodes pinned"   torrc "+HSLayer2Nodes $FP"
+mutate "DEP-01 HSLayer3Nodes pinned"   torrc "+HSLayer3Nodes $FP"
+mutate "DEP-01 StrictNodes 1"          torrc '+StrictNodes 1'
+mutate "DEP-01 AlternateDirAuthority"  torrc "+AlternateDirAuthority evil orport=9001 no-v2 198.51.100.7:9030 $FP"
+mutate "DEP-01 DirAuthority"           torrc "+DirAuthority evil orport=9001 no-v2 v3ident=$FP 198.51.100.7:9030 $FP"
+mutate "DEP-01 ExcludeNodes"           torrc '+ExcludeNodes {de},{nl}'
+mutate "DEP-01 Sandbox 0"              torrc 's|^Sandbox 1$|Sandbox 0|'
+mutate "DEP-04 control socket back"    torrc '+ControlSocket /run/tor-instances/candor-intake/control.sock'
+mutate "DEP-04 control socket no auth" torrc 's|^CookieAuthentication 1$|ControlSocket /run/tor-instances/candor-intake/control.sock\nCookieAuthentication 0|'
+mutate "DEP-05 tor Log err file"       torrc 's|^Log warn stderr$|Log err file /var/lib/tor-instances/candor-intake/err.log|'
+# ---- AUD-RM2-DEP-02: include, and template accept moved above the safety drops
+mutate "DEP-02 nft include accept-all" nftables.conf "+include \"$T/extra.nft\""
+mutate "DEP-02 nft define"             nftables.conf 's|^flush ruleset$|flush ruleset\ndefine EXT = "ext0"|'
+mutate "DEP-02 E1 above safety drops"  nftables.conf '/^    oifname "ext0" meta skuid "_tor-candor-intake"/d; s|^    ip daddr 169.254.0.0/16|    oifname "ext0" meta skuid "_tor-candor-intake" meta l4proto tcp ct state new accept\n    ip daddr 169.254.0.0/16|'
+mutate "nft extra drop rule order"     nftables.conf 's|^    ct state invalid drop$|    ct state invalid drop\n    tcp dport 25 drop|'
+mutate "nft core_relay as interval"    nftables.conf 's|^  set core_relay { type ipv4_addr; }|  set core_relay { type ipv4_addr; flags interval; elements = { 0.0.0.0/0 } }|'
+mutate "nft non_public4 element gone"  nftables.conf 's|10.0.0.0/8, ||'
+# ---- AUD-RM2-DEP-03: effective unit configuration
+mutate "DEP-03 pg ExecStart -c logging" systemd/candor-intake-pg.service.d/zz.conf $'+[Service]\nExecStart=\nExecStart=/usr/lib/postgresql/16/bin/postgres -c config_file=/etc/candor/intake/postgresql/candor-intake.conf -c logging_collector=on -c log_statement=all'
+mutate "DEP-03 pg Environment PGOPTIONS" systemd/candor-intake-pg.service.d/zz.conf $'+[Service]\nEnvironment=PGOPTIONS=-c log_statement=all'
+mutate "DEP-03 sealer keys in [Install]" systemd/candor-sealer.service '/^PrivateNetwork=yes$/d; /^RestrictAddressFamilies=AF_UNIX$/d; s|^WantedBy=multi-user.target$|WantedBy=multi-user.target\nPrivateNetwork=yes\nRestrictAddressFamilies=AF_UNIX|'
+mutate "DEP-03 ReadWritePaths=/"       systemd/candor-intake-web.service.d/zz.conf $'+[Service]\nReadWritePaths=/'
+mutate "DEP-03 BindReadOnlyPaths tor"  systemd/candor-intake-web.service.d/zz.conf $'+[Service]\nBindReadOnlyPaths=/var/lib/tor-instances'
+mutate "DEP-03 SupplementaryGroups"    systemd/candor-intake-store.service 's|^Group=candor-istore$|Group=candor-istore\nSupplementaryGroups=_tor-candor-intake postgres|'
+mutate "DEP-03 DeviceAllow /dev/mem"   systemd/candor-sealer.service.d/zz.conf $'+[Service]\nDeviceAllow=/dev/mem rw'
+mutate "DEP-03 SocketBindAllow"        systemd/candor-intake-web.service.d/zz.conf $'+[Service]\nSocketBindAllow=any'
+mutate "DEP-03 Group= removed"         systemd/candor-intake-web.service '/^Group=candor-web$/d'
+mutate "DEP-03 TemporaryFileSystem rm" systemd/candor-sealer.service '/^TemporaryFileSystem=/d'
+mutate "DEP-03 InaccessiblePaths rm"   systemd/candor-intake-web.service '/^InaccessiblePaths=-\/run\/tor-instances/d'
+mutate "DEP-03 sealer wrong AppArmor"  systemd/candor-sealer.service 's|^AppArmorProfile=candor-sealer$|AppArmorProfile=candor-intake-store|'
+mutate "DEP-03 SocketGroup users"      systemd/candor-sealer.socket 's|^SocketGroup=candor-web$|SocketGroup=users|'
+mutate "DEP-03 SocketUser users"       systemd/candor-intake-store.socket 's|^SocketUser=candor-istore$|SocketUser=users|'
+mutate "DEP-03 relay IPAddressAllow=any" systemd/candor-intake-store-relay.socket.d/site.conf $'+[Socket]\nIPAddressAllow=any'
+mutate "DEP-03 relay allow != core_relay" systemd/candor-intake-store-relay.socket.d/site.conf $'+[Socket]\nIPAddressAllow=192.0.2.10/32'
+mutate "DEP-03 prefix drop-in candor-" systemd/candor-.service.d/zz.conf $'+[Service]\nPrivateNetwork=no\nRestrictAddressFamilies=\nAppArmorProfile='
+mutate "DEP-03 template drop-in tor@"  systemd/tor@.service.d/zz.conf $'+[Service]\nIPAddressDeny='
+mutate "DEP-03 type drop-in service.d" systemd/service.d/zz.conf $'+[Service]\nMemoryDenyWriteExecute=no'
+mutate "DEP-03 ExecStartPre added"     systemd/candor-sealer.service.d/zz.conf $'+[Service]\nExecStartPre=/usr/bin/true'
+mutate "DEP-03 sealer filter deny-list" systemd/candor-sealer.service.d/zz.conf $'+[Service]\nSystemCallFilter=\nSystemCallFilter=~@mount'
+mutate "DEP-03 line continuation"      systemd/candor-intake-web.service 's|^PrivateNetwork=yes$|PrivateNetwork=\\\nno|'
+mutate "unknown key"                   systemd/candor-intake-web.service.d/zz.conf $'+[Service]\nPrivateNetwrok=yes'
+# ---- AUD-RM2-DEP-05..09/11/12 and new artefacts
+mutate "DEP-05 tor stderr to journal"  systemd/tor@candor-intake.service 's|^StandardError=null$|StandardError=journal|'
+mutate "DEP-05 web stderr to journal"  systemd/candor-intake-web.service 's|^StandardError=null$|StandardError=journal|'
+mutate "DEP-06 web LogLevelMax"        systemd/candor-intake-web.service 's|^LogLevelMax=emerg$|LogLevelMax=warning|'
+mutate "DEP-06 host journal no MaxFileSec" journald/candor-intake-host.conf '/^MaxFileSec=/d'
+mutate "DEP-06 host journal Audit=yes" journald/candor-intake-host.conf 's|^Audit=no$|Audit=yes|'
+mutate "DEP-06 ns journal stores warning" journald/journald@candor-intake.conf 's|^MaxLevelStore=crit$|MaxLevelStore=warning|'
+mutate "DEP-07 pg max_wal_size 1GB"    postgresql/candor-intake.conf "s|^max_wal_size = '256MB'|max_wal_size = '1GB'|"
+mutate "DEP-07 pg wal_recycle on"      postgresql/candor-intake.conf 's|^wal_recycle = off|wal_recycle = on|'
+mutate "DEP-08 tor without AppArmor"   systemd/tor@candor-intake.service '/^AppArmorProfile=candor-tor-intake$/d'
+mutate "DEP-08 pg AppArmor soft-fail"  systemd/candor-intake-pg.service 's|^AppArmorProfile=candor-intake-pg$|AppArmorProfile=-candor-intake-pg|'
+mutate "DEP-09 ptrace_scope 1"         sysctl.d/90-candor-intake.conf 's|^kernel.yama.ptrace_scope = 3$|kernel.yama.ptrace_scope = 1|'
+mutate "DEP-09 core_pattern pipe"      sysctl.d/90-candor-intake.conf 's#^kernel.core_pattern = |/bin/false$#kernel.core_pattern = |/usr/lib/systemd/systemd-coredump %P#'
+mutate "DEP-09 tcp_timestamps on"      sysctl.d/90-candor-intake.conf 's|^net.ipv4.tcp_timestamps = 0$|net.ipv4.tcp_timestamps = 1|'
+mutate "DEP-09 sysctl key dropped"     sysctl.d/90-candor-intake.conf '/^kernel.dmesg_restrict/d'
+mutate "DEP-09 sysctl extra key"       sysctl.d/90-candor-intake.conf '+kernel.unprivileged_userns_clone = 1'
+mutate "DEP-09 coredump stored"        coredump.conf.d/50-candor-intake.conf 's|^Storage=none$|Storage=external|'
+mutate "DEP-11 tor group torctl"       systemd/tor@candor-intake.service 's|^Group=_tor-candor-intake$|Group=_candor-torctl|'
+mutate "DEP-12 tor /var/tmp visible"   systemd/tor@candor-intake.service '/^InaccessiblePaths=-\/var\/tmp$/d'
+
+# ---- --host --root: a synthetic installed host (README install layout, CE-SINGLE)
+HONLY=tor,nft,units,journald,kernel,dns,host
+HR="$T/hostroot"
+mkhost() {
+  local r=$1 u d
+  mkdir -p "$r/etc/tor/instances/candor-intake" "$r/etc/systemd/system" "$r/etc/systemd/journald.conf.d" \
+           "$r/etc/systemd/coredump.conf.d" "$r/etc/sysctl.d" "$r/etc/apparmor.d" "$r/etc/candor/intake/postgresql" \
+           "$r/usr/lib/systemd/system" "$r/run/systemd/system"
+  cp "$INTAKE/torrc" "$r/etc/tor/instances/candor-intake/torrc"
+  cp "$INTAKE/nftables.conf" "$r/etc/nftables.conf"
+  cp -a "$INTAKE/systemd/." "$r/etc/systemd/system/"
+  for d in "$INTAKE/profiles/ce-single"/*.d; do mkdir -p "$r/etc/systemd/system/$(basename "$d")"; cp "$d"/* "$r/etc/systemd/system/$(basename "$d")/"; done
+  cp "$INTAKE/journald/journald@candor-intake.conf" "$r/etc/systemd/journald@candor-intake.conf"
+  cp "$INTAKE/journald/candor-intake-host.conf" "$r/etc/systemd/journald.conf.d/50-candor-intake.conf"
+  cp "$INTAKE/coredump.conf.d/50-candor-intake.conf" "$r/etc/systemd/coredump.conf.d/"
+  cp "$INTAKE/sysctl.d/90-candor-intake.conf" "$r/etc/sysctl.d/"
+  cp "$INTAKE/apparmor/"* "$r/etc/apparmor.d/"
+  cp "$INTAKE/postgresql/"* "$r/etc/candor/intake/postgresql/"
+  cp "$INTAKE/resolv.conf" "$r/etc/resolv.conf"
+  : > "$r/etc/fstab"; : > "$r/etc/crypttab"
+  # Distribution units that must be masked (AUD-RM2-DEP-09/14).
+  for u in tor.service tor@.service systemd-coredump.socket; do : > "$r/usr/lib/systemd/system/$u"; done
+  for u in tor.service tor@default.service systemd-coredump.socket; do ln -s /dev/null "$r/etc/systemd/system/$u"; done
+  # Account databases: the container's, without the removed control group and with empty
+  # journal-reader groups (as on a correctly installed host).
+  grep -v '^_candor-torctl:' /etc/group | awk -F: 'BEGIN {OFS=":"} $1=="systemd-journal" || $1=="adm" || $1=="_tor-candor-intake" {$4=""} {print}' > "$r/etc/group"
+  cp /etc/passwd "$r/etc/passwd"
+}
+if is_root && users_exist && have tor && have nft && have jq; then
+  mkhost "$HR"
+  if "$TOOLS/config-check.sh" -q --host --root "$HR" --only "$HONLY" > "$T/host.out" 2>&1; then pass "config-check --host --root: synthetic installed host passes"
+  else bad "config-check --host --root on the synthetic host: $(grep ' FAIL ' "$T/host.out" | head -n 3 | tr -s ' ')"; fi
+  hmutate "system.control drop-in resets IPAddressDeny" etc/systemd/system.control/candor-sealer.service.d/50-IPAddressDeny.conf $'+[Service]\nIPAddressDeny='
+  hmutate "/run drop-in re-enables network"   run/systemd/system/candor-intake-web.service.d/zz.conf $'+[Service]\nPrivateNetwork=no'
+  hmutate "/usr/lib prefix drop-in"            usr/lib/systemd/system/candor-.service.d/zz.conf $'+[Service]\nSystemCallFilter=\nAppArmorProfile='
+  hmutate "/usr/local/lib template drop-in"   usr/local/lib/systemd/system/tor@.service.d/zz.conf $'+[Service]\nRestrictAddressFamilies=AF_NETLINK'
+  hmutate "transient unit"                     run/systemd/transient/candor-sealer.service.d/50-x.conf $'+[Service]\nPrivateNetwork=no'
+  hmutate "generator drop-in"                  run/systemd/generator.late/candor-intake-pg.service.d/x.conf $'+[Service]\nStandardError=journal'
+  hmutate "later sysctl.d overrides ptrace"    etc/sysctl.d/99-local.conf '+kernel.yama.ptrace_scope = 0'
+  hmutate "/etc/sysctl.conf enables forwarding" etc/sysctl.conf '+net.ipv4.ip_forward = 1'
+  hmutate "journald.conf.d persistent"         etc/systemd/journald.conf.d/99-local.conf $'+[Journal]\nStorage=persistent'
+  hmutate "journald@ns drop-in forwards"       etc/systemd/journald@candor-intake.conf.d/99-local.conf $'+[Journal]\nForwardToSyslog=yes'
+  hmutate "coredump.conf.d stores cores"       etc/systemd/coredump.conf.d/99-local.conf $'+[Coredump]\nStorage=external'
+  hmutate "coredump socket unmasked"           etc/systemd/system/systemd-coredump.socket -
+  hmutate "tor@default not masked"             etc/systemd/system/tor@default.service -
+  hmutate "health agent in tor group"          etc/group 's|^\(_tor-candor-intake:[^:]*:[0-9]*:\)$|\1candor-health|'
+  hmutate "admin in systemd-journal"           etc/group 's|^\(systemd-journal:[^:]*:[0-9]*:\)$|\1root|'
+  hmutate "control group recreated"            etc/group '+_candor-torctl:x:4242:candor-health'
+  hmutate "plain swap in fstab"                etc/fstab '+/dev/sda3 none swap sw 0 0'
+  hmutate "AppArmor profile file missing"      etc/apparmor.d/candor-tor-intake -
+  hmutate "torrc edited on host"               etc/tor/instances/candor-intake/torrc '+/SafeLogging'
+  hmutate "site relay drop-in IPAddressAllow=any" etc/systemd/system/candor-intake-store-relay.socket.d/site.conf $'+[Socket]\nIPAddressAllow=any'
+else skip "config-check --host --root cases (need root, users, tor, nft, jq)"; fi
 mutate_results
 
 # ------------------------------------------------------------------------- 3./4. systemd-analyze
@@ -193,9 +323,12 @@ else skip "nft -c (needs nft, root and the sysusers.d users)"; fi
 # ------------------------------------------------------------------------- 6. AppArmor
 if have apparmor_parser; then
   for p in "$INTAKE"/apparmor/*; do
-    if apparmor_parser -Q -K -T "$p" >/dev/null 2>"$T/aa.err" || ! grep -vq 'Cache read/write disabled' "$T/aa.err"; then
-      if grep -v 'Cache read/write disabled' "$T/aa.err" | grep -q .; then bad "apparmor_parser $(basename "$p"): $(cat "$T/aa.err")"; else pass "apparmor_parser $(basename "$p")"; fi
-    else bad "apparmor_parser $(basename "$p"): $(cat "$T/aa.err")"; fi
+    # AUD-RM2-DEP-12: the parser's exit status decides; any stderr other than the container's
+    # cache notice is a failure too.
+    apparmor_parser -Q -K -T "$p" >/dev/null 2>"$T/aa.err"; rc=$?
+    if [ "$rc" -ne 0 ]; then bad "apparmor_parser $(basename "$p"): exit $rc: $(head -c 300 "$T/aa.err")"
+    elif grep -v 'Cache read/write disabled' "$T/aa.err" | grep -q .; then bad "apparmor_parser $(basename "$p"): $(head -c 300 "$T/aa.err")"
+    else pass "apparmor_parser $(basename "$p") (exit 0)"; fi
   done
 else skip "apparmor_parser not installed"; fi
 
@@ -204,7 +337,7 @@ if have tor; then
   if tor --list-modules 2>/dev/null | grep -qx 'pow: yes'; then pass "tor built with PoW (pow: yes)"; else bad "tor built without PoW"; fi
   cp "$INTAKE/torrc" "$T/torrc"; chmod 0644 "$T/torrc"
   if is_root && getent passwd _tor-candor-intake >/dev/null && have setpriv; then
-    run=(setpriv --reuid=_tor-candor-intake --regid=_candor-torctl --clear-groups)
+    run=(setpriv --reuid=_tor-candor-intake --regid=_tor-candor-intake --clear-groups)
   else run=(); fi
   if "${run[@]}" tor --defaults-torrc /dev/null -f "$T/torrc" --verify-config >"$T/tor.out" 2>&1; then
     pass "tor --verify-config ($(tor --version | head -n 1))"
@@ -212,7 +345,7 @@ if have tor; then
 else skip "tor not installed"; fi
 
 # ------------------------------------------------------------------------- 8. check-placement
-if is_root && users_exist && getent group _candor-torctl >/dev/null; then
+if is_root && users_exist; then
   CP="$TOOLS/check-placement.sh"; M="$INTAKE/secret-placement.toml"
   mkroot() { # fresh synthetic host root with every required secret in place
     R="$T/root"; rm -rf "$R"
@@ -221,7 +354,7 @@ if is_root && users_exist && getent group _candor-torctl >/dev/null; then
     chmod 0700 "$R/etc/credstore.encrypted" "$R/var/lib/tor-instances/candor-intake/hs-source"
     local k="$R/var/lib/tor-instances/candor-intake/hs-source/hs_ed25519_secret_key"
     { printf '== ed25519v1-secret: type0 ==\0\0\0'; head -c 64 /dev/urandom; } > "$k"
-    chown _tor-candor-intake:_candor-torctl "$k"; chmod 0600 "$k"
+    chown _tor-candor-intake:_tor-candor-intake "$k"; chmod 0600 "$k"
     local n
     for n in routing_key batch_signing_key relay_tls_key sealer_signing_key argon2_salt; do
       head -c 256 /dev/urandom > "$R/etc/credstore.encrypted/candor-intake.$n.cred"
@@ -265,6 +398,13 @@ if is_root && users_exist && getent group _candor-torctl >/dev/null; then
   mkroot; echo plaintext > "$R/var/lib/candor/intake/blobs/notes.txt"; placement "unexpected file in blob dir" 30
   mkroot; ln -s /etc/passwd "$R/run/candor/staging/abcdefghijklmnopqrstuvwx22"; placement "symlink in staging" 30
   mkroot; mkdir "$R/run/candor/staging/sub"; placement "subdirectory in staging" 30
+  # AUD-RM2-DEP-10: forbidden manifest id, symlinked parent directory, exported key format.
+  mkroot; sed 's|^id = "intake.routing_key"$|id = "onion.standby_key"|' "$M" > "$T/forb.toml"
+          "$CP" -q --manifest "$T/forb.toml" --root "$R" > "$T/cp.out" 2>&1; rc=$?
+          if [ "$rc" -eq 30 ]; then pass "check-placement: forbidden id in manifest (exit 30)"; else bad "check-placement: forbidden id exit $rc"; fi
+  mkroot; mkdir -p "$R/srv/plain"; mv "$R/var/lib/tor-instances/candor-intake" "$R/srv/plain/"
+          ln -s /srv/plain/candor-intake "$R/var/lib/tor-instances/candor-intake"; placement "tor state dir moved behind a symlink" 30
+  mkroot; printf 'ED25519-V3:%s==\n' "$(printf 'A%.0s' $(seq 86))" > "$R/root/onion-export.txt"; placement "ED25519-V3 exported onion key" 30
   mkroot; printf 'manifest_version = 1\nrole = "intake"\nevil = "x"\n' > "$T/bad.toml"
           "$CP" -q --manifest "$T/bad.toml" --root "$R" >/dev/null 2>&1; rc=$?
           if [ "$rc" -eq 2 ]; then pass "check-placement: malformed manifest rejected (exit 2)"; else bad "check-placement: malformed manifest exit $rc"; fi
@@ -288,8 +428,8 @@ if [ -n "${CANDOR_TEST_PG:-}" ] && is_root && users_exist && [ -x "$PGBIN/initdb
     su -s /bin/sh pgtest -c "$PGBIN/postgres -c config_file='$P/test.conf'" >"$P/log" 2>&1 &
     for _ in 1 2 3 4 5 6 7 8 9 10; do [ -S "$P/sock/.s.PGSQL.5432" ] && break; sleep 1; done
     q() { su -s /bin/sh "$1" -c "psql -X -h '$P/sock' -U '$2' -d '$3' -Atc \"$4\"" 2>/dev/null; }
-    got=$(q candor-istore candor_istore candor_intake_t1 "select string_agg(name||'='||setting, ',' order by name) from pg_settings where name in ('wal_level','archive_mode','max_wal_senders','track_commit_timestamp','listen_addresses','log_connections','log_statement','log_line_prefix','log_checkpoints','logging_collector','jit')")
-    want="archive_mode=off,jit=off,listen_addresses=,log_checkpoints=off,log_connections=off,log_line_prefix=%e ,log_statement=none,logging_collector=off,max_wal_senders=0,track_commit_timestamp=off,wal_level=minimal"
+    got=$(q candor-istore candor_istore candor_intake_t1 "select string_agg(name||'='||setting, ',' order by name) from pg_settings where name in ('wal_level','archive_mode','max_wal_senders','track_commit_timestamp','listen_addresses','log_connections','log_statement','log_line_prefix','log_checkpoints','logging_collector','jit','max_wal_size','min_wal_size','wal_recycle')")
+    want="archive_mode=off,jit=off,listen_addresses=,log_checkpoints=off,log_connections=off,log_line_prefix=%e ,log_statement=none,logging_collector=off,max_wal_senders=0,max_wal_size=256,min_wal_size=32,track_commit_timestamp=off,wal_level=minimal,wal_recycle=off"
     if [ "$got" = "$want" ]; then pass "PostgreSQL effective settings"; else bad "PostgreSQL settings: $got"; fi
     if [ -z "$(q candor-istore candor_istore postgres 'select 1')" ]; then pass "pg: candor_istore limited to candor_intake_* databases"; else bad "pg: candor_istore reached postgres db"; fi
     if [ -z "$(q candor-istore postgres postgres 'select 1')" ]; then pass "pg: peer map refuses role switch"; else bad "pg: candor-istore became postgres"; fi
@@ -299,7 +439,20 @@ if [ -n "${CANDOR_TEST_PG:-}" ] && is_root && users_exist && [ -x "$PGBIN/initdb
     # rejected connections and a deliberate error (unique violation on the expected path).
     q candor-istore candor_istore candor_intake_t1 "create table t(k int primary key); insert into t values (1); insert into t values (1)" >/dev/null
     if [ -s "$P/log" ]; then bad "pg: server emitted log output: $(head -c 200 "$P/log" | tr -c '[:print:]' '?')"; else pass "pg: no server log output at all (errors and rejected connections included)"; fi
-    pkill -INT -u pgtest -f "$PGBIN/postgres" >/dev/null 2>&1; sleep 2
+    # config-check --host: effective settings via `postgres -C` (AUD-RM2-DEP-03(1)), on a
+    # synthetic root whose data directory is this cluster's.
+    PR="$T/pgroot"; mkdir -p "$PR/etc/candor/intake/postgresql" "$PR/var/lib/postgresql/16"
+    cp "$INTAKE/postgresql/"* "$PR/etc/candor/intake/postgresql/"; chmod 0755 "$PR" "$PR/etc" "$PR/etc/candor" "$PR/etc/candor/intake" "$PR/etc/candor/intake/postgresql"; chmod 0644 "$PR/etc/candor/intake/postgresql/"*
+    ln -s "$P/data" "$PR/var/lib/postgresql/16/candor-intake"
+    if "$TOOLS/config-check.sh" -q --host --root "$PR" --only pg > "$T/pgc.out" 2>&1; then pass "config-check --host pg: effective settings (postgres -C) match"
+    else bad "config-check --host pg on a clean cluster: $(grep ' FAIL ' "$T/pgc.out" | head -n 3 | tr -s ' ')"; fi
+    printf "log_statement = 'all'\n" >> "$P/data/postgresql.auto.conf"
+    "$TOOLS/config-check.sh" -q --host --root "$PR" --only pg > "$T/pgc.out" 2>&1; rc=$?
+    if [ "$rc" -eq 30 ] && grep -q 'pg.effective.log_statement' "$T/pgc.out"; then pass "config-check rejects: ALTER SYSTEM log_statement=all in postgresql.auto.conf (exit 30)"
+    else bad "config-check accepted postgresql.auto.conf override (exit $rc)"; fi
+    # AUD-RM2-DEP-12: stop exactly this cluster (its postmaster PID), not every pgtest postgres.
+    pgpid=$(head -n 1 "$P/data/postmaster.pid" 2>/dev/null)
+    case "$pgpid" in ''|*[!0-9]*) bad "pg: no postmaster.pid" ;; *) kill -INT "$pgpid" 2>/dev/null; for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$pgpid" 2>/dev/null || break; sleep 1; done ;; esac
   else bad "initdb failed"; fi
 else skip "PostgreSQL run (set CANDOR_TEST_PG=1; needs root, users, user pgtest, $PGBIN)"; fi
 

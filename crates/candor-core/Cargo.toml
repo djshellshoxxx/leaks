@@ -18,8 +18,8 @@ hpke = { version = "=0.14.1", default-features = false, features = ["alloc", "ml
 chacha20poly1305 = { version = "=0.11.0", default-features = false, features = ["alloc", "zeroize"] }
 hkdf = { version = "=0.13.0", default-features = false }
 hmac = { version = "=0.13.0", default-features = false }
-sha2 = { version = "=0.11.0", default-features = false }
-blake3 = { version = "=1.8.2", default-features = false }
+sha2 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }
+blake3 = { version = "=1.8.2", default-features = false, features = ["zeroize"] }
 ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["zeroize", "fast"] }
 argon2 = { version = "=0.6.0", default-features = false, features = ["alloc", "zeroize"] }
 getrandom = { version = "=0.4.3", default-features = false }
@@ -34,3 +34,4 @@ proptest = { version = "=1.11.0", default-features = false, features = ["std"] }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = { version = "=1.0.149" }
 hex = { version = "=0.4.3", features = ["serde"] }
+x25519-dalek = { version = "=3.0.0", default-features = false }

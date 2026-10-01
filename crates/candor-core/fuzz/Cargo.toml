@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0 OR MIT
-# cargo-fuzz layout (§22.3, CRYPTO-039; ST-040/ST-041). Run with:
-#   cargo +nightly fuzz run <target>   (from crates/candor-core)
+# cargo-fuzz layout (§22.3, CRYPTO-039; ST-040/041/042). Run with (from crates/candor-core):
+#   cargo +nightly fuzz run <target> fuzz/corpus/<target> fuzz/seeds/<target> -- -max_len=<see README>
 # Own workspace so the main workspace never builds libFuzzer.
 [package]
 name = "candor-core-fuzz"
@@ -57,6 +57,27 @@ bench = false
 [[bin]]
 name = "fuzz_stream_decrypt"
 path = "fuzz_targets/fuzz_stream_decrypt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_hpke_open"
+path = "fuzz_targets/fuzz_hpke_open.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_recipient_entry"
+path = "fuzz_targets/fuzz_recipient_entry.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_normalize"
+path = "fuzz_targets/fuzz_normalize.rs"
 test = false
 doc = false
 bench = false

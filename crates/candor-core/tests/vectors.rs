@@ -10,7 +10,7 @@
 )]
 
 use candor_core::hash::{EvidenceHasher, KeyKind, key_id, lookup_tag};
-use candor_core::kdf::{derive_case_record_key, derive_payload_key};
+use candor_core::kdf::derive_case_record_key;
 use candor_core::kem::{KemKeyPair, KemPublicKey};
 use candor_core::object::parse;
 use candor_core::passphrase::{SourceKeys, Wordlist, normalize, source_salt};
@@ -18,6 +18,7 @@ use candor_core::record::{RecordAad, open_record};
 use candor_core::secret::{AeadKey, CaseKey, ContentKey, ErasureKey};
 use candor_core::slots::{RecipientListEntry, RecipientSlotBlock, SlotContext};
 use candor_core::stanza::{HpkeWrapContext, WrapStanza};
+use candor_core::stream::StreamDecryptor;
 use candor_core::{Error, Suite, padding, stream};
 use serde_json::Value;
 
@@ -52,7 +53,7 @@ fn passphrase_vectors() {
     for c in v["cases"].as_array().unwrap() {
         let p = c["passphrase"].as_str().unwrap();
         assert!(list.check(p));
-        assert_eq!(normalize(c["input_as_typed"].as_str().unwrap()).as_str(), p);
+        assert_eq!(normalize(c["input_as_typed"].as_str().unwrap()).unwrap().as_str(), p);
         assert_eq!(c["normalized"].as_str().unwrap(), p);
         let ds: [u8; 32] = a(&c["deployment_salt"]);
         let t: [u8; 16] = a(&c["tenant_id"]);
@@ -75,20 +76,45 @@ fn passphrase_vectors() {
     }
 }
 
+/// An independent STREAM encoder (§13.3) over the `chacha20poly1305` crate, used to
+/// rebuild large vector ciphertexts that are published only by hash.
+fn independent_stream_encrypt(key: &[u8], pt: &[u8]) -> Vec<u8> {
+    use chacha20poly1305::aead::Aead;
+    use chacha20poly1305::{ChaCha20Poly1305, KeyInit};
+    let c = ChaCha20Poly1305::new_from_slice(key).unwrap();
+    let chunks: Vec<&[u8]> = if pt.is_empty() {
+        vec![&[][..]]
+    } else {
+        pt.chunks(stream::CHUNK_SIZE).collect()
+    };
+    let n = chunks.len();
+    let mut out = Vec::new();
+    for (i, ch) in chunks.into_iter().enumerate() {
+        let nonce = stream::chunk_nonce(i as u64, i + 1 == n);
+        out.extend_from_slice(&c.encrypt(&nonce.into(), ch).unwrap());
+    }
+    out
+}
+
 /// §13.3 positive and negative STREAM vectors (CRYPTO-007).
 #[test]
 fn stream_vectors() {
     use sha2::{Digest, Sha256};
     let v = load("stream");
     let ck = ContentKey::from_slice(&hx(&v["ck"])).unwrap();
-    let k = derive_payload_key(STD, &ck, &a(&v["payload_nonce"])).unwrap();
-    assert_eq!(k.expose().to_vec(), hx(&v["k_pay"]));
-    let key = || AeadKey::from_bytes(*k.expose());
+    let nonce: [u8; 16] = a(&v["payload_nonce"]);
+    // AUD-RM1-CORE-04: the public API has no raw-key STREAM encryptor; the vectors
+    // are checked through the decrypt side (K_pay derived from CK and the nonce) and
+    // the published k_pay through the raw-key decryptor.
+    let key = || AeadKey::from_slice(&hx(&v["k_pay"])).unwrap();
     let pattern = |n: usize| (0..n).map(|i| (i % 251) as u8).collect::<Vec<u8>>();
+    // Each ciphertext is rebuilt with an independent §13.3 encoder under the published
+    // k_pay and must match the published hash (and bytes, where given); decrypting it
+    // with the CK/nonce-derived decryptor proves k_pay = HKDF(CK, payload_nonce).
     let mut big = Vec::new();
     for c in v["cases"].as_array().unwrap() {
         let n = c["plaintext_len"].as_u64().unwrap() as usize;
-        let ct = stream::encrypt(key(), &pattern(n)).unwrap();
+        let ct = independent_stream_encrypt(&hx(&v["k_pay"]), &pattern(n));
         assert_eq!(
             hex::encode(Sha256::digest(&ct)),
             c["ciphertext_sha256"].as_str().unwrap()
@@ -96,6 +122,11 @@ fn stream_vectors() {
         if let Some(full) = c.get("ciphertext") {
             assert_eq!(ct, hx(full));
         }
+        let d = StreamDecryptor::for_payload(STD, &ck, &nonce, n as u64).unwrap();
+        assert_eq!(
+            stream::decrypt_with(d, &ct).unwrap().as_slice(),
+            pattern(n).as_slice()
+        );
         assert_eq!(
             stream::decrypt(key(), n as u64, &ct).unwrap().as_slice(),
             pattern(n).as_slice()
@@ -176,7 +207,7 @@ fn sealed_object_vectors() {
         if i < 2 {
             let (ck, pos) = r.unwrap();
             assert_eq!(ck.expose().to_vec(), ck_expected);
-            assert!(list.iter().any(|e| usize::from(e.slot_index) == pos));
+            assert!(list.iter().any(|e| usize::from(e.slot_index()) == pos));
             blk.verify_slot_block(&ck, &b, &list, dir).unwrap();
         } else {
             assert_eq!(
@@ -193,7 +224,7 @@ fn sealed_object_vectors() {
     let off = hx(&v["inner_prefix"]).len();
     assert_eq!(usize::from(pt[off]), list.len());
     for (i, e) in list.iter().enumerate() {
-        assert_eq!(pt[off + 1 + 97 * i..off + 1 + 97 * (i + 1)], e.to_bytes());
+        assert_eq!(pt[off + 1 + 97 * i..off + 1 + 97 * (i + 1)], *e.to_bytes());
     }
     assert_eq!(pt.len(), 4096);
 

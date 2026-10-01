@@ -697,7 +697,10 @@ async fn follow_up_reapplies_tightened_coi_policy() {
         sess: s,
         delayed_delivery: false,
     };
-    assert!(matches!(f.sealer.handle(seal.clone()).await, Response::Sealed { .. }));
+    assert!(matches!(
+        f.sealer.handle(seal.clone()).await,
+        Response::Sealed { .. }
+    ));
     // Initial: members 1 and 3 (label 2 is excluded for the category).
     let env = &f.sink.envelopes()[0];
     assert!(open_intake(&env.objects[0], member_ctx(0), &f.members[2].mek.private).is_some());
@@ -706,11 +709,13 @@ async fn follow_up_reapplies_tightened_coi_policy() {
     snap.snapshot_version = 2;
     let n = snap.tree_size + 1;
     resize(&mut snap, n);
-    snap.channels[0].coi_policies.push(candor_sealer::server::directory::CoiPolicy {
-        entry_hash: [0x67; 32],
-        effective_day: TODAY,
-        categories: vec![(CATEGORY_FRAUD, vec![2, 3])],
-    });
+    snap.channels[0]
+        .coi_policies
+        .push(candor_sealer::server::directory::CoiPolicy {
+            entry_hash: [0x67; 32],
+            effective_day: TODAY,
+            categories: vec![(CATEGORY_FRAUD, vec![2, 3])],
+        });
     f.install(snap).unwrap();
     ok(
         &f.sealer,
@@ -724,7 +729,10 @@ async fn follow_up_reapplies_tightened_coi_policy() {
         }),
     )
     .await;
-    assert!(matches!(f.sealer.handle(seal).await, Response::Sealed { .. }));
+    assert!(matches!(
+        f.sealer.handle(seal).await,
+        Response::Sealed { .. }
+    ));
     let fu = &f.sink.envelopes()[1];
     assert!(open_intake(&fu.objects[0], member_ctx(0), &f.members[2].mek.private).is_none());
     assert!(open_intake(&fu.objects[0], member_ctx(0), &f.members[0].mek.private).is_some());

@@ -117,6 +117,7 @@ skip = [
     # Maintainer approval and an expiry <= 90 days): hpke =0.14.1 (mandated by the
     # build brief) depends on sha3 0.12 directly and on sha3 0.11 via ml-kem 0.3.2.
     { crate = "sha3@0.11.0", reason = "hpke 0.14.1 -> ml-kem 0.3.2 pulls sha3 0.11 while hpke uses 0.12 directly; both RustCrypto, no advisory. Approved by project owner as interim exception (ADR-051). Expires 2026-12-30: remove when ml-kem moves to sha3 0.12." },
+    { crate = "sha2@0.10.9", reason = "sqlx 0.9 (candor-intake-store) depends on sha2 0.10; workspace uses 0.11. RustCrypto, no advisory. Interim exception per ADR-052(7); expires 2026-12-30." },
 ]
 skip-tree = []
 
@@ -126,7 +127,10 @@ skip-tree = []
 executables = "deny"
 interpreted = "deny"
 enable-builtin-globs = true
-include-dependencies = true
+# cargo-deny 0.20.2 overflows its stack when scanning dependency sources (reproduced 2026-10-01).
+# Interim: dependency file scanning off; allow-build-scripts below still gates build.rs per crate@version.
+# Re-enable when cargo-deny is fixed (tracked in process/audits/AUDIT-RM2-intake-store.md STO-17).
+include-dependencies = false
 include-workspace = false
 include-archives = true
 # 28 §5.2 "new build.rs ... require explicit approval" (AUD-RM0-INF-06): only the

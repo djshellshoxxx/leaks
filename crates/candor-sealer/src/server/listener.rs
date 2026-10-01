@@ -69,8 +69,7 @@ pub(crate) async fn serve(
             continue;
         }
         let Ok(permit) = slots.clone().try_acquire_owned() else {
-            refuse_busy(&stream);
-            drop(stream);
+            refuse_busy(stream);
             continue;
         };
         let s = sealer.clone();
@@ -82,12 +81,16 @@ pub(crate) async fn serve(
     }
 }
 
-/// Over the connection cap: one `ERR{BUSY}` frame if the socket buffer takes it
-/// right away (never waits), then close.
-fn refuse_busy(stream: &UnixStream) {
+/// Over the connection cap: one `ERR{BUSY}` frame if the (non-blocking) socket
+/// buffer takes it right away — it never waits — then close.
+fn refuse_busy(stream: UnixStream) {
+    use std::io::Write;
     let resp = Response::error(ErrorCode::Busy);
-    if let Ok(f) = encode_response(Op::Hello, 0, &resp).and_then(|b| frame(&b)) {
-        let _ = stream.try_write(&f);
+    if let (Ok(f), Ok(mut s)) = (
+        encode_response(Op::Hello, 0, &resp).and_then(|b| frame(&b)),
+        stream.into_std(),
+    ) {
+        let _ = s.write(&f);
     }
 }
 

@@ -264,3 +264,139 @@ Trust boundaries: C-06/C-07 (source-originated data over local IPC: envelopes, n
 | STO-10 | `deletion_list_after(u64::MAX)` → `InvalidInput`, nothing marked |
 
 Gate: **FAIL** 2026-10-01 55f3356 (open: 2 High, 5 Medium). Re-test per checklist §G after fixes.
+
+---
+
+## Re-test (round 2)
+
+| Item | Value |
+|---|---|
+| Re-tested commit | `0f053c076a6083838afe740be239e9318378bfdf` (crate diff vs 55f3356: 16 files, +3,424 / −1,646; well over the 30 % re-audit trigger, so A2–A4 were re-run on all changed files) |
+| Inputs | ADR-052 (1), (2), (9), (14); SPEC-NOTES "Fixes for AUD-RM2-STO" and the updated "Security self-review" / residuals |
+| Date | 2026-10-01 |
+| New code reviewed | `uniform_rewrite`/`rewrite_all`, `candor_intake_maint` role + `PgIntakeMaintenance`, the new `deletion_list_guard` / `intake_meta_monotonic`, 3-object groups (`CommitEnvelope.objects`, `group_digest`), the account split (`create_account`/`update_account`/`purge_inactive_accounts`), generation-based dead drop (`DeadDropConfig`, `PageBuilder`, `rebuild_published_set`), `merge_pushed`/`verify_pushed`, the restore-pending gate, `open_pool` role/guard checks, `pg-test.sh` |
+
+### Evidence runs (round 2)
+
+| Run | Result |
+|---|---|
+| `scripts/pg-test.sh` with the full crate suite (PG enabled) | 22 + 16 + 26 + 5 tests pass. Includes `pg_uniform_rewrite_xmin`, `pg_no_server_errors_on_expected_paths` (log capture with positive control), `pg_durability_and_guards`, `pg_refuses_privileged_role`, `pg_statistics_reset` |
+| Live probes (fresh DB, roles as deployed by the migration) | see the statuses below. Main-table `xmin` after a rewrite: all 1304. **TOAST `xmin` stays 1300/1302/1303** (STO-18) |
+| PoC, deletion-list push (MemoryStore; same `merge_pushed`) | gap → `Err(gap after local head)`; empty → `Err(empty push…)`; head-mismatch truncation → `Err(truncated push)`; all keep restore-pending. A truncated push with a matching asserted head → `Ok` (STO-22) |
+| PoC, dead-drop generations (K = 8, 1 slot/day) | every slot adds exactly 8 entries (0/1/2 real). Length histogram of the added entries: `{5440: 8}` with no real reply; `{9000: 8}` with one real; `{9000: 7, 21000: 1}` with two (STO-19) |
+| clippy deny set | clean |
+| shellcheck `-S style` pg-test.sh | clean |
+| cargo-audit (db `9b3a3b73`) | exit 0 |
+| cargo-deny `--offline check` | advisories / licenses / sources ok. **`bans` aborts with "stack overflow"** (cargo-deny 0.20.2, reproducible, also with `ulimit -s unlimited`). `deny.toml` still has **no** `sha2@0.10.9` skip (ADR-052(7) not applied) → STO-17 stays open; gate §F.4 not met |
+| `cargo test` without `CANDOR_TEST_PG` | PG suites skip cleanly (26 pass trivially) |
+
+### Per-finding status
+
+| ID | Sev | Status | Verification |
+|---|---|---|---|
+| STO-01 | High | **Fixed for heap tuples; not fixed overall → tracked as STO-18** | Quota is out of the DB, commits no longer write accounts, and `uniform_rewrite` gives every heap row of the 8 tables one `xmin` (test + probe). Out-of-line TOAST values keep their original `xmin` and ordered `chunk_id` (STO-18) |
+| STO-02 | High | **Fixed** | `ON CONFLICT DO NOTHING` / `NOT EXISTS` on every expected-duplicate path (static read). The zero-ERROR suite test with a working positive control passes. `log_min_messages = panic` (ADR-052(14)) is checked by `pg_settings` |
+| STO-03 | Med | **Fixed** (residual → STO-21) | Probe as `candor_istore`: `UPDATE … relayed = true` refused (P0004), `DELETE` refused (no grant). The no-op rewrite is allowed by design |
+| STO-04 | Med | **Fixed** (residual → STO-22) | PoC cases A–C rejected and restore-pending persisted; the anchor, overlap, fork, hole-link and contiguity rules were read in `merge_pushed` |
+| STO-05 | Med | **Fixed** | `PgIntakeStore::open` sets `restore_pending` on every initialised store; `mark_restore_pending()` exists. Every source op calls `MetaRow::serving()` |
+| STO-06 | Med | **Fixed for the diff attack** (new content leaks → STO-19, STO-20) | PoC: two rebuilds differ by exactly K added / K expired whatever the real volume. Dummies are persistent rows and never regenerated. PG `open` requires an explicit `DummyReplies` |
+| STO-07 | Med | **Fixed** | Page count is a configuration constant ≤ `HARD_MAX_PAGES` = 128. Page buffers use fallible `try_reserve_exact`, the build is streamed, and the backlog is bounded by `max_pending` ≤ 100,000 |
+| STO-08 | Low | **Fixed** (residual 4 accepted by builder, needs lead acceptance) | Probe: with the role default set to `statement_timeout = 0` by the role itself, the client option still gives `30s` (client options take precedence over role settings). `open_pool` refuses owner-role and cross-role membership, unforced RLS and disabled guard triggers. Identity columns are not in the UPDATE grant (probe: `kdf_salt` update denied). The app can still flip `restore_pending` (probe) — documented residual 4 |
+| STO-09 | Low | **Fixed** | `serving()` gate in `delete_*`, `create_account`, `update_account`, `lookup_account`, `commit_envelope`, `apply_replies`, `mailbox_list` |
+| STO-10 | Low | **Fixed** (see STO-21) | `after > head` → `InvalidInput`; acknowledgement is the monotonic `deletion_acked_seq`, bounded by the trigger |
+| STO-11 | Low | **Partially fixed; residual** (non-blocking) | `reset_statistics()` daily (probe: the maintenance role can call `pg_stat_reset()` when provisioned). The view/function revocation was not done; stats still accumulate within a day and are written at shutdown. Lead to accept |
+| STO-12 | Low | **Fixed** | `verify_pushed` runs before the row lock; `BTreeMap`/`HashSet`; cap 200,000 |
+| STO-13 | Low | **Fixed** | Inputs validated; existing root/human accounts refused; the created user is removed; `umask 077`; log is 0600 |
+| STO-14 | Info | **Accepted residual** (builder, residual 5) | An early-deleted real reply is identifiable at slot granularity. This conflicts with the STO-06 goal but is required by SA-19. Lead to record |
+| STO-15 | Info | **Fixed** | `Conflict("kdf salt differs")` |
+| STO-16 | Info | **Fixed** | `ORDER BY release_day, envelope_ref` |
+| STO-17 | Info | **Open** | ADR-052(7) skip not present in `deny.toml`; `bans` check now crashes the tool |
+
+Variant hunt (each pattern checked; "none" means no new issue):
+- **TOAST** → STO-18.
+- `cmin`/`cmax`: per-statement command ids only; inside the rewrite every row of a table shares one, so nothing new.
+- Lock-only `xmax`: equals the rewrite xid (asserted by the test).
+- Sequences: none (probe: 0).
+- Visibility map, FSM, clog: no times or per-row xids beyond commit status.
+- Index tuples: the rewrites are HOT (no indexed value changes), so there are no xids. B-tree TID order equals the `ctid` residual already documented.
+- Autovacuum timing: it now follows the slot rewrite, not source actions, and stats are reset daily.
+- Maintenance-role abuse: it can only flag rows ≤ `deletion_acked_seq` and delete relayed non-head rows. The trigger does not enforce the 35-day age (only the Rust SQL does); acceptable because acknowledged entries are on Z-CORE. See STO-21 for the app-side lever.
+- Restore-pending bypass: only by a compromised app role (residual 4).
+- K-entry invariant under carry-over: holds; more than K reals wait in the backlog (PoC + `conf_dead_drop`).
+- Account split: the store side is clean. Chaff-account cadence lives in C-06/C-07 (out of scope here; flag for the sealer/web re-test).
+
+### New findings (round 2)
+
+#### AUD-RM2-STO-18 — TOAST tables keep each value's original `xmin` and a monotonic `chunk_id`, so `uniform_rewrite` does not erase the order or linkage of account creation, envelope commits and reply arrival
+- Severity: **High**
+- Location: `crates/candor-intake-store/src/pg.rs` (`SQL_REWRITE_ACCOUNTS`, `SQL_REWRITE`, `rewrite_all`); `migrations/0001_intake_schema.sql` (`envelope_part.slot_block` 18,692 B, `reply.reply_ct` ≤ 69,996 B, `source_account.prefs_ct` ≤ 4,096 B with `xwing_pk` 1,216 B: all stored out of line in TOAST); test `pg_uniform_rewrite_xmin` (checks heap `xmin` only) (commit 0f053c0)
+- Category: B1.2, B9.4 (+ CWE-212); variant of STO-01
+- Description: when an UPDATE does not change a TOASTed column, PostgreSQL keeps the existing out-of-line value: the `pg_toast.pg_toast_<oid>` tuples are not rewritten. The rewrite statements (`SET state = state`, `SET padded_size = padded_size`, `SET size_bucket = size_bucket`, `SET activity_month = …`) therefore leave every TOAST tuple with the `xmin` of the transaction that first stored the value. Its `chunk_id` is an OID from the cluster-wide, monotonically increasing OID counter. Probe (superuser):
+  - after tx A (account, 4,000 B prefs), tx B (envelope + 3 parts), tx C (reply) and tx D (the exact rewrite statements), every heap row has `xmin` 1304;
+  - the TOAST rows still show `source_account` 1300, `envelope_part` 1302 and `reply` 1303, with `chunk_id` 26284 < 26285 < 26288.
+- Exploit scenario: a disk-seizure adversary parses the TOAST relations of the intake DB.
+  - Each account's creation or last passphrase rotation (the `prefs_ct` TOAST `xmin`/`chunk_id`) and each pending envelope's commit (the `slot_block` TOAST) keep their exact relative order permanently, not just until the next slot.
+  - Account creation is a separate operation since ADR-052(2) precisely so that accounts cannot be linked to envelopes. The adjacency of an account-creation xid/chunk_id to an envelope-commit xid/chunk_id links them again (diluted only by chaff accounts and other traffic in between).
+  - `reply.available_day` together with the reply TOAST `xmin` gives xid→day anchors, as in STO-01.
+
+  Smaller rows that fit in-line (for example, short `prefs_ct`) are not affected, so exposure depends on the data.
+- Fix recommendation: make the rewrite produce new TOAST values. Options:
+  - (a) in the rewrite transaction, re-create each row (`DELETE … RETURNING` then `INSERT` of the identical values, ids kept) so that every TOAST value is newly written. Verify empirically, because a no-op expression on the column may keep the old TOAST pointer;
+  - (b) set `ALTER TABLE … ALTER COLUMN … SET STORAGE MAIN`/`PLAIN` where sizes allow (`prefs_ct` ≤ 4 KB with `xwing_pk` may exceed the 8 KB page limit for PLAIN; `slot_block`/`reply_ct` cannot);
+  - (c) store the large ciphertexts (`slot_block`, `reply_ct`) as blobs via safefs with normalized mtimes instead of in PG.
+
+  Re-assert this in the live test: query `xmin` and `chunk_id` of every TOAST relation of `candor` tables after `uniform_rewrite` and require a single `xmin` and no ordering information. Add TOAST and the OID counter to the 09 §13 residuals until fixed.
+- Spec / requirement reference: ADR-010, ADR-052(2), ADR-052(14); 09 §8 L11, §13; IMPL-RM2 §4 A1, A11
+- Status: Open
+
+#### AUD-RM2-STO-19 — All dummies of a dead-drop generation copy one real reply's length, so each slot's published entries reveal whether real replies were published and their sizes
+- Severity: **Medium**
+- Location: `crates/candor-intake-store/src/pg.rs` (`rebuild_published_set`: one `hint` per generation from `rows.get(uniform_below(rows.len()))`, `DEFAULT_DUMMY_BODY_LEN` when there is no real reply); `src/memory.rs` (same); `src/deaddrop.rs` (`DEFAULT_DUMMY_BODY_LEN = 5_440`, `PageBuilder::finish`)
+- Category: B1.7 (+ CWE-203); variant of STO-06
+- Description: the entries a slot adds are identifiable by diffing two index/page fetches (by design, exactly K). The `u32be` length prefix of each entry is cleartext. With no real reply, all K new entries are 5,440 B. With one real reply, all K take its length L. With two or more reals of different buckets, the dummies copy one of them and the other reals keep distinct lengths. PoC: `{5440: 8}`, `{9000: 8}`, `{9000: 7, 21000: 1}`.
+- Exploit scenario: an anonymous observer polling SA-19/SA-20 each slot learns which slots published real replies, a lower bound on how many, and their size buckets. Per-slot reply activity is exactly what the generation scheme is meant to hide (STO-06, API-037).
+- Fix recommendation: draw every dummy's length independently from a fixed public distribution of REPLY ciphertext lengths (the bucket distribution in the 39 registry); do not copy from real replies and do not use a constant default. Better still, pad every REPLY to a single ciphertext length, or put the true length inside the encrypted body so that the cleartext prefix is constant. Test: the length multiset of the K added entries is independent of real volume (χ² over many slots).
+- Spec / requirement reference: ADR-039; 08 SA-20, §3.8, API-037; 04 §13.5
+- Status: Open
+
+#### AUD-RM2-STO-20 — Dummy rows store `size_bucket = ⌈len/4096⌉` while real replies store the plaintext bucket k, which separates real and dummy rows in the DB
+- Severity: **Medium**
+- Location: `crates/candor-intake-store/src/deaddrop.rs` (`dummy_row`: `k = body.len().div_ceil(4096)`); `src/types.rs` (`IncomingReply.size_bucket`: "k of 4096 × k" plaintext bucket); `migrations/0001_intake_schema.sql` (`reply.size_bucket`)
+- Category: B1.7 / ADR-047(3)-style indistinguishability (+ CWE-203)
+- Description: a REPLY ciphertext of plaintext bucket k is longer than 4096·k (header 160 B, STREAM tags, stanza). A real row therefore has `(octet_length(reply_ct), size_bucket) = (L, k)`, while a dummy of the same length L gets bucket `⌈L/4096⌉ ≥ k+1`. Inside a generation (STO-19) the dummies copy a real's length, so the one row with the smaller `size_bucket` is the real one. In general, `size_bucket ≠ ⌈len/4096⌉` marks real rows. "Dummies stored exactly like Tier V replies" does not hold.
+- Exploit scenario: an intake DB seizure lists exactly which published entries are real Tier V replies, with their generation (slot), defeating the persistent-dummy design at rest.
+- Fix recommendation: derive `size_bucket` for dummies with the same rule as real REPLY objects (take it from the `DummyReplies` implementation, which knows the format), or stop storing `size_bucket` for Tier V/dummy rows (it is only needed for Tier W mailbox rendering). Add a test that real and dummy rows satisfy the same length→bucket relation.
+- Spec / requirement reference: ADR-039; 08 §3.8 / API-037; 09 §5.1 `reply`
+- Status: Open
+
+#### AUD-RM2-STO-21 — The app role can insert an out-of-sequence "head" and advance `deletion_acked_seq` to it; the daily maintenance run then prunes real, never-relayed entries, including the real head
+- Severity: Low
+- Location: `migrations/0001_intake_schema.sql` (`intake_meta_monotonic`: acknowledgement bounded only by `max(seq)`; `GRANT INSERT ON candor.deletion_list TO candor_istore` with no INSERT check; `GRANT UPDATE (deletion_acked_seq)`; `deletion_list_guard`: age not enforced)
+- Category: B9.3 (+ CWE-284); residual of STO-03/STO-10
+- Description: probe as `candor_istore`: three unrelayed entries (seq 1–3), then `INSERT` seq 1000 and `UPDATE intake_meta SET deletion_acked_seq = 1000` (accepted). Then, as `candor_intake_maint`, the production mark + prune SQL left `remaining seqs: 1000`. Every real entry older than the cutoff was deleted although the relay never acknowledged it. The junk row also breaks the chain, which the relay would detect at the next RL-11.
+- Exploit scenario: a compromised app role erases unrelayed deletion entries older than 35 days (for example, during a long relay outage), so those deletions can be undone after a restore. This needs app compromise and an old unrelayed backlog.
+- Fix recommendation: add a BEFORE INSERT trigger requiring `NEW.seq = COALESCE(max(seq), 0) + 1` and `NEW.prev_hash` = SHA-256 chain link of the current head (`pgcrypto` is excluded, so at least require seq contiguity and `NEW.prev_hash <> 0³²` unless seq = 1). Restore and merge inserts would use an owner-run definer path or insert in ascending order. Enforce the 35-day age in `deletion_list_guard` for DELETE.
+- Status: Open
+
+#### AUD-RM2-STO-22 — Truncation detection relies on the relay-asserted `core_head`; backups do not carry `deletion_acked_seq`, so after a restore a truncated push with a matching head is accepted
+- Severity: Low
+- Location: `src/validate.rs` `merge_pushed` (`core_head < acked` is the only independent check); `src/types.rs` `MetaSnapshot` (no `deletion_acked_seq`); `src/pg.rs` `restore_backup`
+- Category: integrity / fail-closed (+ CWE-345); residual of STO-04
+- Description: PoC D: local `[1,2]` (restored), push `[3,4]` with `core_head = 4` while Z-CORE truly holds 6 → `Ok(4)`, serving. After `restore_backup` the `acked` value is 0, so the `core_head < acked` guard is inert exactly when it matters.
+- Exploit scenario: a faulty or compromised relay (or a lagging Z-CORE replica) supplies a short list after a restore; deletions 5–6 are lost on the restored node.
+- Fix recommendation: include `deletion_acked_seq` (and the head seq/hash at backup time) in `MetaSnapshot` and keep the higher value on restore. Longer term, have Z-CORE sign `(core_head, chain_hash)` with a key the intake can verify (spec feedback for 08 RL-12).
+- Status: Open
+
+### Round-2 summary
+
+| Severity | Open | IDs |
+|---|---|---|
+| Critical | 0 | — |
+| High | 1 | STO-18 (STO-01 is closed for heap tuples; its goal stays open through STO-18) |
+| Medium | 2 | STO-19, STO-20 |
+| Low | 3 | STO-11 (residual, needs lead acceptance), STO-21, STO-22 |
+| Info | 2 | STO-14 (accepted residual, lead to record), STO-17 (deny skip missing; `bans` check crashes) |
+
+Fixed and verified: STO-02, 03, 04, 05, 06 (diff attack), 07, 08, 09, 10, 12, 13, 15, 16, and STO-01 for heap tuples.
+
+Gate: **FAIL** 2026-10-01 0f053c0. Open: 1 High (STO-18), 2 Medium (STO-19, STO-20). §F.4 is also not met because `cargo deny check bans` aborts and the ADR-052(7) skip is missing.

@@ -346,8 +346,15 @@ struct Plan {
 /// Greedy primary + complementary suppression (24 §9.3), starting from
 /// `sup` (primary cells and any extra complementary choices).
 fn greedy(values: &[u64], ln: &Lines, k: u64, mut sup: Vec<bool>) -> Plan {
-    let mut row_pub = vec![true; ln.rows.len()];
-    let mut col_pub = vec![true; ln.cols.len()];
+    let total = |line: &[usize]| {
+        line.iter()
+            .map(|&i| values.get(i).copied().unwrap_or(0))
+            .fold(0u64, u64::saturating_add)
+    };
+    // A total below k is itself a small cell: never published.
+    let mut row_pub: Vec<bool> = ln.rows.iter().map(|l| total(l) >= k).collect();
+    let mut col_pub: Vec<bool> = ln.cols.iter().map(|l| total(l) >= k).collect();
+    let grand_pub = values.iter().fold(0u64, |a, v| a.saturating_add(*v)) >= k;
     loop {
         let mut changed = false;
         for (line, published) in ln
@@ -395,7 +402,7 @@ fn greedy(values: &[u64], ln: &Lines, k: u64, mut sup: Vec<bool>) -> Plan {
         sup,
         row_pub,
         col_pub,
-        grand_pub: true,
+        grand_pub,
     }
 }
 
@@ -865,8 +872,10 @@ fn protected_of(table: &Table, plan: &Plan, ln: &Lines, k: u64) -> Vec<BTreeSet<
             out.push(BTreeSet::from([*key]));
         }
     }
-    // Sums of suppressed cells along a line when that sum is below k.
-    for line in ln.rows.iter().chain(ln.cols.iter()) {
+    // Sums of suppressed cells along a line (or the whole table) when that
+    // sum is below k.
+    let all: Vec<usize> = (0..table.cells.len()).collect();
+    for line in ln.rows.iter().chain(ln.cols.iter()).chain(core::iter::once(&all)) {
         let sup: Vec<&TableCell> = line
             .iter()
             .filter(|&&i| plan.sup.get(i).copied().unwrap_or(false))
@@ -986,9 +995,16 @@ fn suppress_with(
     let mut stage = 0u8;
     let mut extra_rounds = values.len();
     loop {
+        // Once everything is suppressed regardless of value, the pattern no
+        // longer tells primary from complementary cells: no priors.
+        let blind = stage == 3;
         let mine = Disclosed {
             facts: facts_of(table, &plan, &ln),
-            priors: priors_of(table, &plan, kv),
+            priors: if blind {
+                Vec::new()
+            } else {
+                priors_of(table, &plan, kv)
+            },
             protected: protected_of(table, &plan, &ln, kv),
         };
         let mut f = prior.facts.clone();
@@ -1014,7 +1030,7 @@ fn suppress_with(
                 }
                 let grand = plan.grand_pub;
                 plan = greedy(&values, &ln, kv, sup);
-                plan.grand_pub = grand;
+                plan.grand_pub &= grand;
                 continue;
             }
         }

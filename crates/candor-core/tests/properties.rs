@@ -92,16 +92,18 @@ proptest! {
             padded_len: pt.len() as u64,
         };
         prop_assert!(seal_bytes(&req, &pt).is_err(), "intake objects must use seal()");
-        let (_ck, obj) = seal(&req, |_| Ok(pt.clone())).unwrap();
+        let (secrets, obj) = seal(&req, |_| Ok(pt.clone())).unwrap();
+        let list = secrets.recipient_list();
         let p = parse(&obj.bytes).unwrap();
         let blk = obj.slot_block.unwrap();
         let (ck, pos) = blk.trial_open(&member().private, &p.slot_binding(ctx.clone())).unwrap();
-        prop_assert_eq!(usize::from(obj.recipient_list[0].slot_index), pos);
+        prop_assert_eq!(usize::from(list.as_slice()[0].slot_index()), pos);
         let dir = |kid: &[u8; 32]| {
             (key_id(Suite::CandorStd1, KeyKind::Mek, &member().public.to_bytes()) == *kid)
                 .then(|| member().public.clone())
         };
-        blk.verify_slot_block(&ck, &p.slot_binding(ctx.clone()), &obj.recipient_list, dir)
+        prop_assert_eq!(p.slot_binding_from_header().unwrap(), p.slot_binding(ctx.clone()));
+        blk.verify_slot_block(&ck, &p.slot_binding(ctx.clone()), list.as_slice(), dir)
             .unwrap();
         let wrong = match which {
             0 => SlotContext::MemberEpoch { tenant_id: [9; 16], channel_id: [2; 16], epoch_id: epoch },
