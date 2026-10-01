@@ -105,6 +105,11 @@ pub const STAGED_MAX_TIMEOUT: Duration = Duration::from_secs(60);
 /// Blobs received but not yet committed or swept, per receiver; more are
 /// refused with [`StoreError::Capacity`] (bounded memory and disk).
 pub const STAGED_MAX_IN_FLIGHT: usize = 64;
+/// Blobs awaiting the slot sweep (orphan or of unknown outcome) per
+/// receiver, counted apart from [`STAGED_MAX_IN_FLIGHT`] (AUD-RM2-STO-30).
+/// Each was one complete failed hand-over, so this also bounds the blob
+/// volume space orphans can take between two sweeps.
+pub const STAGED_MAX_AWAITING_SWEEP: usize = 256;
 /// Recent commits remembered for idempotent re-hand-overs (AUD-RM2-SEA-01).
 pub const STAGED_COMMITTED_MEMORY: usize = 4096;
 /// Required seals (ADR-055(1), plus `F_SEAL_EXEC`: the sealer creates its
@@ -526,7 +531,15 @@ impl StagedReceiver {
         let blob_id = BlobId(*id.as_bytes());
         {
             let mut m = self.reg.lock();
-            if m.len() >= STAGED_MAX_IN_FLIGHT {
+            // AUD-RM2-STO-30: blobs awaiting the sweep (orphan, uncertain)
+            // have their own bound, so failed hand-overs cannot block new
+            // ones until the next slot boundary; both bounds fail closed.
+            let awaiting = m
+                .values()
+                .filter(|s| matches!(s, State::Orphan | State::Uncertain(_)))
+                .count();
+            let active = m.len().saturating_sub(awaiting);
+            if active >= STAGED_MAX_IN_FLIGHT || awaiting >= STAGED_MAX_AWAITING_SWEEP {
                 return Err(StoreError::Capacity);
             }
             if m.insert(blob_id, State::Receiving).is_some() {

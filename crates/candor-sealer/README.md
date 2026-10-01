@@ -85,7 +85,9 @@ The sealer sends one 41-byte message `u8 version = 2 ‖ u64be len ‖ sha256(bu
 - `0x02` must arrive within `copy_deadline(len) = 10 s + ⌈len / 50 MB/s⌉` (`COPY_DEADLINE_BASE`, `MIN_COPY_RATE`).
 - `0x01` must then arrive within `ACK_TIMEOUT` (60 s).
 
-A refusal, a wrong hash, a short or long answer (including the protocol-1 one-byte ack), any other code, a returned descriptor, EOF or a missed deadline is an error and closes the `StoreConnection`, so a late answer can never be credited to the next bundle. Bundles above `MAX_BUNDLE_LEN` (4 GiB, the same value as the store's `STAGED_MAX_BUNDLE_LEN`) are refused before anything is sent. Deploy requirement: the blob volume sustains at least `MIN_COPY_RATE` (50 MB/s); nothing checks this yet (deploy-owner open item).
+A refusal, a wrong hash, a short or long answer (including the protocol-1 one-byte ack), any other code, a returned descriptor, EOF or a missed deadline is an error and closes the `StoreConnection`, so a late answer can never be credited to the next bundle. Bundles above `MAX_BUNDLE_LEN` (4 GiB, the same value as the store's `STAGED_MAX_BUNDLE_LEN`) are refused before anything is sent.
+
+Unknown outcomes (AUD-RM2-SEA-01): `hand_over_with_retry` (and `hand_over_group_bundle_with_retry`) re-send the same sealed bundle once on a fresh connection from the integrator's `reconnect` closure. The store answers a re-hand-over of an already committed group with `0x02 ‖ h`, then `0x01 ‖ h`, and commits nothing twice. A commit that landed after the first attempt gave up is therefore reported as success. The seal path should use the retrying calls. Deploy requirement: the blob volume sustains at least `MIN_COPY_RATE` (50 MB/s); nothing checks this yet (deploy-owner open item).
 
 ## systemd unit (07 §4.2/4.3, BE-003; R7 §B)
 

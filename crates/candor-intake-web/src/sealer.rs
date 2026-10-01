@@ -13,7 +13,7 @@
 //! The web holds no keys: everything key-bearing stays in the sealer.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use candor_sealer::proto::{
@@ -33,6 +33,10 @@ pub enum SealerError {
     /// Socket, deadline, framing or protocol failure: the sealer is treated
     /// as down.
     Unavailable,
+    /// The request was sent in full but no reply arrived in time (deadline
+    /// or connection lost): the operation may still complete in the sealer
+    /// (AUD-RM2-SEA-01: a `SEAL_FINISH` must then not be called "not sent").
+    NoReply,
     /// The sealer answered with an error code (and, for
     /// `NO_ELIGIBLE_TRIAGE`/`UNAVAILABLE`, possibly an alternative channel).
     Code(ErrorCode, Option<[u8; 16]>),
@@ -97,6 +101,7 @@ impl SealerClient {
     /// Send `req` and return the sealer's response, all within `deadline`.
     /// `Response::Error` is returned as [`SealerError::Code`].
     pub async fn call(&self, req: &Request, deadline: Duration) -> Result<Response, SealerError> {
+        let sent = AtomicBool::new(false);
         let work = async {
             let _permit = self
                 .permits
@@ -116,7 +121,20 @@ impl SealerClient {
                 _ => return Err(SealerError::Unavailable),
             }
             let rid = self.next_rid();
-            let resp = Self::exchange(&mut s, rid, req).await?;
+            let msg = encode_request(rid, req).map_err(|_| SealerError::Unavailable)?;
+            let f = frame(&msg).map_err(|_| SealerError::Unavailable)?;
+            s.write_all(&f)
+                .await
+                .map_err(|_| SealerError::Unavailable)?;
+            sent.store(true, Ordering::Relaxed);
+            let body = Self::read_frame(&mut s)
+                .await
+                .map_err(|_| SealerError::NoReply)?;
+            let (got, resp) =
+                decode_response(req.op(), &body).map_err(|_| SealerError::Unavailable)?;
+            if got != rid {
+                return Err(SealerError::Unavailable);
+            }
             // Close the connection: one request per connection.
             let _ = s.shutdown().await;
             match resp {
@@ -127,9 +145,13 @@ impl SealerClient {
                 r => Ok(r),
             }
         };
-        timeout(deadline, work)
-            .await
-            .map_err(|_| SealerError::Unavailable)?
+        timeout(deadline, work).await.map_err(|_| {
+            if sent.load(Ordering::Relaxed) {
+                SealerError::NoReply
+            } else {
+                SealerError::Unavailable
+            }
+        })?
     }
 
     fn next_rid(&self) -> u32 {

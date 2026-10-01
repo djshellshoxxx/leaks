@@ -270,6 +270,14 @@ specs disagreed, the stricter or more specific rule won, as recorded below.
    Fluent's formatting temporaries (see residuals). `ViewModel` strings are owned by C-06. C-06
    must hold the RAM draft and passphrase in zeroizing storage and must not keep view models
    longer than one render.
+   **AUD-RM2-WEB-01 (coordinated change, 2026-10-01):** every model field that carries the
+   source's text, identity data, file names or descriptions, team replies or the form token
+   is now `Zeroizing<String>`. These are `PageContext.form_token`, `Question.value`,
+   `IdentityData.{full_name, role, contact_other_value}`, `AttachedFile.{name, description}`,
+   `ReviewAnswer.answer`, `InboxMessage.{sender, text}` and `ConversationData.draft_text`.
+   Dropping the model wipes them. `label()` (sender labels and file names) also returns a
+   zeroizing buffer, and `q_month`/`q_year` borrow instead of cloning. Tests:
+   `tests/zeroizing_fields.rs`.
 6. **Form tokens before login (AUD-RM1-SUI-06).** Every form carries `csrf`. For pre-session
    pages (S01, S02, S02b, S03, S11 login, Leave, error pages) C-06 issues a single-use
    pre-session token bound (by MAC) to a short-lived, random pre-session cookie

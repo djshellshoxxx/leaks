@@ -24,8 +24,8 @@ use std::time::Duration;
 
 use candor_intake_store::staged::{
     STAGED_ACK_COMMITTED, STAGED_ACK_COPIED, STAGED_ACK_LEN, STAGED_ACK_REFUSED,
-    STAGED_BUNDLE_INDEX, STAGED_MAX_BUNDLE_LEN, STAGED_MAX_IN_FLIGHT, STAGED_VERSION, StagedBlob,
-    StagedCommit, StagedHeader, StagedReceiver, send_staged_bundle,
+    STAGED_BUNDLE_INDEX, STAGED_MAX_AWAITING_SWEEP, STAGED_MAX_BUNDLE_LEN, STAGED_MAX_IN_FLIGHT,
+    STAGED_VERSION, StagedBlob, StagedCommit, StagedHeader, StagedReceiver, send_staged_bundle,
 };
 use candor_intake_store::*;
 use candor_safefs::{ObjectId, RootPolicy, SafeRoot, SlotTime};
@@ -612,6 +612,42 @@ async fn staged_in_flight_bounded() {
     assert_clean(&e, "capacity");
     send_staged_bundle(&sealer, &header(&data), file.as_fd()).unwrap();
     drop(e.rx.receive(store_sock.as_fd(), slot()).unwrap());
+}
+
+/// AUD-RM2-STO-30: blobs that only await the sweep (dropped, orphaned) do
+/// not count against the active in-flight bound; their own bound fails
+/// closed.
+#[tokio::test]
+async fn staged_orphans_do_not_block_new_hand_overs() {
+    let e = env();
+    let (sealer, store_sock) = pair();
+    let data = bundle(64);
+    let file = memfile(&data);
+    // Fill the active bound with orphans (received, then dropped).
+    for _ in 0..STAGED_MAX_IN_FLIGHT {
+        send_staged_bundle(&sealer, &header(&data), file.as_fd()).unwrap();
+        drop(e.rx.receive(store_sock.as_fd(), slot()).unwrap());
+        while try_recv_byte(&sealer).is_some() {}
+    }
+    assert_eq!(e.rx.in_flight(), STAGED_MAX_IN_FLIGHT);
+    // A new hand-over is still accepted before the sweep.
+    send_staged_bundle(&sealer, &header(&data), file.as_fd()).unwrap();
+    let live = e.rx.receive(store_sock.as_fd(), slot()).unwrap();
+    drop(live);
+    while try_recv_byte(&sealer).is_some() {}
+    // The awaiting-sweep bound itself holds.
+    for _ in STAGED_MAX_IN_FLIGHT + 1..STAGED_MAX_AWAITING_SWEEP {
+        send_staged_bundle(&sealer, &header(&data), file.as_fd()).unwrap();
+        drop(e.rx.receive(store_sock.as_fd(), slot()).unwrap());
+        while try_recv_byte(&sealer).is_some() {}
+    }
+    send_staged_bundle(&sealer, &header(&data), file.as_fd()).unwrap();
+    assert_eq!(
+        e.rx.receive(store_sock.as_fd(), slot()).unwrap_err(),
+        StoreError::Capacity
+    );
+    let m = mem_store().await;
+    assert!(e.rx.sweep(&m, next_slot()).await.unwrap() > 0);
 }
 
 /// A commit seam with scripted outcomes (backend errors and cancellation

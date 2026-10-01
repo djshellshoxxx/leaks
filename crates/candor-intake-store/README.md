@@ -25,7 +25,10 @@ Specs: `specs/09-DATABASE.md` §5.1/§8/§10/§11, `specs/07-BACKEND.md` §5.3/�
   - `0x02 ‖ h` once its copy is durable in the blob root;
   - then `0x01 ‖ h` after the envelope naming the blob is committed, or `0x00 ‖ 0³²` on refusal.
 
-  The sealer accepts nothing else. Both sides cap a bundle at 4 GiB (`STAGED_MAX_BUNDLE_LEN`). Details are in SPEC-NOTES decisions 31–33.
+  The sealer accepts nothing else. Both sides cap a bundle at 4 GiB (`STAGED_MAX_BUNDLE_LEN`).
+  - Re-handing over the same bundle of an already committed group is an idempotent success: nothing is committed twice (AUD-RM2-SEA-01).
+
+  Details are in SPEC-NOTES decisions 31–35.
 
 ## API sketch
 

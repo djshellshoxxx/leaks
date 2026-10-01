@@ -63,6 +63,10 @@ pub(crate) enum SealFail {
     Limit,
     /// No eligible first reader / channel unavailable (fail closed, ADR-037(1)).
     NoReader(Option<[u8; 16]>),
+    /// The request reached the sealer but no reply came in time: the
+    /// outcome is unknown (AUD-RM2-SEA-01). Outside `SEAL_FINISH` this is
+    /// handled like the busy page.
+    Unconfirmed,
 }
 
 impl From<Fail> for SealFail {
@@ -257,6 +261,7 @@ impl<S: StoreReads + 'static> Web<S> {
         self.note_sealer(&r);
         r.map_err(|e| match e {
             crate::sealer::SealerError::Unavailable => SealFail::Page(Fail::Busy),
+            crate::sealer::SealerError::NoReply => SealFail::Unconfirmed,
             crate::sealer::SealerError::Code(code, alt) => match code {
                 ErrorCode::Busy => SealFail::Page(Fail::Busy),
                 ErrorCode::UnknownSession => SealFail::Page(Fail::Gone),
@@ -496,6 +501,8 @@ impl<S: StoreReads + 'static> Web<S> {
             SealFail::Page(f) => self.fail(rq, f),
             SealFail::Limit => self.fail(rq, Fail::Error),
             SealFail::NoReader(alt) => self.no_reader(rq, alt),
+            // Outside SEAL_FINISH: as before, the busy page.
+            SealFail::Unconfirmed => self.fail(rq, Fail::Busy),
         }
     }
 
@@ -1771,6 +1778,14 @@ impl<S: StoreReads + 'static> Web<S> {
             Ok(_) => return self.fail(rq, Fail::Error),
             Err(SealFail::Page(Fail::Busy)) => return self.busy_at_submit(rq),
             Err(SealFail::NoReader(alt)) => return self.no_reader(rq, alt),
+            // AUD-RM2-SEA-01: SEAL_FINISH was sent but not answered in time;
+            // the sealer may still deliver (its store hand-over retries and is
+            // idempotent). Never say "not sent" then. A second submit cannot
+            // send twice: the sealer consumes the draft once.
+            Err(SealFail::Unconfirmed) => {
+                let msg = Msg::new("sui-error-unconfirmed");
+                return self.confirm_page(rq, k, Phase::Confirming, Screen::Confirm, Some(msg));
+            }
             Err(_) => {
                 let msg = Msg::new("sui-error-not-sent");
                 return self.confirm_page(rq, k, Phase::Confirming, Screen::Confirm, Some(msg));
@@ -2347,7 +2362,7 @@ fn map_seal(e: SealFail) -> UploadFail {
     match e {
         SealFail::Page(f) => UploadFail::Page(f),
         SealFail::Limit => UploadFail::Field("sui-files-err-too-large"),
-        SealFail::NoReader(_) => UploadFail::Page(Fail::Busy),
+        SealFail::NoReader(_) | SealFail::Unconfirmed => UploadFail::Page(Fail::Busy),
     }
 }
 

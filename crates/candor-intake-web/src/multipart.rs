@@ -789,11 +789,6 @@ mod tests {
             b.len()
         );
         // Wall clock, generous for unoptimised CI builds (was ≈ 13 s).
-        eprintln!(
-            "one-byte feeds: {} bytes, {} windows, {took:?}",
-            b.len(),
-            p.work
-        );
         assert!(took < std::time::Duration::from_millis(250), "{took:?}");
     }
 

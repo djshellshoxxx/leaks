@@ -119,6 +119,7 @@ sui-error-summary = There is a problem
 sui-error-kept = Your text is kept for now. It is lost if you close Tor Browser or after the session ends.
 # @class critical
 sui-error-not-sent = Your report was not sent. Try again.
+sui-error-unconfirmed = We could not confirm that your report was sent. It may still arrive. Do not send it again now: log in later with your passphrase to check whether it was received.
 
 ## S01 Landing
 

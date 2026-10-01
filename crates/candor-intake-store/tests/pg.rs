@@ -2061,7 +2061,11 @@ async fn pg_staged_ack_after_commit() {
         assert!(c1.replayed());
         rx.acknowledge(store_sock.as_fd(), c1).unwrap();
         ack(0x01);
-        assert_eq!(s.pending_count().await.unwrap(), 1, "one envelope in PostgreSQL");
+        assert_eq!(
+            s.pending_count().await.unwrap(),
+            1,
+            "one envelope in PostgreSQL"
+        );
         assert_eq!(rx.sweep(&s, next).await.unwrap(), 1);
         assert_eq!(
             rx.blobs().list().unwrap(),

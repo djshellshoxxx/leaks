@@ -46,6 +46,10 @@ It also covers the C-5 wiring and AUD-RM2-STO-29 in `candor-sealer::server::hand
 | Token | ≤ 160 B |
 | Multipart | ≤ 4 parts, part head ≤ 1 KiB, filename ≤ 255 B, media type ≤ 127 B, value ≤ 160 B, boundary ≤ 70 |
 | File | ≤ `max_file_bytes` (≤ 4 GiB), in ≤ 64 KiB chunks |
+| Upload time | 30 s grace + `Content-Length` at 1 KiB/s (≤ 4 h); average rate ≥ 1 KiB/s after the grace (AUD-RM2-WEB-07) |
+| Uploads in progress | 128 service-wide, 1 per session (AUD-RM2-WEB-07) |
+| Multipart parse work | ≤ 4 window checks per fed byte + 64 Ki per request (AUD-RM2-WEB-02) |
+| Leave tokens remembered | 65,536, 15 min each (AUD-RM2-WEB-04) |
 | Connections | 512 served + 512 answered busy |
 | Sessions | 10,000 |
 | Circuit entries | 65,536 |
@@ -71,7 +75,8 @@ It also covers the C-5 wiring and AUD-RM2-STO-29 in `candor-sealer::server::hand
 **Secrets and their lifetime.**
 - **Session CSRF token.** Lives in a zeroizing string for the session's lifetime. It is rotated at login, passphrase rotation and disclosure-mode changes, and removed at logout, Leave and discard (decision 4).
 - **Piece key.** Lives for the session's lifetime.
-- **Pre-session MAC key and limiter key.** Random per process. The MAC key also derives the leave token (decision 5).
+- **Pre-session MAC key, leave-token key and limiter key.** Random per process. Issued leave-token nonces are kept in RAM for 15 min (decision 5).
+- **Source text, identity data, file descriptions and team replies in view models.** Only in `Zeroizing<String>` fields of the source-ui model, filled straight from the sealer's `SecretText`; the rendered body is zeroizing too and is dropped (wiped) once the response is written (AUD-RM2-WEB-01).
 - **Login passphrase.** Lives in zeroizing buffers for the duration of one request and is forwarded to the sealer.
 - **S10 words.** Live in zeroizing strings for one render.
 
@@ -119,9 +124,11 @@ It also covers the C-5 wiring and AUD-RM2-STO-29 in `candor-sealer::server::hand
    - Tests: `flow::pre_login_token_invalid_after_login` (pre-login token refused with the session cookie, with and without the old `__Host-cpre`; another session's token refused; nothing in a URL; token dead after logout); `flow::extend_identity_and_discard` (rotation at a mode change); `passphrase_rotation`.
 5. **Leave always needs a valid token** (lead decision 2: "a valid csrf token is always required"; replaces the earlier no-token exception).
    - With a live session, the session token is required. With only `__Host-cpre`, the pre-session token is required.
-   - With no cookie at all, the **leave token** is required: `HMAC-SHA256(K_pre, "candor/web/leave" ‖ epoch5min)`, domain-separated from pre-session tokens and on the same epochs. The cookie-clearing screens (S10s, Leave, discarded, closed, signed out) send `Clear-Site-Data`, so the Leave form they render can carry nothing but this token. `App::page` puts it in place of the page token on exactly those screens; it has the same length, so sizes do not change.
+   - With no cookie at all, the **leave token** is required. The cookie-clearing screens (S10s, discarded, closed, signed out) send `Clear-Site-Data`, so the Leave form they render can carry nothing but this token. `App::page` issues one in place of the page token on exactly those screens (the Leave page itself has no form); it has the same 64-hex length, so sizes do not change.
+   - **Construction (AUD-RM2-WEB-04, lead decision):** `nonce(16 B) ‖ HMAC-SHA256(K_leave, "candor/web/leave" ‖ nonce)[..16]`, a fresh random nonce per render. It contains no time and no epoch, so it can neither be enumerated nor mapped to when a page was shown. Validity is bounded by a server-side set of issued nonces (RAM, monotonic clock): 15 min each, at most 65,536, the oldest forgotten first. Verification checks the MAC in constant time and that the nonce is remembered. A token may be used again within its 15 min (back button); it authorises nothing else.
+   - **Stale session cookie (AUD-RM2-WEB-03):** a Leave carrying a `__Host-cs` that is not a live session (idle expiry, ended session, `Clear-Site-Data` not honoured, a forged value) always renders the Leave page with `Clear-Site-Data`, whatever token the form carried: the session token is gone, and without a live session Leave changes no state. `Origin` and `Sec-Fetch-Site` are still checked first.
    - The leave token authorises only `/leave`, which with no cookie changes no state. `Origin` and `Sec-Fetch-Site` are checked as for every POST.
-   - Test: `flow::cookieless_leave_needs_the_leave_token` (no, zero and cookie-less pre-session tokens refused; the token from a discarded page works without a cookie; it is refused by `/new`).
+   - Tests: `flow::cookieless_leave_needs_the_leave_token`, `flow::leave_with_stale_cookie_is_the_leave_page`, `token::tests::leave_tokens_are_unlinkable`.
 6. **Error pages.** source-ui has no 400 or 413 screen, so the mapping is:
    - malformed request, CSRF failure or oversize: S92 (500);
    - unknown route: S91 (404);
@@ -130,6 +137,7 @@ It also covers the C-5 wiring and AUD-RM2-STO-29 in `candor-sealer::server::hand
 
    For field-level limits (text too long, file too large, too many files, empty file) the page is re-rendered with the inline error (11 §5.7).
 7. **Login floor scope.** The floor applies to every POST to `/login`, `/inbox` (SW-22 is a POST `/inbox` action) and `/rotate/confirm`. That includes CSRF failures, rate limits, busy and malformed forms. Inbox part navigation therefore also waits for the floor; this is rare and accepted.
+   - **Anchor and jitter (AUD-RM2-WEB-06):** the body of these routes (≤ 112 KiB) is read in full first, and the floor runs from that moment, the end of the full request; a slow head or body no longer shortens it. Release is `max(complete + floor, work done) + U(0, 250 ms)`: the jitter is added also when the work ran past the floor (`app::floor_release`). Tests: `flow::login_floor_from_full_request`, `app::floor_tests::floor_then_jitter_on_every_path`.
 8. **Uniform login work.** The sequence is always LOGIN_DERIVE → store lookup → random challenge → LOGIN_SIGN → strict Ed25519 verification against the account's `auth_pk`, or a per-process dummy key. Unknown and known locators make the same calls, and the floor hides the rest. Word-count and word-list pre-checks (11 S11 messages) run before Argon2id; they do not depend on any account.
 9. **PROXY protocol.** tor emits **PROXY v1 text** (`PROXY TCP6 fc00:dead:beef:4dad::HHHH:LLLL ::1 sport vport`), not v2 as IMPL-RM2 §2.6 says.
    - The parser accepts exactly that shape and keeps only the 32-bit circuit id, which becomes `HMAC(K_rl, id)[..16]` at once.
@@ -153,6 +161,8 @@ It also covers the C-5 wiring and AUD-RM2-STO-29 in `candor-sealer::server::hand
     | Global new sessions | 600/h |
 
     Entries are evicted after 10 min idle (NET-013), so windows longer than 10 min hold only while the circuit stays active. Privacy wins over precision, and the global buckets carry the real protection.
+
+    **Token buckets (AUD-RM2-WEB-05):** refill carries its remainder (the bucket's clock advances only by the time converted into whole milli-tokens, in nanoseconds), so a steady trickle of requests cannot hold a bucket at zero. A request is granted only if both the global and the circuit bucket have a token, and only then are both spent; a refused request costs nothing anywhere. Tests: `ratelimit::tests::trickle_does_not_starve_refill` (≈ 100 sessions in 10 min under a 5 ms trickle, nominal rate), `refusal_spends_nothing_globally`.
 11. **Socket activation.** The library takes a `tokio::net::UnixListener`. Taking fd 3 from `LISTEN_FDS` needs `OwnedFd::from_raw_fd`, which is `unsafe` (forbidden here; allow-listed only in `candor-memlock`). The binary glue belongs to the integration step (open item O-3), as for the sealer.
 12. **Logging.** There is no per-request event of any kind. The only output is the panic hook's static `diag!` (no payload, location or codes). `Web::health()` gives two booleans for the integrator's daily health band. The `CTR:submissions_received` counters of 08 belong where the commit is known (sealer/store, ADR-047(3): chaff is never counted). They are not emitted here.
 13. **Sessions.**
@@ -167,6 +177,9 @@ It also covers the C-5 wiring and AUD-RM2-STO-29 in `candor-sealer::server::hand
     - The mode chosen at S04 stays in the web session until S05b confirms it. The sealer draft stays ANONYMOUS until then (11 S05b).
 15. **The web never sees filenames.** They go to the sealer as encrypted metadata only. S06 lists files as "#n" with the padded size bucket (08 SW-06 "File (size bucket)").
 16. **Multipart: 4 parts.** The S06/S12 forms send `csrf`, `file`, `neutral_names` and `action`; 07 §5.1 says 3. `csrf` must be first. `PART_BEGIN` waits for the first file byte, so an empty file never reaches the sealer, and is declared with the request `Content-Length` (sealer decision 8). The last chunk is held back one step so `last = true` is exact. Any failure after `PART_BEGIN` sends `PART_DROP`.
+    - **Linear parsing (AUD-RM2-WEB-02):** the delimiter and blank-line searches carry a scan offset (no match starts before it), adjusted when bytes are consumed and reset on state changes, so each fed byte is examined about once per pattern whatever the read sizes. A per-request CPU budget fails closed (`MultipartError::Budget`) if the parser ever examines more than 4 positions per fed byte plus 64 Ki. The request-head reader uses the same carried offset. The auditor's PoC (33 KB of near-delimiter content, 70-byte boundary, 1-byte feeds) went from ≈ 13 s to 0.6 ms (release), 11 ms (debug). Tests: `multipart::tests::one_byte_feeds_are_linear`, `work_budget_fails_closed`.
+    - **Slot pinning (AUD-RM2-WEB-07):** at most 128 uploads in progress service-wide (of the 512 serving slots) and one per session (a flag cleared on every exit path); either limit gives the busy page. An upload's deadline is 30 s + `Content-Length` at 1 KiB/s (≤ 4 h), and after the 30 s grace every read must keep the average rate since the start at ≥ 1 KiB/s, so a trickle cannot hold a slot. Tests: `flow::one_upload_per_session`, `server::tests::upload_deadlines_follow_the_minimum_rate`.
+    - **Size after the token (AUD-RM2-WEB-08):** an over-size `Content-Length` is reported (inline, on the Files page) only after the `csrf` part has been checked; with a bad token it is the uniform error. Test: `flow::oversize_upload_reported_after_csrf`.
 17. **Grapheme counts.** The service counts Unicode scalar values after NFC. This is an upper bound of the grapheme count and matches the browser's `maxlength`. No segmentation dependency is needed.
 18. **Inbox (08 §3.8 `N_fixed = 32`).** Every render makes exactly 32 `OPEN_REPLY` calls: the real entries (`u32be(len) ‖ SealedObject ‖ stanza`) first, then random 1,024-byte dummies.
 19. **S10c attempts.** After 3 mismatches the web stops forwarding words: only "Get a new passphrase" (which resets the count) and "Discard" remain (11 S10c). The sealer's own limit of 5 (07 §5.2) stays as a second line. If it is ever reached, the draft is erased and the source sees the "discarded" page.
@@ -182,6 +195,7 @@ It also covers the C-5 wiring and AUD-RM2-STO-29 in `candor-sealer::server::hand
 23. **`Host`** must equal the configured onion host exactly (ASCII case-insensitive, no port).
 24. **Process hardening.** `harden_process` uses rustix and landlock, the same safe wrappers as the sealer. It applies no-dump, `RLIMIT_CORE = 0`, `mlockall`, and Landlock at ABI 6 with no filesystem rights, no TCP and scoping. seccomp stays with systemd.
 25. **C-5 / AUD-RM2-STO-29** (lead dispositions after round 6). Both sides now speak protocol version 2:
+    - **Unknown outcome (AUD-RM2-SEA-01).** A store commit that lands after the sealer gave up is recognised, never committed twice: the sealer's `StoreConnection::hand_over_with_retry` re-sends the same sealed bundle once on a fresh connection, and the store's `commit_staged` treats `DuplicateEnvelope` as an idempotent success (`CommittedStaged::replayed`, `0x01 ‖ h`). The idempotency key is the group digest (unique in the store, over all three object hashes); a RAM record of recent commits additionally binds the bundle SHA-256 (a different bundle for a committed group is refused). C-06 shows "could not confirm, do not resend, log in later to check" (`sui-error-unconfirmed`) when `SEAL_FINISH` was sent but not answered in time (`SealerError::NoReply`), never "not sent"; a second submit cannot seal twice. Tests: `tests/sto29_handover.rs::late_commit_then_retry_is_one_envelope_and_success`, `tests/sealer_client.rs`, store `staged_duplicate_envelope_orphan_swept`, `staged_unknown_outcome_keeps_blob`, PG `pg_staged_ack_after_commit`.
     - **Hash echo.** Every acknowledgement is `u8 code ‖ SHA-256(bundle)` (33 B).
     - **Copied ack.** The store sends `0x02 ‖ h` once the copy is durable (after the safefs commit, inside `StagedReceiver::receive`). Then it sends `0x01 ‖ h` with the commit token, or `0x00 ‖ 0³²`.
     - **Deadlines.** The sealer waits for `0x02` within `copy_deadline(len) = 10 s + ⌈len / 50 MB/s⌉` and then for `0x01` within the fixed 60 s. A missing `0x02`, a wrong hash, an old one-byte ack or any other code fails and closes the connection.
@@ -334,7 +348,26 @@ The baseline `@system-service` minus the listed groups in the shipped unit cover
   3. The pre-session token can be replayed within 15 min by someone holding the same `__Host-cpre`. A leave token can be replayed within 15 min, but it only renders the Leave page, without a cookie and without changing state.
   4. The fallback page has a fixed all-zero token, so its forms cannot succeed.
   5. A handler panic in a release build aborts the process, which systemd restarts. In-flight drafts survive in the sealer.
-  6. A stalled upload holds one connection slot for at most the 60 s idle limit per read and 4 h in total. Each circuit is limited to 30 uploads/h.
+  6. An upload holds one connection slot only while it keeps ≥ 1 KiB/s on average after a 30 s grace; uploads can take at most 128 of the 512 slots, one per session. Unfinished request heads still hold a slot for up to 10 s each (07 §11 head timeout) before any limiter runs; tor's `HiddenServiceMaxStreams` and PoW defences (16) carry that.
+  7. Leave tokens: a flood of more than about 73 cookie-clearing renders per second for 15 min evicts older nonces from the 65,536-entry set; an evicted source's cookieless Leave then gets the uniform error page (no state is involved). A Leave with any session cookie is unaffected (decision 5).
+  8. The SEA-01 idempotency record lives in store RAM. After a store restart between a commit and the sealer's retry, the retry is still accepted on the group digest alone, without the extra bundle-hash binding.
+
+## Fixes for AUD-RM2-WEB (C-06 audit, 2026-10-01; lead decisions binding)
+
+| Finding | Fix | Tests |
+|---|---|---|
+| WEB-01 (Medium) plaintext in view models | Every source-ui model field carrying source or team text, identity data, file names or descriptions, or the form token is `Zeroizing<String>` (coordinated source-ui change); C-06 fills them straight from `SecretText` without plain copies; the rendered page body and the reply are zeroizing and dropped after the write. | source-ui `tests/zeroizing_fields.rs` (types pinned at compile time and in `model.rs`; all six screens render from them); `hygiene::exposed_secrets_are_copied_only_into_zeroizing_buffers` (source lint) |
+| WEB-02 (Medium) quadratic multipart scan | Carried scan offset; per-request work budget; same for the head reader. Decision 16. | `multipart::tests::one_byte_feeds_are_linear` (PoC), `work_budget_fails_closed`; fuzz `fuzz_multipart_intake` |
+| WEB-03 Leave with stale cookie → 500 | Leave page with `Clear-Site-Data`. Decision 5. | `flow::leave_with_stale_cookie_is_the_leave_page` |
+| WEB-04 leave token = 5-min time beacon | Random nonce + MAC, bounded expiring server-side set, no time in the token. Decision 5. | `token::tests::leave_tokens_are_unlinkable` |
+| WEB-05 starvable buckets | Remainder-carrying refill; spend only when all buckets allow. Decision 10. | `ratelimit::tests::trickle_does_not_starve_refill`, `refusal_spends_nothing_globally` |
+| WEB-06 floor anchored at accept | Floor from the end of the full request; jitter always after `max(floor, work)`. Decision 7. | `flow::login_floor_from_full_request`, `app::floor_tests::*` |
+| WEB-07 cheap slot pinning | Rate floor and size-scaled deadline for uploads; 128 uploads service-wide, 1 per session. Decision 16. | `flow::one_upload_per_session`, `server::tests::upload_deadlines_follow_the_minimum_rate` |
+| SEA-01 unknown commit outcome | Sealer retry on a fresh connection; idempotent replay in the store; `NoReply` → "could not confirm" wording. Decision 25. | see decision 25 |
+| WEB-08 (Info) size before CSRF | Reported after the token part. Decision 16. | `flow::oversize_upload_reported_after_csrf` |
+| STO-30 (Info) orphans fill the in-flight cap | Active blobs (64) and blobs awaiting the sweep (256) are bounded separately (store `staged.rs`). | store `staged_orphans_do_not_block_new_hand_overs` |
+| WEB-09 (Info) | Nothing to fix. | — |
+| WEB-10 (Info) httparse | Documented: open item O-7. | — |
 
 ## Open items
 
@@ -346,5 +379,7 @@ Deferred by the lead to the **next build step**:
 Still open:
 - **O-4.** Not implemented: draft-preserving re-authentication (11 §5.6), S08 invisible-character normalisation, the HIGH-profile rotation offer per login, and pseudo-locales in production (only `en`).
 - **O-6.** Deploy owner: nothing checks yet that the blob volume sustains `MIN_COPY_RATE` (50 MB/s), which the STO-29 copy deadline assumes (decision 25).
+
+- **O-7.** `httparse` (AUD-RM2-WEB-10): a cargo-vet audit of 1.10.1 is due before its exemption expires on 2027-03-30; its parser core contains `unsafe` pointer code on the source-facing path. The repository has no cargo-geiger baseline yet; add `httparse` to it when one is created (release-supply-chain).
 
 Resolved: O-5 (decisions 1, 2 and 4 were decided by the lead on 2026-10-01 and are implemented as described above).

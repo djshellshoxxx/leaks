@@ -13,7 +13,9 @@ Read `SPEC-NOTES.md` first. It covers the design, the implementation decisions (
 - **A strict HTTP/1.1 subset.** `httparse` tokenizes the request head and the subset policy is applied on top (SPEC-NOTES decision 1). There is one request per connection, so there is no pipelining and no smuggling between requests.
   - Framing is `Content-Length` only, and every POST must carry it. `Transfer-Encoding`, `Content-Encoding`, `Expect`, `Upgrade` and `TE` are refused, as are obsolete folding, bare CR/LF, duplicate framing headers and a foreign `Host`.
   - Limits: the head is at most 16 KiB with at most 50 fields, the request line at most 4 KiB, and a form body at most 112 KiB.
-  - Timeouts: 10 s to read the head, 60 s body idle, 4 h total for an upload.
+  - Timeouts: 10 s to read the head, 60 s body idle. An upload gets 30 s plus its size at 1 KiB/s (at most 4 h) and must keep an average of at least 1 KiB/s after the first 30 s.
+  - At most 128 uploads run at once, and one per session.
+  - Parsing is linear in the input whatever the read sizes, and multipart parsing has a per-request work budget.
 - **Exact responses.** `candor-source-ui` renders every byte. The head is always exactly 2,048 bytes and carries the 11 §5.3 header set, at most one `Set-Cookie` and the `X-Pad` header. There is no `Date`, `Server`, `Connection` or `ETag`. The body is padded to P1 (65,536 B) or P2 (131,072 B), chosen only by the method and the presence of a session cookie. A test checks the bytes on the wire (AUD-RM1-SUI-14).
 - **Cookies.** There is at most one per response:
   - `__Host-cs` is the session cookie, session-only. The server keeps only `SHA-256(HKDF(cs))`, never `cs`.
@@ -25,16 +27,20 @@ Read `SPEC-NOTES.md` first. It covers the design, the implementation decisions (
   2. A valid `csrf` token, always:
      - the session's token (rotated at login, passphrase rotation and disclosure-mode changes; removed at logout);
      - or, before login, a pre-session token bound to `__Host-cpre`;
-     - or, for a cookieless Leave, the leave token that the cookie-clearing screens render.
+     - or, for a cookieless Leave, the leave token that the cookie-clearing screens render: a random nonce with a MAC, valid for 15 min from a server-side set, and carrying no time.
+
+     A Leave with a stale session cookie always gets the Leave page.
 
      The comparison is constant-time and tokens never appear in a URL.
 
   In a multipart upload the token must be the first part, so no file byte is forwarded before it has been checked.
-- **Uniform responses.** Every outcome of POST `/login`, `/inbox` and `/rotate/confirm` is released at `max(elapsed, T_LOGIN_FLOOR) + U(0, 250 ms)`, whether the attempt succeeds, uses a wrong or unknown passphrase, is malformed, fails CSRF, is rate-limited or hits BUSY.
+- **Uniform responses.** Every outcome of POST `/login`, `/inbox` and `/rotate/confirm` is released at `max(complete + T_LOGIN_FLOOR, work done) + U(0, 250 ms)`, where `complete` is when the full request (head and body) was received. This holds whether the attempt succeeds, uses a wrong or unknown passphrase, is malformed, fails CSRF, is rate-limited or hits BUSY.
   - The login path does the same work against a dummy key when the locator is unknown.
   - Every busy cause returns the same page.
   - Every inbox render opens exactly 32 entries.
 - **Fail closed.** If the sealer is down or busy, or the store is down or in restore-pending, or the clock is insane, the service returns the busy page. If no eligible first reader exists, it returns the S04b-X page. Nothing is ever degraded.
+  - If a `SEAL_FINISH` was sent but not answered in time, the source is told the service could not confirm the send and should log in later to check, never "not sent".
+- **No plaintext left behind.** Report text, identity data, file descriptions and team replies sit only in zeroizing buffers in the view models and the rendered page, and are wiped once the response is written.
 - **No metadata.** No access log and no per-request event. The client address, User-Agent, time, filename, size, passphrase, body and circuit id are never recorded. The circuit id becomes a keyed token at once and lives in RAM for at most 10 min idle.
   - Panics: release builds abort. In unwinding builds a panic becomes the fixed 500 page. The panic hook writes a static diagnostic only.
 - **Process hardening.** `hardening::harden_process` disables core dumps, applies `mlockall` and sets up Landlock. Landlock allows no filesystem access and no TCP, and at ABI 6 it scopes abstract sockets and signals.
