@@ -1193,8 +1193,26 @@ check_resolv() {
 
 # =============================================================================== host-only
 group_members() { awk -F: -v g="$1" '$1==g {print $4}' "$GROUPF" 2>/dev/null; }
+# Kernel floor for H-INTAKE (Platform Manifest, 17 §4.5): Linux >= 6.3 for vm.memfd_noexec,
+# MFD_NOEXEC_SEAL and F_SEAL_EXEC (ADR-055(1), AUD-RM2-DEP-29). Debian 13 ships 6.12.
+KERNEL_FLOOR_MAJOR=6 KERNEL_FLOOR_MINOR=3
+check_kernel_floor() {
+  local rel maj min
+  if [ "$LIVE" -eq 1 ]; then rel=$(uname -r)
+  elif [ -e "$ROOT/proc/sys/kernel/osrelease" ] || [ -L "$ROOT/proc/sys/kernel/osrelease" ]; then
+    snap host.kernel_floor "$ROOT/proc/sys/kernel/osrelease" osrelease || return
+    rel=$(head -n 1 -- "$SNAP" | cut -c1-64)
+  else skip host.kernel_floor "offline root without proc/sys/kernel/osrelease: kernel not checked"; return; fi
+  if [[ "$rel" =~ ^([0-9]{1,3})\.([0-9]{1,3})([^0-9]|$) ]]; then maj=${BASH_REMATCH[1]}; min=${BASH_REMATCH[2]}
+  else fail host.kernel_floor "kernel release not parseable"; return; fi
+  if [ "$((10#$maj))" -gt "$KERNEL_FLOOR_MAJOR" ] || { [ "$((10#$maj))" -eq "$KERNEL_FLOOR_MAJOR" ] && [ "$((10#$min))" -ge "$KERNEL_FLOOR_MINOR" ]; }; then
+    ok host.kernel_floor "Linux $((10#$maj)).$((10#$min)) >= $KERNEL_FLOOR_MAJOR.$KERNEL_FLOOR_MINOR"
+  else fail host.kernel_floor "Linux $((10#$maj)).$((10#$min)) is below the floor $KERNEL_FLOOR_MAJOR.$KERNEL_FLOOR_MINOR (memfd_noexec, MFD_NOEXEC_SEAL, F_SEAL_EXEC)"; fi
+}
+
 check_host() {
   local v g
+  check_kernel_floor
   if [ "$LIVE" -eq 1 ]; then
     if ! have tor; then fail host.tor_installed "tor binary not found"
     else

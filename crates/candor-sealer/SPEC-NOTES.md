@@ -311,3 +311,13 @@ Residuals and decisions:
 - **Largest attachment:** about half of slice + per-draft cap (~400 MiB at the defaults); 4 GiB needs a larger `MemoryMax`, budget and cap.
 
 Check results (round 5, live tree): fmt applied; clippy `--all-targets --all-features` and `--no-default-features --lib` (`-D warnings`) clean; `cargo test -p candor-sealer` 81 pass (30 unit + 51 integration in 14 binaries) plus the hardening binary (exit 0); lint-safefs (`--include-tests`) no sealer findings; lint-logging ok.
+
+## Fixes for AUD-RM2-SEA-32/33 (ADR-056, 2026-10-01)
+
+| Finding | Change | Test |
+|---|---|---|
+| SEA-32/33 sessions vs slots | New env `CANDOR_SEALER_MAX_SESSIONS` (strict: digits only, 1..=65,536; required in production, defaults to 512 only under the developer override). Compiled defaults `max_sessions` = `upload_slots` = 512 (slots limit raised to 65,536). Start-up refuses `UPLOAD_SLOTS < MAX_SESSIONS` and a guaranteed slice below 1 MiB (defaults: 1,920 MiB / 512 = 3.75 MiB). Every session can therefore hold a slot; within its slice a draft only ever gets `LIMIT`. | `budget.rs::startup_refused_when_slots_below_sessions`, `five_hundred_twelve_sessions_are_admitted` (512 concurrent sessions each admitted to a 1-byte part, reservation ≤ budget, 513th `BUSY`); `slices_never_busy_and_the_shared_pool_recovers` reworked (3 sessions / 3 slots); `mod.rs::memory_env_parsing_is_strict`, `session_baseline_is_small`; hardening binary sets all four variables |
+
+Memory accounting: idle per-session baseline (session state + its mutex + table entry + handle) is **6,616 bytes** on x86_64, ≈ 3.3 MiB for 512 sessions; a worst-case text draft (40 KiB text + identity) adds ~52 KiB, ≈ 26 MiB at 512 — inside the 2,560 MiB base working set, outside the attachment budget. Argon2 derivations remain bounded by `argon_permits` (4) and `argon_queue` (32) via `ArgonGate`, independent of the session count.
+
+Check results (ADR-056, live tree): fmt applied; clippy `--all-targets --all-features` and `--no-default-features --lib` (`-D warnings`) clean; `cargo test -p candor-sealer` 84 pass (31 unit + 53 integration) plus the hardening binary (exit 0); lint-safefs (`--include-tests`) no sealer findings; lint-logging ok. Fuzz `fuzz_sealer_ipc` (scratch copy, 130 s): 3,707 runs, no crash; scratch removed.

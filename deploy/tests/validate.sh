@@ -398,6 +398,8 @@ mkhost() {
   awk 'BEGIN { RS=""; ORS="\n\n" } /(^|\n)Package: apparmor\n/' /var/lib/dpkg/status > "$r/var/lib/dpkg/status"
   cp "$INTAKE/postgresql/"* "$r/etc/candor/intake/postgresql/"
   cp "$INTAKE/resolv.conf" "$r/etc/resolv.conf"
+  # Kernel release as /proc shows it (the --root stand-in for uname -r; floor 6.3).
+  mkdir -p "$r/proc/sys/kernel"; printf '6.12.38+deb13-amd64\n' > "$r/proc/sys/kernel/osrelease"
   : > "$r/etc/fstab"; : > "$r/etc/crypttab"
   # Debian: /etc/sysctl.conf is read by systemd-sysctl only through this link (AUD-RM2-DEP-18).
   printf 'kernel.yama.ptrace_scope = 3\n' > "$r/etc/sysctl.conf"; ln -s ../sysctl.conf "$r/etc/sysctl.d/99-sysctl.conf"
@@ -474,6 +476,9 @@ if is_root && users_exist && have tor && have nft && have jq && have apparmor_pa
   hmutate "DEP-18 systemd-sysctl condition"    etc/systemd/system/systemd-sysctl.service.d/zz.conf $'+[Unit]\nConditionPathExists=/nonexistent'
   hmutate "DEP-20 exception-trace on (sysctl.d)" etc/sysctl.d/99-local.conf '+debug.exception-trace = 1'
   hmutate "DEP-29 memfd_noexec lowered (sysctl.d)" etc/sysctl.d/99-local.conf '+vm.memfd_noexec = 1'
+  hmutate "kernel 6.1 below the 6.3 floor"     proc/sys/kernel/osrelease 's/^.*$/6.1.0-28-amd64/'
+  hmutate "kernel 6.2.16 below the 6.3 floor"  proc/sys/kernel/osrelease 's/^.*$/6.2.16/'
+  hmutate "kernel release unparseable"         proc/sys/kernel/osrelease 's/^.*$/linux-next/'
   hmutate "DEP-22 site set 0.0.0.0 + broadcast" etc/nftables.conf 's|^  set mon_hosts  { type ipv4_addr; }|  set mon_hosts  { type ipv4_addr; elements = { 0.0.0.0, 255.255.255.255 } }|'
   hmutate "STO-23 maint timer drop-in moves time" etc/systemd/system/candor-intake-maint.timer.d/zz.conf $'+[Timer]\nOnCalendar=\nOnCalendar=hourly'
 else skip "config-check --host --root cases (need root, users, tor, nft, jq, apparmor_parser and a dpkg-installed apparmor)"; fi

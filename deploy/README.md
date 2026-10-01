@@ -58,7 +58,9 @@ every ambiguity is recorded in [`SPEC-NOTES.md`](SPEC-NOTES.md).
 ## Install order on a host (reference; the installer automates this)
 
 1. Install the packages from the release's Platform Manifest (17 §4.5). tor must be ≥ 0.4.8, and
-   `tor --list-modules` must show `pow: yes`.
+   `tor --list-modules` must show `pow: yes`. The kernel must be Linux ≥ 6.3 (Platform Manifest
+   floor: `vm.memfd_noexec`, `MFD_NOEXEC_SEAL`, `F_SEAL_EXEC`; Debian 13 ships 6.12).
+   `config-check.sh --host` checks `uname -r`.
 2. Install `sysusers.d` and `tmpfiles.d`, then run `systemd-sysusers` and `systemd-tmpfiles --create`.
 3. Install `nftables.conf` with the site's address sets filled in, then enable `nftables.service`.
 4. Run `initdb` for the intake cluster as `postgres`:
