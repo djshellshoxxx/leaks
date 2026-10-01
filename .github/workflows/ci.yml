@@ -95,7 +95,13 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           components: rustfmt
-      - run: cargo test --workspace --all-features --locked --no-fail-fast
+      - name: cargo test --workspace (with the production memlock limit)
+        # The sealer's hardening test asserts mlockall succeeds (fail closed
+        # otherwise); production grants LimitMEMLOCK=2G (candor-sealer.service).
+        run: |
+          set -euo pipefail
+          sudo prlimit --pid "$$" --memlock=2147483648:2147483648
+          cargo test --workspace --all-features --locked --no-fail-fast
 
   test-nonroot:
     # Runs the suite as a fresh unprivileged account (no sudo, no runner
@@ -160,7 +166,11 @@ jobs:
       - name: cargo test --workspace as the unprivileged user
         run: |
           set -euo pipefail
-          sudo -u "$TEST_USER" -- env -i \
+          # Production memlock limit (LimitMEMLOCK=2G, candor-sealer.service) so the
+          # sealer hardening test can mlockall; setpriv drops to the test user
+          # without PAM, so the raised limit is inherited unchanged.
+          sudo prlimit --memlock=2147483648:2147483648 -- \
+            setpriv --reuid="$TEST_USER" --regid="$TEST_USER" --init-groups -- env -i \
             -C "/home/$TEST_USER/src" \
             HOME="/home/$TEST_USER" \
             PATH="$RUST_PREFIX/cargo/bin:/usr/bin:/bin" \
