@@ -19,7 +19,7 @@
 # workflow-lint -> ST-133; dco -> OSG-003.
 #
 # Tool pins (bump only via reviewed PR; 14-day cooling, 28 §5.1):
-#   cargo-deny =0.20.2, cargo-vet =0.10.2, cargo-cyclonedx =0.5.9, zizmor =1.30.1
+#   cargo-deny =0.20.2, cargo-vet =0.10.2, cargo-cyclonedx =0.5.9, zizmor =1.26.1
 
 name: ci
 
@@ -166,9 +166,9 @@ jobs:
       - uses: ./.github/actions/cargo-install
         with:
           crate: zizmor
-          version: 1.30.1
+          version: 1.26.1
       - name: zizmor (offline audits)
-        run: zizmor --offline --persona=auditor .github/workflows .github/actions
+        run: zizmor --offline --persona=auditor .github
 
   dco:
     name: dco (Signed-off-by)
