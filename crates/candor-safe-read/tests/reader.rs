@@ -8,7 +8,9 @@
     reason = "test fixtures in a tempdir"
 )]
 
-use candor_safe_read::{Policy, Status, copy, md5_line, read_checked, write_md5_report};
+use candor_safe_read::{
+    Policy, Status, copy, md5_line, private_dir, read_checked, write_md5_report,
+};
 use rustix::fs::{CWD, FileType, Mode};
 
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -21,6 +23,15 @@ fn policy_for(p: &std::path::Path, max: u64) -> Policy {
         deny_mode: 0o002,
     }
 }
+fn dirfd(p: &std::path::Path) -> std::os::fd::OwnedFd {
+    rustix::fs::openat(
+        CWD,
+        p,
+        rustix::fs::OFlags::PATH | rustix::fs::OFlags::DIRECTORY,
+        Mode::empty(),
+    )
+    .unwrap()
+}
 fn s(p: &std::path::Path) -> &str {
     p.to_str().unwrap()
 }
@@ -31,7 +42,7 @@ fn copies_regular_file() {
     let f = d.path().join("f");
     std::fs::write(&f, b"abc").unwrap();
     let out = d.path().join("out");
-    copy(s(&f), s(&out), &policy_for(&f, 16)).unwrap();
+    copy(s(&f), dirfd(d.path()), "out", &policy_for(&f, 16)).unwrap();
     assert_eq!(std::fs::read(&out).unwrap(), b"abc");
     assert_eq!(
         std::fs::metadata(&out).unwrap().permissions().mode() & 0o777,
@@ -118,7 +129,7 @@ fn refused_copy_creates_no_output() {
     let out = d.path().join("out");
     let p = policy_for(d.path(), 16);
     assert_eq!(
-        copy(s(&d.path().join("nope")), s(&out), &p),
+        copy(s(&d.path().join("nope")), dirfd(d.path()), "out", &p),
         Err(Status::Missing)
     );
     assert!(!out.exists());
@@ -134,7 +145,7 @@ fn md5_known_answer_and_errors() {
     assert_eq!(md5_line(s(&d.path().join("nope")), &p), "ERR 11");
     let out = d.path().join("report");
     let paths = vec![s(&f).to_string(), s(&d.path().join("nope")).to_string()];
-    write_md5_report(s(&out), &paths, &p).unwrap();
+    write_md5_report(dirfd(d.path()), "report", &paths, &p).unwrap();
     assert_eq!(
         std::fs::read_to_string(&out).unwrap(),
         "OK 900150983cd24fb0d6963f7d28e17f72\nERR 11\n"
@@ -148,4 +159,44 @@ fn policy_parsing() {
     assert_eq!(Policy::parse("10", "", "022").err(), Some(Status::Usage));
     assert_eq!(Policy::parse("10", "0", "9").err(), Some(Status::Usage));
     assert_eq!(Policy::parse("10", "0,a", "022").err(), Some(Status::Usage));
+}
+
+/// AUD-RM2-DEP-30: OUT is created new beneath the work-dir fd; an existing file, symlink or
+/// FIFO there, an escaping name and a non-private directory are all refused without blocking.
+#[test]
+fn output_is_exclusive_beneath_a_private_dir() {
+    let d = tempfile::tempdir().unwrap();
+    let f = d.path().join("f");
+    std::fs::write(&f, b"abc").unwrap();
+    let p = policy_for(&f, 16);
+    std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(private_dir(dirfd(d.path())).err(), Some(Status::Io));
+    std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let dir = private_dir(dirfd(d.path())).unwrap();
+    std::fs::write(d.path().join("exists"), b"keep").unwrap();
+    assert_eq!(copy(s(&f), &dir, "exists", &p), Err(Status::Io));
+    assert_eq!(std::fs::read(d.path().join("exists")).unwrap(), b"keep");
+    let victim = d.path().join("victim");
+    std::os::unix::fs::symlink(&victim, d.path().join("sl")).unwrap();
+    assert_eq!(copy(s(&f), &dir, "sl", &p), Err(Status::Io));
+    assert!(!victim.exists());
+    std::fs::create_dir(d.path().join("sub")).unwrap();
+    std::os::unix::fs::symlink(d.path().join("sub"), d.path().join("sdir")).unwrap();
+    assert_eq!(copy(s(&f), &dir, "sdir/x", &p), Err(Status::Io));
+    rustix::fs::mknodat(
+        CWD,
+        d.path().join("fifo"),
+        FileType::Fifo,
+        Mode::from_raw_mode(0o600),
+        0,
+    )
+    .unwrap();
+    let t = Instant::now();
+    assert_eq!(copy(s(&f), &dir, "fifo", &p), Err(Status::Io));
+    assert!(t.elapsed() < Duration::from_secs(5));
+    for bad in ["/abs", "../x", "a/../b", "./x", "", "a//b"] {
+        assert_eq!(copy(s(&f), &dir, bad, &p), Err(Status::Usage), "{bad}");
+    }
+    copy(s(&f), &dir, "sub/x", &p).unwrap();
+    assert_eq!(std::fs::read(d.path().join("sub/x")).unwrap(), b"abc");
 }

@@ -651,3 +651,62 @@ Commit `f2f33a37` (on 501b63b); `staged.rs` (900 lines), `pg.rs`/`memory.rs`/`st
 | Low / Info | residuals listed in round 4 (lead to record) |
 
 Gate: **FAIL** 2026-10-01 f2f33a37, on STO-28 only (one-line fix + test). STO-26 and STO-27 are closed. The earlier residual acceptances are still pending with the lead.
+
+---
+
+## Re-test (round 6) — delta: STO-28 and the commit-time cap
+
+Working tree on `ff8b5c4` (`pg.rs`: `begin_commit`, `SQL_COMMIT_SCOPE`, `db_commit`, `APP_ACQUIRE_TIMEOUT`, `StoreError::Timeout`, `blob_referenced` via `begin(false)` + tenant check; `tests/pg.rs`). Scratch builds were removed afterwards (8.0 G free).
+
+**Runs:**
+- `pg-test.sh` full suite: 32 + 18 + 37 + 6 + 19 pass, including `pg_staged_crash_between_copy_and_commit` (now with the STO-28 wrong-tenant and empty-DB assertions) and `pg_staged_stalled_commit_refused`.
+- clippy deny set clean.
+- PG 16 PoC (scratch crate, real `PgIntakeStore`):
+
+| Case | Result |
+|---|---|
+| Baseline commit | `Ok`, 12 ms |
+| Another session holds `ACCESS EXCLUSIVE` on `candor.envelope` | `Err(Timeout)` after **2.52 s**; nothing committed |
+| Pooled backend `SIGSTOP`ed (stand-in for a backend stuck in I/O) | `Err(Timeout)` after **5.00 s** (sqlx test-before-acquire + 5 s `acquire_timeout`) |
+| Host write throughput for reference (`dd` 1 GiB, `conv=fsync`) | ≈ 131 MB/s |
+
+**STO-28: Fixed.** `blob_referenced` now runs under `begin(false)` (tenant row required → `NotInitialized`) and compares the tenant (`TenantMismatch`). The regression test, as tenant B on A's database and on an empty initialised-schema database, gets `Err(NotInitialized)`; `sweep`/`startup` return an error and the blob list is unchanged; the correct tenant still gets `Ok(true)`. Info: `MemoryStore::blob_referenced` returns `Ok(false)` when not initialised. It is test-only but public, so make it return `NotInitialized` for parity.
+
+**Commit cap — does the bound hold on PG 16?**
+- **Yes for what the server can enforce.** `SET LOCAL statement_timeout = lock_timeout = 2500ms` applies from the statement after the scope statement onward (6 statements ≤ 15 s), and acquire ≤ 5 s. Lock waits and a non-responsive pooled connection end in `Timeout` (PoC).
+- **Residuals (Info):**
+  - (a) `BEGIN` and the scope statement run under the role's 30 s default (documented).
+  - (b) If the backend stalls *after* acquire (uninterruptible I/O, including the `COMMIT` WAL fsync, which runs with interrupts held), neither server timers nor the client bound it (sqlx has no per-query client deadline). The sealer's 60 s then expires first. This is fail-safe: no `0x01`; the blob is kept by the DB reference check if the commit landed. Optional hardening: a monotonic client deadline (`tokio::time::timeout`) around each attempt, with expiry treated as `Uncertain` (the existing `CommitGuard` path).
+  - (c) Classifying a `57014` on `COMMIT` as a definite refusal is correct in practice (PG 16 holds interrupts through `CommitTransaction`, and a cancel arriving after it is ignored while reading the next command), and blob safety does not depend on it (the orphan is still DB-checked before removal).
+
+**Timeout refuses cleanly:** `Timeout` → `commit_staged` marks the blob `Orphan` (no retry) → the caller sends `0x00`. The sweep removes the blob only after `blob_referenced` = `false`. The builder's test asserts nothing was committed and the orphan was swept once the lock was released.
+
+#### AUD-RM2-STO-29 — The "copy ≤ 4 s" term of the 45 s budget is not enforced, and the defaults violate it
+- Severity: Low (fail-safe: the sealer reports failure and nothing is lost; but the lead's bound does not hold, and large real submissions can fail repeatedly, prompting a source to retry over Tor)
+- Location: `crates/candor-intake-store/src/staged.rs` (`StagedReceiver::new(…, max_len)`: bound only by `MAX_PART_PADDED_SIZE` = 16 GiB; copy + safefs fsync happen inside the sealer's ack wait); `crates/candor-sealer/src/server/mod.rs:124` (`max_bundle_bytes: 4 << 30`); `handover.rs` `ACK_TIMEOUT` = 60 s, measured from `send`; SPEC-NOTES decision 32 ("deploy must size `max_len` …")
+- Description: the sealer's 60 s starts before the store's copy. The copy budget left after the store's own worst case is 60 − 40 (two attempts) − ε ≈ 20 s, while the decision assumes ≤ 4 s. At the measured ~131 MB/s, a 4 GiB bundle (the sealer default) copies and fsyncs in ≈ 30 s+, so the worst case is ≈ 70 s+ > 60 s. Even the 4 s assumption only holds up to ≈ 0.5 GB on such a disk. No code relates `max_len`, disk throughput and `ACK_TIMEOUT`.
+- Fix recommendation (pick one):
+  - **(1) Two-phase ack (preferred):** the store sends `0x02` ("copied, committing") right after the safefs commit. The sealer waits for `0x02` with a length-scaled deadline (`base + len / floor_throughput`, e.g. 10 s + len / 50 MB/s), then for `0x01` with the fixed 60 s. Keep the `0x01` token rule. Tests: a 1 GiB bundle succeeds; a stalled copy fails within the scaled deadline.
+  - **(2) Enforced cap:** a single signed-profile constant `staged_copy_budget_bytes` (e.g. 512 MiB at a 128 MB/s floor) that both `StagedReceiver::new` (`InvalidInput` if `max_len` exceeds it) and the sealer's `max_bundle_bytes` must respect, with larger submissions split or refused up front by the web UI.
+
+  Either way, record the throughput floor as a deploy requirement checked by `config-check`.
+- Status: Open (non-blocking)
+
+| Severity | Open after round 6 |
+|---|---|
+| Critical / High / Medium | 0 |
+| Low | STO-29 (new) |
+| Info | MemoryStore not-initialised parity; commit-cap residuals (a)–(c) above |
+
+Gate: **PASS** 2026-10-01 (working tree on ff8b5c4; it must be committed unchanged, or the PASS is void per §G). STO-28 is closed and the commit cap is verified within the limits stated. STO-29 is tracked for the sealer/store owners. The residual acceptances from round 4 are still pending with the lead.
+
+## Lead dispositions after round 6 (2026-10-01)
+- **Gate: PASS** at the commit that records this section. STO-26, STO-27 and STO-28 are closed.
+- **STO-29 (Low): scheduled for wave-2 integration (C-5, when `hand_over` is wired into the seal path).**
+  - The store sends an interim `0x02` ("copied") after the copy.
+  - The sealer uses a length-scaled copy deadline (base plus `len / min_copy_rate`), followed by the fixed 60 s commit deadline.
+  - Both sides enforce a single bundle-size cap.
+  - Re-audit together with the C-06 web service.
+- **Info:**
+  - `MemoryStore::blob_referenced` will be made fail-closed when the store is uninitialised (done in the same change).
+  - The 30 s role default during `BEGIN`/setup is accepted, because the sealer's 60 s bound applies and it fails safe.

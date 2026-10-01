@@ -115,10 +115,16 @@ async fn bundle_is_handed_over_as_a_sealed_descriptor() {
         assert_eq!(st.st_size as u64, expect_len);
         // …sealed against any change by either side…
         let seals = rustix::fs::fcntl_get_seals(&fd).unwrap(); // safefs-lint: allow(fd seals)
-        assert!(
-            seals
-                .contains(SealFlags::WRITE | SealFlags::GROW | SealFlags::SHRINK | SealFlags::SEAL)
-        );
+        let all = SealFlags::WRITE
+            | SealFlags::GROW
+            | SealFlags::SHRINK
+            | SealFlags::EXEC
+            | SealFlags::SEAL;
+        assert!(seals.contains(all));
+        // DEP-29: not executable, and it cannot be made executable.
+        assert_eq!(st.st_mode & 0o111, 0, "memfd has exec bits");
+        let chmod = rustix::fs::fchmod(&fd, rustix::fs::Mode::RWXU); // safefs-lint: allow(fd-only probe)
+        assert!(chmod.is_err(), "exec seal must refuse chmod +x");
         assert!(rustix::io::pwrite(&fd, b"x", 0).is_err());
         let trunc = rustix::fs::ftruncate(&fd, 0); // safefs-lint: allow(fd-only probe)
         assert!(trunc.is_err());

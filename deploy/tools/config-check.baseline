@@ -1098,6 +1098,7 @@ pgc|dynamic_library_path|$libdir
 sysctl|kernel.printk|3 3 3 3
 sysctl|kernel.dmesg_restrict|1
 sysctl|debug.exception-trace|0
+sysctl|vm.memfd_noexec|2
 sysctl|kernel.kptr_restrict|2
 sysctl|kernel.yama.ptrace_scope|3
 sysctl|kernel.perf_event_paranoid|3

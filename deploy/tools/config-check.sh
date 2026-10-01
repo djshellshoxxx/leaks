@@ -20,7 +20,9 @@
 #   --emit-baseline   (maintainers) print the effective units/nft/tor/security values of the
 #                     tree as baseline lines for review; performs no check
 #   --work-base DIR  private work base instead of /run/candor-config-check (root-owned 0700,
-#                 not a symlink; validators use one per run, AUD-RM2-DEP-27)
+#                 not a symlink; validators use one per run, AUD-RM2-DEP-27). Every ancestor
+#                 up to / must be a root-owned directory, not a symlink and not group- or
+#                 world-writable (a sticky /tmp is refused too; AUD-RM2-DEP-30), else exit 2
 #   -q            print only failures, skips and the summary
 #
 # Every check evaluates EFFECTIVE configuration, never names in a file (AUD-RM2-DEP-01/02/03):
@@ -61,7 +63,9 @@
 # component below the tree / --root, is refused and never read; every input is copied once by
 # candor-safe-read (openat2 RESOLVE_NO_SYMLINKS|BENEATH from /, O_NOFOLLOW|O_NONBLOCK|O_NOCTTY,
 # fstat: regular file, one link, allowed owner, no group/world write on a host, size cap; under
-# `timeout`) into a private 0700 work directory and only the copy is used. --root paths are
+# `timeout`) into a private 0700 work directory and only the copy is used. The reader creates
+# each copy O_EXCL|O_NOFOLLOW|O_NONBLOCK beneath that directory's fd 3 (openat2 BENEATH|
+# NO_SYMLINKS; AUD-RM2-DEP-30), never through a path from /. --root paths are
 # resolved inside the root only.
 # Output: "HOST RULE CLASS STATUS DETAIL" table (18 §14). Details never contain file contents:
 # only rule names, counts, line/statement numbers, baseline values and sanitised, length-capped
@@ -81,7 +85,7 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd -P)
 BASE="$SCRIPT_DIR/config-check.baseline"
 MANIFEST="$SCRIPT_DIR/config-check.manifest"
 # sha256 of config-check.manifest (release-pinned; update together with the manifest).
-MANIFEST_SHA256=6ba431fa3728fd9e0cda329a74e73033b7a634b9aad315ed014bb61601096b82
+MANIFEST_SHA256=c1de01103886f1b30439a1ce7a18c784454502e964e8aadd2b93093ec2965fa6
 SECTIONS="tor nft pg units journald kernel dns apparmor host"
 MODE=static
 DIR="$SCRIPT_DIR/../intake"
@@ -139,9 +143,22 @@ if is_root; then
   if [ -L "$WBASE" ] || [ ! -d "$WBASE" ] || [ "$(stat -c '%u %a' -- "$WBASE")" != "0 700" ]; then
     echo "config-check: unsafe work directory base $WBASE (must be root 0700, not a symlink)" >&2; exit 2
   fi
+  # AUD-RM2-DEP-30: nobody but root may rename or replace the base or any ancestor.
+  case "/$WBASE/" in */./*|*/../*) echo "config-check: --work-base must not contain . or .." >&2; exit 2 ;; esac
+  wb_a=$WBASE
+  while [ "$wb_a" != / ]; do
+    wb_a=$(dirname -- "$wb_a")
+    wb_s=$(stat -c '%u %a %F' -- "$wb_a" 2>/dev/null) || wb_s="? 0 missing"
+    wb_m=${wb_s#* }; wb_m=${wb_m%% *}
+    if [ -L "$wb_a" ] || [ "${wb_s%% *}" != 0 ] || [ "${wb_s#* * }" != directory ] || [ $((8#$wb_m & 8#1022)) -ne 0 ]; then
+      echo "config-check: unsafe work directory base $WBASE: ancestor $wb_a must be a root-owned directory, not a symlink, not group/world-writable and not sticky" >&2; exit 2
+    fi
+  done
 else [ -z "$WBASE_OPT" ] || { echo "config-check: --work-base needs root" >&2; exit 2; }; WBASE=/tmp; fi
 WORK=$(mktemp -d "$WBASE/run.XXXXXXXX") || exit 2
 chmod 0700 "$WORK" || exit 2
+# The reader creates its outputs beneath this descriptor only (fd 3 of each run; DEP-30).
+exec {WORKFD}<"$WORK" || exit 2
 trap 'rm -rf -- "$WORK"' EXIT
 trap 'exit 2' INT TERM HUP
 
@@ -229,9 +246,11 @@ MAXIN=1048576
 SNAP=""
 SAFE_READ="$SCRIPT_DIR/candor-safe-read"
 SAFE_OK=0
-safe_copy() { # abs-path out [extra-owner-uid] -> candor-safe-read status (see there); never prints content
+safe_copy() { # abs-path out-under-$WORK [extra-owner-uid] -> candor-safe-read status (see there); never prints content
   [ "$SAFE_OK" -eq 1 ] || return 15
-  timeout -k 2 20 "$SAFE_READ" "$1" "$2" "$MAXIN" "$OWNERS${3:+,$3}" "$DENYMODE" </dev/null >/dev/null 2>&1
+  case "$2" in "$WORK"/?*) ;; *) return 15 ;; esac
+  rm -f -- "$2"   # the reader creates OUT with O_EXCL
+  timeout -k 2 20 "$SAFE_READ" "$1" "${2#"$WORK"/}" "$MAXIN" "$OWNERS${3:+,$3}" "$DENYMODE" </dev/null >/dev/null 2>&1 3<&"$WORKFD"
 }
 snap() { # rule path name [extra-owner-uid] -> SNAP=copy; FAIL + return 1 when refused
   local r=$1 p=$2 l rc
@@ -1254,7 +1273,7 @@ aa_dist_conffiles() {
   done < "$WORK/aa.conff"
   [ "${#paths[@]}" -gt 0 ] || { fail apparmor.dist_conffiles "none of the apparmor conffiles is present"; return; }
   rm -f -- "$WORK/aa.md5"
-  if [ "$SAFE_OK" -eq 1 ]; then timeout -k 2 60 "$SAFE_READ" --md5 "$WORK/aa.md5" "$MAXIN" "$OWNERS" "$DENYMODE" "${paths[@]}" </dev/null >/dev/null 2>&1; fi
+  if [ "$SAFE_OK" -eq 1 ]; then timeout -k 2 60 "$SAFE_READ" --md5 aa.md5 "$MAXIN" "$OWNERS" "$DENYMODE" "${paths[@]}" </dev/null >/dev/null 2>&1 3<&"$WORKFD"; fi
   mapfile -t got < <(cat -- "$WORK/aa.md5" 2>/dev/null)
   for i in "${!paths[@]}"; do
     n=$((n + 1))

@@ -34,9 +34,14 @@ chmod 0755 "$T"
 trap 'rm -rf "$T"' EXIT INT TERM
 # AUD-RM2-DEP-27: a per-run work base for config-check, so concurrent validator runs never
 # share (or assert on) /run/candor-config-check.
+# DEP-30: every ancestor must be root-owned and not group/world-writable or sticky, so the base
+# lives under /run (not under $T in the sticky /var/tmp).
 CC_WB=()
 WB=""
-if [ "$(id -u)" -eq 0 ]; then WB=$(mktemp -d "$T/wbase.XXXXXX") && chmod 0700 "$WB" && CC_WB=(--work-base "$WB"); fi
+if [ "$(id -u)" -eq 0 ]; then
+  WB=$(mktemp -d /run/candor-validate-wb.XXXXXX) && chmod 0700 "$WB" && CC_WB=(--work-base "$WB")
+  trap 'rm -rf "$T" ${WB:+"$WB"}' EXIT INT TERM
+fi
 cc() { "$TOOLS/config-check.sh" "${CC_WB[@]}" "$@"; }
 FAIL=0
 pass() { printf 'PASS  %s\n' "$*"; }
@@ -315,6 +320,8 @@ mutate "STO-24 vacuum with network"         systemd/candor-intake-vacuum.service
 mutate "STO-24 maint output to journal"     systemd/candor-intake-maint.service 's|^StandardError=null$|StandardError=journal|'
 mutate "STO-24 maint unconfined"            systemd/candor-intake-maint.service '/^AppArmorProfile=candor-intake-maint$/d'
 mutate "DEP-20 exception-trace on"          sysctl.d/90-candor-intake.conf 's|^debug.exception-trace = 0$|debug.exception-trace = 1|'
+mutate "DEP-29 memfd_noexec 0"              sysctl.d/90-candor-intake.conf 's|^vm.memfd_noexec = 2$|vm.memfd_noexec = 0|'
+mutate "DEP-29 memfd_noexec removed"        sysctl.d/90-candor-intake.conf '/^vm.memfd_noexec/d'
 mutate "DEP-22 mon_hosts 0.0.0.0 + broadcast" nftables.conf 's|^  set mon_hosts  { type ipv4_addr; }|  set mon_hosts  { type ipv4_addr; elements = { 0.0.0.0, 255.255.255.255 } }|'
 mutate "DEP-22 admin_jump loopback"         nftables.conf 's|^  set admin_jump { type ipv4_addr; }|  set admin_jump { type ipv4_addr; elements = { 127.0.0.1 } }|'
 mutate "DEP-22 core_relay multicast"        nftables.conf 's|^  set core_relay { type ipv4_addr; }|  set core_relay { type ipv4_addr; elements = { 224.0.0.1 } }|'
@@ -424,6 +431,7 @@ if is_root && users_exist && have tor && have nft && have jq && have apparmor_pa
   hmutate "DEP-18 systemd-sysctl masked"       etc/systemd/system/systemd-sysctl.service @/dev/null
   hmutate "DEP-18 systemd-sysctl condition"    etc/systemd/system/systemd-sysctl.service.d/zz.conf $'+[Unit]\nConditionPathExists=/nonexistent'
   hmutate "DEP-20 exception-trace on (sysctl.d)" etc/sysctl.d/99-local.conf '+debug.exception-trace = 1'
+  hmutate "DEP-29 memfd_noexec lowered (sysctl.d)" etc/sysctl.d/99-local.conf '+vm.memfd_noexec = 1'
   hmutate "DEP-22 site set 0.0.0.0 + broadcast" etc/nftables.conf 's|^  set mon_hosts  { type ipv4_addr; }|  set mon_hosts  { type ipv4_addr; elements = { 0.0.0.0, 255.255.255.255 } }|'
   hmutate "STO-23 maint timer drop-in moves time" etc/systemd/system/candor-intake-maint.timer.d/zz.conf $'+[Timer]\nOnCalendar=\nOnCalendar=hourly'
 else skip "config-check --host --root cases (need root, users, tor, nft, jq, apparmor_parser and a dpkg-installed apparmor)"; fi
@@ -432,20 +440,20 @@ mutate_results
 # ---- AUD-RM2-DEP-24/26: race-free input reader (compiled candor-safe-read), directly and under
 # live races.
 if [ -x "$TOOLS/candor-safe-read" ] && have timeout && have mkfifo; then
-  D="$T/sr"; mkdir -p "$D/real" "$D/secretdir"; chmod 0755 "$D" "$D/real" "$D/secretdir"
+  D="$T/sr"; mkdir -p "$D/real" "$D/secretdir" "$D/o"; chmod 0755 "$D" "$D/real" "$D/secretdir"; chmod 0700 "$D/o"
   printf 'ok\n' > "$D/real/f"; printf 'CANDORLEAKMARKER\n' > "$D/secretdir/f"; chmod 0644 "$D/real/f" "$D/secretdir/f"
   ln -s "$D/secretdir" "$D/link"; ln -s "$D/secretdir/f" "$D/real/l"; mkfifo "$D/real/fifo"
   me=$(id -u)
   srcase() { # name want-status args...
     local name=$1 want=$2 rc; shift 2
-    rm -f "$D/out"
-    timeout -k 1 10 "$TOOLS/candor-safe-read" "$@" > "$D/stdout" 2>&1; rc=$?
+    rm -f "$D/o/out"
+    timeout -k 1 10 "$TOOLS/candor-safe-read" "$@" > "$D/stdout" 2>&1 3<"$D/o"; rc=$?
     if [ "$rc" -ne "$want" ]; then bad "candor-safe-read: $name: status $rc, want $want"
-    elif [ -s "$D/stdout" ] || { [ "$want" -ne 0 ] && [ -e "$D/out" ]; }; then bad "candor-safe-read: $name: printed output or left a copy"
+    elif [ -s "$D/stdout" ] || { [ "$want" -ne 0 ] && [ -e "$D/o/out" ]; }; then bad "candor-safe-read: $name: printed output or left a copy"
     else pass "candor-safe-read: $name (status $rc)"; fi
   }
-  srcase "regular file copied"                0  "$D/real/f" "$D/out" 4096 "$me" 002
-  if cmp -s "$D/real/f" "$D/out"; then pass "candor-safe-read: copy equals the input"; else bad "candor-safe-read: copy differs"; fi
+  srcase "regular file copied"                0  "$D/real/f" out 4096 "$me" 002
+  if cmp -s "$D/real/f" "$D/o/out"; then pass "candor-safe-read: copy equals the input"; else bad "candor-safe-read: copy differs"; fi
   srcase "symlinked parent directory refused" 10 "$D/link/f" "$D/out" 4096 "0,$me" 002
   srcase "symlink as last component refused"  10 "$D/real/l" "$D/out" 4096 "0,$me" 002
   srcase "'..' component refused"             10 "$D/real/../secretdir/f" "$D/out" 4096 "0,$me" 002
@@ -457,11 +465,46 @@ if [ -x "$TOOLS/candor-safe-read" ] && have timeout && have mkfifo; then
   ln "$D/real/f" "$D/real/hard"; srcase "hard-linked input refused" 13 "$D/real/f" "$D/out" 4096 "0,$me" 002; rm -f "$D/real/hard"
   srcase "larger than the cap refused"        14 "$D/real/f" "$D/out" 2 "0,$me" 002
   srcase "missing input"                      11 "$D/real/nope" "$D/out" 4096 "0,$me" 002
-  timeout 10 "$TOOLS/candor-safe-read" --md5 "$D/md5" 4096 "0,$me" 002 "$D/real/f" "$D/link/f" "$D/real/fifo" > "$D/stdout" 2>&1
+  timeout 10 "$TOOLS/candor-safe-read" --md5 md5 4096 "0,$me" 002 "$D/real/f" "$D/link/f" "$D/real/fifo" > "$D/stdout" 2>&1 3<"$D/o"
   [ -s "$D/stdout" ] && bad "candor-safe-read --md5 printed output"
-  got=$(tr '\n' ';' < "$D/md5")
+  got=$(tr '\n' ';' < "$D/o/md5")
   if [ "$got" = "OK $(md5sum < "$D/real/f" | cut -c1-32);ERR 10;ERR 12;" ]; then pass "safe-read --md5: digest of a safe file, status only for refused ones"
   else bad "safe-read --md5: unexpected output"; fi
+  # AUD-RM2-DEP-30: OUT is created new (O_EXCL|O_NOFOLLOW|O_NONBLOCK) beneath the private fd 3.
+  srout() { # name want-status out-name [fd3-dir]
+    local rc
+    timeout -k 1 10 "$TOOLS/candor-safe-read" "$D/real/f" "$3" 4096 "0,$me" 002 > "$D/stdout" 2>&1 3<"${4:-$D/o}"; rc=$?
+    if [ "$rc" -eq "$2" ] && [ ! -s "$D/stdout" ]; then pass "candor-safe-read output: $1 (status $rc)"; else bad "candor-safe-read output: $1: status $rc, want $2"; fi
+  }
+  printf 'keep\n' > "$D/o/exists"; srout "existing OUT not overwritten" 15 exists
+  if [ "$(cat "$D/o/exists")" = keep ]; then pass "candor-safe-read output: existing file kept"; else bad "candor-safe-read output: existing file changed"; fi
+  ln -sf "$D/victim" "$D/o/sl"; srout "symlinked OUT refused" 15 sl
+  if [ ! -e "$D/victim" ]; then pass "candor-safe-read output: symlink target not created"; else bad "candor-safe-read output: wrote through a symlink"; fi
+  ln -sfn "$D/secretdir" "$D/o/sd"; srout "OUT beneath a symlinked directory refused" 15 sd/x
+  mkfifo "$D/o/ff"; srout "FIFO at OUT refused without blocking" 15 ff
+  srout "absolute OUT is a usage error" 2 "$D/o/abs"
+  srout "'..' in OUT is a usage error" 2 ../escape
+  srout "fd 3 not private (0755) refused" 15 out "$D/real"
+  timeout -k 1 10 "$TOOLS/candor-safe-read" "$D/real/f" out 4096 "0,$me" 002 > "$D/stdout" 2>&1 3<&-; rc=$?
+  if [ "$rc" -eq 15 ] && [ ! -e "$D/o/out" ]; then pass "candor-safe-read output: no fd 3, nothing written (status 15)"; else bad "candor-safe-read output: without fd 3: status $rc"; fi
+  rm -f "$D/o/out" "$D/o/ff" "$D/o/sl" "$D/o/sd" "$D/o/exists"
+  # DEP-30: --work-base ancestors must be root-owned, not group/world-writable, not sticky.
+  if is_root; then
+    wbcase() { # name base
+      "$TOOLS/config-check.sh" -q --work-base "$2" --dir "$INTAKE" --only tor > "$T/wb.out" 2>&1; rc=$?
+      if [ "$rc" -eq 2 ] && grep -q 'unsafe work directory base' "$T/wb.out"; then pass "config-check --work-base: $1 refused (exit 2)"; else bad "config-check --work-base: $1: exit $rc"; fi
+    }
+    install -d -m 0700 "$T/wbt/sub" && chmod 0755 "$T/wbt"
+    wbcase "sticky world-writable ancestor (/var/tmp)" "$T/wbt/sub"
+    WBN=$(mktemp -d /run/candor-validate-wbn.XXXXXX); chmod 0755 "$WBN"; install -d -m 0700 "$WBN/sub"
+    chown nobody "$WBN"; wbcase "ancestor owned by another user" "$WBN/sub"
+    chown 0 "$WBN"; chmod 0775 "$WBN"; wbcase "group-writable ancestor" "$WBN/sub"
+    chmod 0755 "$WBN"; ln -s "$WBN" "$WBN.l"; wbcase "symlinked ancestor" "$WBN.l/sub"
+    wbcase "'..' in the base" "$WBN/sub/../sub"
+    "$TOOLS/config-check.sh" -q --work-base "$WBN/sub" --dir "$INTAKE" --only tor > "$T/wb.out" 2>&1; rc=$?
+    if [ "$rc" -eq 0 ]; then pass "config-check --work-base: root-owned 0755 chain accepted"; else bad "config-check --work-base: safe chain: exit $rc"; fi
+    rm -rf "$WBN" "$WBN.l"
+  fi
   # Live races against config-check itself (static mode; the genuine state is broken on
   # purpose, so every run must end in exit 30; the marker must never appear; no run may hang).
   if is_root; then

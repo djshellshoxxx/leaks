@@ -233,6 +233,9 @@ pub enum StartError {
     Rng,
     /// A protection is disabled without [`hardening::InsecureDevMode`].
     Insecure,
+    /// The kernel cannot create non-executable sealed memfds
+    /// (`MFD_NOEXEC_SEAL`, Linux ≥ 6.3; DEP-29).
+    Memfd,
 }
 
 impl core::fmt::Display for StartError {
@@ -243,6 +246,7 @@ impl core::fmt::Display for StartError {
             Self::Config => "invalid sealer configuration",
             Self::Staging => "staging area could not be emptied",
             Self::Rng => "CSPRNG failure",
+            Self::Memfd => "MFD_NOEXEC_SEAL memfds unsupported",
             Self::Insecure => "protection disabled without the developer override",
         })
     }
@@ -479,6 +483,8 @@ impl Sealer {
         for id in staging.list().map_err(|_| StartError::Staging)? {
             staging.remove(&id, slot).map_err(|_| StartError::Staging)?;
         }
+        // DEP-29: bundles need MFD_NOEXEC_SEAL; refuse to start without it.
+        handover::check_memfd_support().map_err(|_| StartError::Memfd)?;
         let chaff_seed = random_secret32().map_err(|_| StartError::Rng)?;
         let mem = budget::Budget::new(cfg.limits.memory_budget_bytes);
         let argon = ArgonGate {

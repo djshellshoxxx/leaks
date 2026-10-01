@@ -11,6 +11,12 @@
 //! swapped in at the last moment cannot block), and the descriptor is `fstat`-checked: regular
 //! file, same inode as pre-checked, one link, owner allowed, no denied mode bit, size within the
 //! cap. Reads stop at cap + 1 bytes. Content is never printed.
+//!
+//! Output (AUD-RM2-DEP-30): OUT is a relative name created beneath a private work directory
+//! the caller passes as an open descriptor (config-check: fd 3 = its `$WORK`). It is opened
+//! with `openat2(O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_NONBLOCK,
+//! RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS)`, mode 0600, so no path is
+//! re-resolved from `/` and nothing that already exists (symlink, FIFO, file) is reused.
 
 #![allow(
     clippy::disallowed_methods,
@@ -211,16 +217,67 @@ fn read_capped<Fd: AsFd>(fd: Fd, max_bytes: u64) -> Result<Vec<u8>, Status> {
     }
 }
 
-/// Write `data` to `out` (absolute; created 0600, never through a symlink, truncated).
-fn write_out(out: &str, data: &[u8]) -> Result<(), Status> {
-    if !out.starts_with('/') {
+/// Check that `dir` is a private directory (no group/other permission bits) and return a
+/// fresh `O_PATH` descriptor of it.
+///
+/// # Errors
+/// [`Status::Io`] when `dir` is not a directory or not private.
+pub fn private_dir<Fd: AsFd>(dir: Fd) -> Result<OwnedFd, Status> {
+    let st = fstat(&dir).map_err(|_| Status::Io)?;
+    if FileType::from_raw_mode(st.st_mode) != FileType::Directory || st.st_mode & 0o077 != 0 {
+        return Err(Status::Io);
+    }
+    openat(
+        &dir,
+        ".",
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| Status::Io)
+}
+
+/// The work directory the caller passed as fd 3 (re-opened through `/proc/self/fd/3`, which
+/// names the open file itself, not a path), checked with [`private_dir`].
+///
+/// # Errors
+/// [`Status::Io`] when fd 3 is not open, not a directory or not private.
+pub fn out_dir_from_fd3() -> Result<OwnedFd, Status> {
+    let fd = openat(
+        CWD,
+        "/proc/self/fd/3",
+        OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| Status::Io)?;
+    private_dir(&fd)
+}
+
+/// `out` must be a relative name with no empty, `.` or `..` component.
+fn out_name_ok(out: &str) -> bool {
+    !out.is_empty()
+        && !out.starts_with('/')
+        && out
+            .split('/')
+            .all(|c| !c.is_empty() && c != "." && c != "..")
+}
+
+/// Create `out` beneath `dir` (0600, `O_EXCL`, never through a symlink) and write `data`.
+fn write_out<Fd: AsFd>(dir: Fd, out: &str, data: &[u8]) -> Result<(), Status> {
+    if !out_name_ok(out) {
         return Err(Status::Usage);
     }
-    let ofd = openat(
-        CWD,
+    let ofd = openat2(
+        &dir,
         out,
-        OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::WRONLY
+            | OFlags::CREATE
+            | OFlags::EXCL
+            | OFlags::NOFOLLOW
+            | OFlags::NONBLOCK
+            | OFlags::NOCTTY
+            | OFlags::CLOEXEC,
         Mode::from_raw_mode(0o600),
+        ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS | ResolveFlags::BENEATH,
     )
     .map_err(|_| Status::Io)?;
     let mut rest = data;
@@ -235,29 +292,34 @@ fn write_out(out: &str, data: &[u8]) -> Result<(), Status> {
     Ok(())
 }
 
-/// Copy `path` to `out` (created 0600, never through a symlink, truncated).
+/// Copy `path` to `out` beneath `dir` (new file, 0600, never through a symlink).
 ///
 /// # Errors
 /// The [`Status`] of the refusal; `out` is not created when the input is refused.
-pub fn copy(path: &str, out: &str, policy: &Policy) -> Result<(), Status> {
-    if !out.starts_with('/') {
+pub fn copy<Fd: AsFd>(path: &str, dir: Fd, out: &str, policy: &Policy) -> Result<(), Status> {
+    if !out_name_ok(out) {
         return Err(Status::Usage);
     }
     let data = read_checked(path, policy)?;
-    write_out(out, &data)
+    write_out(dir, out, &data)
 }
 
-/// `--md5` mode: write one [`md5_line`] per path, in order, to `out`.
+/// `--md5` mode: write one [`md5_line`] per path, in order, to `out` beneath `dir`.
 ///
 /// # Errors
 /// [`Status::Usage`] / [`Status::Io`] when `out` cannot be written.
-pub fn write_md5_report(out: &str, paths: &[String], policy: &Policy) -> Result<(), Status> {
+pub fn write_md5_report<Fd: AsFd>(
+    dir: Fd,
+    out: &str,
+    paths: &[String],
+    policy: &Policy,
+) -> Result<(), Status> {
     let mut report = String::new();
     for p in paths {
         report.push_str(&md5_line(p, policy));
         report.push('\n');
     }
-    write_out(out, report.as_bytes())
+    write_out(dir, out, report.as_bytes())
 }
 
 /// One `--md5` result line: `OK <hex>` or `ERR <status>` (no path, no content).

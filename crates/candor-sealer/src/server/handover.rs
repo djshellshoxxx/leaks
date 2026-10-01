@@ -7,8 +7,9 @@
 //! (`AF_UNIX`, `SOCK_SEQPACKET`) with `SCM_RIGHTS`, never as a path. The
 //! sealer writes each sealed bundle into an anonymous `memfd` (no name in any
 //! directory, RAM-backed like the staging tmpfs, charged to the sealer's
-//! cgroup with `MemorySwapMax=0`) and seals it read-only and size-fixed
-//! (`F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL`) before it is
+//! cgroup with `MemorySwapMax=0`), created `MFD_NOEXEC_SEAL` (never
+//! executable, DEP-29), and seals it read-only and size-fixed
+//! (`F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_EXEC | F_SEAL_SEAL`) before it is
 //! handed over: neither side can change the ciphertext while the store copies
 //! it, and it disappears when the last descriptor is closed — nothing has to
 //! be deleted after the store's acknowledgement, and nothing is left behind by
@@ -126,8 +127,10 @@ impl BundleWriter {
     /// A new anonymous file (`MFD_CLOEXEC | MFD_ALLOW_SEALING`; the name is a
     /// constant and carries no metadata).
     pub(crate) fn new() -> std::io::Result<Self> {
-        // Anonymous memory file: no path, no directory entry.
-        let flags = MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING;
+        // Anonymous memory file: no path, no directory entry; created
+        // non-executable with the exec seal already set (MFD_NOEXEC_SEAL,
+        // DEP-29; implies MFD_ALLOW_SEALING).
+        let flags = MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING | MemfdFlags::NOEXEC_SEAL;
         let fd = memfd_create("candor-bundle", flags)?;
         Ok(Self {
             fd,
@@ -138,7 +141,11 @@ impl BundleWriter {
 
     /// Make the file immutable and return it.
     pub(crate) fn finish(self) -> std::io::Result<StagedBundle> {
-        let seals = SealFlags::WRITE | SealFlags::GROW | SealFlags::SHRINK | SealFlags::SEAL;
+        let seals = SealFlags::WRITE
+            | SealFlags::GROW
+            | SealFlags::SHRINK
+            | SealFlags::EXEC
+            | SealFlags::SEAL;
         fcntl_add_seals(&self.fd, seals)?;
         let st = fstat(&self.fd)?;
         if u64::try_from(st.st_size).ok() != Some(self.len) {
@@ -167,6 +174,14 @@ impl std::io::Write for BundleWriter {
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
+}
+
+/// Start-up check (DEP-29): the kernel supports `MFD_NOEXEC_SEAL` (Linux ≥
+/// 6.3). There is no fallback: the sealer refuses to start without it.
+pub(crate) fn check_memfd_support() -> std::io::Result<()> {
+    let w = BundleWriter::new()?;
+    drop(w);
+    Ok(())
 }
 
 /// Encode the 41-byte hand-over header.
