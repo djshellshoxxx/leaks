@@ -32,6 +32,9 @@ pub enum RetentionError {
     NotWholeInterval,
     /// No matching tombstone was written before deletion.
     MissingTombstone,
+    /// The tombstone is not yet covered by a checkpoint (the verifier would
+    /// reject the pruned prefix).
+    TombstoneNotAttested,
     /// CASE stream is not interval-deleted.
     CaseStream,
 }
@@ -124,12 +127,22 @@ pub struct DeletionPlan {
 }
 
 impl DeletionPlan {
-    /// The tombstone event to emit **before** deleting.
+    /// The tombstone event to emit **before** deleting. It is written into
+    /// the pruned stream itself (`audit.retention_tombstone` for SECURITY,
+    /// `sys.retention_tombstone` for SYSTEM), where the verifier requires it
+    /// (AUD-RM1-LOG-01).
     pub fn tombstone(&self) -> AuditEvent {
-        AuditEvent::AuditRetentionTombstone {
-            stream: self.stream,
-            seq_range: self.range,
-            last_deleted_checkpoint_root: self.last_deleted_root,
+        match self.stream {
+            StreamId::Sys => AuditEvent::SysRetentionTombstone {
+                stream: self.stream,
+                seq_range: self.range,
+                last_deleted_checkpoint_root: self.last_deleted_root,
+            },
+            _ => AuditEvent::AuditRetentionTombstone {
+                stream: self.stream,
+                seq_range: self.range,
+                last_deleted_checkpoint_root: self.last_deleted_root,
+            },
         }
     }
 }
@@ -150,13 +163,16 @@ pub fn plan_interval_deletion(
         .saturating_sub(u64::from(days).saturating_mul(MS_PER_DAY));
     let last = checkpoints
         .iter()
-        .filter(|c| c.body().signed_at.0 <= cutoff && c.body().last_seq >= first_retained)
-        .max_by_key(|c| c.body().last_seq);
+        .filter(|c| {
+            let b = c.body();
+            b.signed_at.0 <= cutoff && b.end_seq > first_retained && !b.is_empty()
+        })
+        .max_by_key(|c| c.body().end_seq);
     Ok(last.map(|c| DeletionPlan {
         stream,
         range: SeqRange {
             first: first_retained,
-            last: c.body().last_seq,
+            last: c.body().end_seq.saturating_sub(1),
         },
         last_deleted_root: Hash32::from_bytes(c.body().merkle_root),
     }))
@@ -172,16 +188,23 @@ pub fn apply_interval_deletion(
         return Err(RetentionError::CaseStream);
     }
     if tombstone.event() != &plan.tombstone()
-        || (plan.stream == StreamId::Sec && tombstone.header().seq <= plan.range.last)
+        || tombstone.header().stream != plan.stream
+        || tombstone.header().seq <= plan.range.last
     {
         return Err(RetentionError::MissingTombstone);
     }
-    let whole = store
-        .checkpoints(plan.stream)
-        .iter()
-        .any(|c| c.body().last_seq == plan.range.last);
+    let cps = store.checkpoints(plan.stream);
+    let whole = cps.iter().any(|c| {
+        !c.body().is_empty() && c.body().end_seq.checked_sub(1) == Some(plan.range.last)
+    });
     if !whole {
         return Err(RetentionError::NotWholeInterval);
+    }
+    if !cps
+        .iter()
+        .any(|c| c.body().end_seq > tombstone.header().seq)
+    {
+        return Err(RetentionError::TombstoneNotAttested);
     }
     store.drop_through(plan.stream, plan.range.last);
     Ok(())

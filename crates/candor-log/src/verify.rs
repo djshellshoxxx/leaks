@@ -8,17 +8,19 @@
 //! witness-held checkpoint.
 
 use core::fmt;
+use std::collections::BTreeMap;
 
 use ed25519_dalek::VerifyingKey;
 
 use crate::cbor;
 use crate::chain::{
     ChainRecord, SignedCheckpoint, StreamResume, chain_hash, checkpoint_genesis, genesis,
-    leaf_hash, merkle_root,
+    leaf_hash, merkle_root, record_commit, redaction_set_hash,
 };
 use crate::codes::{StreamId, VerifyFailureCode};
 use crate::envelope::ENVELOPE_VERSION;
-use crate::ids::TenantRef;
+use crate::ids::{MS_PER_DAY, TenantRef};
+use crate::retention::RetentionPolicy;
 
 /// Verification parameters.
 #[derive(Clone, Copy, Debug)]
@@ -32,13 +34,18 @@ pub struct VerifyParams<'a> {
     /// Latest checkpoint held by the external witness, if any (rollback defence).
     pub trusted_latest: Option<&'a SignedCheckpoint>,
     /// Accept a store whose oldest whole checkpoint intervals were deleted by
-    /// retention (the first record must then follow a checkpoint exactly).
+    /// retention. Even then a pruned prefix is accepted only when a
+    /// checkpointed retention tombstone in the same stream lists exactly the
+    /// deleted range and the root of the last deleted checkpoint, and that
+    /// checkpoint is older than the stream's minimum retention
+    /// (AUD-RM1-LOG-01).
     pub allow_pruned_prefix: bool,
 }
 
 /// Verification failure; `seq` is the first offending sequence number
-/// (or checkpoint last-seq).
+/// (or checkpoint end). Only [`verify_stream`] creates one.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[non_exhaustive]
 pub struct VerifyError {
     /// Failure code (also used for `audit.verification_failed`).
     pub code: VerifyFailureCode,
@@ -58,8 +65,9 @@ fn err(code: VerifyFailureCode, seq: u64) -> VerifyError {
     VerifyError { code, seq }
 }
 
-/// Successful verification summary.
+/// Successful verification summary. Only [`verify_stream`] creates one.
 #[derive(Clone, PartialEq, Eq, Debug)]
+#[non_exhaustive]
 pub struct VerifyReport {
     /// First retained sequence number (None if no records).
     pub first_seq: Option<u64>,
@@ -69,7 +77,7 @@ pub struct VerifyReport {
     pub head: [u8; 32],
     /// Records verified (full + redacted).
     pub records: u64,
-    /// Redacted stubs among them.
+    /// Redacted stubs among them (each bound to a checkpointed tombstone).
     pub redacted: u64,
     /// Checkpoints verified.
     pub checkpoints: u64,
@@ -93,47 +101,93 @@ impl VerifyReport {
     }
 }
 
-struct Parsed {
-    seq: u64,
-    prev: [u8; 32],
-    hash: [u8; 32],
-    leaf: [u8; 32],
-    redacted: bool,
-    claimed: Option<[u8; 32]>,
+/// What a full record is, as far as the verifier cares.
+enum Kind {
+    Other,
+    /// `case.disposed`: (removed count, redaction-set commitment).
+    Disposed(u64, [u8; 32]),
+    /// Retention tombstone: (stream code, last deleted seq, root, ts).
+    Retention(String, u64, [u8; 32], u64),
 }
 
-fn record_seq(r: &ChainRecord) -> Result<u64, VerifyError> {
+struct Parsed {
+    seq: u64,
+    prev: Option<[u8; 32]>,
+    commit: [u8; 32],
+    redacted_by: Option<u64>,
+    claimed: Option<[u8; 32]>,
+    kind: Kind,
+}
+
+fn record_seq(r: &ChainRecord) -> Option<u64> {
     match r {
-        ChainRecord::Redacted { seq, .. } => Ok(*seq),
+        ChainRecord::Redacted { seq, .. } => Some(*seq),
         ChainRecord::Full { bytes, .. } => cbor::decode(bytes)
             .ok()
-            .and_then(|v| v.get("seq").and_then(cbor::Value::as_u64))
-            .ok_or(err(VerifyFailureCode::NonCanonical, 0)),
+            .and_then(|v| v.get("seq").and_then(cbor::Value::as_u64)),
     }
 }
 
-fn parse(
-    r: &ChainRecord,
-    head: &[u8; 32],
-    p: &VerifyParams<'_>,
-    expected: u64,
-) -> Result<Parsed, VerifyError> {
+fn kind_of(v: &cbor::Value, stream: StreamId) -> Kind {
+    let ty = v.get("type").and_then(cbor::Value::as_text);
+    let pl = v.get("payload");
+    let field = |k: &str| pl.and_then(|p| p.get(k));
+    match (stream, ty) {
+        (StreamId::Case, Some("case.disposed")) => {
+            match (
+                field("removed_event_count").and_then(cbor::Value::as_u64),
+                field("redacted_set").and_then(cbor::Value::as_bytes32),
+            ) {
+                (Some(n), Some(h)) => Kind::Disposed(n, h),
+                _ => Kind::Other,
+            }
+        }
+        (StreamId::Sec, Some("audit.retention_tombstone"))
+        | (StreamId::Sys, Some("sys.retention_tombstone")) => {
+            let last = match field("seq_range") {
+                Some(cbor::Value::Array(a)) => match a.as_slice() {
+                    [_, l] => l.as_u64(),
+                    _ => None,
+                },
+                _ => None,
+            };
+            match (
+                field("stream").and_then(cbor::Value::as_text),
+                last,
+                field("last_deleted_checkpoint_root").and_then(cbor::Value::as_bytes32),
+                v.get("ts").and_then(cbor::Value::as_u64),
+            ) {
+                (Some(s), Some(l), Some(r), Some(ts)) => Kind::Retention(s.to_owned(), l, r, ts),
+                _ => Kind::Other,
+            }
+        }
+        _ => Kind::Other,
+    }
+}
+
+fn parse(r: &ChainRecord, p: &VerifyParams<'_>, expected: u64) -> Result<Parsed, VerifyError> {
     match r {
         ChainRecord::Redacted {
             seq,
-            prev,
-            leaf,
-            hash,
-        } => Ok(Parsed {
-            seq: *seq,
-            prev: *prev,
-            hash: *hash,
-            leaf: *leaf,
-            redacted: true,
-            claimed: None,
-        }),
+            commit,
+            tombstone_seq,
+        } => {
+            // Redaction exists only for per-case disposal (AUD-012).
+            if p.stream != StreamId::Case {
+                return Err(err(VerifyFailureCode::UnboundRedaction, *seq));
+            }
+            Ok(Parsed {
+                seq: *seq,
+                prev: None,
+                commit: *commit,
+                redacted_by: Some(*tombstone_seq),
+                claimed: None,
+                kind: Kind::Other,
+            })
+        }
         ChainRecord::Full {
             bytes,
+            salt,
             claimed_hash,
         } => {
             let v =
@@ -150,17 +204,27 @@ fn parse(
                 .get("prev")
                 .and_then(cbor::Value::as_bytes32)
                 .ok_or(err(VerifyFailureCode::EnvelopeMismatch, seq))?;
-            let hash = chain_hash(head, bytes);
             Ok(Parsed {
                 seq,
-                prev,
-                hash,
-                leaf: leaf_hash(bytes),
-                redacted: false,
+                prev: Some(prev),
+                commit: record_commit(salt, bytes),
+                redacted_by: None,
                 claimed: *claimed_hash,
+                kind: kind_of(&v, p.stream),
             })
         }
     }
+}
+
+/// Minimum age of deleted intervals at pruning: the lower retention bound
+/// of the stream (20 §12).
+fn min_retention_ms(s: StreamId) -> Option<u64> {
+    let days = match s {
+        StreamId::Sec => RetentionPolicy::SECURITY_BOUNDS.0,
+        StreamId::Sys => RetentionPolicy::SYSTEM_BOUNDS.0,
+        StreamId::Case => return None,
+    };
+    Some(u64::from(days).saturating_mul(MS_PER_DAY))
 }
 
 /// Verify one stream: records in stored order plus all retained checkpoints
@@ -176,68 +240,64 @@ pub fn verify_stream(
     for cp in checkpoints {
         let b = cp.body();
         if !cp.verify_signature(p.key) {
-            return Err(err(VerifyFailureCode::BadSignature, b.last_seq));
+            return Err(err(VerifyFailureCode::BadSignature, b.end_seq));
         }
         if b.tenant != p.tenant
             || b.stream != p.stream
             || b.prev_checkpoint != prev_cp
             || b.first_seq != expected_first
-            || b.last_seq < b.first_seq
+            || b.end_seq < b.first_seq
         {
-            return Err(err(VerifyFailureCode::CheckpointChain, b.last_seq));
+            return Err(err(VerifyFailureCode::CheckpointChain, b.end_seq));
         }
         prev_cp = cp.hash();
-        expected_first = b
-            .last_seq
-            .checked_add(1)
-            .ok_or(err(VerifyFailureCode::CheckpointChain, b.last_seq))?;
+        expected_first = b.end_seq;
     }
     let attested_end = expected_first; // one past the last checkpointed seq
 
-    // 2. Starting anchor.
+    // 2. Starting anchor. A pruned prefix needs an anchor checkpoint here
+    //    and a tombstone, checked in step 5.
+    let mut anchor: Option<&SignedCheckpoint> = None;
     let (start, mut head) = match records.first() {
-        None => {
-            if attested_end == 0 {
-                (0, genesis(&p.tenant, p.stream))
-            } else if p.allow_pruned_prefix {
-                let last = checkpoints
-                    .last()
-                    .map(|c| c.body().chain_head)
-                    .ok_or(err(VerifyFailureCode::Truncated, 0))?;
-                (attested_end, last)
-            } else {
-                return Err(err(VerifyFailureCode::Truncated, 0));
-            }
-        }
+        None if attested_end == 0 => (0, genesis(&p.tenant, p.stream)),
+        // Every retention deletion leaves its (later) tombstone behind, so
+        // an empty store with attested records is always a truncation.
+        None => return Err(err(VerifyFailureCode::Truncated, 0)),
         Some(r) => {
-            let s0 = record_seq(r)?;
+            let s0 = record_seq(r).ok_or(err(VerifyFailureCode::NonCanonical, 0))?;
             if s0 == 0 {
                 (0, genesis(&p.tenant, p.stream))
             } else {
-                let anchor = checkpoints
+                let a = checkpoints
                     .iter()
-                    .find(|c| c.body().last_seq.checked_add(1) == Some(s0))
-                    .filter(|_| p.allow_pruned_prefix)
+                    .find(|c| c.body().end_seq == s0 && !c.body().is_empty())
+                    .filter(|_| p.allow_pruned_prefix && p.stream != StreamId::Case)
                     .ok_or(err(VerifyFailureCode::MissingPrefix, s0))?;
-                (s0, anchor.body().chain_head)
+                anchor = Some(a);
+                (s0, a.body().chain_head)
             }
         }
     };
 
+    let initial_head = head;
+
     // 3. Walk the chain.
-    let mut leaves: Vec<[u8; 32]> = Vec::with_capacity(records.len());
-    let mut heads: Vec<[u8; 32]> = Vec::with_capacity(records.len());
+    let mut leaves: Vec<[u8; 32]> = Vec::with_capacity(records.len().min(1 << 16));
+    let mut heads: Vec<[u8; 32]> = Vec::with_capacity(records.len().min(1 << 16));
     let mut expected = start;
     let mut redacted: u64 = 0;
+    let mut stubs: BTreeMap<u64, Vec<(u64, [u8; 32])>> = BTreeMap::new();
+    let mut disposals: BTreeMap<u64, (u64, [u8; 32])> = BTreeMap::new();
+    let mut retention: Vec<(u64, String, u64, [u8; 32], u64)> = Vec::new();
     for (pos, r) in records.iter().enumerate() {
-        let rec = parse(r, &head, p, expected)?;
+        let rec = parse(r, p, expected)?;
         if rec.seq > expected {
             // Reordered if the expected record appears later; deleted otherwise.
             let later = records
                 .get(pos.saturating_add(1)..)
                 .unwrap_or_default()
                 .iter()
-                .any(|x| record_seq(x).ok() == Some(expected));
+                .any(|x| record_seq(x) == Some(expected));
             let code = if later {
                 VerifyFailureCode::SequenceOrder
             } else {
@@ -248,15 +308,27 @@ pub fn verify_stream(
         if rec.seq < expected {
             return Err(err(VerifyFailureCode::SequenceOrder, rec.seq));
         }
-        if rec.prev != head || rec.claimed.is_some_and(|c| c != rec.hash) {
+        let hash = chain_hash(&head, &rec.commit);
+        if rec.prev.is_some_and(|pv| pv != head) || rec.claimed.is_some_and(|c| c != hash) {
             return Err(err(VerifyFailureCode::ChainMismatch, rec.seq));
         }
-        if rec.redacted {
+        if let Some(t) = rec.redacted_by {
+            if t <= rec.seq {
+                return Err(err(VerifyFailureCode::UnboundRedaction, rec.seq));
+            }
+            stubs.entry(t).or_default().push((rec.seq, rec.commit));
             redacted = redacted.saturating_add(1);
         }
-        head = rec.hash;
-        leaves.push(rec.leaf);
-        heads.push(rec.hash);
+        match rec.kind {
+            Kind::Disposed(n, h) => {
+                disposals.insert(rec.seq, (n, h));
+            }
+            Kind::Retention(s, last, root, ts) => retention.push((rec.seq, s, last, root, ts)),
+            Kind::Other => {}
+        }
+        head = hash;
+        leaves.push(leaf_hash(&rec.commit));
+        heads.push(hash);
         expected = expected
             .checked_add(1)
             .ok_or(err(VerifyFailureCode::SequenceOrder, rec.seq))?;
@@ -267,29 +339,34 @@ pub fn verify_stream(
     let mut verified_cps: u64 = 0;
     for cp in checkpoints {
         let b = cp.body();
-        if b.last_seq < start {
-            // Interval deleted by retention; signature and chain checked above.
+        if start > 0 && b.end_seq <= start {
+            // Interval deleted by retention (bound by the tombstone check
+            // below); signature and chain checked above.
             verified_cps = verified_cps.saturating_add(1);
             continue;
         }
         if b.first_seq < start {
             return Err(err(VerifyFailureCode::MissingPrefix, b.first_seq));
         }
-        if b.last_seq >= end {
+        if b.end_seq > end {
             return Err(err(VerifyFailureCode::Truncated, end));
         }
         let lo = usize::try_from(b.first_seq.saturating_sub(start))
             .map_err(|_| err(VerifyFailureCode::Truncated, b.first_seq))?;
-        let hi = usize::try_from(b.last_seq.saturating_sub(start))
-            .map_err(|_| err(VerifyFailureCode::Truncated, b.last_seq))?;
+        let hi = usize::try_from(b.end_seq.saturating_sub(start))
+            .map_err(|_| err(VerifyFailureCode::Truncated, b.end_seq))?;
         let slice = leaves
-            .get(lo..=hi)
-            .ok_or(err(VerifyFailureCode::Truncated, b.last_seq))?;
+            .get(lo..hi)
+            .ok_or(err(VerifyFailureCode::Truncated, b.end_seq))?;
         if merkle_root(slice) != b.merkle_root {
-            return Err(err(VerifyFailureCode::MerkleMismatch, b.last_seq));
+            return Err(err(VerifyFailureCode::MerkleMismatch, b.end_seq));
         }
-        if heads.get(hi) != Some(&b.chain_head) {
-            return Err(err(VerifyFailureCode::ChainMismatch, b.last_seq));
+        let expected_head = match hi.checked_sub(1) {
+            Some(i) => heads.get(i).copied(),
+            None => Some(initial_head),
+        };
+        if expected_head != Some(b.chain_head) {
+            return Err(err(VerifyFailureCode::ChainMismatch, b.end_seq));
         }
         verified_cps = verified_cps.saturating_add(1);
     }
@@ -297,18 +374,47 @@ pub fn verify_stream(
         return Err(err(VerifyFailureCode::Truncated, end));
     }
 
-    // 5. Witness rollback / fork check.
+    // 5a. Every redacted stub is listed by a later, checkpointed
+    //     `case.disposed` tombstone that commits to exactly the stubs bound
+    //     to it (count and (seq, commitment) set).
+    for (tseq, set) in &stubs {
+        let (n, h) = disposals
+            .get(tseq)
+            .ok_or(err(VerifyFailureCode::UnboundRedaction, *tseq))?;
+        if *tseq >= attested_end
+            || u64::try_from(set.len()).ok() != Some(*n)
+            || redaction_set_hash(set) != *h
+        {
+            return Err(err(VerifyFailureCode::UnboundRedaction, *tseq));
+        }
+    }
+    // 5b. A pruned prefix needs a checkpointed retention tombstone in this
+    //     stream naming exactly the deleted range end and the root of the
+    //     anchor (last deleted) checkpoint, which must be older than the
+    //     stream's minimum retention.
+    if let Some(a) = anchor {
+        let ab = a.body();
+        let min_age = min_retention_ms(p.stream).ok_or(err(VerifyFailureCode::UnboundPrune, start))?;
+        let bound = retention.iter().any(|(tseq, s, last, root, ts)| {
+            *tseq < attested_end
+                && s.as_str() == p.stream.code()
+                && last.checked_add(1) == Some(start)
+                && *root == ab.merkle_root
+                && ts.saturating_sub(ab.signed_at.0) >= min_age
+        });
+        if !bound {
+            return Err(err(VerifyFailureCode::UnboundPrune, start));
+        }
+    }
+
+    // 6. Witness rollback / fork check.
     if let Some(w) = p.trusted_latest {
         let wb = w.body();
         if !w.verify_signature(p.key) || wb.tenant != p.tenant || wb.stream != p.stream {
-            return Err(err(VerifyFailureCode::BadSignature, wb.last_seq));
+            return Err(err(VerifyFailureCode::BadSignature, wb.end_seq));
         }
-        let ours = checkpoints
-            .iter()
-            .find(|c| c.body().last_seq == wb.last_seq);
-        match ours {
-            Some(c) if c.hash() == w.hash() => {}
-            _ => return Err(err(VerifyFailureCode::Rollback, wb.last_seq)),
+        if !checkpoints.iter().any(|c| c.hash() == w.hash()) {
+            return Err(err(VerifyFailureCode::Rollback, wb.end_seq));
         }
     }
 

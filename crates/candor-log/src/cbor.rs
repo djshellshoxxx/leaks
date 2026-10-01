@@ -265,7 +265,8 @@ impl<'a> Reader<'a> {
             }
             4 => {
                 let n = self.len(info)?;
-                let mut items = Vec::with_capacity(n);
+                // Bounded pre-allocation (AUD-RM1-LOG-11): grow on push.
+                let mut items = Vec::with_capacity(n.min(MAX_PREALLOC));
                 for _ in 0..n {
                     items.push(self.item(next)?);
                 }
@@ -273,7 +274,7 @@ impl<'a> Reader<'a> {
             }
             5 => {
                 let n = self.len(info)?;
-                let mut entries = Vec::with_capacity(n);
+                let mut entries = Vec::with_capacity(n.min(MAX_PREALLOC));
                 let mut prev_key: Option<&'a [u8]> = None;
                 for _ in 0..n {
                     let before = self.rest;
@@ -305,6 +306,9 @@ impl<'a> Reader<'a> {
         }
     }
 }
+
+/// Upper bound on container pre-allocation while decoding.
+const MAX_PREALLOC: usize = 64;
 
 /// Strictly decode one canonical item; any deviation from deterministic
 /// encoding is an error.
