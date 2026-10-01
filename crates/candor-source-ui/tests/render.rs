@@ -1105,7 +1105,8 @@ fn team_message_bidi_neutralised() {
     let t = arts[0].text().collect::<String>();
     assert!(t.contains("a\u{FFFD}b\u{FFFD}c\u{FFFD}d"), "{t:?}");
     assert!(t.contains("Team\u{FFFD}\u{FFFD}"));
-    for c in ['\u{202A}', '\u{202E}', '\u{2066}', '\u{2069}'] {
+    // (U+2068/U+2069 also appear as Fluent's own isolation around placeables.)
+    for c in ['\u{202A}', '\u{202E}', '\u{2066}'] {
         assert!(!t.contains(c));
     }
     assert!(stylesheet().contains("article.msg{border:"));
@@ -1131,4 +1132,29 @@ fn oversized_chrome_fails_closed() {
         render(Screen::Safety, &vm, &Locale::En),
         Err(RenderError::OverBudget(_))
     ));
+}
+
+// ST: AUD-RM1-SUI-05 (guard, not a fix) — the crate's own header block varies only by
+// `Clear-Site-Data` and the language tag, and P2 responses with the largest and smallest header
+// block (plus a 200-byte allowance for the session layer's `Set-Cookie`) need the same number
+// of 498-byte Tor RELAY cell payloads. A change that breaks this must pad the header block.
+#[test]
+fn header_block_spread_is_bounded() {
+    let mut lens = Vec::new();
+    for (s, l, m, e) in variants() {
+        let (p, _) = render_ok(s, l, m, e);
+        if p.class != SizeClass::P2 {
+            continue;
+        }
+        let n: usize = p
+            .headers
+            .iter()
+            .map(|(k, v)| k.len() + 2 + v.len() + 2)
+            .sum();
+        lens.push(n);
+    }
+    let (min, max) = (*lens.iter().min().unwrap(), *lens.iter().max().unwrap());
+    assert!(max - min <= 64, "header spread {min}..{max}");
+    let cells = |n: usize| (SizeClass::P2.bytes() + n).div_ceil(498);
+    assert_eq!(cells(min), cells(max + 200), "header block {min}..{max}");
 }

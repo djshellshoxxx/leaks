@@ -157,14 +157,14 @@ impl Ctx {
     ///
     /// `render(text_html, piece, range)` renders the item with already escaped text; `piece`
     /// and `range` are `None` for the whole item.
-    fn splittable<F>(
-        &self,
-        region: Region,
-        text: &str,
-        render: F,
-    ) -> Result<Vec<Item>, RenderError>
+    fn splittable<F>(&self, region: Region, text: &str, render: F) -> Result<Vec<Item>, RenderError>
     where
-        F: Fn(&str, Option<PieceNo>, Option<&Range<usize>>, usize) -> Result<Option<Zeroizing<String>>, RenderError>,
+        F: Fn(
+            &str,
+            Option<PieceNo>,
+            Option<&Range<usize>>,
+            usize,
+        ) -> Result<Option<Zeroizing<String>>, RenderError>,
     {
         let cap = self.cap();
         let item = |html, exclusive| Item {
@@ -256,10 +256,7 @@ pub(crate) fn build(
             }
             for f in &r.files {
                 let name = label(&f.name);
-                items.push(cx.fixed(
-                    Region::ReviewFiles,
-                    &ReviewFileSeg { p, f, name: &name },
-                )?);
+                items.push(cx.fixed(Region::ReviewFiles, &ReviewFileSeg { p, f, name: &name })?);
             }
             for h in &r.hints {
                 items.push(cx.fixed(Region::Hints, &HintSeg { p, h })?);
@@ -275,10 +272,8 @@ pub(crate) fn build(
             for (index, m) in msgs.iter().enumerate() {
                 let sender = label(&m.sender);
                 let text = neutralize_bidi(&m.text);
-                items.extend(cx.splittable(
-                    Region::Messages,
-                    &text,
-                    |text, piece, _, cap| {
+                items.extend(
+                    cx.splittable(Region::Messages, &text, |text, piece, _, cap| {
                         render_capped(
                             &MessageSeg {
                                 p,
@@ -291,8 +286,8 @@ pub(crate) fn build(
                             },
                             cap,
                         )
-                    },
-                )?);
+                    })?,
+                );
             }
             if deletable {
                 let draft = &vm.conversation.draft_text;
@@ -354,4 +349,3 @@ pub(crate) fn is_paged(s: Screen) -> bool {
             | Screen::MetadataWarning
     )
 }
-

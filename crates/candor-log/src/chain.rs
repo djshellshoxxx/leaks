@@ -126,7 +126,11 @@ pub fn leaf_hash(commit: &[u8; 32]) -> [u8; 32] {
 pub fn redaction_set_hash(entries: &[(u64, [u8; 32])]) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update(REDACTION_SET_DOMAIN);
-    h.update(u64::try_from(entries.len()).unwrap_or(u64::MAX).to_be_bytes());
+    h.update(
+        u64::try_from(entries.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
     for (seq, c) in entries {
         h.update(seq.to_be_bytes());
         h.update(c);
@@ -623,7 +627,10 @@ impl fmt::Debug for ChainRecord {
             Self::Full { bytes, .. } => write!(f, "ChainRecord::Full(<{} bytes>)", bytes.len()),
             Self::Redacted {
                 seq, tombstone_seq, ..
-            } => write!(f, "ChainRecord::Redacted(seq={seq}, tombstone={tombstone_seq})"),
+            } => write!(
+                f,
+                "ChainRecord::Redacted(seq={seq}, tombstone={tombstone_seq})"
+            ),
         }
     }
 }
@@ -890,7 +897,12 @@ impl<S: CheckpointSigner, C: AuditClock> AuditLog<S, C> {
         lag
     }
 
-    fn salt_for(&mut self, stream: StreamId, seq: u64, event: &AuditEvent) -> Result<[u8; 32], LogError> {
+    fn salt_for(
+        &mut self,
+        stream: StreamId,
+        seq: u64,
+        event: &AuditEvent,
+    ) -> Result<[u8; 32], LogError> {
         if stream != StreamId::Case || matches!(event, AuditEvent::CaseDisposed { .. }) {
             return Ok([0; 32]);
         }

@@ -16,9 +16,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use candor_log::cbor;
-use candor_log::chain::{
-    ChainRecord, CheckpointSigner, SignerError, StreamResume, record_commit,
-};
+use candor_log::chain::{ChainRecord, CheckpointSigner, SignerError, StreamResume, record_commit};
 use candor_log::codes::*;
 use candor_log::envelope::EnvelopeError;
 use candor_log::field::{SlotIndex, SmallCount, StaffTimer};
@@ -330,7 +328,10 @@ fn checkpoint_schedule() {
 type CpView = Vec<(StreamId, u64)>;
 
 /// Tick every minute for two days; optionally emit `extra` at 10:17:23.
-fn schedule_trace(host: HostRole, extra: Option<(EventContext, AuditEvent)>) -> (CpView, Vec<SignedCheckpoint>) {
+fn schedule_trace(
+    host: HostRole,
+    extra: Option<(EventContext, AuditEvent)>,
+) -> (CpView, Vec<SignedCheckpoint>) {
     // Start 2026-10-01T00:00:00Z + 30 s.
     let start = T0 - T0 % DAY + 30_000;
     let mut r = rig_at(host, CheckpointPolicy::DEFAULT, start);
@@ -369,10 +370,15 @@ fn checkpoint_timing_independent_of_date_only_events() {
         received_day: UtcMillis(T0).day(),
         import_slot_date: UtcMillis(T0).day(),
     };
-    let (with, cps_with) =
-        schedule_trace(HostRole::Core, Some((EventContext::system(Service::Relay), import)));
+    let (with, cps_with) = schedule_trace(
+        HostRole::Core,
+        Some((EventContext::system(Service::Relay), import)),
+    );
     let (without, cps_without) = schedule_trace(HostRole::Core, None);
-    assert_eq!(with, without, "checkpoint times/streams must not depend on events");
+    assert_eq!(
+        with, without,
+        "checkpoint times/streams must not depend on events"
+    );
     for (s, t) in &with {
         if *s != StreamId::Sec {
             assert_eq!(t % DAY, 0, "CASE/SYSTEM checkpoints only at midnight");
@@ -384,8 +390,10 @@ fn checkpoint_timing_independent_of_date_only_events() {
         status: HealthStatus::Degraded,
         check_code: HealthCheck::AbuseFlood,
     };
-    let (with_sys, _) =
-        schedule_trace(HostRole::Core, Some((EventContext::system(Service::Health), flood)));
+    let (with_sys, _) = schedule_trace(
+        HostRole::Core,
+        Some((EventContext::system(Service::Health), flood)),
+    );
     assert_eq!(with_sys, without);
     // Only the CASE checkpoint closing the import day differs, and only in
     // its seq range / roots (counts per day are not hidden; documented).
@@ -397,7 +405,10 @@ fn checkpoint_timing_independent_of_date_only_events() {
         .collect();
     assert!(diff.iter().all(|s| *s == StreamId::Case));
     // SECURITY: a staff event does not move SECURITY checkpoint times either.
-    let (with_sec, _) = schedule_trace(HostRole::Core, Some((EventContext::staff(user(1)), login())));
+    let (with_sec, _) = schedule_trace(
+        HostRole::Core,
+        Some((EventContext::staff(user(1)), login())),
+    );
     assert_eq!(with_sec, without);
     // Z-INTAKE: SECURITY hourly, never finer than the hour truncation.
     let (intake, _) = schedule_trace(HostRole::Intake, None);
@@ -599,7 +610,8 @@ fn case_disposal_redaction_verifies() {
     let r = rig(HostRole::Core, CheckpointPolicy::DEFAULT);
     let (mut log, sink, clock, keys) = (r.log, r.sink, r.clock, r.keys);
     for i in 0..9 {
-        log.emit(EventContext::staff(user(1)), opened(i % 3)).unwrap();
+        log.emit(EventContext::staff(user(1)), opened(i % 3))
+            .unwrap();
     }
     let target = case(1);
     let plan = sink.0.lock().unwrap().plan_case_redaction(target);
@@ -667,7 +679,8 @@ fn case_disposal_redaction_verifies() {
     // After disposal the destroyed key fails new events for the case closed.
     drop(st);
     assert_eq!(
-        log.emit(EventContext::staff(user(1)), opened(1)).unwrap_err(),
+        log.emit(EventContext::staff(user(1)), opened(1))
+            .unwrap_err(),
         LogError::CaseKeyUnavailable
     );
 }
@@ -711,8 +724,8 @@ fn stub_in_security_stream_rejected() {
     assert!(st.tamper_replace(StreamId::Sec, 0, stub_of(&danger, 1)));
     let mut p = params(&key, StreamId::Sec);
     p.trusted_latest = Some(&witness);
-    let err = verify_stream(&p, &st.chain(StreamId::Sec), &st.checkpoints(StreamId::Sec))
-        .unwrap_err();
+    let err =
+        verify_stream(&p, &st.chain(StreamId::Sec), &st.checkpoints(StreamId::Sec)).unwrap_err();
     assert_eq!(err.code, VerifyFailureCode::UnboundRedaction);
 }
 
@@ -814,7 +827,10 @@ fn redacted_stub_reveals_nothing_without_case_key() {
     assert_ne!(record_commit(&[0; 32], a.bytes()), *a.commit());
     assert_eq!(record_commit(a.salt(), a.bytes()), *a.commit());
     // Non-redactable records carry no salt.
-    let s = log.emit(EventContext::staff(user(1)), login()).unwrap().record;
+    let s = log
+        .emit(EventContext::staff(user(1)), login())
+        .unwrap()
+        .record;
     assert_eq!(s.salt(), &[0; 32]);
     // Salts never appear in Debug output.
     assert!(!format!("{a:?}").contains(&format!("{:?}", a.salt())));
@@ -845,7 +861,15 @@ fn retention_interval_deletion() {
     {
         let mut st = sink.0.lock().unwrap().clone();
         for q in 0..10 {
-            st.tamper_replace(StreamId::Sec, q, ChainRecord::Full { bytes: vec![], salt: [0; 32], claimed_hash: None });
+            st.tamper_replace(
+                StreamId::Sec,
+                q,
+                ChainRecord::Full {
+                    bytes: vec![],
+                    salt: [0; 32],
+                    claimed_hash: None,
+                },
+            );
         }
         let recs: Vec<ChainRecord> = st
             .chain(StreamId::Sec)
@@ -925,8 +949,8 @@ fn premature_prune_rejected() {
     let key = log.verifying_key();
     let mut p = params(&key, StreamId::Sec);
     p.allow_pruned_prefix = true;
-    let e = verify_stream(&p, &st.chain(StreamId::Sec), &st.checkpoints(StreamId::Sec))
-        .unwrap_err();
+    let e =
+        verify_stream(&p, &st.chain(StreamId::Sec), &st.checkpoints(StreamId::Sec)).unwrap_err();
     assert_eq!(e.code, VerifyFailureCode::UnboundPrune);
 }
 
@@ -965,7 +989,9 @@ fn jsonl_round_trip() {
     l.replace_range(i..=i, c);
     let tampered = lines.join("\n");
     let res = read_stream(StreamId::Case, tampered.as_bytes(), cps_txt.as_slice());
-    assert!(res.map_or(true, |(r, c)| verify_stream(&params(&key, StreamId::Case), &r, &c).is_err()));
+    assert!(res.map_or(true, |(r, c)| {
+        verify_stream(&params(&key, StreamId::Case), &r, &c).is_err()
+    }));
     // Line metadata must agree with the CBOR (seq / type).
     let lied = text.replacen("\"seq\":0,", "\"seq\":5,", 1);
     assert_eq!(
@@ -1061,7 +1087,10 @@ fn failing_secondary_does_not_fork_chain() {
     log.tick().unwrap();
     assert_eq!(log.secondary_status()[0].queued, 0);
     let key = log.verifying_key();
-    for store in [primary.0.lock().unwrap().clone(), sec.inner.0.lock().unwrap().clone()] {
+    for store in [
+        primary.0.lock().unwrap().clone(),
+        sec.inner.0.lock().unwrap().clone(),
+    ] {
         let rep = verify_stream(
             &params(&key, StreamId::Sec),
             &store.chain(StreamId::Sec),
@@ -1078,7 +1107,13 @@ fn failing_secondary_does_not_fork_chain() {
 #[test]
 fn failing_primary_commits_nothing() {
     let clock = TestClock::new(T0);
-    let mut log = AuditLog::new(tenant(), HostRole::Core, signer(7), clock.clone(), CheckpointPolicy::DEFAULT);
+    let mut log = AuditLog::new(
+        tenant(),
+        HostRole::Core,
+        signer(7),
+        clock.clone(),
+        CheckpointPolicy::DEFAULT,
+    );
     let prim = Flaky::default();
     log.set_primary_sink(Box::new(prim.clone()));
     log.emit(EventContext::staff(user(1)), login()).unwrap();
@@ -1098,9 +1133,16 @@ fn failing_primary_commits_nothing() {
     )
     .unwrap();
     // Without a primary sink nothing can be emitted (fail closed).
-    let mut bare = AuditLog::new(tenant(), HostRole::Core, signer(7), clock, CheckpointPolicy::DEFAULT);
+    let mut bare = AuditLog::new(
+        tenant(),
+        HostRole::Core,
+        signer(7),
+        clock,
+        CheckpointPolicy::DEFAULT,
+    );
     assert_eq!(
-        bare.emit(EventContext::staff(user(1)), login()).unwrap_err(),
+        bare.emit(EventContext::staff(user(1)), login())
+            .unwrap_err(),
         LogError::NoPrimarySink
     );
 }
@@ -1133,7 +1175,13 @@ fn signer_failure_writes_nothing() {
         inner: signer(7),
         fail: fail.clone(),
     };
-    let mut log = AuditLog::new(tenant(), HostRole::Core, signer, clock.clone(), CheckpointPolicy::DEFAULT);
+    let mut log = AuditLog::new(
+        tenant(),
+        HostRole::Core,
+        signer,
+        clock.clone(),
+        CheckpointPolicy::DEFAULT,
+    );
     let sink = MemorySink::new();
     log.set_primary_sink(Box::new(sink.clone()));
     log.emit(EventContext::staff(user(1)), login()).unwrap();

@@ -519,7 +519,12 @@ const MAX_PIVOTS: usize = 20_000;
 impl Tableau {
     fn pivot(&mut self, r: usize, c: usize) -> Option<()> {
         let pv = *self.rows.get(r)?.get(c)?;
-        let prow: Vec<Q> = self.rows.get(r)?.iter().map(|q| q.div(pv)).collect::<Option<_>>()?;
+        let prow: Vec<Q> = self
+            .rows
+            .get(r)?
+            .iter()
+            .map(|q| q.div(pv))
+            .collect::<Option<_>>()?;
         let prhs = self.rhs.get(r)?.div(pv)?;
         for i in 0..self.rows.len() {
             if i == r {
@@ -610,8 +615,12 @@ impl Region {
     /// Phase 1 of the two-phase simplex. `None` on overflow or if the
     /// system is infeasible (cannot happen for true data; fail closed).
     fn new(facts: &[Fact], priors: &[Prior], keys: &BTreeSet<MicroKey>) -> Option<Self> {
-        let index: BTreeMap<MicroKey, usize> =
-            keys.iter().copied().enumerate().map(|(i, k)| (k, i)).collect();
+        let index: BTreeMap<MicroKey, usize> = keys
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(i, k)| (k, i))
+            .collect();
         let n = index.len();
         // Constraint list: (members, kind, rhs) with kind 0 '=', 1 '≤', 2 '≥'.
         let mut cons: Vec<(Vec<usize>, u8, u64)> = Vec::new();
@@ -677,7 +686,12 @@ impl Region {
         let mut i = 0;
         while i < t.rows.len() {
             if *t.basis.get(i)? >= art0 {
-                let col = (0..art0).find(|&j| t.rows.get(i).and_then(|r| r.get(j)).is_some_and(|q| !q.is_zero()));
+                let col = (0..art0).find(|&j| {
+                    t.rows
+                        .get(i)
+                        .and_then(|r| r.get(j))
+                        .is_some_and(|q| !q.is_zero())
+                });
                 match col {
                     Some(j) => t.pivot(i, j)?,
                     None => {
@@ -723,7 +737,12 @@ impl Region {
 /// Exact disclosure audit: `true` iff every protected functional keeps a
 /// feasible range at least `width` wide given the published `facts` and
 /// the attacker's `priors`. Arithmetic overflow ⇒ `false` (fail closed).
-pub fn audit(facts: &[Fact], priors: &[Prior], protected: &[BTreeSet<MicroKey>], width: u64) -> bool {
+pub fn audit(
+    facts: &[Fact],
+    priors: &[Prior],
+    protected: &[BTreeSet<MicroKey>],
+    width: u64,
+) -> bool {
     first_failure(facts, priors, protected, width) == Some(None)
 }
 
@@ -1080,7 +1099,10 @@ mod state_codec {
     const MAX_ITEMS: usize = 1 << 16;
 
     fn key_v(k: &MicroKey) -> Value {
-        Value::Array(vec![Value::Bytes(k.0.to_vec()), Value::Uint(u64::from(k.1))])
+        Value::Array(vec![
+            Value::Bytes(k.0.to_vec()),
+            Value::Uint(u64::from(k.1)),
+        ])
     }
     fn set_v(s: &BTreeSet<MicroKey>) -> Value {
         Value::Array(s.iter().map(key_v).collect())
@@ -1237,7 +1259,11 @@ impl<H: ReleaseHistory> PeriodRegistry<H> {
     }
 
     fn load(&self, period: MonthStamp) -> Result<PeriodState, ReleaseError> {
-        match self.history.load(period).map_err(|_| ReleaseError::History)? {
+        match self
+            .history
+            .load(period)
+            .map_err(|_| ReleaseError::History)?
+        {
             None => Ok(PeriodState::default()),
             Some(b) => state_codec::decode(&b).ok_or(ReleaseError::History),
         }

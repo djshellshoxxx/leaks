@@ -115,5 +115,8 @@ fn debug_output_has_no_content() {
         assert!(!d.contains(S), "{d}");
         assert!(!d.contains("cobalt"), "{d}");
     }
-    assert_eq!(format!("{:?}", vm.ctx.errors[0].message), "Msg { key: \"sui-q-what\", args: [1 redacted] }");
+    assert_eq!(
+        format!("{:?}", vm.ctx.errors[0].message),
+        "Msg { key: \"sui-q-what\", args: [1 redacted] }"
+    );
 }

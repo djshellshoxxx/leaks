@@ -76,7 +76,11 @@ proptest! {
 
 #[derive(Debug, Clone)]
 enum Tamper {
-    FlipBit { rec: usize, byte: usize, bit: u8 },
+    FlipBit {
+        rec: usize,
+        byte: usize,
+        bit: u8,
+    },
     Delete(usize),
     Swap(usize, usize),
     Duplicate(usize),

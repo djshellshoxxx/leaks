@@ -208,3 +208,87 @@ specs disagreed, the stricter or more specific rule won, as recorded below.
 * `zeroize =1.8.2`: zeroizes page bodies and passphrase words.
 * dev `scraper =0.27.0` (errors): html5ever-based well-formedness and DOM assertions.
 * dev `proptest =1.11.0`: property tests (workspace pin).
+
+## Fixes for AUD-RM1-SUI (audit `process/audits/AUDIT-RM0-RM1-sourceui-infra.md`)
+
+| Finding | Change | Tests |
+|---|---|---|
+| **SUI-01** (High) escaping breaks P2 | New `paging` + `items` modules. Paged screens (S05, S06, S07, S08, S11 inbox, S12) render the chrome once in *measure* mode (all containers, widest part navigation, end-of-flow controls), and the rest of the class budget goes to items. Each item (answer, message, draft, question, file row, hint) is rendered alone into a fixed buffer. An item that does not fit is split into **pieces** cut by *escaped* length (character boundaries, preferably after whitespace, never inside CR LF). Each piece fills a part on its own and is labelled "(part i of n)". Items are packed into parts; `PageContext::part` selects one (clamped). Navigation: `part` submit buttons inside the screen's form, so edits are saved on the way. Nothing is truncated. Sizes never change: class still depends only on method and cookie, and every part is padded to it. End-of-flow controls (S07 continue, S08 send, S12 send/file/delivery) appear only on the last part, so the source passes every part first. Labels that are not source content (team sender, file names) are shortened visibly ("…") past 256 characters, so one label cannot fill a page. `escape` now emits `&#34;` (5 bytes, same as askama), and `escaped_len()` is public. | `tests/content_limits.rs`: S05 and S08 at the 98,304-byte report limit; S12 with a hostile 64 KiB staff message plus a 60,000-char draft; S11 inbox; S06/S07 with 60 files, long names and 500-char descriptions; the audit's own cases (10 % `"`, all `"`/`&`, 60,000 `"` draft); **every screen × every locale × each of `& " ' <`** with all fields at their maximum; a 1 MiB message (beyond limits). Each checks every part for exact class size, parse cleanliness, unique ids and prev/next buttons, and that the text is complete across parts: concatenated display text equals the input, and editable pieces map back exactly to their byte ranges. `paging` unit tests and a proptest (`split_covers_and_fits`). These tests fail on the audited code with `OverBudget`. |
+| **SUI-02** (Medium) `derive(Debug)` on sensitive types | `PageContext`, `FieldError`, `Msg`, `Arg`, `NewReportData`, `ConcernsData`, `Question`, `QuestionnaireData`, `IdentityData`, `AttachedFile`, `FilesData`, `ReviewAnswer`, `IdentityHint`, `ReviewData`, `SentData`, `InboxMessage`, `InboxData`, `ConversationData` and `ViewModel` now print only `Type { [redacted] }`. `Msg` and `FieldError` show the catalog key, field id and argument count only. `Page` no longer prints `unpadded_len`. | `tests/debug_redaction.rs`: a lint over `src/model.rs` (only allow-listed types may derive `Debug`), and a sentinel test that formats a fully populated view model and its parts. |
+| **SUI-03** (Medium) heap copies | Pages and items are rendered with `render_into` into a `CappedWriter`. It is allocated once at the class budget (zeroizing) and **fails instead of reallocating**, so no stale prefix of a page (passphrase, source text) is freed unzeroized. Item HTML is copied into an exactly sized zeroizing buffer, and the large one is zeroized. Source and team text is escaped by `escape_z` into one pre-sized zeroizing buffer. `spell()` and `passphrase_line()` build into one pre-sized `Zeroizing<String>`. `q_value()` (which cloned the answer) was removed. `splice_piece` returns `Zeroizing`. | `paging::tests::capped_writer_never_grows`; `render::oversized_chrome_fails_closed`; the existing passphrase tests. |
+| SUI-04 (Low) pseudo-locales offered | `Locale::from_tag` accepts only `Locale::PRODUCTION` (`[En]`). `from_tag_including_pseudo` exists only with the `preview` feature. An empty `offered_locales` now means `PRODUCTION`, not `ALL`. | `render::locale_allow_list` |
+| SUI-05 (Low) header block length | **Not fixed (spec decision needed).** A real fix needs a padding header, which 11 §5.3 does not allow ("the server must add nothing else except the session cookie"), or serialization done by C-06. Added a regression guard: the crate's P2 header block spread is ≤ 64 bytes, and min/max plus a 200-byte `Set-Cookie` allowance fall in the same number of 498-byte RELAY cell payloads. Spec feedback: add a fixed-width padding header to 11 §5.3, filled by C-06 after the cookie. | `render::header_block_spread_is_bounded` |
+| SUI-06 (Low) no pre-session CSRF token | **Not changed.** The crate already renders the token whenever C-06 supplies one (`ft.html`), including on S11 login. Requiring one would force a pre-session cookie design that C-06/C-07 own. Recorded: login CSRF protection relies on the C-07 `Origin` check plus `SameSite=Strict`. **C-07 must have a negative test**: missing, foreign or `null` `Origin` on POST `/login` → reject. The field name stays `csrf` (note 3; 08 is canonical for the form protocol). | — |
+| SUI-07 (Low) clipboard warning | S10/S11r: `sui-cred-copy-warning` (tier0) under the one-line field, linked by `aria-describedby`. Spec feedback: mirror it in 05 GC-32. | `render::passphrase_copy_warning` |
+| SUI-08 (Info) absolute anonymity copy | **Not changed.** The strings match 11 §7 S03/S04 verbatim. Changing them in the crate alone would diverge from the spec. Spec feedback, as the audit suggests: "Candor does not collect who you are. Your writing and files can still identify you." and "In Tor Browser, this site cannot see your internet address." | — |
+| SUI-09 (Info) preview data in production | `preview` is behind the cargo feature `preview`. Tests and the example enable it through a self dev-dependency, so the C-06 build does not contain it. `Page::unpadded_len` is `#[doc(hidden)]` and documented as CI-only. `Page::parts` is documented as never to be logged or exported. | builds: `cargo clippy -p candor-source-ui` (no feature) and `--all-targets` |
+| SUI-10 (Low) bidi spoofing; tip wording | Team message text and sender labels have U+202A–U+202E and U+2066–U+2069 replaced by a visible U+FFFD. Each message is an `article.msg` framed with a full border (CSS hash updates automatically). File names get the same treatment through `label()`. The tip now reads "A password manager is fine only on a device only you use, and only if it does not sync online." Spec feedback: mirror this in 11a's passphrase row. | `render::team_message_bidi_neutralised`, `render::password_manager_tip_wording` |
+
+### Contract for C-06/C-07 (new; implementation decisions)
+
+1. **Part navigation.** Any POST that carries `part=k` applies the form's own fields as usual and
+   then re-renders the same screen with `ctx.part = k`. New POST targets:
+   * POST `/review` and POST `/inbox`, each with only `csrf` and `part`;
+   * POST `/files/check` with `part`;
+   * POST `/files` (desc-form) with `part`;
+   * POST `/q` with `part`;
+   * POST `/conversation` (reply form) with `part` and `page`.
+   C-06 must accept POST `/inbox`. That response is P2, like the GET with a session cookie, so the
+   size class does not change. Following a `part` button never sends a message, a report or an
+   upload: those happen only through the existing `action`/`nav` buttons.
+2. **Absent fields mean "unchanged" on a multi-part page.**
+   * S06: `desc_N` of files on other parts is not posted. Continue is now a named button
+     (`nav=continue`) rather than a hidden field.
+   * S05: questions not listed in `shown` are untouched. Absent checkboxes clear only the
+     questions listed in `shown`.
+   * S12: a POST without `text` (for example from a part without the text field) leaves the
+     draft unchanged.
+3. **Pieces.** A part with a piece of a long value carries exactly one control for that field and
+   one `piece=field-start-end-total` (byte offsets into the stored value at render time).
+   * C-07 parses the value with `parse_piece` and applies the edit with `splice_piece`.
+   * `splice_piece` fails closed (`Stale`/`Boundary`) if the stored value changed or the offsets
+     are not character boundaries. C-07 then re-renders with the posted text kept (11 §5.7),
+     never discarding it.
+   * Browsers send textarea line breaks as CR LF. C-07 normalises line breaks before it stores
+     or splices a value.
+4. **Errors on other parts.** An error-summary link to a field shown on another part points
+   nowhere on the current part. C-07 should render the part that holds the first invalid field.
+5. **View-model zeroization.** The crate zeroizes everything it allocates for the page except
+   Fluent's formatting temporaries (see residuals). `ViewModel` strings are owned by C-06. C-06
+   must hold the RAM draft and passphrase in zeroizing storage and must not keep view models
+   longer than one render.
+
+### Security self-review (AUD-RM1-SUI fixes)
+
+* **Escaping.** Every item is still escaped: `escape_z` (same rules as askama) or askama
+  auto-escaping, with `|safe` only on crate-escaped HTML. Hidden `piece` values are crate-built
+  (`[a-z0-9_]` id and digits). Textareas get a newline after the start tag, so a leading newline
+  in a piece survives parsing. The hostile-content and `arbitrary_text_is_inert` tests pass
+  unchanged.
+* **Size side channel.** The size class is unchanged and every part is exactly the class size.
+  The number of parts depends on content length, and it shows in the page text and the
+  navigation, both inside the encrypted response. A network observer sees only fixed-size
+  responses and, as before, the number of requests. Navigating between parts is extra requests,
+  equivalent to the existing S12 older/newer pagination (11 §5.4 rule 2).
+* **No truncation or loss.** Tests reassemble every value from all parts. Splicing fails closed
+  on stale offsets. A label past 256 characters is shortened with a visible "…". This applies
+  only to team-sender labels and file names, never to report, message or draft text.
+* **Fail closed remains.** Chrome that alone exceeds the class (deployment text), or a single
+  unsplittable item larger than a part (a choice question with huge deployment labels), still
+  returns `OverBudget`. No source- or team-controlled input within the spec limits can cause it.
+  The tests cover every screen and locale.
+* **Panics.** None. `paging` and `items` use `get`, checked/saturating arithmetic and no indexing.
+  The capped writer reports overflow as an error.
+* **Residuals.**
+  1. Fluent formatting allocates temporaries that are not zeroized for messages with arguments.
+     Those arguments are sender labels, file names, deployment labels and numbers, never answer,
+     message, draft or passphrase text.
+  2. The allocator may copy freed blocks before our zeroizing drop (no `mlock` here). C-06
+     process hardening (no core dumps, no swap) is still required.
+  3. `askama`'s internal buffers and the caller's `ViewModel` are outside this crate's control.
+  4. SUI-05 header-length variance is guarded, not removed.
+
+### Dependencies
+
+* Self dev-dependency `candor-source-ui = { path = ".", version = "=0.1.0", features = ["preview"] }`.
+  It is not a new crate: it only turns on the `preview` feature for tests and examples.

@@ -394,7 +394,8 @@ pub fn verify_stream(
     //     stream's minimum retention.
     if let Some(a) = anchor {
         let ab = a.body();
-        let min_age = min_retention_ms(p.stream).ok_or(err(VerifyFailureCode::UnboundPrune, start))?;
+        let min_age =
+            min_retention_ms(p.stream).ok_or(err(VerifyFailureCode::UnboundPrune, start))?;
         let bound = retention.iter().any(|(tseq, s, last, root, ts)| {
             *tseq < attested_end
                 && s.as_str() == p.stream.code()

@@ -526,7 +526,7 @@ events:
         type: "Seq"
       - name: "failure_code"
         type: "VerifyFailureCode"
-        codes: ["CHAIN_MISMATCH", "SEQUENCE_GAP", "SEQUENCE_ORDER", "NON_CANONICAL", "ENVELOPE_MISMATCH", "MERKLE_MISMATCH", "BAD_SIGNATURE", "CHECKPOINT_CHAIN", "TRUNCATED", "ROLLBACK", "MISSING_PREFIX"]
+        codes: ["CHAIN_MISMATCH", "SEQUENCE_GAP", "SEQUENCE_ORDER", "NON_CANONICAL", "ENVELOPE_MISMATCH", "MERKLE_MISMATCH", "BAD_SIGNATURE", "CHECKPOINT_CHAIN", "TRUNCATED", "ROLLBACK", "MISSING_PREFIX", "UNBOUND_REDACTION", "UNBOUND_PRUNE"]
   - type: "audit.exported"
     class: SECURITY
     stream: sec
@@ -1242,6 +1242,8 @@ events:
         type: "ReceiptId"
       - name: "removed_event_count"
         type: "Count"
+      - name: "redacted_set"
+        type: "Hash32"
   - type: "case.data_purged"
     class: CASE
     stream: case
@@ -1469,3 +1471,15 @@ events:
         type: "Code<SandboxImage>"
       - name: "age_days"
         type: "AgeDays"
+  - type: "sys.retention_tombstone"
+    class: SYSTEM
+    stream: sys
+    ts: system
+    fields:
+      - name: "stream"
+        type: "StreamId"
+        codes: ["sec", "case", "sys"]
+      - name: "seq_range"
+        type: "SeqRange"
+      - name: "last_deleted_checkpoint_root"
+        type: "Hash32"

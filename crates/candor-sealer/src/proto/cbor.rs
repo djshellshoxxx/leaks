@@ -12,7 +12,7 @@
 //! The encoder works over [`Zeroizing`] buffers because encoded maps carry draft
 //! text and passphrase words.
 
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 /// CBOR decoding failure. Carries no input bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -487,6 +487,19 @@ pub enum Value {
     Bool(bool),
     /// `null`.
     Null,
+}
+
+impl Drop for Value {
+    /// Integers in inner formats can be draft-sensitive (COI ticks, categories,
+    /// questionnaire field ids, mode): wipe them in place before the backing
+    /// buffer is freed (AUD-RM2-SEA-08). Byte and text payloads are `Zeroizing`.
+    fn drop(&mut self) {
+        match self {
+            Self::U(v) => v.zeroize(),
+            Self::Bool(b) => b.zeroize(),
+            _ => {}
+        }
+    }
 }
 
 impl core::fmt::Debug for Value {

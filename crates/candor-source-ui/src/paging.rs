@@ -407,12 +407,19 @@ mod tests {
 
     #[test]
     fn pack_rules() {
-        let items = vec![item(10, false), item(10, false), item(500, true), item(10, false)];
+        let items = vec![
+            item(10, false),
+            item(10, false),
+            item(500, true),
+            item(10, false),
+        ];
         let parts = pack(&items, 500 + ITEM_SLACK - 1);
         assert_eq!(parts, None, "item over budget");
         let parts = pack(&items, 1000);
         assert_eq!(parts, Some(vec![0..2, 2..3, 3..4]));
-        assert_eq!(pack(&[], 100), Some(vec![0..0]));
+        let empty = pack(&[], 100).unwrap_or_default();
+        assert_eq!(empty.len(), 1);
+        assert!(empty.iter().all(|r| r.is_empty()));
     }
 
     proptest! {

@@ -304,11 +304,7 @@ impl SeqRange {
     }
     /// The records covered by a successful verification, optionally
     /// narrowed to `[first, last]` inside it (viewer/exports).
-    pub fn within(
-        report: &crate::verify::VerifyReport,
-        first: u64,
-        last: u64,
-    ) -> Option<Self> {
+    pub fn within(report: &crate::verify::VerifyReport, first: u64, last: u64) -> Option<Self> {
         let lo = report.first_seq?;
         (lo <= first && first <= last && last < report.next_seq).then_some(Self { first, last })
     }

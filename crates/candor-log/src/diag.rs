@@ -234,7 +234,13 @@ pub mod __private {
             return;
         }
         if let Some(s) = SINK.get() {
-            s.record(&DiagRecord::new(S::LEVEL, S::MODULE, S::LINE, S::MESSAGE, codes));
+            s.record(&DiagRecord::new(
+                S::LEVEL,
+                S::MODULE,
+                S::LINE,
+                S::MESSAGE,
+                codes,
+            ));
         }
     }
 }

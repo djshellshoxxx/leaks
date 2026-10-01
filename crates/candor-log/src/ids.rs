@@ -211,8 +211,22 @@ opaque_id!(
     SessionTag, 8);
 
 derived_id!(
-    CaseRef, EvidRef, UserRef, PersonRef, DeviceKeyId, TenantRef, ChannelId, PackageId, XformId,
-    BackupId, ReceiptId, PsrId, HoldRef, TimerId, ReportId, WitnessId,
+    CaseRef,
+    EvidRef,
+    UserRef,
+    PersonRef,
+    DeviceKeyId,
+    TenantRef,
+    ChannelId,
+    PackageId,
+    XformId,
+    BackupId,
+    ReceiptId,
+    PsrId,
+    HoldRef,
+    TimerId,
+    ReportId,
+    WitnessId,
 );
 
 /// Purpose label of a keyed value hash (domain separation per field).

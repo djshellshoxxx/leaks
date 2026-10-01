@@ -15,8 +15,97 @@
 //! arenas, and the seccomp allow-list of 07 §4.3 (`SystemCallFilter=`). Call
 //! [`harden_process`] on the main thread **before** the tokio runtime starts, so
 //! every runtime thread inherits the Landlock domain; refuse to start on error.
+//!
+//! **Enforced (ADR-052(5), AUD-RM2-SEA-06).** [`crate::server::Sealer::serve`]
+//! runs [`self_check`] before accepting the first connection and refuses to
+//! serve unless [`harden_process`] succeeded with Landlock fully enforced and the
+//! process is still non-dumpable with `RLIMIT_CORE = 0`. The only bypass is an
+//! [`InsecureDevMode`] token, which can be obtained only by emitting a typed
+//! `candor-log` event ([`InsecureDevMode::acknowledge`]).
 
 use std::path::Path;
+use std::sync::OnceLock;
+
+/// What [`harden_process`] achieved (recorded once per process).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HardeningReport {
+    /// `PR_SET_DUMPABLE = 0` and `RLIMIT_CORE = 0` applied.
+    pub core_dumps_disabled: bool,
+    /// `mlockall(MCL_CURRENT | MCL_FUTURE)` applied.
+    pub memory_locked: bool,
+    /// Landlock ruleset fully enforced.
+    pub landlock_enforced: bool,
+}
+
+static REPORT: OnceLock<HardeningReport> = OnceLock::new();
+
+/// The recorded hardening state, if [`harden_process`] succeeded.
+#[must_use]
+pub fn report() -> Option<HardeningReport> {
+    REPORT.get().copied()
+}
+
+/// Start-up self-check (07 BE-003, ADR-052(5)): hardening was applied by
+/// [`harden_process`] with Landlock fully enforced, and the process is (still)
+/// non-dumpable with a zero core limit.
+pub fn self_check() -> Result<HardeningReport, HardeningError> {
+    use rustix::process::{DumpableBehavior, Resource, dumpable_behavior, getrlimit};
+    let r = report().ok_or(HardeningError::NotApplied)?;
+    if !r.core_dumps_disabled || !r.memory_locked {
+        return Err(HardeningError::NotApplied);
+    }
+    if !r.landlock_enforced {
+        return Err(HardeningError::Landlock);
+    }
+    if dumpable_behavior().map_err(|_| HardeningError::Dumpable)? != DumpableBehavior::NotDumpable
+    {
+        return Err(HardeningError::Dumpable);
+    }
+    let core = getrlimit(Resource::Core);
+    if core.current != Some(0) || core.maximum != Some(0) {
+        return Err(HardeningError::CoreLimit);
+    }
+    Ok(r)
+}
+
+/// Explicit developer override: run without enforced hardening (and with
+/// test-only configuration such as disabled chaff or a same-UID peer). Never
+/// used in production; obtaining it always leaves a typed audit record.
+#[derive(Clone)]
+pub struct InsecureDevMode {
+    _private: (),
+}
+
+impl core::fmt::Debug for InsecureDevMode {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("InsecureDevMode")
+    }
+}
+
+impl InsecureDevMode {
+    /// Emit the typed `sys.health` event (service `upload`, status `DEGRADED`,
+    /// check `READINESS`; candor-log has no sealer service code yet, see
+    /// SPEC-NOTES) and return the token only if the event was accepted.
+    pub fn acknowledge<S, C>(
+        log: &mut candor_log::AuditLog<S, C>,
+    ) -> Result<Self, HardeningError>
+    where
+        S: candor_log::chain::CheckpointSigner,
+        C: candor_log::chain::AuditClock,
+    {
+        use candor_log::codes::{HealthCheck, HealthStatus, Service};
+        log.emit(
+            candor_log::EventContext::system(Service::Upload),
+            candor_log::AuditEvent::SysHealth {
+                service: Service::Upload,
+                status: HealthStatus::Degraded,
+                check_code: HealthCheck::Readiness,
+            },
+        )
+        .map_err(|_| HardeningError::DevFlagNotLogged)?;
+        Ok(Self { _private: () })
+    }
+}
 
 /// Which hardening step failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,6 +118,12 @@ pub enum HardeningError {
     Mlock,
     /// Landlock could not be applied at the required level.
     Landlock,
+    /// [`harden_process`] has not (successfully) run in this process.
+    NotApplied,
+    /// The configured peer UID is 0 or the sealer's own UID.
+    PeerUid,
+    /// The developer override could not be audit-logged.
+    DevFlagNotLogged,
 }
 
 impl core::fmt::Display for HardeningError {
@@ -38,19 +133,22 @@ impl core::fmt::Display for HardeningError {
             Self::CoreLimit => "RLIMIT_CORE failed",
             Self::Mlock => "mlockall failed",
             Self::Landlock => "Landlock restriction failed",
+            Self::NotApplied => "process hardening not applied",
+            Self::PeerUid => "peer UID must not be root or the sealer's own UID",
+            Self::DevFlagNotLogged => "insecure developer mode could not be audit-logged",
         })
     }
 }
 
 impl std::error::Error for HardeningError {}
 
-/// How strictly Landlock must apply.
+/// How strictly Landlock must apply. Anything but `Required` makes
+/// [`self_check`] fail, so the sealer will not serve without [`InsecureDevMode`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LandlockLevel {
-    /// Do not apply Landlock (tests only).
+    /// Do not apply Landlock (development only).
     Off,
-    /// Apply what the kernel supports; succeed even if not enforced (dev).
-    BestEffort,
+    /// Apply what the kernel supports; succeed even if not enforced (development).
     /// Require full enforcement (production).
     Required,
 }
@@ -106,8 +204,24 @@ pub fn restrict_filesystem(staging: &Path, level: LandlockLevel) -> Result<bool,
 }
 
 /// Apply all in-process hardening in order: no dumps, memory locked, Landlock.
+/// The result is recorded for [`self_check`] (first successful call only).
 pub fn harden_process(staging: &Path, landlock: LandlockLevel) -> Result<bool, HardeningError> {
     disable_core_dumps()?;
     lock_memory()?;
-    restrict_filesystem(staging, landlock)
+    let full = restrict_filesystem(staging, landlock)?;
+    let _ = REPORT.set(HardeningReport {
+        core_dumps_disabled: true,
+        memory_locked: true,
+        landlock_enforced: full,
+    });
+    Ok(full)
+}
+
+/// SEA-18: the peer must be a distinct, unprivileged UID.
+pub(crate) fn check_peer_uid(peer: u32) -> Result<(), HardeningError> {
+    let own = rustix::process::getuid().as_raw();
+    if peer == 0 || peer == own {
+        return Err(HardeningError::PeerUid);
+    }
+    Ok(())
 }

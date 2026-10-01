@@ -43,9 +43,11 @@ fn diag_reaches_sink_with_static_contents() {
     let dbg = format!("{second:?}");
     assert!(dbg.contains("session ended") && dbg.contains("IDLE_TIMEOUT"));
 
-    // AUD-RM1-LOG-04: a hand-written call site bypassing the macro's
-    // compile-time check is still validated (at monomorphisation in a full
-    // build, and at run time here): the record is dropped, never stored.
+    // AUD-RM1-LOG-04: a hand-written call site bypassing the macro still
+    // has to name a compile-time constant message; `__private::emit` asserts
+    // it at monomorphisation (calling `emit::<Bad>` does not build) and
+    // again at run time. A runtime string cannot be a `const` at all (see
+    // tests/ui/diag_forged_internals.rs).
     struct Bad;
     impl candor_log::diag::__private::Site for Bad {
         const LEVEL: DiagLevel = DiagLevel::Error;
@@ -53,18 +55,7 @@ fn diag_reaches_sink_with_static_contents() {
         const MODULE: &'static str = "m";
         const LINE: u32 = 1;
     }
-    let before = RING.snapshot().len();
-    if std::env::var_os("CANDOR_NEVER_SET").is_some() {
-        // Not executed: referencing emit::<Bad> in a build would fail the
-        // post-monomorphisation assertion, so only the runtime guard is
-        // exercised through a function pointer that is never called.
-    }
-    let runtime_guard: fn(&[candor_log::diag::DiagCodeValue]) = guard_only::<Bad>;
-    runtime_guard(&[]);
-    assert_eq!(RING.snapshot().len(), before);
-}
-
-/// Mirrors `__private::emit`'s runtime check without its compile-time one.
-fn guard_only<S: candor_log::diag::__private::Site>(_: &[candor_log::diag::DiagCodeValue]) {
-    assert!(!candor_log::diag::__private::message_ok(S::MESSAGE));
+    assert!(!candor_log::diag::__private::message_ok(
+        <Bad as candor_log::diag::__private::Site>::MESSAGE
+    ));
 }

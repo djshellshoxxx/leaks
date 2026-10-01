@@ -5,9 +5,7 @@ use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use candor_log::chain::{
-    AuditClock, CaseCommitKey, CaseKeyStore, ClockReading, KeyUnavailable,
-};
+use candor_log::chain::{AuditClock, CaseCommitKey, CaseKeyStore, ClockReading, KeyUnavailable};
 use candor_log::codes::HostRole;
 use candor_log::ids::{AuditIdKey, CaseRef, TenantRef, UserRef, UtcMillis};
 use candor_log::sink::MemorySink;

@@ -194,9 +194,9 @@ pub fn apply_interval_deletion(
         return Err(RetentionError::MissingTombstone);
     }
     let cps = store.checkpoints(plan.stream);
-    let whole = cps.iter().any(|c| {
-        !c.body().is_empty() && c.body().end_seq.checked_sub(1) == Some(plan.range.last)
-    });
+    let whole = cps
+        .iter()
+        .any(|c| !c.body().is_empty() && c.body().end_seq.checked_sub(1) == Some(plan.range.last));
     if !whole {
         return Err(RetentionError::NotWholeInterval);
     }

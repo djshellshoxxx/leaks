@@ -9,11 +9,11 @@ use zeroize::Zeroizing;
 
 use crate::guidance::{Block, Card, Group, JurisdictionText};
 use crate::locale::{Catalog, Locale};
-use crate::paging::{MAX_PARTS, Paging, Region};
 use crate::model::{
     Arg, AttachedFile, ChannelOption, FieldError, Mode, Msg, OperatorStatement, Question,
     QuestionKind, Text, ViewModel,
 };
+use crate::paging::{MAX_PARTS, Paging, Region};
 use crate::routes::Route;
 use crate::screens::Screen;
 

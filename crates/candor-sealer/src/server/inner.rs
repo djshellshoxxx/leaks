@@ -162,7 +162,7 @@ pub(crate) fn signed_payload(
     sigs: &[SigSpec<'_>],
 ) -> Result<Zeroizing<Vec<u8>>, Error> {
     let mut body = Value::M(unsigned);
-    let unsigned_cbor = Zeroizing::new(body.encode().map_err(cbor_err)?);
+    let unsigned_cbor = body.encode().map_err(cbor_err)?;
     let h_body = sha256(&[&unsigned_cbor]);
     let h_hdr = sha256(&[header_bytes]);
     let Value::M(entries) = &mut body else {
@@ -174,12 +174,15 @@ pub(crate) fn signed_payload(
         let sig = sign_with_context(s.signer, s.label, &[&h_hdr, &h_body]);
         entries.push((s.key, Value::bytes(&sig)));
     }
-    let cbor = Zeroizing::new(body.encode().map_err(cbor_err)?);
+    let cbor = body.encode().map_err(cbor_err)?;
     length_prefixed_pad(object_type, &cbor)
 }
 
 /// `u32be(len) ‖ cbor`, zero-padded to `target` bytes.
-pub(crate) fn length_prefixed_pad_to(cbor: &[u8], target: u64) -> Result<Zeroizing<Vec<u8>>, Error> {
+pub(crate) fn length_prefixed_pad_to(
+    cbor: &[u8],
+    target: u64,
+) -> Result<Zeroizing<Vec<u8>>, Error> {
     let len = u32::try_from(cbor.len()).map_err(|_| Error::TooLarge)?;
     let total = cbor.len().checked_add(4).ok_or(Error::TooLarge)?;
     let target = usize::try_from(target).map_err(|_| Error::TooLarge)?;
@@ -206,7 +209,7 @@ pub(crate) fn length_prefixed_pad(
 /// ANONYMOUS-mode and follow-up dummies), padded to the maximum IDENTITY bucket.
 pub(crate) fn identity_payload(text: &str) -> Result<Zeroizing<Vec<u8>>, Error> {
     let v = Value::M(vec![(1, Value::U(IDENTITY_FORMAT)), (2, Value::text(text))]);
-    let cbor = Zeroizing::new(v.encode().map_err(cbor_err)?);
+    let cbor = v.encode().map_err(cbor_err)?;
     length_prefixed_pad(ObjectType::Identity, &cbor)
 }
 
@@ -268,21 +271,24 @@ pub(crate) fn encode_prefs(p: &Prefs) -> Result<Zeroizing<Vec<u8>>, Error> {
                 (1001, Value::bytes(&r.original_submission_hash)),
                 (
                     1002,
-                    Value::A(r.categories.iter().map(|c| Value::U(u64::from(*c))).collect()),
+                    Value::A(
+                        r.categories
+                            .iter()
+                            .map(|c| Value::U(u64::from(*c)))
+                            .collect(),
+                    ),
                 ),
             ])
         })
         .collect();
-    let cbor = Zeroizing::new(
-        Value::M(vec![
-            (1, Value::U(PREFS_FORMAT)),
-            (2, Value::U(KDF_VERSION)),
-            (3, Value::A(reports)),
-            (4, Value::M(Vec::new())),
-        ])
-        .encode()
-        .map_err(cbor_err)?,
-    );
+    let cbor = Value::M(vec![
+        (1, Value::U(PREFS_FORMAT)),
+        (2, Value::U(KDF_VERSION)),
+        (3, Value::A(reports)),
+        (4, Value::M(Vec::new())),
+    ])
+    .encode()
+    .map_err(cbor_err)?;
     length_prefixed_pad_to(&cbor, PREFS_PADDED_LEN)
 }
 
@@ -456,9 +462,15 @@ mod tests {
     /// ADR-052(1): text-bearing objects always use the maximum bucket.
     #[test]
     fn text_objects_use_max_bucket() {
-        assert_eq!(identity_payload("").unwrap().len() as u64, padding::IDENTITY_MAX);
+        assert_eq!(
+            identity_payload("").unwrap().len() as u64,
+            padding::IDENTITY_MAX
+        );
         let big = "x".repeat(4096);
-        assert_eq!(identity_payload(&big).unwrap().len() as u64, padding::IDENTITY_MAX);
+        assert_eq!(
+            identity_payload(&big).unwrap().len() as u64,
+            padding::IDENTITY_MAX
+        );
         let p = length_prefixed_pad(ObjectType::Submission, b"abc").unwrap();
         assert_eq!(p.len() as u64, padding::MESSAGE_MAX);
         let too_big = vec![0u8; usize::try_from(padding::MESSAGE_MAX).unwrap()];

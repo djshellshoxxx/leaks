@@ -54,8 +54,8 @@ fn mixed(c: char, bytes: usize) -> String {
 fn all_parts(s: Screen, vm: &ViewModel, l: Locale) -> Vec<String> {
     let mut vm = vm.clone();
     vm.ctx.part = 0;
-    let first = render(s, &vm, &l)
-        .unwrap_or_else(|e| panic!("{} {} part 0: {e:?}", s.spec_id(), l.tag()));
+    let first =
+        render(s, &vm, &l).unwrap_or_else(|e| panic!("{} {} part 0: {e:?}", s.spec_id(), l.tag()));
     let n = first.parts;
     assert!(n >= 1);
     let mut out = Vec::new();
@@ -83,7 +83,11 @@ fn all_parts(s: Screen, vm: &ViewModel, l: Locale) -> Vec<String> {
         let mut ids = HashSet::new();
         for el in h.select(&sel("[id]")) {
             let v = el.value().attr("id").unwrap();
-            assert!(ids.insert(v.to_owned()), "{}: duplicate id {v}", s.spec_id());
+            assert!(
+                ids.insert(v.to_owned()),
+                "{}: duplicate id {v}",
+                s.spec_id()
+            );
         }
         if n > 1 {
             // Navigation to the neighbouring parts is always present.
@@ -92,10 +96,18 @@ fn all_parts(s: Screen, vm: &ViewModel, l: Locale) -> Vec<String> {
                 .map(|b| b.value().attr("value").unwrap().to_owned())
                 .collect();
             if k > 0 {
-                assert!(values.contains(&(k - 1).to_string()), "{}: no previous", s.spec_id());
+                assert!(
+                    values.contains(&(k - 1).to_string()),
+                    "{}: no previous",
+                    s.spec_id()
+                );
             }
             if k + 1 < n {
-                assert!(values.contains(&(k + 1).to_string()), "{}: no next", s.spec_id());
+                assert!(
+                    values.contains(&(k + 1).to_string()),
+                    "{}: no next",
+                    s.spec_id()
+                );
             }
         }
         out.push(b);
@@ -163,7 +175,11 @@ fn rebuild(bodies: &[String], name: &str, original: &str) {
             [(start, end, total)] => {
                 assert_eq!(*total, original.len());
                 assert_eq!(*start, next, "{name}: pieces contiguous");
-                assert_eq!(norm(&value), norm(&original[*start..*end]), "{name}: piece text");
+                assert_eq!(
+                    norm(&value),
+                    norm(&original[*start..*end]),
+                    "{name}: piece text"
+                );
                 next = *end;
             }
             _ => panic!("{name}: more than one piece on a part"),
@@ -286,7 +302,10 @@ fn s08_worst_case_fits_and_is_complete() {
             let (vm, answers) = s08_vm(c);
             let bodies = all_parts(Screen::Review, &vm, l);
             assert!(bodies.len() > 1);
-            assert_eq!(nl(&texts(&bodies, "dd p.ut").concat()), nl(&answers.concat()));
+            assert_eq!(
+                nl(&texts(&bodies, "dd p.ut").concat()),
+                nl(&answers.concat())
+            );
             let hints = texts(&bodies, "section li").len();
             assert_eq!(hints, 300);
             for (k, b) in bodies.iter().enumerate() {
@@ -461,6 +480,9 @@ fn far_over_limit_still_paged() {
 // ST: AUD-RM1-SUI-01 — escaped_len matches what the page carries.
 #[test]
 fn escaped_len_is_exact() {
-    assert_eq!(escaped_len("a&b\"c'd<e>f"), 1 + 5 + 1 + 5 + 1 + 5 + 1 + 4 + 1 + 4 + 1);
+    assert_eq!(
+        escaped_len("a&b\"c'd<e>f"),
+        1 + 5 + 1 + 5 + 1 + 5 + 1 + 4 + 1 + 4 + 1
+    );
     assert_eq!(escaped_len("é😀"), "é😀".len());
 }

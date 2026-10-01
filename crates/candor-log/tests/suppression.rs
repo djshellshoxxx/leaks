@@ -124,10 +124,16 @@ fn exposed(n: usize, vals: &[u64], eqs: &[(Vec<usize>, u64)]) -> Vec<usize> {
             for &i in primary {
                 seen.entry(i).or_default().insert(assign[&i]);
             }
-            return primary.iter().all(|i| seen.get(i).is_some_and(|s| s.len() == 10));
+            return primary
+                .iter()
+                .all(|i| seen.get(i).is_some_and(|s| s.len() == 10));
         }
         let cell = cells[idx];
-        let (lo, hi) = if vals[cell] < 10 { (0, 9) } else { (10, bound(cell).max(10)) };
+        let (lo, hi) = if vals[cell] < 10 {
+            (0, 9)
+        } else {
+            (10, bound(cell).max(10))
+        };
         for v in lo..=hi {
             assign.insert(cell, v);
             let done = rec(idx + 1, cells, vals, assign, eqs, bound, primary, seen);
@@ -138,7 +144,16 @@ fn exposed(n: usize, vals: &[u64], eqs: &[(Vec<usize>, u64)]) -> Vec<usize> {
         }
         false
     }
-    rec(0, &unknown, vals, &mut assign, eqs, &bound, &primary, &mut seen);
+    rec(
+        0,
+        &unknown,
+        vals,
+        &mut assign,
+        eqs,
+        &bound,
+        &primary,
+        &mut seen,
+    );
     primary
         .into_iter()
         .filter(|i| seen.get(i).is_none_or(|s| s.len() < 10))
@@ -231,7 +246,12 @@ fn primary_cell_not_narrowed_by_attacker_priors() {
     let rel = suppress(&simple(2, 3, &vals), k()).unwrap();
     assert_eq!(rel.cells[0], Published::Suppressed);
     assert!(pinned_cells(&rel, &vals).is_empty(), "{rel:?}");
-    for p in rel.cells.iter().chain(&rel.row_totals).chain(&rel.col_totals) {
+    for p in rel
+        .cells
+        .iter()
+        .chain(&rel.row_totals)
+        .chain(&rel.col_totals)
+    {
         let d = p.display();
         assert!(d == "suppressed" || d.parse::<u64>().is_ok(), "{d}");
     }
@@ -380,7 +400,9 @@ fn tumbling_frozen_periods() {
 // memory when released; before/after one submission across periods.
 #[test]
 fn counter_aggregation_and_release() {
-    let ch: Vec<ChannelId> = (1..=4).map(|n| ChannelId::derive(&candor_log::ids::AuditIdKey::new([1; 32]), &[n])).collect();
+    let ch: Vec<ChannelId> = (1..=4)
+        .map(|n| ChannelId::derive(&candor_log::ids::AuditIdKey::new([1; 32]), &[n]))
+        .collect();
     let mut agg = CounterAggregator::new(m(2026, 9));
     let sub = IntakeCounter::Submissions;
     for _ in 0..14 {
@@ -435,12 +457,18 @@ fn counter_aggregation_and_release() {
     assert_eq!(rep.table.cells[7], Published::Suppressed);
     assert_eq!(rep.table.cells[2], Published::Suppressed);
     let vals = [14, 14, 0, 12, 12, 0, 22, 0, 0];
-    assert!(pinned_cells(&rep.table, &vals).is_empty(), "{:?}", rep.table);
+    assert!(
+        pinned_cells(&rep.table, &vals).is_empty(),
+        "{:?}",
+        rep.table
+    );
 }
 
 #[test]
 fn group_with_one_folded_channel_absorbs_another() {
-    let ch: Vec<ChannelId> = (1..=3).map(|n| ChannelId::derive(&candor_log::ids::AuditIdKey::new([1; 32]), &[n])).collect();
+    let ch: Vec<ChannelId> = (1..=3)
+        .map(|n| ChannelId::derive(&candor_log::ids::AuditIdKey::new([1; 32]), &[n]))
+        .collect();
     let pop = BTreeMap::from([(ch[0], 500), (ch[1], 500), (ch[2], 500)]);
     let groups = ChannelGroups::new(vec![ch.clone()], pop).unwrap();
     let closed = ClosedMonth::from_counts(
@@ -467,7 +495,10 @@ fn group_with_one_folded_channel_absorbs_another() {
     let lone = ClosedMonth::from_counts(
         m(2026, 9),
         [(
-            (ChannelId::derive(&candor_log::ids::AuditIdKey::new([1; 32]), &[9]), IntakeCounter::Submissions),
+            (
+                ChannelId::derive(&candor_log::ids::AuditIdKey::new([1; 32]), &[9]),
+                IntakeCounter::Submissions,
+            ),
             50,
         )],
     );
@@ -478,7 +509,9 @@ fn group_with_one_folded_channel_absorbs_another() {
 fn folded_channel_not_recoverable_from_second_report() {
     // A later report showing the group's other channel individually must not
     // reveal the folded small channel by subtraction.
-    let ch: Vec<ChannelId> = (1..=2).map(|n| ChannelId::derive(&candor_log::ids::AuditIdKey::new([1; 32]), &[n])).collect();
+    let ch: Vec<ChannelId> = (1..=2)
+        .map(|n| ChannelId::derive(&candor_log::ids::AuditIdKey::new([1; 32]), &[n]))
+        .collect();
     let pop = BTreeMap::from([(ch[0], 500), (ch[1], 10)]);
     let groups = ChannelGroups::new(vec![ch.clone()], pop).unwrap();
     let closed = ClosedMonth::from_counts(
@@ -536,24 +569,74 @@ fn magnitude_rules() {
     let mut r = reg();
     let p = m(2026, 8);
     let cur = m(2026, 10);
-    assert_eq!(r.release_magnitude(p, cur, "med9", Magnitude::Median, &pop(&nine), k()).unwrap(), None);
+    assert_eq!(
+        r.release_magnitude(p, cur, "med9", Magnitude::Median, &pop(&nine), k())
+            .unwrap(),
+        None
+    );
     let mut r = reg();
-    assert_eq!(r.release_magnitude(p, cur, "med10", Magnitude::Median, &pop(&ten), k()).unwrap(), Some(5));
-    assert_eq!(r.release_magnitude(p, cur, "p90", Magnitude::Percentile(90), &pop(&ten), k()).unwrap(), Some(9));
-    assert_eq!(r.release_magnitude(p, cur, "mean", Magnitude::Mean, &pop(&ten), k()).unwrap(), Some(5));
+    assert_eq!(
+        r.release_magnitude(p, cur, "med10", Magnitude::Median, &pop(&ten), k())
+            .unwrap(),
+        Some(5)
+    );
+    assert_eq!(
+        r.release_magnitude(p, cur, "p90", Magnitude::Percentile(90), &pop(&ten), k())
+            .unwrap(),
+        Some(9)
+    );
+    assert_eq!(
+        r.release_magnitude(p, cur, "mean", Magnitude::Mean, &pop(&ten), k())
+            .unwrap(),
+        Some(5)
+    );
     // Min/max (single-case values) are not percentiles we publish.
     for q in [0, 5, 95, 100] {
         assert_eq!(
-            r.release_magnitude(p, cur, "pq", Magnitude::Percentile(q), &pop(&ten), k()).unwrap_err(),
+            r.release_magnitude(p, cur, "pq", Magnitude::Percentile(q), &pop(&ten), k())
+                .unwrap_err(),
             ReleaseError::BadStatistic
         );
     }
     let mut r = reg();
-    assert_eq!(r.release_magnitude(p, cur, "w", Magnitude::MedianDurationWeeks, &pop(&[10; 9]), k()).unwrap(), None);
+    assert_eq!(
+        r.release_magnitude(
+            p,
+            cur,
+            "w",
+            Magnitude::MedianDurationWeeks,
+            &pop(&[10; 9]),
+            k()
+        )
+        .unwrap(),
+        None
+    );
     let mut r = reg();
-    assert_eq!(r.release_magnitude(p, cur, "w", Magnitude::MedianDurationWeeks, &pop(&[10; 10]), k()).unwrap(), Some(1));
+    assert_eq!(
+        r.release_magnitude(
+            p,
+            cur,
+            "w",
+            Magnitude::MedianDurationWeeks,
+            &pop(&[10; 10]),
+            k()
+        )
+        .unwrap(),
+        Some(1)
+    );
     let mut r = reg();
-    assert_eq!(r.release_magnitude(p, cur, "w", Magnitude::MedianDurationWeeks, &pop(&[11; 10]), k()).unwrap(), Some(2));
+    assert_eq!(
+        r.release_magnitude(
+            p,
+            cur,
+            "w",
+            Magnitude::MedianDurationWeeks,
+            &pop(&[11; 10]),
+            k()
+        )
+        .unwrap(),
+        Some(2)
+    );
     // Ratios: every contributing cell (num, den − num) ≥ k.
     let mut r = reg();
     for (i, (num, den, want)) in [
@@ -583,21 +666,32 @@ fn magnitude_differencing_blocked() {
     eleven.push(1000);
     let p = m(2026, 8);
     let cur = m(2026, 9);
-    assert!(r.release_magnitude(p, cur, "kpi.a", Magnitude::Mean, &pop(&ten), k()).unwrap().is_some());
+    assert!(
+        r.release_magnitude(p, cur, "kpi.a", Magnitude::Mean, &pop(&ten), k())
+            .unwrap()
+            .is_some()
+    );
     assert_eq!(
-        r.release_magnitude(p, cur, "kpi.b", Magnitude::Mean, &pop(&eleven), k()).unwrap(),
+        r.release_magnitude(p, cur, "kpi.b", Magnitude::Mean, &pop(&eleven), k())
+            .unwrap(),
         None
     );
     // The same holds after a restart (history persisted).
     let mut r2 = PeriodRegistry::new(r.history().clone());
     assert_eq!(
-        r2.release_magnitude(p, cur, "kpi.c", Magnitude::Median, &pop(&eleven), k()).unwrap(),
+        r2.release_magnitude(p, cur, "kpi.c", Magnitude::Median, &pop(&eleven), k())
+            .unwrap(),
         None
     );
     // A population differing by ≥ k is fine.
-    let other: Vec<(MicroKey, u64)> =
-        (0..20u16).map(|i| (MicroKey([8; 16], i), u64::from(i))).collect();
-    assert!(r2.release_magnitude(p, cur, "kpi.d", Magnitude::Median, &other, k()).unwrap().is_some());
+    let other: Vec<(MicroKey, u64)> = (0..20u16)
+        .map(|i| (MicroKey([8; 16], i), u64::from(i)))
+        .collect();
+    assert!(
+        r2.release_magnitude(p, cur, "kpi.d", Magnitude::Median, &other, k())
+            .unwrap()
+            .is_some()
+    );
 }
 
 // AUD-RM1-LOG-06 regression: the differencing defence survives a restart
@@ -615,20 +709,38 @@ fn differencing_blocked_across_restart() {
     };
     let mut r = reg();
     let a = r
-        .release(m(2026, 8), m(2026, 10), "report.all", &one(29, vec![c(1), c(2), c(3)]), k())
+        .release(
+            m(2026, 8),
+            m(2026, 10),
+            "report.all",
+            &one(29, vec![c(1), c(2), c(3)]),
+            k(),
+        )
         .unwrap();
     assert_eq!(a.cells[0], Published::Value(29));
     let history = r.history().clone();
     drop(r);
     let mut restarted = PeriodRegistry::new(history);
     let b = restarted
-        .release(m(2026, 8), m(2026, 10), "report.without3", &one(25, vec![c(1), c(2)]), k())
+        .release(
+            m(2026, 8),
+            m(2026, 10),
+            "report.without3",
+            &one(25, vec![c(1), c(2)]),
+            k(),
+        )
         .unwrap();
     assert_eq!(b.cells[0], Published::Suppressed);
     // Frozen across restarts too.
     assert_eq!(
         restarted
-            .release(m(2026, 8), m(2026, 10), "report.all", &one(29, vec![c(1), c(2), c(3)]), k())
+            .release(
+                m(2026, 8),
+                m(2026, 10),
+                "report.all",
+                &one(29, vec![c(1), c(2), c(3)]),
+                k()
+            )
             .unwrap_err(),
         ReleaseError::AlreadyReleased
     );
@@ -641,7 +753,11 @@ struct BrokenHistory {
 
 impl ReleaseHistory for BrokenHistory {
     fn load(&self, _: candor_log::ids::MonthStamp) -> Result<Option<Vec<u8>>, HistoryError> {
-        if self.load_fails { Err(HistoryError) } else { Ok(Some(vec![0xff, 0x00])) }
+        if self.load_fails {
+            Err(HistoryError)
+        } else {
+            Ok(Some(vec![0xff, 0x00]))
+        }
     }
     fn store(&mut self, _: candor_log::ids::MonthStamp, _: &[u8]) -> Result<(), HistoryError> {
         Err(HistoryError)
