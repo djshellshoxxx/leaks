@@ -82,10 +82,12 @@ InaccessiblePaths=-/run/tor-instances -/run/candor/source-web -/run/credentials/
 # ---- Logging (ADR-016, LOG-004, LOG-007, NET-008) ----
 # stdout discarded; stderr carries only candor-log formatted codes (07 §4.2). It goes to the
 # separate journald namespace "candor-intake" (journald@candor-intake.conf: Storage=volatile,
-# MaxRetentionSec=24h, no forwarding); messages below warning are dropped at the source.
+# MaxRetentionSec=24h, no forwarding). Un-prefixed stderr lines are stored at level warning
+# (SyslogLevel); anything a program explicitly marks below warning is dropped (LogLevelMax).
 StandardInput=null
 StandardOutput=null
 StandardError=journal
+SyslogLevel=warning
 LogNamespace=candor-intake
 LogLevelMax=warning
 LogRateLimitIntervalSec=30s

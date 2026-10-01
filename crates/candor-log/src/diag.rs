@@ -18,7 +18,7 @@
 //! logs, 20 §6.2).
 //!
 //! Release builds (`debug_assertions` off in the *calling* crate) compile
-//! out `Info` and `Debug` diagnostics entirely, matching the
+//! out `Info` and `Trace` diagnostics entirely, matching the
 //! `release_max_level_warn` ceiling of 20 §7. Records go to the single
 //! process-wide [`DiagSink`] installed with [`set_sink`]; without a sink
 //! they are dropped (nothing is ever written to stdout/stderr or disk
@@ -46,8 +46,9 @@ pub enum DiagLevel {
     Warn,
     /// Informational (debug builds only).
     Info,
-    /// Debug (debug builds only).
-    Debug,
+    /// Fine-grained tracing (debug builds only). Named `Trace`, not
+    /// `Debug`, so it never shadows `core::fmt::Debug` in diagnostics.
+    Trace,
 }
 
 /// The value of one enumerated code.
@@ -284,8 +285,8 @@ mod tests {
         assert!(__enabled(DiagLevel::Error, false));
         assert!(__enabled(DiagLevel::Warn, false));
         assert!(!__enabled(DiagLevel::Info, false));
-        assert!(!__enabled(DiagLevel::Debug, false));
-        assert!(__enabled(DiagLevel::Debug, true));
+        assert!(!__enabled(DiagLevel::Trace, false));
+        assert!(__enabled(DiagLevel::Trace, true));
     }
 
     #[test]

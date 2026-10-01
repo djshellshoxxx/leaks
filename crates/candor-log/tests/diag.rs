@@ -21,7 +21,7 @@ fn diag_reaches_sink_with_static_contents() {
         SessionEndReason::IdleTimeout,
         Code::<OperationClass>::new(3),
     );
-    diag!(Debug, "debug detail");
+    diag!(Trace, "trace detail");
     let line_debug = line!() - 1;
 
     let recs = RING.snapshot();
@@ -42,7 +42,7 @@ fn diag_reaches_sink_with_static_contents() {
             }
         ]
     );
-    // Debug/Info are compiled out unless debug_assertions (release ceiling Warn).
+    // Trace/Info are compiled out unless debug_assertions (release ceiling Warn).
     let has_debug = recs.iter().any(|r| r.line() == line_debug);
     assert_eq!(has_debug, cfg!(debug_assertions));
     // Debug output of a record contains only static data.

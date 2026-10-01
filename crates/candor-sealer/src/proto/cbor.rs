@@ -83,6 +83,16 @@ impl Enc {
         Self::default()
     }
 
+    /// Writer whose buffer is allocated once at `cap` bytes. Secret-bearing
+    /// encodings size `cap` to their maximum so the buffer never reallocates
+    /// (a reallocation would leave an unzeroized copy behind; R7 SI-A-05).
+    #[must_use]
+    pub fn with_capacity(cap: usize) -> Self {
+        Self {
+            buf: Zeroizing::new(Vec::with_capacity(cap)),
+        }
+    }
+
     fn head(&mut self, major: u8, v: u64) {
         if let Ok(small) = u8::try_from(v) {
             if small < 24 {
@@ -500,9 +510,26 @@ impl Value {
 
     /// Encode canonically.
     pub fn encode(&self) -> Result<Zeroizing<Vec<u8>>, CborError> {
-        let mut e = Enc::new();
+        let mut e = Enc::with_capacity(self.encoded_len_hint());
         self.encode_into(&mut e)?;
         Ok(e.into_bytes())
+    }
+
+    /// Upper bound of the encoded length (each head ≤ 9 bytes), used to size the
+    /// output buffer once.
+    #[must_use]
+    pub fn encoded_len_hint(&self) -> usize {
+        match self {
+            Self::U(_) | Self::Bool(_) | Self::Null => 9,
+            Self::B(b) => b.len().saturating_add(9),
+            Self::T(t) => t.len().saturating_add(9),
+            Self::A(items) => items
+                .iter()
+                .fold(9usize, |acc, i| acc.saturating_add(i.encoded_len_hint())),
+            Self::M(entries) => entries.iter().fold(9usize, |acc, (_, v)| {
+                acc.saturating_add(9).saturating_add(v.encoded_len_hint())
+            }),
+        }
     }
 
     /// Encode into a writer. Recursion depth is bounded by the (trusted) value tree.
