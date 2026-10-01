@@ -470,7 +470,7 @@ if [ -x "$TOOLS/candor-safe-read" ] && have timeout && have mkfifo; then
     ( while :; do mv -T "$RD/postgresql" "$RD/pg.real" 2>/dev/null; ln -s "$T/race1.secret" "$RD/postgresql" 2>/dev/null; rm -f "$RD/postgresql"; mv -T "$RD/pg.real" "$RD/postgresql" 2>/dev/null; done ) &
     sw=$!; badrun=""
     for i in $(seq 1 25); do
-      timeout -k 5 60 cc -q --dir "$RD" --only pg > "$T/race.out" 2>&1; rc=$?
+      timeout -k 5 60 "$TOOLS/config-check.sh" "${CC_WB[@]}" -q --dir "$RD" --only pg > "$T/race.out" 2>&1; rc=$?
       if [ "$rc" -ne 30 ] || grep -q CANDORLEAKMARKER "$T/race.out"; then badrun="run $i exit $rc"; break; fi
     done
     kill "$sw" 2>/dev/null; wait "$sw" 2>/dev/null
@@ -479,18 +479,18 @@ if [ -x "$TOOLS/candor-safe-read" ] && have timeout && have mkfifo; then
     ( while :; do rm -f "$RD/torrc.f"; mkfifo "$RD/torrc.f" && mv -f "$RD/torrc.f" "$RD/torrc"; cp "$T/race2.torrc" "$RD/torrc.n" && mv -f "$RD/torrc.n" "$RD/torrc"; done ) &
     sw=$!; badrun=""
     for i in $(seq 1 10); do
-      timeout -k 5 60 cc -q --dir "$RD" --only tor > "$T/race.out" 2>&1; rc=$?
+      timeout -k 5 60 "$TOOLS/config-check.sh" "${CC_WB[@]}" -q --dir "$RD" --only tor > "$T/race.out" 2>&1; rc=$?
       if [ "$rc" -ne 30 ]; then badrun="run $i exit $rc"; break; fi
     done
     kill "$sw" 2>/dev/null; wait "$sw" 2>/dev/null
     if [ -z "$badrun" ]; then pass "config-check under a FIFO swap race: 10 runs, all exit 30, none blocked"; else bad "config-check FIFO swap race: $badrun (124 = hung)"; fi
     # Deterministic end-to-end: a FIFO in place of the torrc fails at once.
     RD="$T/race3"; cp -a "$INTAKE" "$RD"; rm -f "$RD/torrc"; mkfifo "$RD/torrc"
-    timeout -k 5 60 cc -q --dir "$RD" --only tor > "$T/race.out" 2>&1; rc=$?
+    timeout -k 5 60 "$TOOLS/config-check.sh" "${CC_WB[@]}" -q --dir "$RD" --only tor > "$T/race.out" 2>&1; rc=$?
     if [ "$rc" -eq 30 ]; then pass "config-check: torrc replaced by a FIFO fails with exit 30 (no hang)"; else bad "config-check FIFO torrc: exit $rc"; fi
     # Unknown torrc option names are counted, never echoed (AUD-RM2-DEP-24).
     RD="$T/race4"; cp -a "$INTAKE" "$RD"; printf 'CANDORLEAKMARKERxyz 1\n' >> "$RD/torrc"
-    timeout -k 5 60 cc -q --dir "$RD" --only tor > "$T/race.out" 2>&1; rc=$?
+    timeout -k 5 60 "$TOOLS/config-check.sh" "${CC_WB[@]}" -q --dir "$RD" --only tor > "$T/race.out" 2>&1; rc=$?
     if [ "$rc" -eq 30 ] && ! grep -q CANDORLEAKMARKER "$T/race.out"; then pass "config-check: unknown torrc option rejected, its name not printed"; else bad "config-check unknown torrc option: exit $rc or name printed"; fi
   else skip "config-check race tests (need root)"; fi
 else bad "candor-safe-read tests: binary missing (tools/build-safe-read.sh) or no timeout/mkfifo"; fi

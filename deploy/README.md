@@ -36,7 +36,7 @@ every ambiguity is recorded in [`SPEC-NOTES.md`](SPEC-NOTES.md).
 | `intake/profiles/{ce-single,ce-hardened}/` | `/etc/systemd/system/<unit>.d/` | Profile drop-ins. Staging is 4 GiB on CE-SINGLE and 8 GiB on CE-HARDENED. The sealer's `MemoryMax` is 2560M plus the staging size, because tmpfs pages are charged to the writer's cgroup. |
 | `intake/secret-placement.toml` | `/usr/share/candor/manifests/intake.toml` | ADR-028 Secret Placement Manifest for role `intake`. |
 | `tools/check-placement.sh` | `/usr/lib/candor/tools/` | Verifies the manifest on a host: owner, group, mode, parent mode, symlinks and hard links per entry. It also scans for unlisted secret material and checks names in the ciphertext-only directories. |
-| `tools/config-check.sh`, `tools/config-check.baseline`, `tools/config-check.manifest`, `tools/safe-read.py` | `/usr/lib/candor/tools/` | The subset of `candorctl check` (18 §14) that covers these files. It checks **effective** configuration against allow-lists: tor's own canonical dump, the nft ruleset as loaded into a throw-away network namespace, units as systemd merges them (all drop-in locations), the sealer's expanded syscall set, `postgres -C`, `systemd-analyze cat-config`, live `/proc/sys`, AppArmor profiles statement by statement (SPEC-NOTES D-31, D-35). It never follows a symlinked input and never prints file content. Every input is read by `safe-read.py` (openat walk with `O_NOFOLLOW`, `O_NONBLOCK`, fstat checks, size cap; AUD-RM2-DEP-24). Self-contained AppArmor profiles are compared as compiled policy against an isolated compile (AUD-RM2-DEP-23). The baseline and the reader are verified against the manifest, whose digest is pinned in the script. Needs root, `jq`, `tor`, `nft`, `unshare`, `setpriv`, `systemd-analyze`, `sha256sum`, `timeout`, `python3`, `apparmor_parser` (`--host`). |
+| `tools/config-check.sh`, `tools/config-check.baseline`, `tools/config-check.manifest`, `tools/candor-safe-read` (built by `tools/build-safe-read.sh` from `crates/candor-safe-read`) | `/usr/lib/candor/tools/` | The subset of `candorctl check` (18 §14) that covers these files. It checks **effective** configuration against allow-lists: tor's own canonical dump, the nft ruleset as loaded into a throw-away network namespace, units as systemd merges them (all drop-in locations), the sealer's expanded syscall set, `postgres -C`, `systemd-analyze cat-config`, live `/proc/sys`, AppArmor profiles statement by statement (SPEC-NOTES D-31, D-35). It never follows a symlinked input and never prints file content. Every input is read by the compiled `candor-safe-read` (`openat2` `RESOLVE_NO_SYMLINKS|BENEATH`, `O_NOFOLLOW`, `O_NONBLOCK`, fstat checks, size cap; AUD-RM2-DEP-24). Self-contained AppArmor profiles are compared as compiled policy against an isolated compile (AUD-RM2-DEP-23). The baseline and the reader are verified against the manifest, whose digest is pinned in the script. Needs root, `jq`, `tor`, `nft`, `unshare`, `setpriv`, `systemd-analyze`, `sha256sum`, `timeout`, `apparmor_parser` (`--host`). |
 | `tests/validate.sh` | — (CI) | Runs all the checks listed under "Validation" below. |
 
 ## Users, sockets and flows
@@ -78,11 +78,14 @@ every ambiguity is recorded in [`SPEC-NOTES.md`](SPEC-NOTES.md).
    `/etc/fstab`; only random-key dm-crypt swap is tolerated), keep `systemd-journal` and `adm`
    without members.
 8. Run `config-check.sh --host` (must exit 0) and `check-placement.sh --mode full` (must exit 0).
-   `config-check.sh` needs `python3` (standard library only; Platform Manifest) for its race-free
-   input reader. Once the tenant database is provisioned and the cluster runs, the ST-120 gate is
-   `config-check.sh --host --pg-db candor_intake_<tenant>`: it checks that `candor_intake_maint` owns
-   the database, owns no object and is no member of the schema owner (a running server checked
-   without `--pg-db` fails).
+   Its race-free input reader is the compiled `candor-safe-read` next to it (no interpreter on
+   H-INTAKE, ADR-055(3)); the release manifest pins its digest. Before installing `pg_hba.conf`,
+   replace `candor_intake_TENANT` with the site's one intake database name (ADR-054). Once that
+   database is provisioned and the cluster runs, the ST-120 gate is
+   `config-check.sh --host --pg-db candor_intake_<tenant>`. It checks that the cluster has exactly
+   that one intake database, which `candor_intake_maint` owns. The role must own no object, be no
+   member of the schema owner, and have no connection limit and no `ALTER DATABASE … SET` (a
+   running server checked without `--pg-db` fails).
    Then enable the sockets, services, `tor@candor-intake` and the two maintenance timers.
 
 ## Requirements on the Candor binaries (C-06/C-07/C-08 implementers)

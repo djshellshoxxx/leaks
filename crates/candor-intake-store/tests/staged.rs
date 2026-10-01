@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use candor_intake_store::staged::{
     STAGED_ACK_COMMITTED, STAGED_ACK_REFUSED, STAGED_BUNDLE_INDEX, STAGED_MAX_IN_FLIGHT,
-    StagedBlob, StagedHeader, StagedReceiver, send_staged_bundle,
+    StagedBlob, StagedCommit, StagedHeader, StagedReceiver, send_staged_bundle,
 };
 use candor_intake_store::*;
 use candor_safefs::{ObjectId, RootPolicy, SafeRoot, SlotTime};
@@ -47,13 +47,17 @@ struct Env {
 }
 
 fn env_with(max: u64) -> Env {
+    env_uid(max, my_uid())
+}
+
+fn env_uid(max: u64, uid: u32) -> Env {
     use std::os::unix::fs::DirBuilderExt;
     let tmp = tempfile::tempdir().unwrap();
     let base = std::fs::canonicalize(tmp.path()).unwrap();
     let p = base.join("blobs");
     std::fs::DirBuilder::new().mode(0o700).create(&p).unwrap();
     let root = SafeRoot::open(&p, RootPolicy::BlobStore).unwrap();
-    let rx = StagedReceiver::new(root, my_uid(), max)
+    let rx = StagedReceiver::new(root, uid, max)
         .unwrap()
         .with_timeout(Duration::from_millis(200));
     Env { tmp, rx }
@@ -228,13 +232,7 @@ async fn staged_bundle_handover_roundtrip() {
 #[test]
 fn staged_wrong_peer_uid_refused() {
     let e = env();
-    let o = env();
-    let other = StagedReceiver::new(
-        SafeRoot::open(o.rx.blobs_path(), RootPolicy::BlobStore).unwrap(),
-        my_uid().wrapping_add(1),
-        MAX,
-    )
-    .unwrap();
+    let other = env_uid(MAX, my_uid().wrapping_add(1)).rx;
     let (sealer, store_sock) = pair();
     let data = bundle(1000);
     let file = memfile(&data);
@@ -290,6 +288,9 @@ fn staged_stalled_peer_times_out() {
     assert_clean(&e, "timeout");
 }
 
+/// A hostile message: label, bytes, descriptors per control message.
+type Case<'a> = (&'static str, Vec<u8>, Vec<Vec<BorrowedFd<'a>>>);
+
 /// STO-27(3)/ADR-055(1): hostile hand-overs are refused before anything is
 /// committed and answered with `0x00`; the receiver still accepts a good
 /// bundle afterwards.
@@ -330,7 +331,7 @@ fn staged_bundle_hostile_variants_refused() {
     };
     let (sock_a, _sock_b) = pair();
     let g = good.encode().to_vec();
-    let mut cases: Vec<(&str, Vec<u8>, Vec<Vec<BorrowedFd<'_>>>)> = vec![
+    let mut cases: Vec<Case<'_>> = vec![
         ("no descriptor", g.clone(), vec![vec![]]),
         (
             "two descriptors",
@@ -431,7 +432,7 @@ fn staged_surplus_descriptors_closed() {
     for n in [2usize, 6] {
         let b: Vec<BorrowedFd<'_>> = fds[..n].iter().map(AsFd::as_fd).collect();
         send_raw(&sealer, &header(&data).encode(), &b);
-        assert_eq!(probe_fds(), 6 + n);
+        assert_eq!(probe_fds(), 6, "in flight descriptors are not in the table");
         assert!(e.rx.receive(store_sock.as_fd(), slot()).is_err());
         assert_eq!(probe_fds(), 6, "received descriptors must be closed ({n})");
         assert_eq!(try_recv_byte(&sealer), Some(STAGED_ACK_REFUSED));
@@ -546,4 +547,164 @@ fn staged_in_flight_bounded() {
     assert_clean(&e, "capacity");
     send_staged_bundle(&sealer, &header(&data), file.as_fd()).unwrap();
     drop(e.rx.receive(store_sock.as_fd(), slot()).unwrap());
+}
+
+/// A commit seam with scripted outcomes (backend errors and cancellation
+/// cannot be produced by the real stores on demand). `None` never completes.
+struct Scripted {
+    outcomes: std::sync::Mutex<Vec<Option<Result<EnvelopeRef>>>>,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl Scripted {
+    fn new(mut v: Vec<Option<Result<EnvelopeRef>>>) -> Self {
+        v.reverse();
+        Self {
+            outcomes: std::sync::Mutex::new(v),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl StagedCommit for Scripted {
+    fn commit_staged_envelope(
+        &self,
+        _env: CommitEnvelope,
+    ) -> impl std::future::Future<Output = Result<EnvelopeRef>> + Send {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let next = self.outcomes.lock().unwrap().pop().unwrap();
+        async move {
+            match next {
+                Some(r) => r,
+                None => std::future::pending().await,
+            }
+        }
+    }
+}
+
+/// Receive one small bundle (the sealer end is dropped: no answers needed).
+fn received(e: &Env) -> StagedBlob {
+    let (sealer, store_sock) = pair();
+    let data = bundle(100);
+    let file = memfile(&data);
+    send_staged_bundle(&sealer, &header(&data), file.as_fd()).unwrap();
+    e.rx.receive(store_sock.as_fd(), slot()).unwrap()
+}
+
+/// STO-27(3): a backend error has an unknown outcome; the commit is retried
+/// once and a success then yields the token; nothing is kept as an orphan.
+#[tokio::test]
+async fn staged_backend_error_retry_commits() {
+    let e = env();
+    let b = received(&e);
+    let env_in = envelope_for(&b);
+    let s = Scripted::new(vec![
+        Some(Err(StoreError::Backend)),
+        Some(Ok(EnvelopeRef([9; 16]))),
+    ]);
+    let c = e.rx.commit_staged(&s, env_in, b).await.unwrap();
+    assert_eq!(c.envelope_ref(), EnvelopeRef([9; 16]));
+    assert_eq!(s.calls(), 2);
+    assert_eq!(e.rx.in_flight(), 0);
+    assert_eq!(e.rx.uncertain_count(), 0);
+    assert_eq!(e.rx.sweep_orphans(next_slot()).unwrap(), 0);
+    assert_eq!(e.rx.blobs().list().unwrap().len(), 1);
+}
+
+/// STO-27(4): when the outcome stays unknown (backend error twice, or a
+/// duplicate/any error on the retry, meaning the first attempt may have
+/// committed), no token is issued and the blob is kept, never swept.
+#[tokio::test]
+async fn staged_unknown_outcome_keeps_blob() {
+    for second in [
+        StoreError::Backend,
+        StoreError::DuplicateEnvelope,
+        StoreError::InvalidInput("duplicate blob id"),
+    ] {
+        let e = env();
+        let b = received(&e);
+        let id = ObjectId::from_bytes(b.blob_id().0);
+        let env_in = envelope_for(&b);
+        let s = Scripted::new(vec![Some(Err(StoreError::Backend)), Some(Err(second))]);
+        assert_eq!(
+            e.rx.commit_staged(&s, env_in, b).await.unwrap_err(),
+            StoreError::Backend
+        );
+        assert_eq!(e.rx.uncertain_count(), 1);
+        assert_eq!(e.rx.in_flight(), 0);
+        assert_eq!(e.rx.sweep_orphans(next_slot()).unwrap(), 0);
+        assert!(e.rx.blobs().exists(&id).unwrap());
+    }
+}
+
+/// A definite rejection is not retried; the blob is an orphan for the sweep.
+#[tokio::test]
+async fn staged_definite_rejection_not_retried() {
+    let e = env();
+    let b = received(&e);
+    let env_in = envelope_for(&b);
+    let s = Scripted::new(vec![Some(Err(StoreError::RestorePending))]);
+    assert_eq!(
+        e.rx.commit_staged(&s, env_in, b).await.unwrap_err(),
+        StoreError::RestorePending
+    );
+    assert_eq!(s.calls(), 1);
+    assert_eq!(e.rx.sweep_orphans(next_slot()).unwrap(), 1);
+    assert_clean(&e, "definite rejection");
+}
+
+/// A commit future dropped mid-await (cancelled): the outcome is unknown,
+/// so the blob is kept and counted.
+#[tokio::test]
+async fn staged_cancelled_commit_keeps_blob() {
+    let e = env();
+    let b = received(&e);
+    let env_in = envelope_for(&b);
+    let s = Scripted::new(vec![None]);
+    let fut = e.rx.commit_staged(&s, env_in, b);
+    let cancelled = tokio::select! {
+        biased;
+        _ = fut => false,
+        () = std::future::ready(()) => true,
+    };
+    assert!(cancelled);
+    assert_eq!(s.calls(), 1);
+    assert_eq!(e.rx.uncertain_count(), 1);
+    assert_eq!(e.rx.in_flight(), 0);
+    assert_eq!(e.rx.sweep_orphans(next_slot()).unwrap(), 0);
+    assert_eq!(e.rx.blobs().list().unwrap().len(), 1);
+}
+
+/// STO-27(3): the envelope must reference the blob exactly once, in the
+/// bundle position, with its exact size; otherwise the store is not called
+/// and the blob is swept.
+#[tokio::test]
+async fn staged_envelope_must_reference_blob() {
+    let e = env();
+    let mutate: [fn(&mut CommitEnvelope, BlobId); 4] = [
+        |v, _| v.objects[STAGED_BUNDLE_INDEX].blob.blob_id = BlobId([7; 16]),
+        |v, _| v.objects[STAGED_BUNDLE_INDEX].blob.padded_size += 1,
+        |v, id| v.objects[0].blob.blob_id = id,
+        |v, id| {
+            v.objects[STAGED_BUNDLE_INDEX].blob.blob_id = BlobId([7; 16]);
+            v.objects[2].blob.blob_id = id;
+        },
+    ];
+    for m in mutate {
+        let b = received(&e);
+        let mut v = envelope_for(&b);
+        m(&mut v, b.blob_id());
+        let s = Scripted::new(vec![Some(Ok(EnvelopeRef([1; 16])))]);
+        assert!(matches!(
+            e.rx.commit_staged(&s, v, b).await,
+            Err(StoreError::InvalidInput(_))
+        ));
+        assert_eq!(s.calls(), 0);
+    }
+    assert_eq!(e.rx.sweep_orphans(next_slot()).unwrap(), 4);
+    assert_clean(&e, "unreferenced");
 }

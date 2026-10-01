@@ -19,14 +19,16 @@
 //! | CHANNEL_ROSTER, COI_POLICY | the channel's current CIK + 1 K15; loosening (recomputed, not trusted from `change_class`) also an independent-role K08 not held by that K15 holder, and the time lock |
 //! | MEMBER_EPOCH | the member's current K08 (ADR-030) |
 //! | ROLE_LABEL_CERT | an OVERSIGHT member's K08 (GOVERNANCE_ROLES, ADR-036(3)) |
-//! | OBJECTION | resolution: 2 distinct OVERSIGHT K08; an objection itself only blocks activation, so it is honoured whoever signed it (fail-safe) |
-//! | REVOCATION | honoured whoever signed it: it can only remove keys (fail-safe) |
+//! | OBJECTION | a current channel member's or an OVERSIGHT member's K08; resolution: 2 distinct OVERSIGHT K08 |
+//! | REVOCATION | a signer authorised for the subject type (see `revocation_authorized`); K01 for anything |
 //!
 //! Continuity (§14.4 rule 1) is enforced for every entry of every type per
 //! `(entry_type, subject_id)`. Any entry that fails is fatal for the whole
 //! snapshot (a log that contains an invalid entry is evidence of compromise;
-//! fail closed, §12.6). ML-DSA-65 halves of hybrid signatures are **not**
-//! verified (no ML-DSA in `candor-core`; see SPEC-NOTES).
+//! fail closed, §12.6). K01 signatures are hybrid: both the Ed25519 and the
+//! ML-DSA-65 half (pure ML-DSA, empty context, `signer_key_id =
+//! SHA-256(pk)`) must verify, and every ML-DSA half on any entry must be by a
+//! known key and verify (AUD-RM2-SEA-27); ECDSA-P384 halves are refused.
 //!
 //! The CBOR body layouts (field numbers) and the subject-id derivations are
 //! implementation decisions documented in SPEC-NOTES ("Key Directory entry
@@ -65,9 +67,9 @@ pub const MIN_ORPHAN_TIMELOCK_DAYS: u32 = 7;
 pub mod alg {
     /// Ed25519 (`signer_key_id` = the 32-byte public key).
     pub const ED25519: u64 = 1;
-    /// ML-DSA-65 (not verifiable by the sealer yet).
+    /// ML-DSA-65 (`signer_key_id` = SHA-256 of the encoded public key).
     pub const ML_DSA_65: u64 = 2;
-    /// ECDSA-P384 (not used by any rule the sealer checks).
+    /// ECDSA-P384 (no rule the sealer checks uses it: refused).
     pub const ECDSA_P384: u64 = 3;
 }
 
@@ -194,14 +196,57 @@ struct Header<'a> {
 struct Signed<'a> {
     hash: [u8; 32],
     entry: &'a [u8],
+    /// Verified Ed25519 signers.
     signers: Vec<[u8; 32]>,
+    /// ML-DSA-65 signatures `(signer_key_id = SHA-256(pk), sig)`, verified
+    /// against the known ML-DSA keys once the entry's authority is known.
+    mldsa: Vec<([u8; 32], &'a [u8])>,
+    msg: Vec<u8>,
 }
 
 impl Signed<'_> {
     fn has(&self, pk: &[u8; 32]) -> bool {
         self.signers.iter().any(|s| s == pk)
     }
+
+    /// An ML-DSA-65 signature by `pk` (encoded verifying key) verifies.
+    fn has_mldsa(&self, pk: &[u8]) -> bool {
+        let kid = sha256(&[pk]);
+        self.mldsa
+            .iter()
+            .any(|(k, sig)| k == &kid && mldsa_verify(pk, &self.msg, sig))
+    }
+
+    /// Every ML-DSA signature on the entry is by one of `known` and verifies
+    /// (an unverifiable signature anywhere is fatal, like an Ed25519 one).
+    fn all_mldsa_valid(&self, known: &[&[u8]]) -> bool {
+        self.mldsa.iter().all(|(kid, sig)| {
+            known
+                .iter()
+                .any(|pk| &sha256(&[pk]) == kid && mldsa_verify(pk, &self.msg, sig))
+        })
+    }
 }
+
+/// Pure ML-DSA-65 verification (FIPS 204, empty context) of `msg`.
+fn mldsa_verify(pk: &[u8], msg: &[u8], sig: &[u8]) -> bool {
+    use ml_dsa::{EncodedSignature, EncodedVerifyingKey, MlDsa65, Signature, VerifyingKey};
+    let (Ok(epk), Ok(esig)) = (
+        EncodedVerifyingKey::<MlDsa65>::try_from(pk),
+        EncodedSignature::<MlDsa65>::try_from(sig),
+    ) else {
+        return false;
+    };
+    let Some(sig) = Signature::<MlDsa65>::decode(&esig) else {
+        return false;
+    };
+    VerifyingKey::<MlDsa65>::decode(&epk).verify_with_context(msg, &[], &sig)
+}
+
+/// ML-DSA-65 sizes (04 §6).
+pub const MLDSA65_PK_LEN: usize = 1952;
+/// ML-DSA-65 signature length.
+pub const MLDSA65_SIG_LEN: usize = 3309;
 
 fn parse_signed(bytes: &[u8]) -> Result<Signed<'_>, SnapshotError> {
     if bytes.len() > MAX_SIGNED_ENTRY_BYTES {
@@ -216,6 +261,7 @@ fn parse_signed(bytes: &[u8]) -> Result<Signed<'_>, SnapshotError> {
     need(n >= 1)?;
     let msg = signing_message(entry);
     let mut signers: Vec<[u8; 32]> = Vec::with_capacity(n);
+    let mut mldsa: Vec<([u8; 32], &[u8])> = Vec::new();
     for _ in 0..n {
         let mut s = d.map(3).map_err(bad)?;
         d.req(&mut s, 1).map_err(bad)?;
@@ -223,7 +269,7 @@ fn parse_signed(bytes: &[u8]) -> Result<Signed<'_>, SnapshotError> {
         d.req(&mut s, 2).map_err(bad)?;
         let a = d.uint_max(alg::ECDSA_P384).map_err(bad)?;
         d.req(&mut s, 3).map_err(bad)?;
-        let sig = d.bytes(4_096).map_err(bad)?;
+        let sig = d.bytes(MLDSA65_SIG_LEN).map_err(bad)?;
         d.end_map(s).map_err(bad)?;
         match a {
             alg::ED25519 => {
@@ -235,7 +281,13 @@ fn parse_signed(bytes: &[u8]) -> Result<Signed<'_>, SnapshotError> {
                     signers.push(pk);
                 }
             }
-            alg::ML_DSA_65 | alg::ECDSA_P384 => {}
+            alg::ML_DSA_65 => {
+                let kid: [u8; 32] = key.try_into().map_err(bad)?;
+                need(sig.len() == MLDSA65_SIG_LEN)?;
+                mldsa.push((kid, sig));
+            }
+            // No rule the sealer checks uses ECDSA-P384; an unverifiable
+            // signature is not carried silently (AUD-RM2-SEA-27).
             _ => return Err(SnapshotError::Entry),
         }
     }
@@ -245,6 +297,8 @@ fn parse_signed(bytes: &[u8]) -> Result<Signed<'_>, SnapshotError> {
         hash: entry_hash(bytes),
         entry,
         signers,
+        mldsa,
+        msg,
     })
 }
 
@@ -323,6 +377,7 @@ fn opt_bytes16(d: &mut Dec<'_>) -> Result<Option<[u8; 16]>, CborError> {
 
 struct OrgRoot {
     pk: [u8; 32],
+    mldsa_pk: Vec<u8>,
     suites: Vec<u16>,
     salt: [u8; 32],
     witnesses: Vec<WitnessKey>,
@@ -335,7 +390,10 @@ fn body_org_root(d: &mut Dec<'_>) -> Result<OrgRoot, CborError> {
     d.req(&mut m, 1)?;
     let pk = d.bytes_n::<32>()?;
     d.req(&mut m, 2)?;
-    d.bytes(4_096)?; // ML-DSA-65 public key (not used)
+    let mldsa_pk = d.bytes(MLDSA65_PK_LEN)?.to_vec();
+    if mldsa_pk.len() != MLDSA65_PK_LEN {
+        return Err(CborError::Limit);
+    }
     d.req(&mut m, 3)?;
     let suites = u16_array(d, 8)?;
     d.req(&mut m, 4)?;
@@ -377,6 +435,7 @@ fn body_org_root(d: &mut Dec<'_>) -> Result<OrgRoot, CborError> {
     d.end_map(m)?;
     Ok(OrgRoot {
         pk,
+        mldsa_pk,
         suites,
         salt,
         witnesses,
@@ -815,6 +874,8 @@ struct State<'c> {
     leaf: u64,
     chains: BTreeMap<(u8, Vec<u8>), (u64, [u8; 32])>,
     k01: Vec<[u8; 32]>,
+    /// ML-DSA-65 halves of the K01 chain (encoded verifying keys).
+    k01_mldsa: Vec<Vec<u8>>,
     org: Option<OrgRoot>,
     log_key: Option<[u8; 32]>,
     admins: BTreeMap<[u8; 16], [u8; 32]>,
@@ -844,6 +905,7 @@ impl<'c> State<'c> {
             leaf: 0,
             chains: BTreeMap::new(),
             k01: Vec::new(),
+            k01_mldsa: Vec::new(),
             org: None,
             log_key: None,
             admins: BTreeMap::new(),
@@ -872,8 +934,63 @@ impl<'c> State<'c> {
         self.usable_at(key, self.leaf)
     }
 
+    /// Both halves of the current K01 (Ed25519 and ML-DSA-65; 04 §14.2 "both
+    /// algs", AUD-RM2-SEA-27).
     fn k01_signed(&self, e: &Signed<'_>) -> bool {
-        self.k01.last().is_some_and(|k| self.usable(k) && e.has(k))
+        let ed = self.k01.last().is_some_and(|k| self.usable(k) && e.has(k));
+        ed && self.k01_mldsa.last().is_some_and(|pk| e.has_mldsa(pk))
+    }
+
+    /// 04 §14.2: a REVOCATION is signed by a signer authorised for the subject
+    /// type (AUD-RM2-SEA-25). K01 may revoke any key. Otherwise: a MEK by its
+    /// member's current K08 or by the channel's CIK + 1 K15; a user's K08 or
+    /// key id by that K08 itself or by 1 K15 + 1 OVERSIGHT member; a K15 or
+    /// CIK key by itself. Anything else (unknown key, LOG_KEY, K01) needs K01.
+    fn revocation_authorized(&self, e: &Signed<'_>, key: &[u8]) -> bool {
+        if self.k01_signed(e) {
+            return true;
+        }
+        if let Some(m) = self.meks.iter().find(|m| m.key_id.as_slice() == key) {
+            let member = self.user_k08(&m.user).is_some_and(|k| e.has(&k));
+            let governance = self.cik(&m.channel).is_some_and(|c| e.has(&c.pk))
+                && !self.admin_signers(e).is_empty();
+            return member || governance;
+        }
+        let user = self
+            .users
+            .iter()
+            .any(|u| u.k08.as_slice() == key || u.key_ids.iter().any(|k| k.as_slice() == key));
+        if user {
+            let own = self
+                .users
+                .iter()
+                .filter(|u| u.k08.as_slice() == key || u.key_ids.iter().any(|k| k.as_slice() == key))
+                .any(|u| e.has(&u.k08) && self.usable(&u.k08));
+            let governance =
+                !self.admin_signers(e).is_empty() && !self.oversight_signers(e).is_empty();
+            return own || governance;
+        }
+        let Ok(k32) = <[u8; 32]>::try_from(key) else {
+            return false;
+        };
+        let admin = self.admins.values().any(|pk| pk == &k32);
+        let cik = self.channels.values().any(|c| c.ciks.iter().any(|x| x.pk == k32));
+        (admin || cik) && e.has(&k32) && self.usable(&k32)
+    }
+
+    /// 04 §14.2: an OBJECTION is signed by the K08 of a current member of the
+    /// channel (latest roster entry) or of an OVERSIGHT member (SEA-25).
+    fn objection_authorized(&self, e: &Signed<'_>, channel: &[u8; 16]) -> bool {
+        let member = self
+            .channels
+            .get(channel)
+            .and_then(|c| c.rosters.last())
+            .is_some_and(|r| {
+                r.members
+                    .iter()
+                    .any(|m| self.user_k08(&m.user_id).is_some_and(|k| e.has(&k)))
+            });
+        member || !self.oversight_signers(e).is_empty()
     }
 
     /// Distinct admin (K15) subjects that signed `e`.
@@ -979,6 +1096,9 @@ impl<'c> State<'c> {
         need(h.ty >= ty::ORG_ROOT && h.ty <= ty::MAX)?;
         self.continuity(&h, e.hash)?;
         self.body(&mut d, &e, &h)?;
+        // Every ML-DSA-65 half on the entry must be by a known key and verify.
+        let known: Vec<&[u8]> = self.k01_mldsa.iter().map(Vec::as_slice).collect();
+        need(e.all_mldsa_valid(&known))?;
         d.end_map(m).map_err(bad)?;
         d.finish().map_err(bad)
     }
@@ -997,12 +1117,16 @@ impl<'c> State<'c> {
             ty::ORG_ROOT => {
                 need(h.subject == self.ctx.tenant_id)?;
                 let b = body_org_root(d).map_err(bad)?;
-                need(e.has(&b.pk))?;
+                // Self-signed with both algorithms (SEA-27).
+                need(e.has(&b.pk) && e.has_mldsa(&b.mldsa_pk))?;
                 if let Some(prev) = self.k01.last() {
-                    // Rotation: the old K01 signs the new ORG_ROOT (VR-1).
-                    need(e.has(prev) && self.usable(prev))?;
+                    // Rotation: the old K01 signs the new ORG_ROOT (VR-1),
+                    // both halves.
+                    let prev_pq = self.k01_mldsa.last().is_some_and(|pk| e.has_mldsa(pk));
+                    need(e.has(prev) && self.usable(prev) && prev_pq)?;
                 }
                 self.k01.push(b.pk);
+                self.k01_mldsa.push(b.mldsa_pk.clone());
                 self.org = Some(b);
             }
             ty::LOG_KEY => {
@@ -1036,6 +1160,7 @@ impl<'c> State<'c> {
             ty::REVOCATION => {
                 let k = body_revocation(d).map_err(bad)?;
                 need(k.as_slice() == h.subject)?;
+                need(self.revocation_authorized(e, &k))?;
                 let leaf = self.leaf;
                 self.revoked.entry(k).or_insert(leaf);
             }
@@ -1065,6 +1190,8 @@ impl<'c> State<'c> {
                 if resolved {
                     // Resolution: two OVERSIGHT members (§14.4 rule 8).
                     need(self.oversight_signers(e).len() >= 2)?;
+                } else {
+                    need(self.objection_authorized(e, &channel))?;
                 }
                 self.objections.insert(objected, !resolved);
             }

@@ -97,6 +97,28 @@ pub const LOG_ID: [u8; 16] = [0x10; 16];
 pub fn k01() -> SigningKey {
     SigningKey::from_seed(&[0x01; 32])
 }
+/// The ML-DSA-65 half of K01 (AUD-RM2-SEA-27).
+pub fn k01_mldsa() -> &'static ml_dsa::SigningKey<ml_dsa::MlDsa65> {
+    static K: std::sync::OnceLock<ml_dsa::SigningKey<ml_dsa::MlDsa65>> = std::sync::OnceLock::new();
+    K.get_or_init(|| ml_dsa::SigningKey::from_seed(&ml_dsa::B32::from([0x01; 32])))
+}
+
+/// Encoded ML-DSA-65 verifying key of K01.
+pub fn k01_mldsa_pk() -> Vec<u8> {
+    k01_mldsa().expanded_key().verifying_key().encode().to_vec()
+}
+
+/// An ML-DSA-65 signature entry `{1: SHA-256(pk), 2: 2, 3: sig}` by `sk`.
+pub fn mldsa_sig(sk: &ml_dsa::SigningKey<ml_dsa::MlDsa65>, msg: &[u8]) -> Value {
+    let pk = sk.expanded_key().verifying_key().encode();
+    let sig = sk.expanded_key().sign_deterministic(msg, &[]).unwrap().encode();
+    m(vec![
+        (1, b(&candor_core::hash::sha256(&[pk.as_slice()]))),
+        (2, u(kd::alg::ML_DSA_65)),
+        (3, b(sig.as_slice())),
+    ])
+}
+
 pub fn log_key() -> SigningKey {
     SigningKey::from_seed(&[0x4c; 32])
 }
@@ -161,10 +183,12 @@ pub fn kd_entry(
     .to_vec()
 }
 
-/// Sign entry bytes into a SignedKDEntry with Ed25519 signers.
+/// Sign entry bytes into a SignedKDEntry with Ed25519 signers; K01 also
+/// signs with its ML-DSA-65 half (hybrid, 04 §14.2).
 pub fn signed_entry(entry: &[u8], signers: &[&SigningKey]) -> Vec<u8> {
     let msg = kd::signing_message(entry);
-    let sigs = signers
+    let k01_pk = k01().verifying_key_bytes();
+    let mut sigs: Vec<Value> = signers
         .iter()
         .map(|k| {
             m(vec![
@@ -174,6 +198,9 @@ pub fn signed_entry(entry: &[u8], signers: &[&SigningKey]) -> Vec<u8> {
             ])
         })
         .collect();
+    if signers.iter().any(|k| k.verifying_key_bytes() == k01_pk) {
+        sigs.push(mldsa_sig(k01_mldsa(), &msg));
+    }
     m(vec![(1, b(entry)), (2, a(sigs))])
         .encode()
         .unwrap()
@@ -316,7 +343,7 @@ impl TestLog {
             0,
             m(vec![
                 (1, b(&k01.verifying_key_bytes())),
-                (2, b(&[0x02; 32])),
+                (2, b(&k01_mldsa_pk())),
                 (3, a(vec![u(1)])),
                 (4, b(&SALT)),
                 (5, u(1)),
@@ -724,13 +751,13 @@ impl TestLog {
                 );
                 let kid = key_id(Suite::CandorStd1, KeyKind::Mek, &k.public_key).to_vec();
                 if k.revoked && !self.revoked.contains(&kid) {
-                    let a1 = admin1();
+                    // Revoked by the member's own K08 (an authorised signer).
                     self.append(
                         ty::REVOCATION,
                         &kid,
                         0,
                         m(vec![(1, b(&kid)), (2, u(1)), (3, u(u64::from(TODAY)))]),
-                        &[&a1],
+                        &[k08],
                     );
                     self.revoked.push(kid);
                 }

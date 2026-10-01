@@ -12,7 +12,10 @@
     clippy::expect_used,
     clippy::panic,
     clippy::indexing_slicing,
-    clippy::arithmetic_side_effects
+    clippy::arithmetic_side_effects,
+    // Test fixture only: a private 0700 temp root for candor-safefs
+    // (pg_staged_ack_after_commit).
+    clippy::disallowed_methods
 )]
 
 mod common;
@@ -1845,4 +1848,132 @@ async fn reply_node(c: &mut PgConnection) -> i64 {
         .await
         .unwrap()
         .get(0)
+}
+
+/// AUD-RM2-STO-27 against PostgreSQL: the staged blob is acknowledged only
+/// with the token of a committed `envelope_part` row naming it; a duplicate
+/// group and a commit refused in restore-pending (both before any
+/// transaction commits) leave orphans that the slot sweep removes, while the
+/// committed blob stays.
+#[tokio::test]
+async fn pg_staged_ack_after_commit() {
+    use candor_intake_store::staged::{
+        STAGED_BUNDLE_INDEX, StagedHeader, StagedReceiver, send_staged_bundle,
+    };
+    use candor_safefs::{ObjectId, RootPolicy, SafeRoot, SlotTime};
+    use sha2::Digest;
+    use std::io::Write;
+    use std::os::fd::AsFd;
+    use std::os::unix::fs::PermissionsExt;
+
+    let Some(b) = base() else { return };
+    let db = fresh_db(&b).await;
+    let tmp = tempfile::Builder::new()
+        .permissions(PermissionsExt::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let (sealer, store_sock) = rustix::net::socketpair(
+        rustix::net::AddressFamily::UNIX,
+        rustix::net::SocketType::SEQPACKET,
+        rustix::net::SocketFlags::CLOEXEC,
+        None,
+    )
+    .unwrap();
+    let uid = rustix::net::sockopt::socket_peercred(&store_sock)
+        .unwrap()
+        .uid
+        .as_raw();
+    let rx = StagedReceiver::new(
+        SafeRoot::open(tmp.path(), RootPolicy::BlobStore).unwrap(),
+        uid,
+        1 << 20,
+    )
+    .unwrap();
+    let slot = SlotTime::from_unix_secs(1_790_000_100).unwrap();
+    let next = SlotTime::from_unix_secs(1_790_003_700).unwrap();
+    let data = vec![0x42u8; 9000];
+    let fd = rustix::fs::memfd_create(
+        "staged",
+        rustix::fs::MemfdFlags::CLOEXEC | rustix::fs::MemfdFlags::ALLOW_SEALING,
+    )
+    .unwrap();
+    let mut f = std::fs::File::from(fd);
+    f.write_all(&data).unwrap();
+    let fd: std::os::fd::OwnedFd = f.into();
+    rustix::fs::fcntl_add_seals(
+        &fd,
+        rustix::fs::SealFlags::WRITE
+            | rustix::fs::SealFlags::GROW
+            | rustix::fs::SealFlags::SHRINK
+            | rustix::fs::SealFlags::SEAL,
+    )
+    .unwrap();
+    let h = StagedHeader {
+        len: data.len() as u64,
+        sha256: sha2::Sha256::digest(&data).into(),
+    };
+    let ack = |want: u8| {
+        let mut x = [0u8; 2];
+        let n = rustix::net::recv(&sealer, &mut x, rustix::net::RecvFlags::DONTWAIT).unwrap();
+        assert_eq!((n.0, x[0]), (1, want));
+    };
+    let mut env0 = common::envelope(0);
+    {
+        let s = open(&b, &db, common::TENANT).await;
+        s.init(common::TENANT, common::SALT).await.unwrap();
+        send_staged_bundle(&sealer, &h, fd.as_fd()).unwrap();
+        let blob = rx.receive(store_sock.as_fd(), slot).unwrap();
+        let keep = blob.blob_id();
+        env0.objects[STAGED_BUNDLE_INDEX].blob = PartRef {
+            blob_id: keep,
+            padded_size: blob.len(),
+        };
+        let c = rx.commit_staged(&s, env0.clone(), blob).await.unwrap();
+        // The committed row names the blob before the ack is sent.
+        let mut su = su(&b, &db).await;
+        let n: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM candor.envelope_part WHERE blob_id = $1")
+                .bind(uuid::Uuid::from_bytes(keep.0))
+                .fetch_one(&mut su)
+                .await
+                .unwrap();
+        assert_eq!(n, 1);
+        rx.acknowledge(store_sock.as_fd(), c).unwrap();
+        ack(0x01);
+        // Same group again: DuplicateEnvelope, nothing committed.
+        send_staged_bundle(&sealer, &h, fd.as_fd()).unwrap();
+        let dup = rx.receive(store_sock.as_fd(), slot).unwrap();
+        let mut env1 = env0.clone();
+        env1.objects[STAGED_BUNDLE_INDEX].blob.blob_id = dup.blob_id();
+        assert_eq!(
+            rx.commit_staged(&s, env1, dup).await.unwrap_err(),
+            StoreError::DuplicateEnvelope
+        );
+        rx.refuse(store_sock.as_fd()).unwrap();
+        ack(0x00);
+        assert_eq!(rx.sweep_orphans(next).unwrap(), 1);
+        assert_eq!(
+            rx.blobs().list().unwrap(),
+            vec![ObjectId::from_bytes(keep.0)]
+        );
+        s.close().await;
+    }
+    // Restart: restore-pending refuses the commit; the copy is swept.
+    let s = open(&b, &db, common::TENANT).await;
+    send_staged_bundle(&sealer, &h, fd.as_fd()).unwrap();
+    let blob = rx.receive(store_sock.as_fd(), slot).unwrap();
+    let mut env2 = common::envelope(0);
+    env2.objects[STAGED_BUNDLE_INDEX].blob = PartRef {
+        blob_id: blob.blob_id(),
+        padded_size: blob.len(),
+    };
+    assert_eq!(
+        rx.commit_staged(&s, env2, blob).await.unwrap_err(),
+        StoreError::RestorePending
+    );
+    rx.refuse(store_sock.as_fd()).unwrap();
+    ack(0x00);
+    assert_eq!(rx.sweep_orphans(next).unwrap(), 1);
+    assert_eq!(rx.blobs().list().unwrap().len(), 1);
+    assert_eq!(rx.in_flight(), 0);
 }
