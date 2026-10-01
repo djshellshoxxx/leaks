@@ -282,6 +282,7 @@ name = "candor-sealer"
 version = "0.1.0"
 dependencies = [
  "candor-core",
+ "candor-log",
  "candor-safefs",
  "hkdf",
  "landlock",

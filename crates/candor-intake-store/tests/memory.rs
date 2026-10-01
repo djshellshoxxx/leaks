@@ -19,6 +19,8 @@ conformance_tests!(factory());
 /// The default in-memory configuration is valid and small.
 #[test]
 fn memory_default_config() {
-    candor_intake_store::MEMORY_DEADDROP_CONFIG.validate().unwrap();
+    candor_intake_store::MEMORY_DEADDROP_CONFIG
+        .validate()
+        .unwrap();
     assert!(MemoryStore::new().is_ok());
 }

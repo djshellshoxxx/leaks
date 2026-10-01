@@ -16,7 +16,7 @@ use super::inner::{
 };
 use super::select::Selection;
 use super::session::StagedPart;
-use super::sink::{Blob, CommitRequest, EnvelopeObject};
+use super::sink::{Blob, EnvelopeGroup, EnvelopeObject};
 use crate::proto::cbor::Value;
 use crate::proto::{Mode, PendingReply, SecretText};
 use candor_core::header::{CoreHeader, HEADER_LEN, HEADER_MAC_LEN, ObjectType, object_hash};
@@ -30,7 +30,7 @@ use candor_core::slots::{RecipientListEntry, RecipientSlotBlock, SlotBinding, Sl
 use candor_core::stanza::{HpkeWrapContext, WrapStanza};
 use candor_core::stream::{self, CHUNK_SIZE, StreamDecryptor, StreamEncryptor};
 use candor_core::{Error, Suite, fill_random, labels, padding};
-use candor_safefs::{SafeRoot, SlotTime};
+use candor_safefs::{ObjectId, PendingObject, SafeRoot, SlotTime};
 use zeroize::{Zeroize, Zeroizing};
 
 /// Shared sealing context.
@@ -57,6 +57,30 @@ impl SealCtx<'_> {
 
 fn io_err<E>(_: E) -> Error {
     Error::Internal
+}
+
+/// Start a staging file under a caller-known id, so a failed `commit` (which
+/// may fail after the rename) can still be cleaned up (AUD-RM2-SEA-13).
+pub(crate) fn stage_create(staging: &'static SafeRoot) -> Result<(ObjectId, PendingObject<'static>), Error> {
+    let id = ObjectId::random().map_err(io_err)?;
+    let w = staging.create_new(&id).map_err(io_err)?;
+    Ok((id, w))
+}
+
+/// Commit a staging file; on failure remove whatever may have been renamed.
+pub(crate) fn stage_commit(
+    staging: &'static SafeRoot,
+    w: PendingObject<'static>,
+    id: &ObjectId,
+    slot: SlotTime,
+) -> Result<ObjectId, Error> {
+    match w.commit(slot) {
+        Ok(got) => Ok(got),
+        Err(_) => {
+            let _ = staging.remove(id, slot);
+            Err(Error::Internal)
+        }
+    }
 }
 
 /// Encrypts a STREAM of known plaintext length chunk by chunk into `out`, with a
@@ -240,7 +264,7 @@ pub(crate) fn seal_bundle(
     };
     let header_bytes = header.encode()?;
     let mac = header.header_mac(&ck)?;
-    let mut w = ctx.staging.create_random().map_err(io_err)?;
+    let (staged_id, mut w) = stage_create(ctx.staging)?;
     w.write_all(&header_bytes).map_err(io_err)?;
     w.write_all(&mac).map_err(io_err)?;
     let enc = StreamEncryptor::new(derive_payload_key(ctx.suite, &ck, &payload_nonce)?, padded);
@@ -276,7 +300,7 @@ pub(crate) fn seal_bundle(
         offset = offset.checked_add(p.real_len).ok_or(Error::Internal)?;
     }
     let w = sink.finish()?;
-    let id = w.commit(ctx.slot).map_err(io_err)?;
+    let id = stage_commit(ctx.staging, w, &staged_id, ctx.slot)?;
     let len = stream::ciphertext_len(padded)?
         .checked_add((HEADER_LEN + HEADER_MAC_LEN) as u64)
         .ok_or(Error::Internal)?;
@@ -293,7 +317,8 @@ pub(crate) fn seal_bundle(
     })
 }
 
-/// Seal the IDENTITY object to K13 (one real slot, 15 dummies; §13.2).
+/// Seal the IDENTITY object to K13 (one real slot, 15 dummies; §13.2), padded
+/// to the maximum IDENTITY bucket (ADR-052(1)).
 fn seal_identity(
     ctx: &SealCtx<'_>,
     channel_id: [u8; 16],
@@ -320,22 +345,36 @@ fn seal_identity(
     Ok(obj)
 }
 
-fn dummy_entries(n: usize) -> Vec<RecipientListEntry> {
-    (0..n)
-        .map(|_| RecipientListEntry {
-            slot_index: 0,
-            key_id: [0; 32],
-            enc_rand: [0; 64],
-        })
-        .collect()
-}
-
 fn nfc(s: &str) -> Zeroizing<String> {
     use unicode_normalization::UnicodeNormalization;
     // NFC expands at most 3× (UAX #15); size once so the buffer never reallocates.
     let mut out = Zeroizing::new(String::with_capacity(s.len().saturating_mul(3)));
     out.extend(s.nfc());
     out
+}
+
+/// The three sealed objects of one envelope group (ADR-052(1)).
+pub(crate) struct SealedGroup {
+    pub main: EnvelopeObject,
+    pub bundle: EnvelopeObject,
+    pub identity: EnvelopeObject,
+}
+
+impl SealedGroup {
+    /// Delete the staged bundle (the group will not be handed to the sink).
+    pub(crate) fn remove_staged(&self, ctx: &SealCtx<'_>) {
+        remove_staged(ctx, &self.bundle);
+    }
+
+    pub(crate) fn into_group(self, channel_id: [u8; 16], disposition_ct: Vec<u8>) -> EnvelopeGroup {
+        EnvelopeGroup {
+            channel_id,
+            main: self.main,
+            bundle: self.bundle,
+            identity: self.identity,
+            disposition_ct,
+        }
+    }
 }
 
 /// What the source drafted, as used by the builders.
@@ -375,10 +414,13 @@ fn submission_entries(
         bundle_entries: Some(&p.bundle.entries),
         identity_entries: Some(p.identity_entries),
     };
-    let mut concerns: Vec<u16> = p.draft.flagged_labels.to_vec();
+    let mut concerns: Zeroizing<Vec<u16>> = Zeroizing::new(p.draft.flagged_labels.to_vec());
     concerns.sort_unstable();
     concerns.dedup();
-    let mut m = vec![
+    // Sized once: the map holds the mode and COI data, so it must not reallocate
+    // and leave a stale copy behind (AUD-RM2-SEA-08).
+    let mut m = Vec::with_capacity(24);
+    m.extend([
         (1, Value::U(inner::SUBMISSION_FORMAT)),
         (2, Value::U(u64::from(p.report_index))),
         (3, Value::bytes(&p.mailbox_id)),
@@ -418,7 +460,7 @@ fn submission_entries(
             18,
             inner::manifest_value(&p.bundle.manifest, p.bundle.total_len),
         ),
-    ];
+    ]);
     if let Some(first) = p.draft.categories.first() {
         m.push((17, Value::U(u64::from(*first))));
     }
@@ -437,8 +479,8 @@ fn submission_entries(
     m
 }
 
-/// Initial Tier W submission: SUBMISSION + ATTACHMENT_BUNDLE + IDENTITY.
-/// Returns the envelope objects (SUBMISSION first) and the SUBMISSION hash.
+/// Initial Tier W submission: SUBMISSION + ATTACHMENT_BUNDLE (possibly empty)
+/// + IDENTITY (empty in ANONYMOUS mode). Returns the group and the SUBMISSION hash.
 pub(crate) fn seal_initial(
     ctx: &SealCtx<'_>,
     sel: &Selection,
@@ -447,7 +489,7 @@ pub(crate) fn seal_initial(
     draft: &DraftInput<'_>,
     parts: &[StagedPart],
     k36: &Secret32,
-) -> Result<(Vec<EnvelopeObject>, [u8; 32]), Error> {
+) -> Result<(SealedGroup, [u8; 32]), Error> {
     let mailbox_id = keys.mailbox_id(report_index)?;
     let bundle = seal_bundle(ctx, sel, parts, k36)?;
     let result = (|| {
@@ -481,14 +523,6 @@ pub(crate) fn seal_initial(
                 signer: ctx.sealer_key,
             },
         ];
-        let dry = inner::signed_payload(
-            ObjectType::Submission,
-            submission_entries(&sp, &dummy_entries(sel.recipients.len())),
-            &[0u8; HEADER_LEN],
-            &sigs,
-        )?;
-        let padded_len = u64::try_from(dry.len()).map_err(|_| Error::Internal)?;
-        drop(dry);
         let pks: Vec<KemPublicKey> = sel.recipients.iter().map(|r| r.pk.clone()).collect();
         let req = SealRequest {
             suite: ctx.suite,
@@ -498,7 +532,8 @@ pub(crate) fn seal_initial(
             epoch_id: sel.epoch_id,
             day_stamp: 0,
             recipients: Some((ctx.member_ctx(sel.channel_id, sel.epoch_id), &pks)),
-            padded_len,
+            // ADR-052(1): always the maximum bucket.
+            padded_len: inner::max_bucket(ObjectType::Submission)?,
         };
         let (_ck, sub) = object::seal(&req, |pc| {
             inner::signed_payload(
@@ -509,12 +544,12 @@ pub(crate) fn seal_initial(
             )
         })?;
         let sub_hash = sub.object_hash;
-        let objects = vec![
-            envelope_object(&sub, Blob::Inline(sub.bytes.clone()))?,
-            bundle.object.clone(),
-            envelope_object(&identity, Blob::Inline(identity.bytes.clone()))?,
-        ];
-        Ok((objects, sub_hash))
+        let group = SealedGroup {
+            main: envelope_object(&sub, Blob::Inline(sub.bytes.clone()))?,
+            bundle: bundle.object.clone(),
+            identity: envelope_object(&identity, Blob::Inline(identity.bytes.clone()))?,
+        };
+        Ok((group, sub_hash))
     })();
     if result.is_err() {
         remove_staged(ctx, &bundle.object);
@@ -539,13 +574,20 @@ pub(crate) struct SourceMessageInput<'a> {
     pub new_keys: Option<&'a SourceKeys>,
 }
 
+struct SourceMessageParts<'a> {
+    sm: &'a SourceMessageInput<'a>,
+    sel: &'a Selection,
+    message_nfc: &'a str,
+    bundle: &'a BundleOut,
+    identity_hash: [u8; 32],
+    identity_entries: &'a [RecipientListEntry],
+}
+
 fn source_message_entries(
-    sm: &SourceMessageInput<'_>,
-    sel: &Selection,
-    message_nfc: &str,
+    p: &SourceMessageParts<'_>,
     entries: &[RecipientListEntry],
-    bundle: Option<&BundleOut>,
 ) -> Vec<(u64, Value)> {
+    let (sm, sel) = (p.sm, p.sel);
     let list = RecipientListCbor {
         epoch_id: sel.epoch_id,
         entries,
@@ -553,19 +595,24 @@ fn source_message_entries(
         coi_policy_entry_hash: sel.coi_policy_entry_hash,
         tree_size: sel.tree_size,
         root_hash: sel.root_hash,
-        bundle_entries: bundle.map(|b| b.entries.as_slice()),
-        identity_entries: None,
+        bundle_entries: Some(&p.bundle.entries),
+        identity_entries: Some(p.identity_entries),
     };
-    let mut m = vec![
+    let mut m = Vec::with_capacity(16);
+    m.extend([
         (1, Value::U(inner::SOURCE_MESSAGE_FORMAT)),
         (2, Value::U(u64::from(sm.report.report_index))),
         (3, Value::bytes(&sm.report.mailbox_id)),
         (4, Value::Null),
-        (5, Value::text(message_nfc)),
+        (5, Value::text(p.message_nfc)),
         (7, Value::U(sm.kind as u64)),
         (8, list.value()),
         (9, Value::bytes(&sm.report.original_submission_hash)),
-    ];
+        // The bundle is always present (empty when no attachment, ADR-052(1)).
+        (11, Value::bytes(&p.bundle.object.object_hash)),
+        // Forward-compatible key: the group's (dummy) IDENTITY object.
+        (1000, Value::bytes(&p.identity_hash)),
+    ]);
     if let Some(nk) = sm.new_keys {
         m.push((
             10,
@@ -575,27 +622,22 @@ fn source_message_entries(
             ]),
         ));
     }
-    if let Some(b) = bundle {
-        m.push((11, Value::bytes(&b.object.object_hash)));
-    }
     m
 }
 
-/// Seal a SOURCE_MESSAGE envelope (follow-up rule applied by the caller's
-/// selection). Returns the objects (SOURCE_MESSAGE first).
+/// Seal a SOURCE_MESSAGE envelope group (follow-up rule applied by the caller's
+/// selection): SOURCE_MESSAGE + ATTACHMENT_BUNDLE (possibly empty) + a dummy
+/// IDENTITY (empty, to K13), the same shape as every other group (ADR-052(1)).
 pub(crate) fn seal_source_message(
     ctx: &SealCtx<'_>,
     sel: &Selection,
     sm: &SourceMessageInput<'_>,
     parts: &[StagedPart],
     k36: &Secret32,
-) -> Result<Vec<EnvelopeObject>, Error> {
-    let bundle = if parts.is_empty() {
-        None
-    } else {
-        Some(seal_bundle(ctx, sel, parts, k36)?)
-    };
+) -> Result<SealedGroup, Error> {
+    let bundle = seal_bundle(ctx, sel, parts, k36)?;
     let result = (|| {
+        let identity = seal_identity(ctx, sel.channel_id, "")?;
         let message_nfc = nfc(sm.message);
         let mut sigs = vec![
             SigSpec {
@@ -616,20 +658,14 @@ pub(crate) fn seal_source_message(
                 signer: nk.sign_key(),
             });
         }
-        let dry = inner::signed_payload(
-            ObjectType::SourceMessage,
-            source_message_entries(
-                sm,
-                sel,
-                &message_nfc,
-                &dummy_entries(sel.recipients.len()),
-                bundle.as_ref(),
-            ),
-            &[0u8; HEADER_LEN],
-            &sigs,
-        )?;
-        let padded_len = u64::try_from(dry.len()).map_err(|_| Error::Internal)?;
-        drop(dry);
+        let parts_in = SourceMessageParts {
+            sm,
+            sel,
+            message_nfc: &message_nfc,
+            bundle: &bundle,
+            identity_hash: identity.object_hash,
+            identity_entries: &identity.recipient_list,
+        };
         let pks: Vec<KemPublicKey> = sel.recipients.iter().map(|r| r.pk.clone()).collect();
         let req = SealRequest {
             suite: ctx.suite,
@@ -639,71 +675,88 @@ pub(crate) fn seal_source_message(
             epoch_id: sel.epoch_id,
             day_stamp: 0,
             recipients: Some((ctx.member_ctx(sel.channel_id, sel.epoch_id), &pks)),
-            padded_len,
+            padded_len: inner::max_bucket(ObjectType::SourceMessage)?,
         };
         let (_ck, msg) = object::seal(&req, |pc| {
             inner::signed_payload(
                 ObjectType::SourceMessage,
-                source_message_entries(sm, sel, &message_nfc, pc.recipient_list, bundle.as_ref()),
+                source_message_entries(&parts_in, pc.recipient_list),
                 pc.header_bytes,
                 &sigs,
             )
         })?;
-        let mut objects = vec![envelope_object(&msg, Blob::Inline(msg.bytes.clone()))?];
-        if let Some(b) = &bundle {
-            objects.push(b.object.clone());
-        }
-        Ok(objects)
+        Ok(SealedGroup {
+            main: envelope_object(&msg, Blob::Inline(msg.bytes.clone()))?,
+            bundle: bundle.object.clone(),
+            identity: envelope_object(&identity, Blob::Inline(identity.bytes.clone()))?,
+        })
     })();
-    if let (Err(_), Some(b)) = (&result, &bundle) {
-        remove_staged(ctx, &b.object);
+    if result.is_err() {
+        remove_staged(ctx, &bundle.object);
     }
     result
 }
 
-/// Fixed public chaff bucket distributions (04 §12.7; provisional values until
-/// the 39 constants registry defines `CHAFF_BUCKETS_*`, see SPEC-NOTES).
+/// Public chaff bundle-size distribution (04 §12.7; provisional values until
+/// the 39 constants registry defines `CHAFF_BUCKETS_*`, see SPEC-NOTES). The
+/// text-bearing objects need no distribution: real and chaff SUBMISSION,
+/// SOURCE_MESSAGE and IDENTITY objects always use their maximum bucket
+/// (ADR-052(1)). Configure it to approximate the real attachment distribution.
 #[derive(Debug, Clone)]
 pub struct ChaffBuckets {
-    /// SUBMISSION padded lengths and weights.
-    pub submission: Vec<(u64, u32)>,
-    /// ATTACHMENT_BUNDLE padded lengths and weights (each ≤ 8 MiB).
+    /// ATTACHMENT_BUNDLE padded lengths and weights (each ≤ 8 MiB). Must give
+    /// the empty-bundle bucket (256 KiB) a positive weight, because every real
+    /// group without attachments carries an empty bundle.
     pub bundle: Vec<(u64, u32)>,
-    /// SOURCE_MESSAGE padded lengths and weights.
-    pub source_message: Vec<(u64, u32)>,
 }
 
 impl Default for ChaffBuckets {
     fn default() -> Self {
         let b: Vec<u64> = padding::file_buckets()
-            .take_while(|b| *b <= 8 << 20)
+            .take_while(|b| *b <= CHAFF_BUNDLE_MAX)
             .collect();
         let weights = [600u32, 120, 80, 60, 40, 30, 25, 20, 15, 10];
         Self {
-            submission: vec![(4096, 500), (8192, 250), (12288, 150), (16384, 100)],
             bundle: b
                 .iter()
                 .zip(weights.iter().chain(core::iter::repeat(&5)))
                 .map(|(b, w)| (*b, *w))
                 .collect(),
-            source_message: vec![(4096, 700), (8192, 200), (12288, 100)],
         }
     }
 }
 
+/// Largest chaff bundle bucket (8 MiB); larger real bundles are an honest limit
+/// (04 §12.7, ADR-052(1)).
+pub const CHAFF_BUNDLE_MAX: u64 = 8 << 20;
+
 impl ChaffBuckets {
-    /// All entries are legal buckets for their type and bundles are ≤ 8 MiB.
+    /// All entries are legal bundle buckets ≤ 8 MiB, some weight is positive,
+    /// and the empty-bundle bucket is in the support.
     #[must_use]
     pub fn is_valid(&self) -> bool {
-        let ok = |t: ObjectType, v: &[(u64, u32)]| {
-            !v.is_empty()
-                && v.iter().any(|(_, w)| *w > 0)
-                && v.iter().all(|(b, _)| padding::is_legal_bucket(t, *b))
-        };
-        ok(ObjectType::Submission, &self.submission)
-            && ok(ObjectType::AttachmentBundle, &self.bundle)
-            && self.bundle.iter().all(|(b, _)| *b <= 8 << 20)
-            && ok(ObjectType::SourceMessage, &self.source_message)
+        let t = ObjectType::AttachmentBundle;
+        !self.bundle.is_empty()
+            && self.bundle.iter().any(|(_, w)| *w > 0)
+            && self
+                .bundle
+                .iter()
+                .all(|(b, _)| padding::is_legal_bucket(t, *b) && *b <= CHAFF_BUNDLE_MAX)
+            && self
+                .bundle
+                .iter()
+                .any(|(b, w)| *b == padding::FILE_BUCKET_0 && *w > 0)
+            && self
+                .bundle
+                .iter()
+                .try_fold(0u32, |acc, (_, w)| acc.checked_add(*w))
+                .is_some()
+    }
+
+    /// Whether `len` is in the support of the bundle distribution.
+    #[must_use]
+    pub fn supports(&self, len: u64) -> bool {
+        self.bundle.iter().any(|(b, w)| *b == len && *w > 0)
     }
 }
 
@@ -732,8 +785,10 @@ fn chaff_object(
     object::seal_with_ck(ck, &req, |_| Ok(vec![0u8; n]))
 }
 
-/// Build one chaff envelope (04 §12.7): same shapes and functions as real ones,
-/// all 16 slots dummy, zero plaintext, CKs from the RAM chaff seed, chaff-kind
+/// Build one chaff envelope group (04 §12.7, ADR-052(1)): the same three-object
+/// shape as a real group (main object and IDENTITY at their maximum bucket, a
+/// bundle drawn from the configured distribution), the same functions, all 16
+/// slots dummy, zero plaintext, CKs from the RAM chaff seed, chaff-kind
 /// disposition marker.
 pub(crate) fn build_chaff(
     ctx: &SealCtx<'_>,
@@ -743,99 +798,78 @@ pub(crate) fn build_chaff(
     counter: &mut u64,
     followup: bool,
     buckets: &ChaffBuckets,
-) -> Result<CommitRequest, Error> {
+) -> Result<EnvelopeGroup, Error> {
     let mut next_ck = || -> Result<ContentKey, Error> {
         let ck = chaff_ck(seed, *counter)?;
         *counter = counter.checked_add(1).ok_or(Error::Internal)?;
         Ok(ck)
     };
     let member = ctx.member_ctx(channel_id, epoch_id);
-    let mut objects = Vec::with_capacity(3);
-    if followup {
-        let len = super::rand::weighted(&buckets.source_message)?;
-        let ck = next_ck()?;
-        let o = chaff_object(
-            ctx,
-            &ck,
-            ObjectType::SourceMessage,
-            channel_id,
-            member,
-            epoch_id,
-            len,
-        )?;
-        objects.push(envelope_object(&o, Blob::Inline(o.bytes.clone()))?);
+    let main_type = if followup {
+        ObjectType::SourceMessage
     } else {
-        let sub_len = super::rand::weighted(&buckets.submission)?;
-        let bundle_len = super::rand::weighted(&buckets.bundle)?;
-        let ck = next_ck()?;
-        let sub = chaff_object(
-            ctx,
-            &ck,
-            ObjectType::Submission,
-            channel_id,
-            member.clone(),
-            epoch_id,
-            sub_len,
-        )?;
-        let ck = next_ck()?;
-        let bundle = chaff_object(
-            ctx,
-            &ck,
-            ObjectType::AttachmentBundle,
-            channel_id,
-            member,
-            epoch_id,
-            bundle_len,
-        )?;
-        let ck = next_ck()?;
-        let identity = chaff_object(
-            ctx,
-            &ck,
-            ObjectType::Identity,
-            channel_id,
-            SlotContext::Custodian {
-                tenant_id: ctx.tenant_id,
-            },
-            0,
-            padding::MESSAGE_BUCKET_UNIT,
-        )?;
-        let id = ctx
-            .staging
-            .put_random(&bundle.bytes, ctx.slot)
-            .map_err(io_err)?;
-        let len = u64::try_from(bundle.bytes.len()).map_err(|_| Error::Internal)?;
-        objects.push(envelope_object(&sub, Blob::Inline(sub.bytes.clone()))?);
-        objects.push(envelope_object(&bundle, Blob::Staged { id, len })?);
-        objects.push(envelope_object(
-            &identity,
-            Blob::Inline(identity.bytes.clone()),
-        )?);
-    }
-    let first = objects
-        .first()
-        .map(|o| o.object_hash)
-        .ok_or(Error::Internal)?;
-    let disposition_ct =
-        match disposition_ct(ctx.suite, &ctx.tenant_id, &ctx.disposition_pk, &first, true) {
-            Ok(d) => d,
-            Err(e) => {
-                for o in &objects {
-                    remove_staged(ctx, o);
-                }
-                return Err(e);
-            }
-        };
-    Ok(CommitRequest {
+        ObjectType::Submission
+    };
+    let bundle_len = super::rand::weighted(&buckets.bundle)?;
+    let ck = next_ck()?;
+    let main = chaff_object(
+        ctx,
+        &ck,
+        main_type,
         channel_id,
-        objects,
-        disposition_ct,
-        release_offset_days: 0,
-        account: None,
-    })
+        member.clone(),
+        epoch_id,
+        inner::max_bucket(main_type)?,
+    )?;
+    let ck = next_ck()?;
+    let bundle = chaff_object(
+        ctx,
+        &ck,
+        ObjectType::AttachmentBundle,
+        channel_id,
+        member,
+        epoch_id,
+        bundle_len,
+    )?;
+    let ck = next_ck()?;
+    let identity = chaff_object(
+        ctx,
+        &ck,
+        ObjectType::Identity,
+        channel_id,
+        SlotContext::Custodian {
+            tenant_id: ctx.tenant_id,
+        },
+        0,
+        inner::max_bucket(ObjectType::Identity)?,
+    )?;
+    let (staged_id, mut w) = stage_create(ctx.staging)?;
+    w.write_all(&bundle.bytes).map_err(io_err)?;
+    let id = stage_commit(ctx.staging, w, &staged_id, ctx.slot)?;
+    let len = u64::try_from(bundle.bytes.len()).map_err(|_| Error::Internal)?;
+    let group = SealedGroup {
+        main: envelope_object(&main, Blob::Inline(main.bytes.clone()))?,
+        bundle: envelope_object(&bundle, Blob::Staged { id, len })?,
+        identity: envelope_object(&identity, Blob::Inline(identity.bytes.clone()))?,
+    };
+    match disposition_ct(
+        ctx.suite,
+        &ctx.tenant_id,
+        &ctx.disposition_pk,
+        &group.main.object_hash,
+        true,
+    ) {
+        Ok(d) => Ok(group.into_group(channel_id, d)),
+        Err(e) => {
+            group.remove_staged(ctx);
+            Err(e)
+        }
+    }
 }
 
 /// Re-wrap one pending reply's stanza (1) from the old to the new source key
-/// (04 §11.7 step 3). Fails closed if the stanza does not open for any mailbox.
+/// (04 §11.7 step 3). `Err(Authentication)` if the stanza does not open for any
+/// mailbox (the caller skips such entries, AUD-RM2-SEA-14).
 pub(crate) fn rewrap_reply(
     suite: Suite,
     tenant_id: [u8; 16],

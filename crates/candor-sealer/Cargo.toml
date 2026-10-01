@@ -17,6 +17,7 @@ default = ["server"]
 # The `proto` module (IPC types, CBOR codec, framing) needs only `zeroize`.
 # `server` adds the sealer process itself.
 server = [
+    "dep:candor-log",
     "dep:candor-core",
     "dep:candor-safefs",
     "dep:tokio",
@@ -33,6 +34,7 @@ server = [
 zeroize = { version = "=1.8.2", default-features = false, features = ["alloc"] }
 candor-core = { path = "../candor-core", optional = true }
 candor-safefs = { path = "../candor-safefs", optional = true }
+candor-log = { path = "../candor-log", optional = true }
 tokio = { version = "=1.48.0", default-features = false, features = ["rt", "net", "sync", "time", "io-util"], optional = true }
 rustix = { version = "=1.1.2", default-features = false, features = ["std", "mm", "process"], optional = true }
 hkdf = { version = "=0.13.0", default-features = false, optional = true }
