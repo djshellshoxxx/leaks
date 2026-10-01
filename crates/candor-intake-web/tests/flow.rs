@@ -660,10 +660,9 @@ async fn pre_login_token_invalid_after_login() {
     let cs = r.cookie().unwrap();
     let tok = r.csrf();
     assert_ne!(tok, pre_tok, "rotated at login");
-    for t in [&tok] {
-        let page = r.text();
-        assert!(!page.contains(&format!("csrf={t}")) && !page.contains("?csrf"));
-    }
+    // Never in a URL: only as a hidden POST field.
+    let page = r.text();
+    assert!(!page.contains(&format!("csrf={tok}")) && !page.contains("?csrf"));
     let before = h.sealer.ops().len();
     for cookies in [vec![cs.as_str()], vec![cs.as_str(), pre.as_str()]] {
         let r = h
