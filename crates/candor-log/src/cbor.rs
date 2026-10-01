@@ -454,7 +454,10 @@ mod tests {
     #[test]
     fn rejects_non_canonical() {
         assert_eq!(decode(&[0x18, 0x05]), Err(CborError::NonCanonicalHead));
-        assert_eq!(decode(&[0x19, 0x00, 0x10]), Err(CborError::NonCanonicalHead));
+        assert_eq!(
+            decode(&[0x19, 0x00, 0x10]),
+            Err(CborError::NonCanonicalHead)
+        );
         assert_eq!(decode(&[0x5f, 0xff]), Err(CborError::Indefinite));
         assert_eq!(decode(&[0xc0, 0x00]), Err(CborError::Unsupported));
         assert_eq!(decode(&[0xf9, 0x00, 0x00]), Err(CborError::Unsupported));

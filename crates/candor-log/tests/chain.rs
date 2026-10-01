@@ -38,10 +38,7 @@ fn login() -> AuditEvent {
     }
 }
 
-fn params<'a>(
-    key: &'a ed25519_dalek::VerifyingKey,
-    stream: StreamId,
-) -> VerifyParams<'a> {
+fn params<'a>(key: &'a ed25519_dalek::VerifyingKey, stream: StreamId) -> VerifyParams<'a> {
     VerifyParams {
         tenant: tenant(),
         stream,
@@ -53,7 +50,8 @@ fn params<'a>(
 
 #[test]
 fn class_separated_streams_verify() {
-    let (mut log, sink, _clock) = log_with(HostRole::Core, CheckpointPolicy::new(4, 300_000).unwrap());
+    let (mut log, sink, _clock) =
+        log_with(HostRole::Core, CheckpointPolicy::new(4, 300_000).unwrap());
     for i in 0..10 {
         log.emit(EventContext::staff(user(1)), opened(i)).unwrap();
         log.emit(EventContext::staff(user(2)), login()).unwrap();
@@ -84,19 +82,35 @@ fn class_separated_streams_verify() {
     assert_eq!(rep.checkpoints, 2);
     assert_eq!(rep.unattested_tail, 2);
     // The case stream contains only CASE events.
-    assert!(store
-        .records(StreamId::Case)
-        .iter()
-        .all(|r| r.event().class() == candor_log::EventClass::Case));
+    assert!(
+        store
+            .records(StreamId::Case)
+            .iter()
+            .all(|r| r.event().class() == candor_log::EventClass::Case)
+    );
 }
 
-fn setup(n: u8, every: u64) -> (Vec<ChainRecord>, Vec<candor_log::SignedCheckpoint>, ed25519_dalek::VerifyingKey) {
-    let (mut log, sink, _c) = log_with(HostRole::Core, CheckpointPolicy::new(every, 300_000).unwrap());
+fn setup(
+    n: u8,
+    every: u64,
+) -> (
+    Vec<ChainRecord>,
+    Vec<candor_log::SignedCheckpoint>,
+    ed25519_dalek::VerifyingKey,
+) {
+    let (mut log, sink, _c) = log_with(
+        HostRole::Core,
+        CheckpointPolicy::new(every, 300_000).unwrap(),
+    );
     for i in 0..n {
         log.emit(EventContext::staff(user(1)), opened(i)).unwrap();
     }
     let st = sink.0.lock().unwrap();
-    (st.chain(StreamId::Case), st.checkpoints(StreamId::Case), log.verifying_key())
+    (
+        st.chain(StreamId::Case),
+        st.checkpoints(StreamId::Case),
+        log.verifying_key(),
+    )
 }
 
 fn code_of(
@@ -104,7 +118,9 @@ fn code_of(
     cps: &[candor_log::SignedCheckpoint],
     key: &ed25519_dalek::VerifyingKey,
 ) -> VerifyFailureCode {
-    verify_stream(&params(key, StreamId::Case), recs, cps).unwrap_err().code
+    verify_stream(&params(key, StreamId::Case), recs, cps)
+        .unwrap_err()
+        .code
 }
 
 // AUD-004 tamper fixtures: modified payload, reordered, deleted, truncated,
@@ -127,23 +143,36 @@ fn reordering_detected() {
 fn modification_detected() {
     let (mut recs, cps, key) = setup(12, 5);
     // Re-encode record 3 with a different case ID but keep it canonical.
-    let ChainRecord::Full { bytes, .. } = &recs[3] else { panic!() };
+    let ChainRecord::Full { bytes, .. } = &recs[3] else {
+        panic!()
+    };
     let mut b = bytes.clone();
     let pos = b.windows(16).position(|w| w == [3u8; 16]).unwrap();
     b[pos] = 0x99;
-    recs[3] = ChainRecord::Full { bytes: b, claimed_hash: None };
+    recs[3] = ChainRecord::Full {
+        bytes: b,
+        claimed_hash: None,
+    };
     assert_eq!(code_of(&recs, &cps, &key), VerifyFailureCode::ChainMismatch);
 }
 
 #[test]
 fn modification_of_last_record_detected_by_checkpoint() {
     let (mut recs, cps, key) = setup(10, 5);
-    let ChainRecord::Full { bytes, .. } = &recs[9] else { panic!() };
+    let ChainRecord::Full { bytes, .. } = &recs[9] else {
+        panic!()
+    };
     let mut b = bytes.clone();
     let pos = b.windows(16).position(|w| w == [9u8; 16]).unwrap();
     b[pos] = 0x42;
-    recs[9] = ChainRecord::Full { bytes: b, claimed_hash: None };
-    assert_eq!(code_of(&recs, &cps, &key), VerifyFailureCode::MerkleMismatch);
+    recs[9] = ChainRecord::Full {
+        bytes: b,
+        claimed_hash: None,
+    };
+    assert_eq!(
+        code_of(&recs, &cps, &key),
+        VerifyFailureCode::MerkleMismatch
+    );
 }
 
 #[test]
@@ -156,14 +185,20 @@ fn truncation_below_checkpoint_detected() {
 #[test]
 fn deleting_head_detected() {
     let (recs, cps, key) = setup(10, 5);
-    assert_eq!(code_of(&recs[1..], &cps, &key), VerifyFailureCode::MissingPrefix);
+    assert_eq!(
+        code_of(&recs[1..], &cps, &key),
+        VerifyFailureCode::MissingPrefix
+    );
 }
 
 #[test]
 fn forged_checkpoint_rejected() {
     let (recs, cps, _key) = setup(10, 5);
     let other = signer(99).verifying_key_for_test();
-    assert_eq!(code_of(&recs, &cps, &other), VerifyFailureCode::BadSignature);
+    assert_eq!(
+        code_of(&recs, &cps, &other),
+        VerifyFailureCode::BadSignature
+    );
     // Tampered signature bytes.
     let mut sig = *cps[0].signature();
     sig[0] ^= 1;
@@ -174,7 +209,10 @@ fn forged_checkpoint_rejected() {
     assert_eq!(code_of(&recs, &cps2, &key), VerifyFailureCode::BadSignature);
     // Dropping a checkpoint breaks the checkpoint chain.
     let cps3 = vec![cps[1].clone()];
-    assert_eq!(code_of(&recs, &cps3, &key), VerifyFailureCode::CheckpointChain);
+    assert_eq!(
+        code_of(&recs, &cps3, &key),
+        VerifyFailureCode::CheckpointChain
+    );
 }
 
 trait VkForTest {
@@ -210,10 +248,15 @@ fn rollback_detected_against_witness() {
 #[test]
 fn non_canonical_record_rejected() {
     let (mut recs, cps, key) = setup(3, 5);
-    let ChainRecord::Full { bytes, .. } = &recs[1] else { panic!() };
+    let ChainRecord::Full { bytes, .. } = &recs[1] else {
+        panic!()
+    };
     let mut b = bytes.clone();
     b.push(0x00); // trailing byte
-    recs[1] = ChainRecord::Full { bytes: b, claimed_hash: None };
+    recs[1] = ChainRecord::Full {
+        bytes: b,
+        claimed_hash: None,
+    };
     assert_eq!(code_of(&recs, &cps, &key), VerifyFailureCode::NonCanonical);
 }
 
@@ -233,7 +276,12 @@ fn checkpoint_cadence() {
     let (mut log, sink, clock) = log_with(HostRole::Core, CheckpointPolicy::DEFAULT);
     let mut produced = 0;
     for _ in 0..1000 {
-        if log.emit(EventContext::staff(user(1)), login()).unwrap().checkpoint.is_some() {
+        if log
+            .emit(EventContext::staff(user(1)), login())
+            .unwrap()
+            .checkpoint
+            .is_some()
+        {
             produced += 1;
         }
     }
@@ -267,7 +315,10 @@ fn ts_of(r: &candor_log::CommittedRecord) -> u64 {
 #[test]
 fn timestamp_policy() {
     let (mut log, _sink, _c) = log_with(HostRole::Core, CheckpointPolicy::DEFAULT);
-    let staff = log.emit(EventContext::staff(user(1)), opened(1)).unwrap().record;
+    let staff = log
+        .emit(EventContext::staff(user(1)), opened(1))
+        .unwrap()
+        .record;
     assert_eq!(ts_of(&staff), T0, "staff actions exact to the ms");
     let imp = log
         .emit(
@@ -355,7 +406,8 @@ fn timestamp_policy() {
 fn intake_host_rules() {
     let (mut log, _sink, _c) = log_with(HostRole::Intake, CheckpointPolicy::DEFAULT);
     assert_eq!(
-        log.emit(EventContext::staff(user(1)), opened(1)).unwrap_err(),
+        log.emit(EventContext::staff(user(1)), opened(1))
+            .unwrap_err(),
         LogError::Envelope(EnvelopeError::NotAllowedOnHost)
     );
     let r = log
@@ -370,17 +422,21 @@ fn intake_host_rules() {
         .unwrap()
         .record;
     assert_eq!(ts_of(&r) % MS_PER_HOUR, 0);
-    let a = log.emit(EventContext::staff(user(1)), login()).unwrap().record;
+    let a = log
+        .emit(EventContext::staff(user(1)), login())
+        .unwrap()
+        .record;
     assert_eq!(ts_of(&a) % MS_PER_HOUR, 0);
-    assert!(log
-        .emit(
+    assert!(
+        log.emit(
             EventContext::system(Service::Relay),
             AuditEvent::SysRelaySlotOverrun {
                 date: DayStamp(1),
                 slot_index: candor_log::field::SlotIndex(1)
             }
         )
-        .is_err());
+        .is_err()
+    );
 }
 
 // LOG-012: session tag only for staff; envelope rules.
@@ -419,7 +475,9 @@ fn full_catalog_round_trip() {
         let r = log.emit(EventContext::staff(user(1)), e).unwrap().record;
         let v = cbor::decode(r.bytes()).unwrap();
         assert_eq!(cbor::encode(&v).unwrap(), r.bytes());
-        let cbor::Value::Map(payload) = v.get("payload").unwrap() else { panic!() };
+        let cbor::Value::Map(payload) = v.get("payload").unwrap() else {
+            panic!()
+        };
         // Payload keys ⊆ schema.
         for (k, _) in payload {
             assert!(names.contains(&k.as_text().unwrap()));
@@ -427,7 +485,12 @@ fn full_catalog_round_trip() {
     }
     let st = sink.0.lock().unwrap();
     for s in [StreamId::Sec, StreamId::Case, StreamId::Sys] {
-        verify_stream(&params(&log.verifying_key(), s), &st.chain(s), &st.checkpoints(s)).unwrap();
+        verify_stream(
+            &params(&log.verifying_key(), s),
+            &st.chain(s),
+            &st.checkpoints(s),
+        )
+        .unwrap();
     }
 }
 
@@ -436,7 +499,8 @@ fn full_catalog_round_trip() {
 fn case_disposal_redaction_verifies() {
     let (mut log, sink, _c) = log_with(HostRole::Core, CheckpointPolicy::new(4, 300_000).unwrap());
     for i in 0..9 {
-        log.emit(EventContext::staff(user(1)), opened(i % 3)).unwrap();
+        log.emit(EventContext::staff(user(1)), opened(i % 3))
+            .unwrap();
     }
     let target = CaseRef::from_bytes([1; 16]);
     let removed = sink.0.lock().unwrap().redact_case(target);
@@ -451,11 +515,12 @@ fn case_disposal_redaction_verifies() {
     )
     .unwrap();
     let st = sink.0.lock().unwrap();
-    assert!(st
-        .records(StreamId::Case)
-        .iter()
-        .filter(|r| !matches!(r.event(), AuditEvent::CaseDisposed { .. }))
-        .all(|r| r.event().case_ref() != Some(target)));
+    assert!(
+        st.records(StreamId::Case)
+            .iter()
+            .filter(|r| !matches!(r.event(), AuditEvent::CaseDisposed { .. }))
+            .all(|r| r.event().case_ref() != Some(target))
+    );
     let rep = verify_stream(
         &params(&log.verifying_key(), StreamId::Case),
         &st.chain(StreamId::Case),
@@ -465,7 +530,10 @@ fn case_disposal_redaction_verifies() {
     assert_eq!(rep.redacted, 3);
     // Tampering with a stub is detected.
     let mut recs = st.chain(StreamId::Case);
-    let pos = recs.iter().position(|r| matches!(r, ChainRecord::Redacted { .. })).unwrap();
+    let pos = recs
+        .iter()
+        .position(|r| matches!(r, ChainRecord::Redacted { .. }))
+        .unwrap();
     if let ChainRecord::Redacted { leaf, .. } = &mut recs[pos] {
         leaf[0] ^= 1;
     }
@@ -481,7 +549,8 @@ fn case_disposal_redaction_verifies() {
 // AUD-005: whole-interval retention with tombstone; remaining chain verifies.
 #[test]
 fn retention_interval_deletion() {
-    let (mut log, sink, clock) = log_with(HostRole::Core, CheckpointPolicy::new(5, 300_000).unwrap());
+    let (mut log, sink, clock) =
+        log_with(HostRole::Core, CheckpointPolicy::new(5, 300_000).unwrap());
     for _ in 0..10 {
         log.emit(EventContext::staff(user(1)), login()).unwrap();
     }
@@ -499,9 +568,17 @@ fn retention_interval_deletion() {
     let policy = RetentionPolicy::new(90, 7, 365, 13).unwrap();
     // SECURITY: nothing older than 90 days yet.
     let cps = sink.0.lock().unwrap().checkpoints(StreamId::Sec);
-    assert!(retention::plan_interval_deletion(&policy, StreamId::Sec, &cps, 0, UtcMillis(T0 + 31 * MS_PER_DAY))
+    assert!(
+        retention::plan_interval_deletion(
+            &policy,
+            StreamId::Sec,
+            &cps,
+            0,
+            UtcMillis(T0 + 31 * MS_PER_DAY)
+        )
         .unwrap()
-        .is_none());
+        .is_none()
+    );
     clock.advance(60 * MS_PER_DAY);
     let now = UtcMillis(T0 + 91 * MS_PER_DAY);
     let plan = retention::plan_interval_deletion(&policy, StreamId::Sec, &cps, 0, now)
@@ -509,8 +586,13 @@ fn retention_interval_deletion() {
         .unwrap();
     assert_eq!(plan.range.last, 9);
     // Without a tombstone, deletion is refused.
-    let unrelated = log.emit(EventContext::staff(user(1)), login()).unwrap().record;
-    assert!(retention::apply_interval_deletion(&mut sink.0.lock().unwrap(), &plan, &unrelated).is_err());
+    let unrelated = log
+        .emit(EventContext::staff(user(1)), login())
+        .unwrap()
+        .record;
+    assert!(
+        retention::apply_interval_deletion(&mut sink.0.lock().unwrap(), &plan, &unrelated).is_err()
+    );
     let tomb = log
         .emit(EventContext::system(Service::Audit), plan.tombstone())
         .unwrap()
@@ -541,7 +623,9 @@ fn jsonl_round_trip() {
     }
     let mem: MemoryJsonl = jsonl.0.lock().unwrap().clone();
     let recs_txt = mem.contents(JsonlFile::Records(StreamId::Case)).to_vec();
-    let cps_txt = mem.contents(JsonlFile::Checkpoints(StreamId::Case)).to_vec();
+    let cps_txt = mem
+        .contents(JsonlFile::Checkpoints(StreamId::Case))
+        .to_vec();
     let text = String::from_utf8(recs_txt.clone()).unwrap();
     assert!(text.lines().all(|l| l.starts_with("{\"k\":\"rec\"")));
     assert!(text.contains("\"type\":\"case.opened\""));
@@ -579,7 +663,8 @@ fn resume_continues_chain() {
     let key = log.verifying_key();
     let rep = verify_stream(&params(&key, StreamId::Case), &recs, &cps).unwrap();
     // A fresh writer (restart) resumes from the verified state.
-    let (mut log2, sink2, _c2) = log_with(HostRole::Core, CheckpointPolicy::new(4, 300_000).unwrap());
+    let (mut log2, sink2, _c2) =
+        log_with(HostRole::Core, CheckpointPolicy::new(4, 300_000).unwrap());
     log2.resume(StreamId::Case, rep.resume());
     for i in 6..10 {
         log2.emit(EventContext::staff(user(1)), opened(i)).unwrap();

@@ -224,7 +224,10 @@ impl CheckpointBody {
             .put("last_seq", Value::Uint(self.last_seq))
             .put("chain_head", Value::Bytes(self.chain_head.to_vec()))
             .put("merkle_root", Value::Bytes(self.merkle_root.to_vec()))
-            .put("prev_checkpoint", Value::Bytes(self.prev_checkpoint.to_vec()))
+            .put(
+                "prev_checkpoint",
+                Value::Bytes(self.prev_checkpoint.to_vec()),
+            )
             .put("signed_at", Value::Uint(self.signed_at.0))
             .put("clock_flagged", Value::Bool(self.clock_flagged));
         m.build()
@@ -588,10 +591,7 @@ impl<S: CheckpointSigner, C: AuditClock> AuditLog<S, C> {
         }
         let reading = self.clock.read();
         let stream = event.class().stream();
-        let st = self
-            .streams
-            .get(idx(stream))
-            .ok_or(LogError::Encoding)?;
+        let st = self.streams.get(idx(stream)).ok_or(LogError::Encoding)?;
         let precision = ts_precision(&event, &ctx.actor, self.host_role);
         let header = EnvelopeHeader {
             stream,
@@ -604,7 +604,8 @@ impl<S: CheckpointSigner, C: AuditClock> AuditLog<S, C> {
             prev: st.head,
         };
         let next_seq = st.next_seq.checked_add(1).ok_or(LogError::SeqOverflow)?;
-        let bytes = cbor::encode(&envelope_value(&header, &event)).map_err(|_| LogError::Encoding)?;
+        let bytes =
+            cbor::encode(&envelope_value(&header, &event)).map_err(|_| LogError::Encoding)?;
         let hash = chain_hash(&st.head, &bytes);
         let leaf = leaf_hash(&bytes);
         let record = CommittedRecord {
@@ -643,7 +644,8 @@ impl<S: CheckpointSigner, C: AuditClock> AuditLog<S, C> {
         for stream in [StreamId::Sec, StreamId::Case, StreamId::Sys] {
             let due = self.streams.get(idx(stream)).is_some_and(|st| {
                 !st.pending.is_empty()
-                    && reading.now.0.saturating_sub(st.last_cp_time.0) >= self.policy.max_interval_ms
+                    && reading.now.0.saturating_sub(st.last_cp_time.0)
+                        >= self.policy.max_interval_ms
             });
             if due {
                 out.push(self.checkpoint_stream(stream, reading)?);
@@ -653,7 +655,10 @@ impl<S: CheckpointSigner, C: AuditClock> AuditLog<S, C> {
     }
 
     /// Force a checkpoint of `stream` now (`None` if nothing is pending).
-    pub fn checkpoint_now(&mut self, stream: StreamId) -> Result<Option<SignedCheckpoint>, LogError> {
+    pub fn checkpoint_now(
+        &mut self,
+        stream: StreamId,
+    ) -> Result<Option<SignedCheckpoint>, LogError> {
         let reading = self.clock.read();
         if self
             .streams
@@ -729,7 +734,10 @@ mod tests {
         );
         // n = 5: k = 4
         let l4 = node_hash(&node_hash(&h(1), &h(2)), &node_hash(&h(3), &h(4)));
-        assert_eq!(merkle_root(&[h(1), h(2), h(3), h(4), h(5)]), node_hash(&l4, &h(5)));
+        assert_eq!(
+            merkle_root(&[h(1), h(2), h(3), h(4), h(5)]),
+            node_hash(&l4, &h(5))
+        );
         // empty tree = SHA-256("")
         assert_eq!(
             crate::ids::hex(&merkle_root(&[])),
@@ -741,7 +749,10 @@ mod tests {
     fn genesis_is_stream_separated() {
         let t = TenantRef::from_bytes([0; 16]);
         assert_ne!(genesis(&t, StreamId::Sec), genesis(&t, StreamId::Case));
-        assert_ne!(genesis(&t, StreamId::Sec), checkpoint_genesis(&t, StreamId::Sec));
+        assert_ne!(
+            genesis(&t, StreamId::Sec),
+            checkpoint_genesis(&t, StreamId::Sec)
+        );
     }
 
     #[test]

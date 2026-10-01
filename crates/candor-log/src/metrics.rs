@@ -64,7 +64,11 @@ pub enum IntakeCounter {
 
 impl IntakeCounter {
     /// All counters in column order.
-    pub const ALL: [Self; 3] = [Self::Submissions, Self::AccountsCreated, Self::AccountDeletions];
+    pub const ALL: [Self; 3] = [
+        Self::Submissions,
+        Self::AccountsCreated,
+        Self::AccountDeletions,
+    ];
     /// Name.
     pub const fn name(self) -> &'static str {
         match self {
@@ -417,7 +421,9 @@ impl Q {
     }
     fn sub(self, o: Self) -> Option<Self> {
         Self::norm(
-            self.n.checked_mul(o.d)?.checked_sub(o.n.checked_mul(self.d)?)?,
+            self.n
+                .checked_mul(o.d)?
+                .checked_sub(o.n.checked_mul(self.d)?)?,
             self.d.checked_mul(o.d)?,
         )
     }
@@ -439,8 +445,11 @@ fn rref(mut m: Vec<Vec<Q>>, ncols: usize) -> Option<Rref> {
     let mut pivots = Vec::new();
     let mut r: usize = 0;
     for c in 0..ncols {
-        let Some(p) = (r..m.len()).find(|&i| m.get(i).and_then(|row| row.get(c)).is_some_and(|q| !q.is_zero()))
-        else {
+        let Some(p) = (r..m.len()).find(|&i| {
+            m.get(i)
+                .and_then(|row| row.get(c))
+                .is_some_and(|q| !q.is_zero())
+        }) else {
             continue;
         };
         m.swap(r, p);
@@ -510,7 +519,12 @@ fn audit_inner(facts: &[Fact], protected: &[BTreeSet<MicroKey>]) -> Option<bool>
     for p in protected {
         keys.extend(p.iter().copied());
     }
-    let index: BTreeMap<MicroKey, usize> = keys.iter().copied().enumerate().map(|(i, k)| (k, i)).collect();
+    let index: BTreeMap<MicroKey, usize> = keys
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(i, k)| (k, i))
+        .collect();
     let n = index.len();
     let vec_of = |s: &BTreeSet<MicroKey>| -> Vec<Q> {
         let mut v = vec![Q::ZERO; n];
@@ -537,7 +551,10 @@ fn audit_inner(facts: &[Fact], protected: &[BTreeSet<MicroKey>]) -> Option<bool>
         .iter()
         .map(|f| {
             (
-                f.members.iter().filter_map(|k| index.get(k).copied()).collect(),
+                f.members
+                    .iter()
+                    .filter_map(|k| index.get(k).copied())
+                    .collect(),
                 u128::from(f.value),
             )
         })
@@ -545,8 +562,14 @@ fn audit_inner(facts: &[Fact], protected: &[BTreeSet<MicroKey>]) -> Option<bool>
     for _ in 0..n.saturating_add(2).min(64) {
         let mut changed = false;
         for (members, v) in &fidx {
-            let sum_lo: u128 = members.iter().map(|&i| lo.get(i).copied().unwrap_or(0)).fold(0, u128::saturating_add);
-            let sum_hi: u128 = members.iter().map(|&i| hi.get(i).copied().unwrap_or(u128::MAX)).fold(0, u128::saturating_add);
+            let sum_lo: u128 = members
+                .iter()
+                .map(|&i| lo.get(i).copied().unwrap_or(0))
+                .fold(0, u128::saturating_add);
+            let sum_hi: u128 = members
+                .iter()
+                .map(|&i| hi.get(i).copied().unwrap_or(u128::MAX))
+                .fold(0, u128::saturating_add);
             for &i in members {
                 let (l, h) = (lo.get(i).copied()?, hi.get(i).copied()?);
                 let others_lo = sum_lo.saturating_sub(l);
@@ -606,7 +629,12 @@ fn facts_of(table: &Table, plan: &Plan, ln: &Lines) -> Vec<Fact> {
             });
         }
     }
-    for (line, p) in ln.rows.iter().zip(&plan.row_pub).chain(ln.cols.iter().zip(&plan.col_pub)) {
+    for (line, p) in ln
+        .rows
+        .iter()
+        .zip(&plan.row_pub)
+        .chain(ln.cols.iter().zip(&plan.col_pub))
+    {
         if *p {
             out.push(Fact {
                 members: set(line),
@@ -678,13 +706,25 @@ fn finish(table: &Table, plan: &Plan, ln: &Lines) -> Released {
             .rows
             .iter()
             .zip(&plan.row_pub)
-            .map(|(l, p)| if *p { Published::Value(total(l)) } else { Published::Withheld })
+            .map(|(l, p)| {
+                if *p {
+                    Published::Value(total(l))
+                } else {
+                    Published::Withheld
+                }
+            })
             .collect(),
         col_totals: ln
             .cols
             .iter()
             .zip(&plan.col_pub)
-            .map(|(l, p)| if *p { Published::Value(total(l)) } else { Published::Withheld })
+            .map(|(l, p)| {
+                if *p {
+                    Published::Value(total(l))
+                } else {
+                    Published::Withheld
+                }
+            })
             .collect(),
         grand_total: if plan.grand_pub {
             Published::Value(total(&all))
@@ -912,7 +952,10 @@ pub fn counter_table(
                     protected.push(vec![key]);
                 }
             }
-            cells.push(TableCell { value: v, members: keys });
+            cells.push(TableCell {
+                value: v,
+                members: keys,
+            });
         }
     }
     let labels: Vec<RowLabel> = rows.into_iter().map(|(l, _)| l).collect();

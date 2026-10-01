@@ -20,15 +20,29 @@ use common::*;
 
 fn allowed_keys(ty: &str) -> &'static [&'static str] {
     match ty {
-        "auth.login_succeeded" => &["type", "date", "tenant", "actor", "method", "aal", "outcome"],
-        "auth.login_failed" => &["type", "date", "tenant", "actor", "method", "outcome", "failure_code"],
+        "auth.login_succeeded" => &[
+            "type", "date", "tenant", "actor", "method", "aal", "outcome",
+        ],
+        "auth.login_failed" => &[
+            "type",
+            "date",
+            "tenant",
+            "actor",
+            "method",
+            "outcome",
+            "failure_code",
+        ],
         "auth.stepup_failed" => &["type", "date", "actor"],
         t if t.starts_with("user.") => &["type", "date", "actor", "target"],
         t if t.starts_with("role.") => &["type", "date", "actor", "target", "role"],
         "authz.denied" => &["type", "date", "actor", "action", "reason_code"],
         t if t.starts_with("cfg.") => &["type", "ts", "actor", "key", "class"],
-        "audit.verification_failed" | "audit.witness_failed" => &["type", "ts", "stream", "failure_code"],
-        "selftest.logging_violation" | "secret.placement_violation" => &["type", "ts", "host_role", "check_code"],
+        "audit.verification_failed" | "audit.witness_failed" => {
+            &["type", "ts", "stream", "failure_code"]
+        }
+        "selftest.logging_violation" | "secret.placement_violation" => {
+            &["type", "ts", "host_role", "check_code"]
+        }
         t if t.starts_with("update.") => &["type", "date", "component", "outcome"],
         t if t.starts_with("backup.") => &["type", "date", "backup_id", "outcome"],
         "sys.health_band" => &["type", "date", "service", "band"],
@@ -40,7 +54,12 @@ fn allowed_keys(ty: &str) -> &'static [&'static str] {
 #[test]
 fn full_catalog_replay_respects_allow_list() {
     let (mut log, _sink, _c) = log_with(HostRole::Core, CheckpointPolicy::DEFAULT);
-    let mut exp = ScrubbedExport::new(SiemKey::new([9; 32]), ExportPrecision::Date, ExportProfile::Standard).unwrap();
+    let mut exp = ScrubbedExport::new(
+        SiemKey::new([9; 32]),
+        ExportPrecision::Date,
+        ExportProfile::Standard,
+    )
+    .unwrap();
     let mut out = Vec::new();
     let mut case_events = 0;
     let mut day = None;
@@ -69,21 +88,36 @@ fn full_catalog_replay_respects_allow_list() {
         let allowed: BTreeSet<&str> = allowed_keys(ty).iter().copied().collect();
         assert!(!allowed.is_empty(), "unexpected exported type {ty}");
         for k in obj.keys() {
-            assert!(allowed.contains(k.as_str()), "{ty}: field {k} not allow-listed");
+            assert!(
+                allowed.contains(k.as_str()),
+                "{ty}: field {k} not allow-listed"
+            );
         }
         // No raw UserRef/CaseRef, no COI code, date-only staff times.
-        assert!(!l.0.contains(&user_hex) && !l.0.contains(&case_hex));
+        // (backup_id is an allow-listed opaque ID that shares the sample bytes.)
+        if !ty.starts_with("backup.") {
+            assert!(
+                !l.0.contains(&user_hex) && !l.0.contains(&case_hex),
+                "{l:?}"
+            );
+        }
         assert!(!l.0.contains("COI"));
         if let Some(d) = obj.get("date") {
             assert_eq!(d.as_str().unwrap().len(), 10);
         }
         if let Some(t) = obj.get("ts") {
-            assert!(t.as_str().unwrap().ends_with(":00Z"), "ts coarsened to the hour");
+            assert!(
+                t.as_str().unwrap().ends_with(":00Z"),
+                "ts coarsened to the hour"
+            );
         }
         assert!(!ty.starts_with("sys.") || ty == "sys.health_band");
     }
     // Integrity alarms are among the immediate lines.
-    assert!(out.iter().any(|l| l.0.contains("audit.verification_failed")));
+    assert!(
+        out.iter()
+            .any(|l| l.0.contains("audit.verification_failed"))
+    );
 }
 
 #[test]
@@ -101,7 +135,12 @@ fn pseudonyms_are_per_destination_and_stable() {
         .unwrap()
         .record;
     let line = |key: u8| {
-        let mut e = ScrubbedExport::new(SiemKey::new([key; 32]), ExportPrecision::Date, ExportProfile::Standard).unwrap();
+        let mut e = ScrubbedExport::new(
+            SiemKey::new([key; 32]),
+            ExportPrecision::Date,
+            ExportProfile::Standard,
+        )
+        .unwrap();
         assert_eq!(e.ingest(&rec), Disposition::Batched);
         e.close_day(rec.header().ts.day()).remove(0).0
     };
@@ -110,13 +149,21 @@ fn pseudonyms_are_per_destination_and_stable() {
     let v: serde_json::Value = serde_json::from_str(&line(1)).unwrap();
     assert_eq!(v["actor"].as_str().unwrap().len(), 16, "64-bit pseudonym");
     assert_eq!(v["reason_code"], "NO_RELATION");
-    assert!(v.get("resource_kind").is_none(), "no resource in SIEM export");
+    assert!(
+        v.get("resource_kind").is_none(),
+        "no resource in SIEM export"
+    );
 }
 
 #[test]
 fn breakglass_and_health_aggregated_daily() {
     let (mut log, _sink, clock) = log_with(HostRole::Core, CheckpointPolicy::DEFAULT);
-    let mut e = ScrubbedExport::new(SiemKey::new([1; 32]), ExportPrecision::Date, ExportProfile::Standard).unwrap();
+    let mut e = ScrubbedExport::new(
+        SiemKey::new([1; 32]),
+        ExportPrecision::Date,
+        ExportProfile::Standard,
+    )
+    .unwrap();
     for _ in 0..3 {
         let r = log
             .emit(
@@ -136,7 +183,11 @@ fn breakglass_and_health_aggregated_daily() {
         let r = log
             .emit(
                 EventContext::system(Service::Health),
-                AuditEvent::SysHealth { service: Service::Web, status: st, check_code: HealthCheck::Liveness },
+                AuditEvent::SysHealth {
+                    service: Service::Web,
+                    status: st,
+                    check_code: HealthCheck::Liveness,
+                },
             )
             .unwrap()
             .record;
@@ -147,21 +198,40 @@ fn breakglass_and_health_aggregated_daily() {
     let r = log
         .emit(
             EventContext::system(Service::Health),
-            AuditEvent::SysHealth { service: Service::Upload, status: HealthStatus::Down, check_code: HealthCheck::AbuseFlood },
+            AuditEvent::SysHealth {
+                service: Service::Upload,
+                status: HealthStatus::Down,
+                check_code: HealthCheck::AbuseFlood,
+            },
         )
         .unwrap()
         .record;
     assert_eq!(e.ingest(&r), Disposition::Dropped);
     let lines = e.close_day(UtcMillis(T0).day());
     assert_eq!(lines.len(), 2);
-    assert!(lines.iter().any(|l| l.0.contains("\"band\":\"DEGRADED\"") && l.0.contains("\"service\":\"web\"")));
-    assert!(lines.iter().any(|l| l.0.contains("\"count\":3") && !l.0.contains(&"07".repeat(16))));
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.0.contains("\"band\":\"DEGRADED\"") && l.0.contains("\"service\":\"web\""))
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.0.contains("\"count\":3") && !l.0.contains(&"07".repeat(16)))
+    );
     assert!(!lines.iter().any(|l| l.0.contains("upload")));
 }
 
 #[test]
 fn precision_and_profiles() {
-    assert!(ScrubbedExport::new(SiemKey::new([1; 32]), ExportPrecision::Exact, ExportProfile::HighOrGov).is_err());
+    assert!(
+        ScrubbedExport::new(
+            SiemKey::new([1; 32]),
+            ExportPrecision::Exact,
+            ExportProfile::HighOrGov
+        )
+        .is_err()
+    );
     let (mut log, _sink, _c) = log_with(HostRole::Core, CheckpointPolicy::DEFAULT);
     let rec = log
         .emit(
@@ -175,19 +245,38 @@ fn precision_and_profiles() {
         .unwrap()
         .record;
     // HIGH/GOV: even alarms are batched daily.
-    let mut e = ScrubbedExport::new(SiemKey::new([1; 32]), ExportPrecision::Hour, ExportProfile::HighOrGov).unwrap();
+    let mut e = ScrubbedExport::new(
+        SiemKey::new([1; 32]),
+        ExportPrecision::Hour,
+        ExportProfile::HighOrGov,
+    )
+    .unwrap();
     assert_eq!(e.ingest(&rec), Disposition::Batched);
-    let mut e = ScrubbedExport::new(SiemKey::new([1; 32]), ExportPrecision::Date, ExportProfile::Standard).unwrap();
+    let mut e = ScrubbedExport::new(
+        SiemKey::new([1; 32]),
+        ExportPrecision::Date,
+        ExportProfile::Standard,
+    )
+    .unwrap();
     assert!(matches!(e.ingest(&rec), Disposition::Immediate(_)));
     // Exact (DANGEROUS) keeps milliseconds for staff dates.
     let login = log
         .emit(
             EventContext::staff(user(1)),
-            AuditEvent::AuthLoginFailed { method: AuthMethod::Totp, failure_code: LoginFailure::UvMissing, audience: Audience::AdminApi },
+            AuditEvent::AuthLoginFailed {
+                method: AuthMethod::Totp,
+                failure_code: LoginFailure::UvMissing,
+                audience: Audience::AdminApi,
+            },
         )
         .unwrap()
         .record;
-    let mut e = ScrubbedExport::new(SiemKey::new([1; 32]), ExportPrecision::Exact, ExportProfile::Standard).unwrap();
+    let mut e = ScrubbedExport::new(
+        SiemKey::new([1; 32]),
+        ExportPrecision::Exact,
+        ExportProfile::Standard,
+    )
+    .unwrap();
     e.ingest(&login);
     let l = e.close_day(login.header().ts.day()).remove(0).0;
     assert!(l.contains("T13:37:42.123Z"), "{l}");

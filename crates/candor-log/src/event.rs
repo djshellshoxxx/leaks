@@ -321,7 +321,9 @@ impl AuditEvent {
     pub fn is_import_related(&self) -> bool {
         matches!(
             self,
-            Self::CaseImported { .. } | Self::EvidenceImported { .. } | Self::CaseEnvelopeRejected { .. }
+            Self::CaseImported { .. }
+                | Self::EvidenceImported { .. }
+                | Self::CaseEnvelopeRejected { .. }
         )
     }
 }
@@ -337,7 +339,10 @@ mod tests {
         let mut seen = BTreeSet::new();
         for (n, _) in CATALOG {
             assert!(seen.insert(*n), "duplicate {n}");
-            assert!(n.bytes().all(|b| b.is_ascii_lowercase() || b == b'.' || b == b'_'));
+            assert!(
+                n.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b == b'.' || b == b'_')
+            );
             assert!(n.contains('.'));
         }
     }

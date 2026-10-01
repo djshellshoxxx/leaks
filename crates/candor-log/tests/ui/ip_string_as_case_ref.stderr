@@ -1,0 +1,5 @@
+error[E0308]: mismatched types
+ --> tests/ui/ip_string_as_case_ref.rs:7:15
+  |
+7 |         case: String::from("203.0.113.7"),
+  |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `CaseRef`, found `String`

@@ -370,7 +370,10 @@ mod tests {
 
     #[test]
     fn hex_round_trip() {
-        assert_eq!(unhex(&hex(&[0, 1, 0xab, 0xff])).unwrap(), vec![0, 1, 0xab, 0xff]);
+        assert_eq!(
+            unhex(&hex(&[0, 1, 0xab, 0xff])).unwrap(),
+            vec![0, 1, 0xab, 0xff]
+        );
         assert!(unhex("0g").is_none());
         assert!(unhex("abc").is_none());
     }

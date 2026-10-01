@@ -263,7 +263,10 @@ pub fn checkpoint_line(cp: &SignedCheckpoint) -> String {
 impl<T: JsonlTarget> AuditSink for JsonlFileSink<T> {
     fn write_record(&mut self, r: &CommittedRecord) -> Result<(), SinkError> {
         self.target
-            .append_line(JsonlFile::Records(r.header().stream), record_line(r).as_bytes())
+            .append_line(
+                JsonlFile::Records(r.header().stream),
+                record_line(r).as_bytes(),
+            )
             .map_err(|_| SinkError::Io)
     }
     fn write_checkpoint(&mut self, cp: &SignedCheckpoint) -> Result<(), SinkError> {
@@ -283,8 +286,11 @@ pub struct SharedJsonl(pub Arc<Mutex<MemoryJsonl>>);
 impl AuditSink for SharedJsonl {
     fn write_record(&mut self, r: &CommittedRecord) -> Result<(), SinkError> {
         let mut g = self.0.lock().map_err(|_| SinkError::Poisoned)?;
-        g.append_line(JsonlFile::Records(r.header().stream), record_line(r).as_bytes())
-            .map_err(|_| SinkError::Io)
+        g.append_line(
+            JsonlFile::Records(r.header().stream),
+            record_line(r).as_bytes(),
+        )
+        .map_err(|_| SinkError::Io)
     }
     fn write_checkpoint(&mut self, cp: &SignedCheckpoint) -> Result<(), SinkError> {
         let mut g = self.0.lock().map_err(|_| SinkError::Poisoned)?;
@@ -340,9 +346,14 @@ fn read_lines(r: impl BufRead) -> Result<Vec<Line>, ReadError> {
     loop {
         let mut buf = Vec::new();
         // Bounded read: never buffer more than MAX_LINE + 1 bytes per line.
-        let n = std::io::Read::take(&mut r, u64::try_from(MAX_LINE).unwrap_or(u64::MAX).saturating_add(1))
-            .read_until(b'\n', &mut buf)
-            .map_err(|_| ReadError::Io)?;
+        let n = std::io::Read::take(
+            &mut r,
+            u64::try_from(MAX_LINE)
+                .unwrap_or(u64::MAX)
+                .saturating_add(1),
+        )
+        .read_until(b'\n', &mut buf)
+        .map_err(|_| ReadError::Io)?;
         if n == 0 {
             break;
         }
@@ -374,7 +385,11 @@ pub fn read_stream(
         }
         match l.k.as_str() {
             "rec" => {
-                let bytes = l.cbor.as_deref().and_then(unhex).ok_or(ReadError::Malformed)?;
+                let bytes = l
+                    .cbor
+                    .as_deref()
+                    .and_then(unhex)
+                    .ok_or(ReadError::Malformed)?;
                 recs.push(ChainRecord::Full {
                     bytes,
                     claimed_hash: Some(h32(l.hash.as_ref())?),
@@ -394,7 +409,11 @@ pub fn read_stream(
         if l.stream != stream.code() || l.k != "cp" || l.last_seq.is_none() {
             return Err(ReadError::Malformed);
         }
-        let bytes = l.cbor.as_deref().and_then(unhex).ok_or(ReadError::Malformed)?;
+        let bytes = l
+            .cbor
+            .as_deref()
+            .and_then(unhex)
+            .ok_or(ReadError::Malformed)?;
         let sig: [u8; 64] = l
             .sig
             .as_deref()

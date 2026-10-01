@@ -43,7 +43,12 @@ fn arb_value() -> impl Strategy<Value = Value> {
 fn permute(v: &Value) -> Value {
     match v {
         Value::Array(a) => Value::Array(a.iter().map(permute).collect()),
-        Value::Map(m) => Value::Map(m.iter().rev().map(|(k, v)| (permute(k), permute(v))).collect()),
+        Value::Map(m) => Value::Map(
+            m.iter()
+                .rev()
+                .map(|(k, v)| (permute(k), permute(v)))
+                .collect(),
+        ),
         other => other.clone(),
     }
 }
@@ -83,7 +88,11 @@ enum Tamper {
 
 fn arb_tamper() -> impl Strategy<Value = Tamper> {
     prop_oneof![
-        (any::<usize>(), any::<usize>(), 0u8..8).prop_map(|(rec, byte, bit)| Tamper::FlipBit { rec, byte, bit }),
+        (any::<usize>(), any::<usize>(), 0u8..8).prop_map(|(rec, byte, bit)| Tamper::FlipBit {
+            rec,
+            byte,
+            bit
+        }),
         any::<usize>().prop_map(Tamper::Delete),
         (any::<usize>(), any::<usize>()).prop_map(|(a, b)| Tamper::Swap(a, b)),
         any::<usize>().prop_map(Tamper::Duplicate),
@@ -93,19 +102,36 @@ fn arb_tamper() -> impl Strategy<Value = Tamper> {
     ]
 }
 
-fn build(n: u8, every: u64, seed: u8) -> (Vec<ChainRecord>, Vec<candor_log::SignedCheckpoint>, ed25519_dalek::VerifyingKey) {
-    let (mut log, sink, _c) = log_with(HostRole::Core, CheckpointPolicy::new(every, 300_000).unwrap());
+fn build(
+    n: u8,
+    every: u64,
+    seed: u8,
+) -> (
+    Vec<ChainRecord>,
+    Vec<candor_log::SignedCheckpoint>,
+    ed25519_dalek::VerifyingKey,
+) {
+    let (mut log, sink, _c) = log_with(
+        HostRole::Core,
+        CheckpointPolicy::new(every, 300_000).unwrap(),
+    );
     for i in 0..n {
         log.emit(
             EventContext::staff(user(seed)),
-            AuditEvent::CaseOpened { case: CaseRef::from_bytes([i; 16]) },
+            AuditEvent::CaseOpened {
+                case: CaseRef::from_bytes([i; 16]),
+            },
         )
         .unwrap();
     }
     // Attest the tail so every record is covered by a signed checkpoint.
     log.checkpoint_now(StreamId::Case).unwrap();
     let st = sink.0.lock().unwrap();
-    (st.chain(StreamId::Case), st.checkpoints(StreamId::Case), log.verifying_key())
+    (
+        st.chain(StreamId::Case),
+        st.checkpoints(StreamId::Case),
+        log.verifying_key(),
+    )
 }
 
 proptest! {

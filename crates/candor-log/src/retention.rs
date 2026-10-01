@@ -145,7 +145,9 @@ pub fn plan_interval_deletion(
     now: UtcMillis,
 ) -> Result<Option<DeletionPlan>, RetentionError> {
     let days = policy.days(stream).ok_or(RetentionError::CaseStream)?;
-    let cutoff = now.0.saturating_sub(u64::from(days).saturating_mul(MS_PER_DAY));
+    let cutoff = now
+        .0
+        .saturating_sub(u64::from(days).saturating_mul(MS_PER_DAY));
     let last = checkpoints
         .iter()
         .filter(|c| c.body().signed_at.0 <= cutoff && c.body().last_seq >= first_retained)

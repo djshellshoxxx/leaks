@@ -32,9 +32,18 @@ fn simple(rows: usize, cols: usize, vals: &[u64]) -> Table {
     for (i, v) in vals.iter().enumerate() {
         let key = MicroKey([0; 16], i as u16);
         micro.insert(key, *v);
-        cells.push(TableCell { value: *v, members: vec![key] });
+        cells.push(TableCell {
+            value: *v,
+            members: vec![key],
+        });
     }
-    Table { rows, cols, cells, micro, protected: vec![] }
+    Table {
+        rows,
+        cols,
+        cells,
+        micro,
+        protected: vec![],
+    }
 }
 
 /// Independent brute-force attacker: enumerates every non-negative integer
@@ -42,7 +51,9 @@ fn simple(rows: usize, cols: usize, vals: &[u64]) -> Table {
 /// and totals, and returns the suppressed cells whose value is pinned.
 fn pinned_cells(rel: &Released) -> Vec<usize> {
     let (r, c) = (rel.rows, rel.cols);
-    let sup: Vec<usize> = (0..r * c).filter(|&i| rel.cells[i] == Published::Suppressed).collect();
+    let sup: Vec<usize> = (0..r * c)
+        .filter(|&i| rel.cells[i] == Published::Suppressed)
+        .collect();
     let known = |i: usize| match rel.cells[i] {
         Published::Value(v) => Some(v),
         _ => None,
@@ -63,10 +74,17 @@ fn pinned_cells(rel: &Released) -> Vec<usize> {
         eqs.push(((0..r * c).collect(), t));
     }
     let bound = |cell: usize| -> Option<u64> {
-        eqs.iter().filter(|(e, _)| e.contains(&cell)).map(|(_, t)| *t).min()
+        eqs.iter()
+            .filter(|(e, _)| e.contains(&cell))
+            .map(|(_, t)| *t)
+            .min()
     };
     // Cells in no equation are free (never pinned).
-    let constrained: Vec<usize> = sup.iter().copied().filter(|&i| bound(i).is_some()).collect();
+    let constrained: Vec<usize> = sup
+        .iter()
+        .copied()
+        .filter(|&i| bound(i).is_some())
+        .collect();
     let mut seen: BTreeMap<usize, BTreeSet<u64>> = BTreeMap::new();
     let mut assign: BTreeMap<usize, u64> = BTreeMap::new();
     fn rec(
@@ -105,12 +123,23 @@ fn pinned_cells(rel: &Released) -> Vec<usize> {
             rec(idx + 1, cells, assign, eqs, known, bound, seen);
             assign.remove(&cell);
             // Early exit: everything already shown ambiguous.
-            if cells.iter().all(|c| seen.get(c).is_some_and(|s| s.len() >= 2)) {
+            if cells
+                .iter()
+                .all(|c| seen.get(c).is_some_and(|s| s.len() >= 2))
+            {
                 return;
             }
         }
     }
-    rec(0, &constrained, &mut assign, &eqs, &known, &bound, &mut seen);
+    rec(
+        0,
+        &constrained,
+        &mut assign,
+        &eqs,
+        &known,
+        &bound,
+        &mut seen,
+    );
     constrained
         .into_iter()
         .filter(|i| seen.get(i).is_none_or(|s| s.len() < 2))
@@ -145,7 +174,11 @@ fn complementary_suppression_row_with_one_small_cell() {
     let t = simple(2, 3, &[3, 20, 30, 15, 25, 40]);
     let rel = suppress(&t, k()).unwrap();
     assert_eq!(rel.cells[0], Published::Suppressed);
-    assert_eq!(rel.cells[1], Published::Suppressed, "next-smallest in row 0");
+    assert_eq!(
+        rel.cells[1],
+        Published::Suppressed,
+        "next-smallest in row 0"
+    );
     assert!(pinned_cells(&rel).is_empty(), "{rel:?}");
     // Published row totals never allow recovery of the 3.
     let row0_known: u64 = (0..3)
@@ -187,25 +220,38 @@ fn differencing_attack_across_reports_is_blocked() {
     let all = Table {
         rows: 1,
         cols: 1,
-        cells: vec![TableCell { value: 29, members: vec![c(1), c(2), c(3)] }],
+        cells: vec![TableCell {
+            value: 29,
+            members: vec![c(1), c(2), c(3)],
+        }],
         micro: micro.clone(),
         protected: vec![],
     };
     let without3 = Table {
         rows: 1,
         cols: 1,
-        cells: vec![TableCell { value: 25, members: vec![c(1), c(2)] }],
+        cells: vec![TableCell {
+            value: 25,
+            members: vec![c(1), c(2)],
+        }],
         micro: micro.clone(),
         protected: vec![],
     };
     // In isolation each table looks safe: the attack is real.
     assert_eq!(suppress(&all, k()).unwrap().cells[0], Published::Value(29));
-    assert_eq!(suppress(&without3, k()).unwrap().cells[0], Published::Value(25));
+    assert_eq!(
+        suppress(&without3, k()).unwrap().cells[0],
+        Published::Value(25)
+    );
     // Through the period registry, the second release cannot complete the
     // subtraction 29 − 25 = 4.
     let mut reg = PeriodRegistry::new();
-    let a = reg.release(m(2026, 8), m(2026, 10), "report.all", &all, k()).unwrap();
-    let b = reg.release(m(2026, 8), m(2026, 10), "report.without3", &without3, k()).unwrap();
+    let a = reg
+        .release(m(2026, 8), m(2026, 10), "report.all", &all, k())
+        .unwrap();
+    let b = reg
+        .release(m(2026, 8), m(2026, 10), "report.without3", &without3, k())
+        .unwrap();
     assert_eq!(a.cells[0], Published::Value(29));
     assert_eq!(b.cells[0], Published::Suppressed);
     assert_eq!(b.grand_total, Published::Withheld);
@@ -222,9 +268,18 @@ fn differencing_via_marginals_is_blocked() {
         rows: 3,
         cols: 1,
         cells: vec![
-            TableCell { value: 12, members: vec![key(1)] },
-            TableCell { value: 4, members: vec![key(2)] },
-            TableCell { value: 15, members: vec![key(3)] },
+            TableCell {
+                value: 12,
+                members: vec![key(1)],
+            },
+            TableCell {
+                value: 4,
+                members: vec![key(2)],
+            },
+            TableCell {
+                value: 15,
+                members: vec![key(3)],
+            },
         ],
         micro: micro.clone(),
         protected: vec![],
@@ -233,24 +288,44 @@ fn differencing_via_marginals_is_blocked() {
     let total = Table {
         rows: 1,
         cols: 1,
-        cells: vec![TableCell { value: 31, members: vec![key(1), key(2), key(3)] }],
+        cells: vec![TableCell {
+            value: 31,
+            members: vec![key(1), key(2), key(3)],
+        }],
         micro,
         protected: vec![],
     };
     let mut reg = PeriodRegistry::new();
-    let r1 = reg.release(m(2026, 8), m(2026, 9), "by_channel", &by_channel, k()).unwrap();
-    let r2 = reg.release(m(2026, 8), m(2026, 9), "total", &total, k()).unwrap();
+    let r1 = reg
+        .release(m(2026, 8), m(2026, 9), "by_channel", &by_channel, k())
+        .unwrap();
+    let r2 = reg
+        .release(m(2026, 8), m(2026, 9), "total", &total, k())
+        .unwrap();
     // c2 must stay hidden: 31 − 12 − 15 would reveal it.
     assert_eq!(r1.cells[1], Published::Suppressed);
     let published_sum: u64 = r1
         .cells
         .iter()
-        .filter_map(|p| if let Published::Value(v) = p { Some(*v) } else { None })
+        .filter_map(|p| {
+            if let Published::Value(v) = p {
+                Some(*v)
+            } else {
+                None
+            }
+        })
         .sum();
     if let Published::Value(t) = r2.cells[0] {
-        assert!(t - published_sum >= 10 || published_sum < 27, "c2 derivable");
+        assert!(
+            t - published_sum >= 10 || published_sum < 27,
+            "c2 derivable"
+        );
         // The only way t is published is if published cells exclude ≥ 2 values.
-        let hidden = r1.cells.iter().filter(|p| **p == Published::Suppressed).count();
+        let hidden = r1
+            .cells
+            .iter()
+            .filter(|p| **p == Published::Suppressed)
+            .count();
         assert!(hidden >= 2);
     }
 }
@@ -262,14 +337,16 @@ fn tumbling_frozen_periods() {
     let t = simple(1, 1, &[40]);
     // No month-to-date figures.
     assert_eq!(
-        reg.release(m(2026, 10), m(2026, 10), "r", &t, k()).unwrap_err(),
+        reg.release(m(2026, 10), m(2026, 10), "r", &t, k())
+            .unwrap_err(),
         ReleaseError::PeriodNotClosed
     );
     reg.release(m(2026, 9), m(2026, 10), "r", &t, k()).unwrap();
     // Frozen: no revision of a released period.
     let t2 = simple(1, 1, &[41]);
     assert_eq!(
-        reg.release(m(2026, 9), m(2026, 11), "r", &t2, k()).unwrap_err(),
+        reg.release(m(2026, 9), m(2026, 11), "r", &t2, k())
+            .unwrap_err(),
         ReleaseError::AlreadyReleased
     );
 }
@@ -283,11 +360,13 @@ fn counter_aggregation_and_release() {
     let sub = IntakeCounter::Submissions;
     for _ in 0..14 {
         agg.increment(m(2026, 9), ch[0], sub).unwrap();
-        agg.increment(m(2026, 9), ch[0], IntakeCounter::AccountsCreated).unwrap();
+        agg.increment(m(2026, 9), ch[0], IntakeCounter::AccountsCreated)
+            .unwrap();
     }
     for _ in 0..12 {
         agg.increment(m(2026, 9), ch[1], sub).unwrap();
-        agg.increment(m(2026, 9), ch[1], IntakeCounter::AccountsCreated).unwrap();
+        agg.increment(m(2026, 9), ch[1], IntakeCounter::AccountsCreated)
+            .unwrap();
     }
     // ch[2]: 2 submissions (< 3 cases → folded); ch[3]: 20 but population < 50.
     for _ in 0..2 {
@@ -297,10 +376,16 @@ fn counter_aggregation_and_release() {
         agg.increment(m(2026, 9), ch[3], sub).unwrap();
     }
     // The open month cannot be taken (no month-to-date).
-    assert_eq!(agg.take_closed(m(2026, 9)).unwrap_err(), CounterError::NotClosed);
+    assert_eq!(
+        agg.take_closed(m(2026, 9)).unwrap_err(),
+        CounterError::NotClosed
+    );
     agg.increment(m(2026, 10), ch[0], sub).unwrap();
     // Stale months are rejected.
-    assert_eq!(agg.increment(m(2026, 8), ch[0], sub).unwrap_err(), CounterError::StaleMonth);
+    assert_eq!(
+        agg.increment(m(2026, 8), ch[0], sub).unwrap_err(),
+        CounterError::StaleMonth
+    );
     let closed = agg.take_closed(m(2026, 9)).unwrap();
     // Taken once: raw values are gone.
     assert!(agg.take_closed(m(2026, 9)).is_err());
@@ -313,7 +398,11 @@ fn counter_aggregation_and_release() {
     // ch[2], ch[3] folded into group 1; ch[0], ch[1] shown individually.
     assert_eq!(
         rep.rows,
-        vec![RowLabel::Channel(ch[0]), RowLabel::Channel(ch[1]), RowLabel::Group(1)]
+        vec![
+            RowLabel::Channel(ch[0]),
+            RowLabel::Channel(ch[1]),
+            RowLabel::Group(1)
+        ]
     );
     // Group row is [22, 0, 0]: its two zero cells sum to 0 < k, so the row
     // total would reveal them; complementary suppression hides the 22 too.
@@ -341,9 +430,21 @@ fn group_with_one_folded_channel_absorbs_another() {
     assert_eq!(rows, vec![RowLabel::Channel(ch[0]), RowLabel::Group(0)]);
     // Groups must have ≥ 2 channels and be disjoint.
     assert!(ChannelGroups::new(vec![vec![ch[0]]], BTreeMap::new()).is_err());
-    assert!(ChannelGroups::new(vec![vec![ch[0], ch[1]], vec![ch[1], ch[2]]], BTreeMap::new()).is_err());
+    assert!(
+        ChannelGroups::new(
+            vec![vec![ch[0], ch[1]], vec![ch[1], ch[2]]],
+            BTreeMap::new()
+        )
+        .is_err()
+    );
     // Channels outside any group are refused.
-    let lone = ClosedMonth::from_counts(m(2026, 9), [((ChannelId::from_bytes([9; 16]), IntakeCounter::Submissions), 50)]);
+    let lone = ClosedMonth::from_counts(
+        m(2026, 9),
+        [(
+            (ChannelId::from_bytes([9; 16]), IntakeCounter::Submissions),
+            50,
+        )],
+    );
     assert!(counter_table(&lone, &groups).is_err());
 }
 
@@ -356,7 +457,10 @@ fn folded_channel_not_recoverable_from_second_report() {
     let groups = ChannelGroups::new(vec![ch.clone()], pop).unwrap();
     let closed = ClosedMonth::from_counts(
         m(2026, 9),
-        [((ch[0], IntakeCounter::Submissions), 40), ((ch[1], IntakeCounter::Submissions), 12)],
+        [
+            ((ch[0], IntakeCounter::Submissions), 40),
+            ((ch[1], IntakeCounter::Submissions), 12),
+        ],
     );
     let mut reg = PeriodRegistry::new();
     let rep = release_counters(closed, &groups, &mut reg, m(2026, 10), k()).unwrap();
@@ -365,11 +469,16 @@ fn folded_channel_not_recoverable_from_second_report() {
     let single = Table {
         rows: 1,
         cols: 1,
-        cells: vec![TableCell { value: 40, members: vec![MicroKey(*ch[0].as_bytes(), 0)] }],
+        cells: vec![TableCell {
+            value: 40,
+            members: vec![MicroKey(*ch[0].as_bytes(), 0)],
+        }],
         micro: BTreeMap::from([(MicroKey(*ch[0].as_bytes(), 0), 40)]),
         protected: vec![],
     };
-    let r = reg.release(m(2026, 9), m(2026, 10), "single", &single, k()).unwrap();
+    let r = reg
+        .release(m(2026, 9), m(2026, 10), "single", &single, k())
+        .unwrap();
     assert_eq!(r.cells[0], Published::Suppressed);
 }
 

@@ -59,7 +59,11 @@ impl Sample for SeqRange {
 }
 impl Sample for Version {
     fn sample() -> Self {
-        Version { major: 1, minor: 2, patch: 3 }
+        Version {
+            major: 1,
+            minor: 2,
+            patch: 3,
+        }
     }
 }
 impl Sample for Percent {

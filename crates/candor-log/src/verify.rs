@@ -136,7 +136,8 @@ fn parse(
             bytes,
             claimed_hash,
         } => {
-            let v = cbor::decode(bytes).map_err(|_| err(VerifyFailureCode::NonCanonical, expected))?;
+            let v =
+                cbor::decode(bytes).map_err(|_| err(VerifyFailureCode::NonCanonical, expected))?;
             let mismatch = err(VerifyFailureCode::EnvelopeMismatch, expected);
             let seq = v.get("seq").and_then(cbor::Value::as_u64).ok_or(mismatch)?;
             if v.get("v").and_then(cbor::Value::as_u64) != Some(ENVELOPE_VERSION)
@@ -302,7 +303,9 @@ pub fn verify_stream(
         if !w.verify_signature(p.key) || wb.tenant != p.tenant || wb.stream != p.stream {
             return Err(err(VerifyFailureCode::BadSignature, wb.last_seq));
         }
-        let ours = checkpoints.iter().find(|c| c.body().last_seq == wb.last_seq);
+        let ours = checkpoints
+            .iter()
+            .find(|c| c.body().last_seq == wb.last_seq);
         match ours {
             Some(c) if c.hash() == w.hash() => {}
             _ => return Err(err(VerifyFailureCode::Rollback, wb.last_seq)),
@@ -310,7 +313,10 @@ pub fn verify_stream(
     }
 
     let tail_from = usize::try_from(attested_end.saturating_sub(start)).unwrap_or(usize::MAX);
-    let pending_leaves = leaves.get(tail_from..).map(<[_]>::to_vec).unwrap_or_default();
+    let pending_leaves = leaves
+        .get(tail_from..)
+        .map(<[_]>::to_vec)
+        .unwrap_or_default();
     Ok(VerifyReport {
         first_seq: (!records.is_empty()).then_some(start),
         next_seq: end,
