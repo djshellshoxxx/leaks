@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Safety-tip conformance tests (`specs/11a-SOURCE-SAFETY-TIPS.md`, TIP-*).
 
+// Test-only: reads the crate's own template sources and prints budget reports (no source
+// data); the ADR-027 safefs/logging bans in `clippy.toml` target shipped code.
 #![allow(
+    clippy::disallowed_methods,
+    clippy::disallowed_macros,
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,

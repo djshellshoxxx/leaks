@@ -3,6 +3,11 @@
 //! `target/source-ui-preview/` for manual review. Run with
 //! `cargo run -p candor-source-ui --example render_all`.
 
+// Dev-only preview tool (never shipped, not linked into any server binary): it writes the
+// rendered pages under `target/` for manual review, so the ADR-027 safefs/logging bans in
+// `clippy.toml` do not apply here.
+#![allow(clippy::disallowed_methods, clippy::disallowed_macros)]
+
 use std::fs; // safefs-lint: allow(dev-only preview example writing to target/, never shipped)
 use std::path::PathBuf;
 

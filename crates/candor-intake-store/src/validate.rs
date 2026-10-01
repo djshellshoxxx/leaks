@@ -9,7 +9,7 @@ use subtle::ConstantTimeEq;
 use crate::deletion::{DeletionEntry, SignedDeletionHead, verify_chain};
 use crate::error::{Result, StoreError};
 use crate::types::{
-    BackupSnapshot, ClaimLimits, CommitEnvelope, CounterDelta, DISPOSITION_CT_LEN_STD,
+    BackupSnapshot, ClaimLimits, CommitEnvelope, CounterDelta, DISPOSITION_CT_LEN_STD, Day,
     GROUP_OBJECTS, IncomingReply, InstallOutcome, KdHighWater, MAX_CLAIM_BYTES, MAX_CLAIM_OBJECTS,
     MAX_PART_PADDED_SIZE, MAX_PREFS_CT, MAX_PUSHED_DELETION_LIST, MAX_RELEASE_OFFSET_DAYS,
     MAX_REPLY_CT, MAX_SNAPSHOT_BODY, MAX_SNAPSHOT_SIGNATURES, NewAccount, SLOT_BLOCK_LEN_STD,
@@ -123,6 +123,15 @@ pub(crate) fn backup(b: &BackupSnapshot) -> Result<()> {
         return Err(StoreError::DeletionList("backup list not a chain"));
     }
     if let Some(h) = &b.meta.deletion_head {
+        // Shape of a stored head (AUD-RM2-STO-24): seq ≥ 1, counter ≥ 1.
+        if h.seq == 0
+            || h.counter == 0
+            || i64::try_from(h.seq).is_err()
+            || i64::try_from(h.counter).is_err()
+        {
+            return Err(StoreError::DeletionList("backup head malformed"));
+        }
+        day_i32(h.day)?;
         let map: BTreeMap<u64, &DeletionEntry> =
             b.deletion_list.iter().map(|e| (e.seq, e)).collect();
         if !links_to_head(&map, h) {
@@ -262,20 +271,23 @@ impl From<SnapshotDecision> for InstallOutcome {
     }
 }
 
-/// RL-12 step 1 (outside any lock, AUD-RM2-STO-12/22): bound the size, verify
-/// the Z-CORE head attestation under `core_pk`, and verify the pushed run's
-/// internal chain and every strict Ed25519 signature under K31.
+/// RL-12 step 1 (outside any lock, AUD-RM2-STO-12/22/24): bound the size,
+/// verify the Z-CORE head attestation under `core_pk` and its freshness
+/// against `today`, and verify the pushed run's internal chain and every strict
+/// Ed25519 signature under K31.
 pub(crate) fn verify_pushed(
     pushed: &[DeletionEntry],
     k31_pk: &[u8; 32],
     head: &SignedDeletionHead,
     tenant: &TenantId,
     core_pk: &[u8; 32],
+    today: Day,
 ) -> Result<()> {
     if pushed.len() > MAX_PUSHED_DELETION_LIST {
         return Err(StoreError::InvalidInput("deletion list too long"));
     }
     head.verify(tenant, core_pk)?;
+    head.check_fresh(today)?;
     verify_chain(pushed, k31_pk, None)
 }
 
@@ -300,23 +312,24 @@ pub(crate) fn links_to_head(map: &BTreeMap<u64, &DeletionEntry>, h: &SignedDelet
         .is_some_and(|n| bool::from(n.prev_hash.ct_eq(&h.head_hash)))
 }
 
-/// RL-11 acknowledgement of a verified Z-CORE head (AUD-RM2-STO-21): the head
+/// RL-11 acknowledgement of a verified Z-CORE head (AUD-RM2-STO-21/24): the
+/// head must not be older (by attestation counter) than the acknowledged head,
 /// must lie within the local chain and match it. Returns `true` when the stored
-/// acknowledged head must advance; an older head changes nothing.
+/// acknowledged head must advance (a newer attestation, also of the same seq);
+/// an identical re-acknowledgement and a seq-0 head change nothing.
 pub(crate) fn ack_head(
     local: &[DeletionEntry],
     current: Option<&SignedDeletionHead>,
     head: &SignedDeletionHead,
 ) -> Result<bool> {
-    let cur = current.map_or(0, |c| c.seq);
-    if head.seq < cur {
+    if !head.newer_than(current)? || head.seq == 0 {
         return Ok(false);
     }
     if let Some(c) = current
-        && head.seq == cur
+        && head.seq == c.seq
     {
         return if bool::from(c.head_hash.ct_eq(&head.head_hash)) {
-            Ok(false)
+            Ok(true)
         } else {
             Err(StoreError::DeletionList(
                 "head differs from acknowledged head",
@@ -338,7 +351,8 @@ pub(crate) fn ack_head(
 /// into the local list (AUD-RM2-STO-04/22). `local` is sorted by seq;
 /// `verified` is the last Z-CORE head the store verified (kept across restore);
 /// `head` is the verified Z-CORE head of this push. Fails closed on:
-/// - a head older than the verified head;
+/// - a head older than the verified head (attestation counter, day or seq;
+///   AUD-RM2-STO-24), or a different head with the same counter;
 /// - a non-empty push that does not end exactly at the signed head (seq and
 ///   chain hash: truncation or a relay-claimed head);
 /// - an empty push unless the local chain already contains the head;
@@ -359,9 +373,7 @@ pub(crate) fn merge_pushed(
     if pushed.len() > MAX_PUSHED_DELETION_LIST {
         return Err(StoreError::InvalidInput("deletion list too long"));
     }
-    if head.seq < verified.map_or(0, |v| v.seq) {
-        return Err(StoreError::DeletionList("Z-CORE head behind verified head"));
-    }
+    head.newer_than(verified)?;
     let map: BTreeMap<u64, &DeletionEntry> = local.iter().map(|e| (e.seq, e)).collect();
     let Some(last) = pushed.last() else {
         return if links_to_head(&map, head) && verified.is_none_or(|v| links_to_head(&map, v)) {
@@ -548,8 +560,15 @@ mod tests {
         candor_core::sig::SigningKey::from_seed(&[0x7c; 32])
     }
 
+    const HDAY: Day = Day(20_000);
+
+    /// A Z-CORE head on day `HDAY` whose counter grows with the seq.
     fn head_of(e: Option<&DeletionEntry>) -> SignedDeletionHead {
-        SignedDeletionHead::sign(&T, e, &core_key())
+        head_at(e, HDAY, e.map_or(0, |e| e.seq) + 1)
+    }
+
+    fn head_at(e: Option<&DeletionEntry>, day: Day, counter: u64) -> SignedDeletionHead {
+        SignedDeletionHead::sign(&T, e, day, counter, &core_key())
     }
 
     /// AUD-RM2-STO-04/22: gapped, truncated, empty, unanchored and forked pushes
@@ -560,7 +579,7 @@ mod tests {
         let (all, pk) = chain(8);
         let cpk = core_key().verifying_key_bytes();
         let h8 = head_of(all.last());
-        verify_pushed(&all, &pk, &h8, &T, &cpk).unwrap();
+        verify_pushed(&all, &pk, &h8, &T, &cpk, HDAY).unwrap();
         let local = &all[..2];
         // Gap: local [1,2] + pushed [5..=6].
         assert_eq!(
@@ -653,7 +672,62 @@ mod tests {
         let mut z = h;
         z.head_hash = [0; 32];
         assert!(z.verify(&T, &cpk).is_err());
-        assert!(verify_pushed(&all, &pk, &s, &T, &cpk).is_err());
+        assert!(verify_pushed(&all, &pk, &s, &T, &cpk, HDAY).is_err());
+        // Day and counter are signed (AUD-RM2-STO-24).
+        let mut d = h;
+        d.day = Day(HDAY.0 + 1);
+        assert!(d.verify(&T, &cpk).is_err());
+        let mut c = h;
+        c.counter += 1;
+        assert!(c.verify(&T, &cpk).is_err());
+        assert!(head_at(all.last(), HDAY, 0).verify(&T, &cpk).is_err());
+    }
+
+    /// AUD-RM2-STO-24(b): RL-12 heads must be fresh (±1 day) and not older
+    /// than the verified head by attestation counter; the same counter must
+    /// carry the same attestation.
+    #[test]
+    fn head_freshness_and_monotonic_rules() {
+        let (all, pk) = chain(6);
+        let cpk = core_key().verifying_key_bytes();
+        let h = head_at(all.last(), HDAY, 50);
+        for (today, ok) in [
+            (HDAY, true),
+            (Day(HDAY.0 + 1), true),
+            (Day(HDAY.0 - 1), true),
+            (Day(HDAY.0 + 2), false),
+            (Day(HDAY.0 - 2), false),
+        ] {
+            assert_eq!(
+                verify_pushed(&all, &pk, &h, &T, &cpk, today).is_ok(),
+                ok,
+                "today {today:?}"
+            );
+        }
+        // Replay of an older head after a newer one was verified.
+        let v = head_at(all.get(3), HDAY, 40);
+        let older = head_at(all.get(4), HDAY, 30);
+        assert_eq!(
+            merge_pushed(&all[..4], Some(&v), &all[4..5], &older),
+            Err(StoreError::DeletionList(
+                "Z-CORE head older than the verified head"
+            ))
+        );
+        // Same counter, different content.
+        let twin = head_at(all.get(4), HDAY, 40);
+        assert_eq!(
+            merge_pushed(&all[..4], Some(&v), &all[4..5], &twin),
+            Err(StoreError::DeletionList("conflicting Z-CORE head"))
+        );
+        // Newer counter but an earlier day.
+        let back = head_at(all.get(4), Day(HDAY.0 - 1), 41);
+        assert!(merge_pushed(&all[..4], Some(&v), &all[4..5], &back).is_err());
+        // Identical re-push and a newer attestation are accepted.
+        assert!(merge_pushed(&all[..4], Some(&v), &[], &v).is_ok());
+        assert_eq!(
+            merge_pushed(&all[..4], Some(&v), &all[4..], &h).unwrap().len(),
+            2
+        );
     }
 
     /// AUD-RM2-STO-21: acknowledgement only of a head the local chain contains.
@@ -663,7 +737,15 @@ mod tests {
         let h3 = head_of(all.get(2));
         assert_eq!(ack_head(&all, None, &h3), Ok(true));
         assert_eq!(ack_head(&all, Some(&h3), &h3), Ok(false));
-        assert_eq!(ack_head(&all, Some(&h3), &head_of(all.get(1))), Ok(false));
+        // An older attestation is refused (AUD-RM2-STO-24), a newer one of
+        // the same head refreshes it, a newer one of a different hash fails.
+        assert!(ack_head(&all, Some(&h3), &head_of(all.get(1))).is_err());
+        assert_eq!(
+            ack_head(&all, Some(&h3), &head_at(all.get(2), HDAY, 9)),
+            Ok(true)
+        );
+        assert!(ack_head(&all, Some(&h3), &head_at(all.get(1), HDAY, 9)).is_err());
+        assert!(ack_head(&all, Some(&h3), &head_at(all.get(2), Day(1), 9)).is_err());
         assert!(matches!(
             ack_head(&all[..2], None, &h3),
             Err(StoreError::InvalidInput(_))

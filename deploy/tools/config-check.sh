@@ -66,7 +66,7 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd -P)
 BASE="$SCRIPT_DIR/config-check.baseline"
 MANIFEST="$SCRIPT_DIR/config-check.manifest"
 # sha256 of config-check.manifest (release-pinned; update together with the manifest).
-MANIFEST_SHA256=@@MANIFEST_SHA256@@
+MANIFEST_SHA256=d0bdb180c9ea9d1884ee22d5ddbacd0d2c1a499a04dbfda9ae9f4ebed3549090
 SECTIONS="tor nft pg units journald kernel dns apparmor host"
 MODE=static
 DIR="$SCRIPT_DIR/../intake"
@@ -271,7 +271,8 @@ tor_canon() { # snapshot -> $WORK/tor/{verify,short,full}.out ; returns non-zero
     mkdir -m 0700 /var/lib/.cc
     mount --bind "$1" /var/lib/.cc
     mount -t tmpfs -o mode=0755,size=16m tmpfs /run
-    mkdir -p /var/lib/tor-instances/candor-intake
+    mkdir -m 0755 /var/lib/tor-instances
+    mkdir -m 0700 /var/lib/tor-instances/candor-intake
     chown "$2:$3" /var/lib/tor-instances/candor-intake
     chmod 0700 /var/lib/tor-instances/candor-intake
     for m in verify short full; do
@@ -537,7 +538,7 @@ check_pg() {
 
   # pg_hba / pg_ident: Unix-socket peer only, reject last (09 §10, DB-022, R7 SI-E-01), and
   # exactly the release lines (AUD-RM2-DEP-19; ADR-052(9): the migration user's single line).
-  if snap pg.hba_file "$PGHBA" pg_hba.conf; then
+  if snap pg.hba_conf "$PGHBA" pg_hba.conf; then
     local hba last
     hba=$(sed -e 's/#.*$//' "$SNAP" | trim | tr -s ' \t' '  ' | grep -v '^$')
     if printf '%s\n' "$hba" | awk '$1 != "local" {bad=1} END {exit bad?0:1}'; then fail pg.hba_local_only "non-local (TCP) line present"; else ok pg.hba_local_only; fi
@@ -548,7 +549,7 @@ check_pg() {
     if [ "$last" = "local all all reject" ]; then ok pg.hba_reject_last; else fail pg.hba_reject_last "last line must be 'local all all reject'"; fi
     pg_exact pg.hba_exact hba "$hba"
   fi
-  if snap pg.ident_file "$PGIDENT" pg_ident.conf; then
+  if snap pg.ident_conf "$PGIDENT" pg_ident.conf; then
     pg_exact pg.ident_exact ident "$(sed -e 's/#.*$//' "$SNAP" | trim | tr -s ' \t' '  ' | grep -v '^$')"
   fi
 
@@ -591,8 +592,9 @@ pg_exact() { # rule kind text: normalised lines must equal the baseline's <kind>
 # =============================================================================== systemd units
 ALL_UNITS="tor@candor-intake.service candor-intake-web.service candor-sealer.service candor-intake-store.service
 candor-intake-pg.service candor-intake-web.socket candor-sealer.socket candor-intake-store.socket
-candor-intake-store-relay.socket run-candor-staging.mount"
-SERVICES="tor@candor-intake.service:15 candor-intake-web.service:5 candor-sealer.service:5 candor-intake-store.service:5 candor-intake-pg.service:5"
+candor-intake-store-relay.socket run-candor-staging.mount candor-intake-vacuum.service candor-intake-vacuum.timer
+candor-intake-maint.service candor-intake-maint.timer"
+SERVICES="tor@candor-intake.service:15 candor-intake-web.service:5 candor-sealer.service:5 candor-intake-store.service:5 candor-intake-pg.service:5 candor-intake-vacuum.service:5 candor-intake-maint.service:5"
 
 SR=""
 units_root() { # static: a scratch root holding the tree (+ profile drop-ins) as /etc/systemd/system
@@ -813,7 +815,9 @@ check_host_units() {
     unit_merge "${files[@]}" > "$WORK/eff.$u"
     awk -v u="$u" '
       FNR==NR { if (split($0, a, "|") >= 5 && a[1]=="hunit" && a[2]==u) { k=a[3] "|" a[4]; order[++n]=k; mode[k]=a[5]; ex[k]=substr($0, length(a[1] a[2] a[3] a[4] a[5])+6) } next }
-      { e=index($0, "|"); s=substr($0, 1, e-1); r=substr($0, e+1); e=index(r, "|"); k=s "|" substr(r, 1, e-1); got[k]=substr(r, e+1); seen[k]=1 }
+      { e=index($0, "|"); s=substr($0, 1, e-1); r=substr($0, e+1); e=index(r, "|"); kk=substr(r, 1, e-1); k=s "|" kk; got[k]=substr(r, e+1); seen[k]=1
+        # A condition or assertion can silently skip the unit: only pinned ones are allowed.
+        if (kk ~ /^(Condition|Assert)/ && !(k in mode)) { gsub(/[^A-Za-z0-9]/, "?", kk); printf "FAIL\thost.unit.%s.%s\tunpinned condition/assertion\n", u, substr(kk, 1, 48) } }
       END { for (i=1; i<=n; i++) { k=order[i]; dk=k; sub(/\|/, ".", dk)
         if (mode[k]=="absent") { if (k in seen) printf "FAIL\thost.unit.%s.%s\tmust not be set\n", u, dk; else printf "OK\thost.unit.%s.%s\tabsent\n", u, dk }
         else if (!(k in seen)) printf "FAIL\thost.unit.%s.%s\tmissing (expected %s)\n", u, dk, ex[k]
@@ -837,7 +841,7 @@ check_host_units() {
 check_units_live() {
   have systemctl || { fail unit.live "systemctl missing"; return; }
   local u spec kind p want got
-  for spec in tor@candor-intake.service:tor candor-intake-web.service:candor candor-sealer.service:candor candor-intake-store.service:candor candor-intake-pg.service:pg; do
+  for spec in tor@candor-intake.service:tor candor-intake-web.service:candor candor-sealer.service:candor candor-intake-store.service:candor candor-intake-pg.service:pg candor-intake-vacuum.service:candor candor-intake-maint.service:candor; do
     u=${spec%%:*}; kind=${spec##*:}
     if ! systemctl show --no-pager "$u" > "$WORK/show" 2>/dev/null || [ ! -s "$WORK/show" ]; then fail "unit.$u.live" "systemctl show failed"; continue; fi
     # Drop-ins actually loaded must be the ones systemd-analyze verify found.
@@ -856,7 +860,7 @@ check_units_live() {
 journald_eff() { # label file catconfig-name -> "Key=Value" last-wins of [Journal]
   if [ "$MODE" = host ]; then
     systemd-analyze "--root=${ROOT:-/}" cat-config "$3" 2>/dev/null
-  else cat -- "$2"; fi | awk '
+  else cat -- "$SNAP"; fi | awk '
     /^[ \t]*[#;]/ || /^[ \t]*$/ { next }
     /^\[/ { s=$0; next }
     s=="[Journal]" { e=index($0, "="); k=substr($0, 1, e-1); v=substr($0, e+1); gsub(/^[ \t]+|[ \t]+$/, "", k); gsub(/^[ \t]+|[ \t]+$/, "", v); val[k]=v }
@@ -877,7 +881,7 @@ to_seconds() { # systemd time span (subset) -> seconds, or empty if unparseable
       if (ok) print total }'
 }
 check_journald() { # rule file catconfig-name ns(0|1)
-  if [ "$MODE" = static ]; then need_file "$1.file" "$2" || return; fi
+  if [ "$MODE" = static ]; then snap "$1.file" "$2" "journald.$1" || return; fi
   [ "$MODE" = static ] || have systemd-analyze || { fail "$1" "systemd-analyze missing"; return; }
   local e k w g s
   e=$(journald_eff "$1" "$2" "$3")
@@ -885,16 +889,16 @@ check_journald() { # rule file catconfig-name ns(0|1)
   for k in Storage=volatile ForwardToSyslog=no ForwardToKMsg=no ForwardToConsole=no ForwardToWall=no Audit=no; do
     w=${k#*=}; k=${k%%=*}
     g=$(printf '%s\n' "$e" | sed -n "s/^$k=//p")
-    if [ "$g" = "$w" ]; then ok "$1.$k" "$w"; else fail "$1.$k" "expected '$w', effective '$g'"; fi
+    if [ "$g" = "$w" ]; then ok "$1.$k" "$w"; else fail "$1.$k" "expected '$w', effective value differs"; fi
   done
   for k in MaxRetentionSec:86400 MaxFileSec:3600; do
     w=${k#*:}; k=${k%%:*}
     g=$(printf '%s\n' "$e" | sed -n "s/^$k=//p"); s=$(to_seconds "$g")
-    if [ -n "$s" ] && [ "$s" -gt 0 ] && [ "$s" -le "$w" ]; then ok "$1.$k" "$g"; else fail "$1.$k" "must be set and <= ${w}s, effective '$g'"; fi
+    if [ -n "$s" ] && [ "$s" -gt 0 ] && [ "$s" -le "$w" ]; then ok "$1.$k" "${s}s"; else fail "$1.$k" "must be set and <= ${w}s"; fi
   done
   if [ "$4" -eq 1 ]; then
     g=$(printf '%s\n' "$e" | sed -n 's/^MaxLevelStore=//p')
-    case "$g" in emerg|alert|crit|0|1|2) ok "$1.MaxLevelStore" "$g" ;; *) fail "$1.MaxLevelStore" "must be crit or lower, effective '$g'" ;; esac
+    case "$g" in emerg|alert|crit|0|1|2) ok "$1.MaxLevelStore" "$g" ;; *) fail "$1.MaxLevelStore" "must be crit or lower" ;; esac
   fi
 }
 
@@ -904,16 +908,18 @@ check_kernel() {
   # ---- sysctl (20 §11.4, 17 sysctl row; AUD-RM2-DEP-09)
   if [ "$LIVE" -eq 1 ]; then src=live
   elif [ "$MODE" = host ]; then src=offline
-  else src="file"; need_file kernel.sysctl.file "$SYSCTL" || src="none"; fi
+  else src="file"; if snap kernel.sysctl.file "$SYSCTL" sysctl.conf; then local SYSCTL=$SNAP; else src="none"; fi; fi
   if [ "$src" = file ]; then
     local extra
     extra=$(awk -F'|' 'NR==FNR { if ($1=="sysctl") ok[$2]=1; next }
       /^[ \t]*[#;]/ || /^[ \t]*$/ { next }
-      { l=$0; sub(/^[ \t]*-?/, "", l); e=index(l, "="); k=substr(l, 1, e-1); gsub(/[ \t]+$/, "", k); if (!(k in ok)) print k }' "$BASE" "$SYSCTL" | tr '\n' ' ')
+      { l=$0; sub(/^[ \t]*-?/, "", l); e=index(l, "="); k=substr(l, 1, e-1); gsub(/[ \t]+$/, "", k); if (!(k in ok)) print k }' "$BASE" "$SYSCTL" | san_names)
     if [ -n "$extra" ]; then fail kernel.sysctl.allowed_keys "keys not in the baseline: $extra"; else ok kernel.sysctl.allowed_keys; fi
   fi
+  # Offline precedence = systemd-sysctl's (AUD-RM2-DEP-18): sysctl.d only, in systemd's order;
+  # /etc/sysctl.conf counts only through Debian's 99-sysctl.conf link inside sysctl.d.
   if [ "$src" = file ] || [ "$src" = offline ]; then
-    { if [ "$src" = file ]; then cat -- "$SYSCTL"; else systemd-analyze "--root=$ROOT" cat-config sysctl.d 2>/dev/null; [ -f "$ROOT/etc/sysctl.conf" ] && cat -- "$ROOT/etc/sysctl.conf"; fi; } |
+    { if [ "$src" = file ]; then cat -- "$SYSCTL"; else systemd-analyze "--root=$ROOT" cat-config sysctl.d 2>/dev/null; fi; } |
       awk '/^[ \t]*[#;]/ || /^[ \t]*$/ { next } { l=$0; sub(/^[ \t]*-?/, "", l); e=index(l, "="); k=substr(l, 1, e-1); v=substr(l, e+1)
         gsub(/^[ \t]+|[ \t]+$/, "", k); gsub(/^[ \t]+|[ \t]+$/, "", v); gsub(/[ \t]+/, " ", v); val[k]=v }
         END { for (k in val) print k "\t" val[k] }' > "$WORK/sysctl.eff"
@@ -923,51 +929,54 @@ check_kernel() {
       if [ "$src" = live ]; then
         if [ -r "/proc/sys/$(printf '%s' "$k" | tr . /)" ]; then g=$(tr -s ' \t' '  ' < "/proc/sys/$(printf '%s' "$k" | tr . /)" | trim); else g="<absent>"; fi
       else g=$(awk -F'\t' -v k="$k" '$1==k {print $2}' "$WORK/sysctl.eff"); fi
-      if [ "$g" = "$w" ]; then ok "kernel.sysctl.$k" "$w"; else fail "kernel.sysctl.$k" "expected '$w', found '$g'"; fi
+      if [ "$g" = "$w" ]; then ok "kernel.sysctl.$k" "$w"; else fail "kernel.sysctl.$k" "expected '$w', effective value differs"; fi
     done < <(base sysctl)
   fi
   # ---- systemd-coredump stores nothing (20 §11.4, REQ-H-58)
   local cd
   if [ "$MODE" = host ]; then cd=$(systemd-analyze "--root=${ROOT:-/}" cat-config systemd/coredump.conf 2>/dev/null)
-  elif need_file kernel.coredump.file "$COREDUMP"; then cd=$(cat -- "$COREDUMP"); else cd=""; fi
+  elif snap kernel.coredump.file "$COREDUMP" coredump.conf; then cd=$(cat -- "$SNAP"); else cd=""; fi
   for k in Storage=none ProcessSizeMax=0; do
     w=${k#*=}; k=${k%%=*}
     g=$(printf '%s\n' "$cd" | awk -v k="$k" '/^\[/ { s=$0; next } s=="[Coredump]" { e=index($0, "="); kk=substr($0, 1, e-1); gsub(/[ \t]/, "", kk); if (kk==k) { v=substr($0, e+1); gsub(/^[ \t]+|[ \t]+$/, "", v) } } END { print v }')
-    if [ "$g" = "$w" ]; then ok "kernel.coredump.$k" "$w"; else fail "kernel.coredump.$k" "expected '$w', effective '$g'"; fi
+    if [ "$g" = "$w" ]; then ok "kernel.coredump.$k" "$w"; else fail "kernel.coredump.$k" "expected '$w', effective value differs"; fi
   done
   [ "$MODE" = host ] || return
   local sock="$ROOT/etc/systemd/system/systemd-coredump.socket"
   if [ ! -e "$ROOT/usr/lib/systemd/system/systemd-coredump.socket" ] || [ "$(readlink "$sock" 2>/dev/null)" = /dev/null ]; then ok kernel.coredump_socket_masked
   else fail kernel.coredump_socket_masked "systemd-coredump.socket installed and not masked"; fi
   # ---- swap: none, or dm-crypt swap with a fresh random key per boot (20 §11.4)
-  local dev name line bad=""
+  local dev name line bad="" ct
+  snap_opt kernel.swap "$ROOT/etc/crypttab" crypttab || return
+  ct=$SNAP
   if [ "$LIVE" -eq 1 ]; then
     while read -r dev _; do
       case "$dev" in Filename) continue ;; /dev/dm-*) name=$(cat "/sys/block/${dev#/dev/}/dm/name" 2>/dev/null) ;; /dev/mapper/*) name=${dev#/dev/mapper/} ;; *) bad="$bad $dev"; continue ;; esac
-      line=$(awk -v n="$name" '$1==n' "$ROOT/etc/crypttab" 2>/dev/null)
+      line=$(awk -v n="$name" '$1==n' "$ct" 2>/dev/null)
       printf '%s\n' "$line" | awk '$3=="/dev/urandom" && $4 ~ /(^|,)swap(,|$)/ {f=1} END {exit f?0:1}' || bad="$bad $dev"
     done < /proc/swaps
   else
+    snap_opt kernel.swap "$ROOT/etc/fstab" fstab || return
     while read -r dev _ typ _; do
       [ "$typ" = swap ] || continue
       case "$dev" in /dev/mapper/*) name=${dev#/dev/mapper/} ;; *) bad="$bad $dev"; continue ;; esac
-      line=$(awk -v n="$name" '$1==n' "$ROOT/etc/crypttab" 2>/dev/null)
+      line=$(awk -v n="$name" '$1==n' "$ct" 2>/dev/null)
       printf '%s\n' "$line" | awk '$3=="/dev/urandom" && $4 ~ /(^|,)swap(,|$)/ {f=1} END {exit f?0:1}' || bad="$bad $dev"
-    done < <(grep -vE '^[[:space:]]*(#|$)' "$ROOT/etc/fstab" 2>/dev/null)
+    done < <(grep -vE '^[[:space:]]*(#|$)' "$SNAP" 2>/dev/null)
   fi
-  if [ -n "$bad" ]; then fail kernel.swap "swap that is not random-key dm-crypt:$bad"; else ok kernel.swap "none, or random-key encrypted only"; fi
+  if [ -n "$bad" ]; then fail kernel.swap "$(printf '%s' "$bad" | wc -w) swap device(s) that are not random-key dm-crypt"; else ok kernel.swap "none, or random-key encrypted only"; fi
 }
 
 # =============================================================================== DNS
 check_resolv() {
-  need_file dns.resolv "$RESOLV" || return
+  snap dns.resolv "$RESOLV" resolv.conf || return
   local ns
-  ns=$(sed -e 's/#.*$//' "$RESOLV" | awk '$1=="nameserver" {print $2}' | sort -u | tr '\n' ' ')
-  if [ "$ns" = "127.0.0.1 " ] || [ "$ns" = "::1 " ]; then ok dns.no_resolver "nameserver $ns(nothing listens)"; else fail dns.no_resolver "only a loopback nameserver allowed, found '$ns'"; fi
+  ns=$(sed -e 's/#.*$//' "$SNAP" | awk '$1=="nameserver" {print $2}' | sort -u | tr '\n' ' ')
+  if [ "$ns" = "127.0.0.1 " ] || [ "$ns" = "::1 " ]; then ok dns.no_resolver "nameserver $ns(nothing listens)"; else fail dns.no_resolver "only a loopback nameserver allowed"; fi
 }
 
 # =============================================================================== host-only
-group_members() { awk -F: -v g="$1" '$1==g {print $4}' "$ROOT/etc/group" 2>/dev/null; }
+group_members() { awk -F: -v g="$1" '$1==g {print $4}' "$GROUPF" 2>/dev/null; }
 check_host() {
   local v g
   if [ "$LIVE" -eq 1 ]; then
@@ -989,22 +998,138 @@ check_host() {
   done
   # No tor control group and nobody else in tor's group (AUD-RM2-DEP-04); journal readers are
   # root only (the journal files are group-readable by systemd-journal and adm).
-  if [ -r "$ROOT/etc/group" ]; then
-    if grep -q '^_candor-torctl:' "$ROOT/etc/group"; then fail host.no_torctl_group "group _candor-torctl exists"; else ok host.no_torctl_group; fi
+  if snap host.groups "$ROOT/etc/group" group && GROUPF=$SNAP && snap host.groups "$ROOT/etc/passwd" passwd; then
+    if grep -q '^_candor-torctl:' "$GROUPF"; then fail host.no_torctl_group "group _candor-torctl exists"; else ok host.no_torctl_group; fi
     for g in _tor-candor-intake systemd-journal adm; do
       v=$(group_members "$g")
-      if [ -z "$v" ]; then ok "host.group_empty.$g"; else fail "host.group_empty.$g" "members: $v"; fi
+      if [ -z "$v" ]; then ok "host.group_empty.$g"; else fail "host.group_empty.$g" "members: $(printf '%s' "$v" | tr ',' ' ' | san_names)"; fi
     done
-    v=$(awk -F: 'NR==FNR { if ($1=="_tor-candor-intake") g=$3; next } $4==g && $1!="_tor-candor-intake" {print $1}' "$ROOT/etc/group" "$ROOT/etc/passwd" 2>/dev/null | tr '\n' ' ')
+    v=$(awk -F: 'NR==FNR { if ($1=="_tor-candor-intake") g=$3; next } $4==g && $1!="_tor-candor-intake" {print $1}' "$GROUPF" "$SNAP" 2>/dev/null | san_names)
     if [ -z "$v" ]; then ok host.tor_group_primary_only; else fail host.tor_group_primary_only "other users with tor's primary group: $v"; fi
-  else fail host.groups "cannot read /etc/group"; fi
-  # AppArmor profiles loaded in enforce mode (17 §5.2; AUD-RM2-DEP-08).
-  local p
-  for p in candor-tor-intake candor-web candor-sealer candor-intake-store candor-intake-pg; do
-    if [ "$LIVE" -eq 1 ]; then
-      if grep -qx "$p (enforce)" /sys/kernel/security/apparmor/profiles 2>/dev/null; then ok "host.apparmor.$p" enforce; else fail "host.apparmor.$p" "profile not loaded in enforce mode"; fi
-    elif [ -f "$ROOT/etc/apparmor.d/$p" ]; then ok "host.apparmor.$p" "installed (offline root: load state not checked)"
-    else fail "host.apparmor.$p" "profile file missing"; fi
+  fi
+  # ---- AUD-RM2-DEP-18: paths outside the unit set that would undo the confinement
+  # Library injection into every process: /etc/ld.so.preload must not exist at all.
+  if [ -e "$ROOT/etc/ld.so.preload" ] || [ -L "$ROOT/etc/ld.so.preload" ]; then fail host.no_ld_so_preload "/etc/ld.so.preload exists"
+  else ok host.no_ld_so_preload; fi
+  # Manager environment handed to every unit (LD_PRELOAD, LD_LIBRARY_PATH, ...).
+  local env
+  env=$(systemd-analyze "--root=${ROOT:-/}" cat-config systemd/system.conf 2>/dev/null | awk '
+    /^[ \t]*[#;]/ || /^[ \t]*$/ { next } /^\[/ { s=$0; next }
+    s=="[Manager]" { e=index($0, "="); k=substr($0, 1, e-1); gsub(/[ \t]/, "", k)
+      if (k=="DefaultEnvironment" || k=="ManagerEnvironment") { v=substr($0, e+1); gsub(/^[ \t]+|[ \t]+$/, "", v); val[k]=v } }
+    END { for (k in val) if (val[k] != "") print k }' | san_names)
+  if [ -n "$env" ]; then fail host.manager_environment "set in system.conf(.d): $env (values not shown)"; else ok host.manager_environment "DefaultEnvironment/ManagerEnvironment unset"; fi
+  if [ "$LIVE" -eq 1 ]; then
+    if have systemctl; then
+      env=$(systemctl show --property=Environment --value 2>/dev/null | tr ' ' '\n' | sed -n 's/^\([^=]*\)=.*/\1/p' | grep -vxE 'PATH|LANG|LANGUAGE|LC_[A-Z]+' | san_names)
+      if [ -n "$env" ]; then fail host.manager_environment_live "service manager environment carries: $env"; else ok host.manager_environment_live; fi
+    else fail host.manager_environment_live "systemctl missing"; fi
+  fi
+  if have systemd-analyze; then check_host_units; else fail host.unit "systemd-analyze missing"; fi
+}
+
+# =============================================================================== AppArmor
+AA_PROFILES="candor-tor-intake candor-web candor-sealer candor-intake-store candor-intake-pg candor-intake-maint"
+# Normalised statements: comments and blank lines dropped, whitespace collapsed. '#include'
+# (an include, not a comment, for the parser) is turned into a line that never matches.
+aa_norm() {
+  awk '{ l=$0
+    if (l ~ /#[ \t]*include/) { print "!HASH-INCLUDE"; next }
+    sub(/^[ \t]*#.*$/, "", l); sub(/[ \t\r\f\v]#.*$/, "", l)
+    gsub(/[ \t\r\f\v]+/, " ", l); sub(/^ /, "", l); sub(/ $/, "", l)
+    if (l != "") print l }' "$1"
+}
+# Rule classes that must never appear in an allow rule (AUD-RM2-DEP-15). Independent of the
+# exact comparison, so a mistaken baseline edit is still caught. Statements are split at ','
+# and at block braces outside (...) and path globs {a,b}.
+aa_classes() { # profile normalised-file inet-allowed(0|1) caps-allowed(space list)
+  awk -v p="$1" -v inet="$3" -v caps=" $4 " '
+    function stmt(t,   w, n, i, perm, path, deny, kw, f) {
+      gsub(/^ +| +$/, "", t); if (t == "") return
+      ns++
+      n=split(t, w, " ")
+      i=1; deny=0
+      while (i <= n && (w[i]=="audit" || w[i]=="quiet" || w[i]=="owner" || w[i]=="allow" || w[i]=="deny" || w[i] ~ /^priority=/ || w[i]=="other")) { if (w[i]=="deny") deny=1; i++ }
+      kw=w[i]
+      if (t ~ /^profile / || t ~ /^\// && hdr) {
+        if (match(t, /\(.*\)/)) { f=substr(t, RSTART+1, RLENGTH-2); gsub(/flags *= */, "", f); gsub(/[ ,]+/, " ", f); gsub(/^ | $/, "", f)
+          if (f != "attach_disconnected") bad["flags"]=bad["flags"] " " f }
+        return }
+      if (kw=="abi") return
+      if (kw=="include") { if (t != "include <tunables/global>" && t != "include <abstractions/base>" && t != "include <abstractions/openssl>") bad["include"]=bad["include"] " " ns; return }
+      if (deny) return
+      if (kw ~ /^(change_profile|change_hat|pivot_root|mount|remount|umount|ptrace|userns|io_uring|mqueue|dbus|all|file|set|link|rlimit|unconfined)$/ || kw ~ /^\^/) { bad["forbidden_rule"]=bad["forbidden_rule"] " " kw; return }
+      if (kw=="capability") { if (i == n) bad["capability"]=bad["capability"] " all"; for (j=i+1; j<=n; j++) if (index(caps, " " w[j] " ") == 0) bad["capability"]=bad["capability"] " " w[j]; return }
+      if (kw=="network") {
+        if (!(n == i+2 && (w[i+1]=="unix" && w[i+2] ~ /^(stream|dgram|seqpacket)$/ || w[i+1]=="inet" && w[i+2]=="stream" && inet==1)))
+          bad["network"]=bad["network"] " " ns
+        return }
+      if (kw=="signal" || kw=="unix") return
+      # path rule: [file] <path> <perms> [-> target] or <perms> <path>
+      perm=""; path=""
+      for (j=i; j<=n; j++) { if (w[j] ~ /^(\/|@\{|")/) path=w[j]; else if (w[j] ~ /^[rwaklmixuUpPcCD]+$/) perm=perm w[j]; else if (w[j]=="->") bad["exec"]=bad["exec"] " " ns }
+      if (path == "") { bad["unknown_rule"]=bad["unknown_rule"] " " ns; return }
+      if (perm ~ /[xX]/) bad["exec"]=bad["exec"] " " ns
+      if (perm ~ /[wal]/ && (path=="/" || path ~ /^\/(\*|\{|\?|\[)/)) bad["broad_write"]=bad["broad_write"] " " ns
+    }
+    { line=$0; cur=""; par=0; gl=0
+      if (line ~ /^profile / || line ~ /^\/[^ ]* .*\{$/ || line ~ /^\/[^ ]* *\{$/) hdr=1; else hdr=0
+      for (c=1; c<=length(line); c++) { ch=substr(line, c, 1)
+        if (ch=="(") par++; else if (ch==")" && par>0) par--
+        if (ch=="{") { if (c>1 && substr(line, c-1, 1) != " ") { gl++; cur=cur ch; continue } stmt(cur); hdr=0; cur=""; continue }
+        if (ch=="}") { if (gl>0) { gl--; cur=cur ch; continue } stmt(cur); cur=""; continue }
+        if (ch=="," && par==0 && gl==0) { stmt(cur); cur=""; continue }
+        cur=cur ch }
+      stmt(cur) }
+    END { n=split("flags include forbidden_rule capability network exec broad_write unknown_rule", cls, " ")
+      for (i=1; i<=n; i++) { c=cls[i]
+        if (c in bad) { d=bad[c]; gsub(/[^A-Za-z0-9_ ]/, "?", d); printf "FAIL\tapparmor.%s.%s\t%s at statement(s)/name(s):%s\n", p, c, c, substr(d, 1, 200) }
+        else printf "OK\tapparmor.%s.%s\tnone\n", p, c } }' "$2"
+}
+check_apparmor() {
+  local p f n want got l
+  for p in $AA_PROFILES; do
+    if [ "$MODE" = host ]; then f="$ROOT/etc/apparmor.d/$p"; else f="$DIR/apparmor/$p"; fi
+    snap "apparmor.$p.file" "$f" "aa.$p" || continue
+    aa_norm "$SNAP" > "$WORK/aa.$p.got"
+    awk -F'|' -v p="$p" '$1=="aa" && $2==p {print substr($0, length($1 $2)+3)}' "$BASE" > "$WORK/aa.$p.want"
+    want=$(wc -l < "$WORK/aa.$p.want"); got=$(wc -l < "$WORK/aa.$p.got")
+    if [ "$want" -gt 0 ] && cmp -s "$WORK/aa.$p.want" "$WORK/aa.$p.got"; then ok "apparmor.$p.content" "$got statements equal the release profile"
+    else
+      n=$(awk 'NR==FNR { a[FNR]=$0; na=FNR; next } { nb=FNR; if (!(FNR in a) || a[FNR]!=$0) { print FNR; f=1; exit } } END { if (!f) print (nb < na ? nb+1 : na+1) }' "$WORK/aa.$p.want" "$WORK/aa.$p.got")
+      fail "apparmor.$p.content" "differs from the release profile at statement line $n (expected $want, found $got; text not shown)"
+    fi
+    aa_classes "$p" "$WORK/aa.$p.got" "$(awk -F'|' -v p="$p" '$1=="aa-inet" && $2==p {f=1} END {print f+0}' "$BASE")" "$(awk -F'|' -v p="$p" '$1=="aa-cap" && $2==p {print $3}' "$BASE" | tr '\n' ' ')" > "$WORK/rl"
+    report_lines < "$WORK/rl"
+  done
+  [ "$MODE" = host ] || return
+  # Not disabled or forced to complain mode by the distribution's mechanisms, and no other file
+  # in /etc/apparmor.d defines or attaches a profile under a Candor name or binary.
+  for p in $AA_PROFILES; do
+    if [ -e "$ROOT/etc/apparmor.d/disable/$p" ] || [ -L "$ROOT/etc/apparmor.d/disable/$p" ] ||
+       [ -e "$ROOT/etc/apparmor.d/force-complain/$p" ] || [ -L "$ROOT/etc/apparmor.d/force-complain/$p" ]; then
+      fail "apparmor.$p.not_disabled" "disable/ or force-complain/ entry present"
+    else ok "apparmor.$p.not_disabled"; fi
+  done
+  if [ -d "$ROOT/etc/apparmor.d" ] && ! l=$(symlinked_component "$INPREFIX" "$ROOT/etc/apparmor.d"); then
+    n=$(grep -rlIE --exclude-dir=disable --exclude-dir=force-complain 'candor-(tor-intake|web|sealer|intake-store|intake-pg|intake-maint)([^A-Za-z0-9_-]|$)|/usr/lib/candor/' "$ROOT/etc/apparmor.d" 2>/dev/null |
+        grep -cvxE "$(printf '%s' "$ROOT/etc/apparmor.d/" | sed 's/[][\.*^$]/\\&/g')($(printf '%s' "$AA_PROFILES" | tr ' ' '|'))")
+    if [ "$n" -gt 0 ]; then fail apparmor.no_foreign_profiles "$n other file(s) in /etc/apparmor.d name a Candor profile or binary"; else ok apparmor.no_foreign_profiles; fi
+  else fail apparmor.no_foreign_profiles "/etc/apparmor.d missing or behind a symlink"; fi
+  [ "$LIVE" -eq 1 ] || { skip apparmor.live "offline root: load state not checked"; return; }
+  # Live: enforce mode, and the loaded policy is the compiled checked file (a weakened
+  # parser cache or a manual `apparmor_parser -r` of another file shows up here).
+  have apparmor_parser || { fail apparmor.live "apparmor_parser missing"; return; }
+  local d raw
+  for p in $AA_PROFILES; do
+    if grep -qx "$p (enforce)" /sys/kernel/security/apparmor/profiles 2>/dev/null; then ok "apparmor.$p.enforce" enforce; else fail "apparmor.$p.enforce" "profile not loaded in enforce mode"; fi
+    raw=""
+    for d in /sys/kernel/security/apparmor/policy/profiles/*; do
+      [ "$(cat "$d/name" 2>/dev/null)" = "$p" ] && raw="$d/raw_data" && break
+    done
+    if [ -z "$raw" ] || [ ! -r "$raw" ]; then fail "apparmor.$p.loaded_policy" "loaded raw policy not readable (kernel must export it)"; continue; fi
+    if [ "$(apparmor_parser -QTK -S "$WORK/in/aa.$p" 2>/dev/null | sha256sum | cut -c1-64)" = "$(sha256sum < "$raw" | cut -c1-64)" ]; then ok "apparmor.$p.loaded_policy" "loaded policy equals the checked file"
+    else fail "apparmor.$p.loaded_policy" "loaded policy differs from the compiled profile file"; fi
   done
 }
 
@@ -1047,6 +1172,7 @@ if ! verify_policy; then
   printf 'config-check: policy integrity check FAILED; no check run (exit=30)\n'
   exit 30
 fi
+PRECHECKS=$CHECKS
 
 want tor && check_torrc
 want nft && check_nft
@@ -1055,8 +1181,13 @@ want units && check_units
 want journald && { check_journald journald.ns "$JNS" systemd/journald@candor-intake.conf 1; check_journald journald.host "$JHOST" systemd/journald.conf 0; }
 want kernel && check_kernel
 want dns && check_resolv
+want apparmor && check_apparmor
 [ "$MODE" = host ] && want host && check_host
 
+if [ "$CHECKS" -eq "$PRECHECKS" ]; then
+  echo "config-check: the selection ran no check (exit=2)" >&2
+  exit 2
+fi
 if [ "$FAILS" -gt 0 ]; then
   printf 'config-check: %d of %d checks FAILED, %d skipped (exit=30)\n' "$FAILS" "$CHECKS" "$SKIPS"
   exit 30

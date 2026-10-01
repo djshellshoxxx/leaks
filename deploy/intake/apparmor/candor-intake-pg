@@ -24,6 +24,9 @@ profile candor-intake-pg /usr/lib/postgresql/16/bin/postgres flags=(attach_disco
   owner /var/lib/postgresql/16/candor-intake/** rwk,
   /run/candor/intake-pg/ rw,
   /run/candor/intake-pg/** rwk,
+  # Cumulative statistics on tmpfs (data_directory/pg_stat -> here; AUD-RM2-STO-11).
+  owner /run/candor/intake-pg-stat/ rw,
+  owner /run/candor/intake-pg-stat/** rwk,
   # dynamic_shared_memory_type = posix, shared_memory_type = mmap.
   owner /dev/shm/PostgreSQL.* rw,
   /run/systemd/notify w,

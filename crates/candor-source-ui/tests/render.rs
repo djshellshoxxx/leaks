@@ -3,7 +3,11 @@
 //! Requirement IDs refer to `specs/11-FRONTEND-SOURCE.md` (SUI-*), `26-ACCESSIBILITY.md`
 //! (A11Y-*, I18N-*) and `08-API.md` (API-*).
 
+// Test-only: reads the crate's own template sources and prints budget reports (no source
+// data); the ADR-027 safefs/logging bans in `clippy.toml` target shipped code.
 #![allow(
+    clippy::disallowed_methods,
+    clippy::disallowed_macros,
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
@@ -1239,11 +1243,12 @@ fn every_form_carries_a_token() {
         }
     }
     assert!(n > 0);
+    // The Leave *page* has no form; its Leave *button* is on S02 and in the footer.
     for s in [
         Screen::Login,
-        Screen::Leave,
         Screen::Landing,
         Screen::Safety,
+        Screen::Status,
     ] {
         let (_, b) = render_ok(s, Locale::En, Mode::Anonymous, false);
         assert!(b.contains("name=\"csrf\""), "{}", s.spec_id());

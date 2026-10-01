@@ -271,41 +271,67 @@ pub fn verify_chain(
 /// (AUD-RM2-STO-21/22; implementation decision, spec feedback for 08 RL-11/RL-12).
 pub const HEAD_CONTEXT: &[u8] = b"candor/v1/intake/deletion-head";
 
-/// A deletion-list head as attested by Z-CORE: "I hold the chain through `seq`,
-/// whose chain hash is `head_hash`", signed with the Z-CORE head key whose public
-/// half is intake configuration (`core_pk`).
+/// A deletion-list head as attested by Z-CORE: "on Z-CORE day `day`, in my
+/// attestation number `counter`, I hold the chain through `seq`, whose chain
+/// hash is `head_hash`", signed with the Z-CORE head key whose public half is
+/// intake configuration (`core_pk`).
 ///
 /// - `head_hash` = [`DeletionEntry::next_prev_hash`] of entry `seq` (it commits
 ///   to the whole chain through `seq`); all-zero for `seq = 0`;
+/// - `day` = Z-CORE's day of the attestation (freshness, AUD-RM2-STO-24);
+/// - `counter` = Z-CORE's attestation counter for this tenant, strictly
+///   increasing with every attestation it signs (≥ 1);
 /// - `sig = Ed25519_core("candor/v1/intake/deletion-head" ‖ tenant_id(16) ‖
-///   u64be seq ‖ head_hash)`.
+///   u64be counter ‖ u32be day ‖ u64be seq ‖ head_hash)`.
 ///
 /// The relay cannot assert a head on its own: the store acknowledges (RL-11)
-/// and accepts pushed lists (RL-12) only against a head whose signature verifies.
+/// and accepts pushed lists (RL-12) only against a head whose signature
+/// verifies, that is not older (by `counter`) than the last head the store
+/// verified (stored, and carried in backups), and, for RL-12, whose `day` is
+/// fresh ([`MAX_HEAD_AGE_DAYS`]).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct SignedDeletionHead {
     /// Highest seq Z-CORE holds.
     pub seq: u64,
     /// Chain hash through `seq`.
     pub head_hash: [u8; 32],
+    /// Z-CORE day of the attestation.
+    pub day: Day,
+    /// Z-CORE attestation counter (strictly increasing per tenant, ≥ 1).
+    pub counter: u64,
     /// Z-CORE signature.
     pub sig: [u8; 64],
 }
+
+/// Largest age, in days, of a Z-CORE head accepted by RL-12 / restore
+/// (AUD-RM2-STO-24(b)): `today − 1 ≤ head.day ≤ today + 1` (one day of clock
+/// skew either way). A replayed older attestation is refused even on a node
+/// restored from a backup that predates it.
+pub const MAX_HEAD_AGE_DAYS: u32 = 1;
 
 impl fmt::Debug for SignedDeletionHead {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SignedDeletionHead")
             .field("seq", &self.seq)
+            .field("counter", &self.counter)
             .finish_non_exhaustive()
     }
 }
 
 /// Signed message of a head attestation.
 #[must_use]
-pub fn head_message(tenant: &TenantId, seq: u64, head_hash: &[u8; 32]) -> Vec<u8> {
-    let mut m = Vec::with_capacity(HEAD_CONTEXT.len().saturating_add(16 + 8 + 32));
+pub fn head_message(
+    tenant: &TenantId,
+    seq: u64,
+    head_hash: &[u8; 32],
+    day: Day,
+    counter: u64,
+) -> Vec<u8> {
+    let mut m = Vec::with_capacity(HEAD_CONTEXT.len().saturating_add(16 + 8 + 4 + 8 + 32));
     m.extend_from_slice(HEAD_CONTEXT);
     m.extend_from_slice(&tenant.0);
+    m.extend_from_slice(&counter.to_be_bytes());
+    m.extend_from_slice(&day.0.to_be_bytes());
     m.extend_from_slice(&seq.to_be_bytes());
     m.extend_from_slice(head_hash);
     m
@@ -318,35 +344,94 @@ pub fn chain_hash(entry: Option<&DeletionEntry>) -> [u8; 32] {
 }
 
 impl SignedDeletionHead {
-    /// Sign a head (Z-CORE side and tests).
+    /// Sign a head (Z-CORE side and tests) for Z-CORE day `day` with
+    /// attestation counter `counter`.
     #[must_use]
     pub fn sign(
         tenant: &TenantId,
         head: Option<&DeletionEntry>,
+        day: Day,
+        counter: u64,
         key: &candor_core::sig::SigningKey,
     ) -> Self {
         let seq = head.map_or(0, |e| e.seq);
         let head_hash = chain_hash(head);
-        let sig = key.sign(&head_message(tenant, seq, &head_hash));
+        let sig = key.sign(&head_message(tenant, seq, &head_hash, day, counter));
         Self {
             seq,
             head_hash,
+            day,
+            counter,
             sig,
         }
     }
 
     /// Verify the attestation (strict Ed25519 under `core_pk`) and its shape
-    /// (`seq = 0` ⇔ all-zero hash).
+    /// (`seq = 0` ⇔ all-zero hash; `1 ≤ counter ≤ i64::MAX`; day in range).
     pub fn verify(&self, tenant: &TenantId, core_pk: &[u8; 32]) -> Result<()> {
-        if (self.seq == 0) != (self.head_hash == [0u8; 32]) || i64::try_from(self.seq).is_err() {
+        if (self.seq == 0) != (self.head_hash == [0u8; 32])
+            || i64::try_from(self.seq).is_err()
+            || self.counter == 0
+            || i64::try_from(self.counter).is_err()
+            || i32::try_from(self.day.0).is_err()
+        {
             return Err(StoreError::DeletionList("malformed head"));
         }
         candor_core::sig::verify_strict(
             core_pk,
-            &head_message(tenant, self.seq, &self.head_hash),
+            &head_message(tenant, self.seq, &self.head_hash, self.day, self.counter),
             &self.sig,
         )
         .map_err(|_| StoreError::DeletionList("bad head signature"))
+    }
+
+    /// Same attested content (seq, hash, day, counter).
+    #[must_use]
+    pub fn same_attestation(&self, other: &Self) -> bool {
+        self.seq == other.seq
+            && self.day == other.day
+            && self.counter == other.counter
+            && bool::from(self.head_hash.ct_eq(&other.head_hash))
+    }
+
+    /// RL-12 freshness (AUD-RM2-STO-24(b)): `today − MAX_HEAD_AGE_DAYS ≤ day ≤
+    /// today + MAX_HEAD_AGE_DAYS`.
+    pub fn check_fresh(&self, today: Day) -> Result<()> {
+        let lo = today.saturating_minus(MAX_HEAD_AGE_DAYS);
+        let hi = today.0.saturating_add(MAX_HEAD_AGE_DAYS);
+        if self.day < lo || self.day.0 > hi {
+            return Err(StoreError::DeletionList("stale Z-CORE head"));
+        }
+        Ok(())
+    }
+
+    /// The monotonic rule against the last head this store verified
+    /// (AUD-RM2-STO-24(b)): `None` = nothing verified yet. A head with a lower
+    /// counter is older and refused; the same counter must carry the same
+    /// attestation; a newer counter must not move `day` or `seq` backwards.
+    /// Returns whether `self` is newer than `verified` (to be stored).
+    pub fn newer_than(&self, verified: Option<&Self>) -> Result<bool> {
+        let Some(v) = verified else {
+            return Ok(true);
+        };
+        if self.counter < v.counter {
+            return Err(StoreError::DeletionList(
+                "Z-CORE head older than the verified head",
+            ));
+        }
+        if self.counter == v.counter {
+            return if self.same_attestation(v) {
+                Ok(false)
+            } else {
+                Err(StoreError::DeletionList("conflicting Z-CORE head"))
+            };
+        }
+        if self.day < v.day || self.seq < v.seq {
+            return Err(StoreError::DeletionList(
+                "Z-CORE head behind the verified head",
+            ));
+        }
+        Ok(true)
     }
 }
 

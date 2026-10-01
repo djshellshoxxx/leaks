@@ -21,14 +21,17 @@ pub mod types;
 mod validate;
 
 pub use deaddrop::{
-    DEFAULT_DUMMY_BUCKET_WEIGHTS, DeadDropConfig, DummyReplies, RandomDummyReplies,
+    DEFAULT_DUMMY_BUCKET_WEIGHTS, DeadDropConfig, DummyReplies, MIN_DUMMY_BUCKET_WEIGHT,
+    RandomDummyReplies,
 };
 pub use deletion::{
     CoreReplyHasher, DeletionEntry, DeletionKind, DeletionSigner, Ed25519DeletionSigner,
-    ReplyObjectHasher, SignedDeletionHead,
+    MAX_HEAD_AGE_DAYS, ReplyObjectHasher, SignedDeletionHead,
 };
 pub use error::{Result, StoreError};
 pub use memory::{MEMORY_DEADDROP_CONFIG, MemoryStore};
-pub use pg::{PgIntakeMaintenance, PgIntakeStore, migrate, schema_hash, vacuum_after_rewrite};
+pub use pg::{
+    PgIntakeMaintenance, PgIntakeStore, migrate, schema_hash, vacuum_after_rewrite, vacuum_full_daily,
+};
 pub use store::{IntakeMaintenance, IntakeStore};
 pub use types::*;

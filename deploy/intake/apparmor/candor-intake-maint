@@ -1,0 +1,64 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# AppArmor profile for the intake maintenance jobs (candor-intake-vacuum.service,
+# candor-intake-maint.service; AUD-RM2-STO-11/23/24). Enforce mode. Installed as
+# /etc/apparmor.d/candor-intake-maint; attached by AppArmorProfile=candor-intake-maint.
+# Allowed: read program and the signed config bundle (Z-CORE head key); the PostgreSQL socket.
+# Denied: every write, exec, capabilities, all IP networking, any blob/staging/tor/sealer state.
+abi <abi/3.0>,
+
+include <tunables/global>
+
+profile candor-intake-maint /usr/lib/candor/intake-store/candor-intake-maint {
+  include <abstractions/base>
+
+  /usr/lib/candor/intake-store/candor-intake-maint mr,
+  /run/candor/config/ r,
+  /run/candor/config/** r,
+
+  # PostgreSQL client over the Unix socket only (peer authentication as candor_intake_maint).
+  network unix stream,
+  unix (create, connect, receive, send, getattr, getopt, setopt, shutdown) type=stream,
+  /run/candor/intake-pg/.s.PGSQL.5432 rw,
+
+  # Rust std runtime: available_parallelism() reads the cgroup CPU quota.
+  @{PROC}/@{pid}/cgroup r,
+  @{PROC}/@{pid}/mountinfo r,
+  /sys/fs/cgroup/**/cpu.max r,
+  /sys/devices/system/cpu/online r,
+
+  signal (receive) peer=unconfined,
+
+  deny capability,
+  deny ptrace,
+  deny mount,
+  deny umount,
+  deny pivot_root,
+  deny network inet,
+  deny network inet6,
+  deny network netlink,
+  deny network packet,
+  deny @{PROC}/*/mem rw,
+  deny @{PROC}/*/environ r,
+  deny @{PROC}/kcore r,
+  deny /dev/mem rw,
+  deny /dev/kmem rw,
+  deny /dev/log w,
+  deny /run/systemd/journal/dev-log w,
+  deny /run/systemd/journal/socket w,
+  deny /run/systemd/journal/syslog w,
+  deny /run/tor-instances/** rwklx,
+  deny /var/lib/tor-instances/** rwklx,
+  deny /var/lib/postgresql/** rwklx,
+  deny /var/lib/candor/** rwklx,
+  deny /run/candor/source-web/** rwklx,
+  deny /run/candor/sealer/** rwklx,
+  deny /run/candor/istore/** rwklx,
+  deny /run/candor/staging/** rwklx,
+  deny /run/candor/directory/** rwklx,
+  deny /run/credentials/** rwklx,
+  deny /etc/credstore.encrypted/** rwklx,
+  deny /etc/tor/** rwklx,
+  deny /etc/shadow r,
+  deny /etc/gshadow r,
+  deny /boot/** rwklx,
+}

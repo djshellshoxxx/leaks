@@ -18,8 +18,10 @@ User=postgres
 Group=postgres
 # MAC layer (AUD-RM2-DEP-08; 17 §5.2, R7 SI-B-04). No '-' prefix: fail closed.
 AppArmorProfile=candor-intake-pg
-# Socket group candor-istore (unix_socket_group): only candor-istore (and postgres) may
-# connect; pg_hba additionally allows only peer candor-istore -> candor_istore.
+# Socket group candor-istore (unix_socket_group): only members may connect (candor-istore; the
+# maintenance and migration units add it per unit); pg_hba allows only the peer maps
+# candor-istore -> candor_istore, candor-imaint -> candor_intake_maint and candor-migrate ->
+# candor_intake_migrator (ADR-052(9)).
 SupplementaryGroups=candor-istore
 ExecStart=/usr/lib/postgresql/16/bin/postgres -c config_file=/etc/candor/intake/postgresql/candor-intake.conf
 ExecReload=/bin/kill -HUP $MAINPID
@@ -30,7 +32,9 @@ TimeoutStopSec=300
 Restart=on-failure
 RestartSec=5s
 OOMScoreAdjust=-900
-ReadWritePaths=/run/candor/intake-pg
+# Socket directory, and the RAM-only statistics directory behind data_directory/pg_stat
+# (AUD-RM2-STO-11: cumulative statistics are never persisted to disk).
+ReadWritePaths=/run/candor/intake-pg /run/candor/intake-pg-stat
 MemorySwapMax=0
 TasksMax=128
 PrivateNetwork=yes

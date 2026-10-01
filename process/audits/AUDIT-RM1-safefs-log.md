@@ -363,3 +363,185 @@ The tests are strong on the happy and negative paths for limits, traversal, bomb
 ## Gate
 
 Gate: **FAIL** 2026-10-01 60e732f9 (2 High open: LOG-01, LOG-02; 10 Medium need a fix or written acceptance).
+
+---
+
+## Re-test (round 2)
+
+| Field | Value |
+|---|---|
+| Re-tested commit | `fc64069` ("candor-safefs/candor-log audit fixes"). `crates/candor-safefs` and `crates/candor-log` are clean in the working tree |
+| Procedure | AUDIT-CHECKLIST §G: fix verification, regression tests, variant hunt, delta review of all changed lines in both crates (≈5.7 k lines added), full §C re-run. The PoCs were re-run from a private scratch crate (not committed) |
+| Date | 2026-10-01 |
+
+### G5. Tool re-run (fc64069)
+
+| Tool | Result |
+|---|---|
+| `cargo clippy -p candor-safefs -p candor-log --all-targets --all-features -- -D warnings` | clean |
+| `cargo test -p candor-safefs -p candor-log --locked` | all pass (incl. new trybuild UI cases `diag_forged_internals`, `launder_raw_id`, `launder_code_counter`) |
+| Miri `-p candor-log --lib` | 22/22 pass |
+| `lint-safefs.sh` / `lint-logging.sh` (real tree) | OK (76 / 85 files); both run in CI job `repo-lints` |
+| Round-1 bypass fixture against the new scripts | all round-1 bypasses are reported (`s::fs::write`, `*v = s::fs::read`, `[dependencies.tar]`, `package = "zip"`, `"//"`-string + `println!`, `lg::log!`, `writeln!(stderr)`, `panic!("{ip}")`, renamed `log`) |
+| Workspace `clippy.toml` on a fixture crate (`CLIPPY_CONF_DIR`) | type-resolved bans fire for `s::fs::write/read`, `p.join`, `File::open/options`, `OpenOptions::open`, `std::io::stderr`, `println!`. Not covered: see SFS-11/LOG-21 |
+| cargo-fuzz (nightly-2026-09-28, 46–61 s each, seeded) | no crash/OOM/timeout. log: cbor_decode cov 384, checkpoint_parse 1061, jsonl_read_verify 2574, audit_log_verify 1157. safefs: zip 1784, tar 1095, tar_gz 1775, names 913 (round 1: 160–273). *Process note:* these runs used the committed seed dirs as the corpus, so libFuzzer added files there. When the runs finished I restored them with `git checkout -- …/fuzz/seeds && git clean -fd …/fuzz/seeds` (both crates). The repo is unchanged |
+
+### Per-finding status
+
+| Finding | Status | Evidence / remark |
+|---|---|---|
+| SFS-01 (M) | **Fixed** | Workspace `clippy.toml` `disallowed-methods/types` (type-resolved). The script rejects `allow(clippy::disallowed_*)` and crate-local `clippy.toml`, resolves dependencies via `cargo metadata` and fails closed. CI `repo-lints`. `tests/lint.rs::audit_bypasses_are_caught` passes; the round-1 fixture is caught. Residual variants: SFS-11 |
+| SFS-02 (M) | **Fixed** | `is_invisible` covers the DI/Cf/PUA/noncharacter/filler set. Whitespace collapse, NFKC all-dots check, middle truncation that keeps the extension. Round-1 PoC string → `"invoice.pdf.exe"`. Residual (accepted in notes): unassigned `Cn` code points survive (Info) |
+| SFS-03 (L) | **Fixed for a single writer; variant open** | `dropped_pending_object_restores_root_times` passes. Concurrent writers re-introduce the leak: SFS-10 |
+| SFS-04 (L) | **Fixed** | Manual `Debug` impls. Tests `debug_output_has_no_path_or_size`, `report_debug_has_no_sizes` |
+| SFS-05 (L) | **Fixed** | `ArchiveError::RollbackIncomplete(ids)`. Display prints a count only. Test `incomplete_rollback_is_reported` |
+| SFS-06 (L) | **Fixed** | Archive-wide counter; a repeated local pax header is `Malformed`. Test `tar_extension_header_cap_is_archive_wide` |
+| SFS-07 (L) | **Fixed** | `poisoned` flag blocks further writes and `commit`. Test `failed_write_poisons_pending_object` |
+| SFS-08 (I) | **Partially fixed; deferrals assessed below** | `ContentKey` no longer `Clone`. Seeds committed (coverage confirmed above) |
+| SFS-09 (I) | **Fixed** (residual SFS-12) | Method, encryption flag, CRC and sizes cross-checked. Members must end before the CD. Test `zip_local_central_field_mismatch_rejected` |
+| LOG-01 (H) | **Fixed as reported; bypassed by a new variant → LOG-16 (High)** | Stubs outside CASE give `UnboundRedaction` (round-1 PoC is now the test `stub_in_security_stream_rejected`). Stub hash/leaf are recomputed from `commit`. Unbound, count-mismatched and set-mismatched stubs are rejected. The tombstone must be checkpointed. Pruning needs a same-stream, checkpointed retention tombstone with the anchor root and a minimum age. Replaying an existing tombstone for other seqs fails (the set hash commits to (seq, commit)). **But** a caller can forge the tombstone's `redacted_set`. See LOG-16 |
+| LOG-02 (H) | **Partially fixed — remains Open (High)** | The checkpoint channel is fixed: `signed_at` = slot boundary, empty intervals are checkpointed, no count trigger, CASE/SYS daily. Test `checkpoint_timing_independent_of_date_only_events` passes. **Still open:** the record-order channel named in the original finding ("date-only events share a seq-ordered chain with ms-precision staff events in the same stream"). It is not addressed and is not listed as a residual. In CASE, `case.imported`/`evidence.imported` (date-only) sit between staff events with ms `ts` (e.g. `case.opened`), so anyone who reads CASE records (admins, OVERSIGHT, audit exports) can bound each import to the gap between neighbouring staff events, i.e. which import slot it arrived in (P-17). In SYS, date-only `sys.relay_*` and source-load `sys.health` sit between second-precision `sys.clock`/`sys.job` records, which bounds source-load detections to minutes for SYS_ADMIN/SOC readers (TEL-018). Fix: put date-only events in a separate stream (checkpointed daily), or buffer them and emit at day close in randomized order. Add a test that no date-only record has a finer-precision neighbour in its stream |
+| LOG-03 (M) | **Partially fixed → LOG-17 (M)** | Raw `from_bytes`, `Code::new`, `Hash32::digest` and the public counter fields are gone (trybuild). New laundering paths remain: LOG-17 |
+| LOG-04 (M) | **Fixed** | `DiagCodeValue` is opaque. The const-only `Site` + `const {}` assert and a runtime re-check. The round-1 PoC (`Box::leak` message, forged `DiagCodeValue::Code`) no longer compiles (`tests/ui/diag_forged_internals.rs`). Residual: Info LOG-23 |
+| LOG-05 (M) | **Fixed** | Exact simplex with attacker priors (primary ∈ [0,k−1], complementary ≥ k) and a ≥ k−1 range requirement. Hidden cells display "suppressed". Round-1 PoC table: all six cells suppressed with margins 110/180, 50/70/170, 290. I checked by hand that the primary cell keeps its full [0,9] feasible range under the priors (e.g. x00=9: x10=41, x01=10, x11=60, x02=91, x12=79). Test `primary_cell_not_narrowed_by_attacker_priors`. LP relaxation residual: LOG-22 |
+| LOG-06 (M) | **Partially fixed → LOG-18 (M)** | The durable `ReleaseHistory` fails closed (tests `differencing_blocked_across_restart`, `history_errors_fail_closed`). Percentiles are limited to 10..=90 and magnitude releases need pairwise population differences ≥ k. That pairwise check does not stop linear combinations: LOG-18 |
+| LOG-07 (M) | **Fixed** | A single primary commit point, secondaries fed from outboxes, the slot-close signer failure happens before any write. Tests `failing_secondary_does_not_fork_chain`, `failing_primary_commits_nothing`, `signer_failure_writes_nothing` |
+| LOG-08 (M) | **Fixed** | `c_i = H(label‖salt_i‖bytes)` with a per-case HMAC-derived salt, dropped on redaction. Missing key → `CaseKeyUnavailable`. Test `redacted_stub_reveals_nothing_without_case_key` |
+| LOG-09 (M) | **Fixed** (residual LOG-21) | Bans are in the workspace `clippy.toml`, the crate-local file is removed, the lexer-aware script runs in CI, and the round-1 fixture is caught |
+| LOG-10 (M) | **Fixed** | Four seeded targets. Smoke runs clean (above). CI scheduling is deferred (see below) |
+| LOG-11 (L) | **Fixed** | Pre-allocation capped at 64 |
+| LOG-12 (I) | **Fixed** | NUL-terminated labels, `sign_checkpoint(bytes)`. Test `labels_are_prefix_free` |
+| LOG-13 (L) | **Fixed** | `MetadataMismatch` on `seq`/`type`/`end_seq`, foreign fields rejected, `MAX_LINES` 4 Mi |
+| LOG-14 (L) | **Accepted residual (documented) — needs the lead auditor's written acceptance** | Documented with the system-actor/daily-batch decorrelation option. Low, so it does not block |
+| LOG-15 (I) | **Fixed** | Documentation corrected |
+
+### New findings (round 2)
+
+### AUD-RM1-SFS-10 — Concurrent pending objects restore a real timestamp onto the root
+- Severity: Low
+- Location: crates/candor-safefs/src/store.rs `pending()` (root time capture), `Drop for PendingObject` / `restore_dir_times` (fc64069)
+- Category: B1.2 (CWE-200)
+- Description: `pending()` saves the root's atime/mtime *at temp-file creation*. If another `PendingObject` already has an uncommitted temp file, the root mtime at that moment is the real creation time of that other file. When the second object is dropped, `restore_dir_times` writes that real timestamp back, so the SFS-03 leak returns under any concurrency (parallel uploads or extractions). Drops that run out of order can also roll the root back to an older value.
+- Exploit scenario: Same as SFS-03 (disk seizure reads the root mtime). Preconditions: concurrent writers. ctime remains the documented residual.
+- Fix recommendation: Don't restore a captured value. Carry a `SlotTime` (or a root-wide "last settled slot" kept in `SafeRoot`) and normalize to it, or use `O_TMPFILE` so the directory is never touched before commit. Add a test with two overlapping `PendingObject`s.
+- Spec / requirement reference: ADR-038(1), DB-028, SPEC-NOTES decision 5.
+- Status: Open
+
+### AUD-RM1-SFS-11 — Remaining gaps in the filesystem bans
+- Severity: Low
+- Location: clippy.toml `disallowed-methods`; crates/candor-safefs/scripts/lint-safefs.sh (fc64069)
+- Category: B6.1/B6.2, B1.11
+- Description: A fixture passed both clippy and the script with these: `std::env::temp_dir()` followed by `PathBuf::extend([name])` (path composition from input without `join`/`push`); `std::process::Command::new(..)` (`rm`, `tar`, `unzip` with input paths); and the `tempfile` crate, which is neither banned nor listed. None of these reaches a disk write without a further banned call except `Command`, so this is Low.
+- Fix recommendation: Add `std::env::temp_dir`, `std::path::PathBuf::extend`, `std::path::PathBuf::set_file_name`, `std::process::Command::new` (allow-listed per crate with a reason) and `tempfile::*` (non-test) to the workspace bans. Add fixtures to `tests/lint.rs`.
+- Spec / requirement reference: ADR-027, ST-005, B1.11.
+- Status: Open
+
+### AUD-RM1-SFS-12 — ZIP data-descriptor flag is not cross-checked, so the CRC/size cross-check can be skipped
+- Severity: Info
+- Location: crates/candor-safefs/src/archive/zip_impl.rs (pass 3) (fc64069)
+- Category: B2.8
+- Description: The CRC/size comparison runs only when the *local* bit 3 is clear, and local bit 3 is not compared with central bit 3. Setting it locally skips the new check. The local zip64 extra sizes are also not compared. There is no impact on this extractor (it uses central values). The gap matters only if a later local-header parser is used.
+- Fix recommendation: Require local flags == central flags, apart from bits a spec allows to differ, and compare the zip64 local extra when sizes are `0xFFFFFFFF`.
+- Status: Open
+
+### AUD-RM1-LOG-16 — Forged `case.disposed` tombstone redacts arbitrary CASE records; verifier passes
+- Severity: High
+- Location: crates/candor-log/src/ids.rs `Hash32::checkpoint_root` (verifies under a caller-supplied key); src/chain.rs `pub fn redaction_set_hash`; src/event.rs `CaseDisposed { .., removed_event_count: Count, redacted_set: Hash32 }` (public variant); src/verify.rs step 5a (fc64069)
+- Category: B4.3/B12 (CWE-345, CWE-354)
+- Description: The verifier binds stubs to a `case.disposed` tombstone by `(count, redacted_set)`, but any code that can call `AuditLog::emit` can build that tombstone with values of its choosing:
+  - `redacted_set` comes from `Hash32::checkpoint_root(cp, key)`, which accepts a checkpoint signed by *any* key the caller supplies. A self-made `SoftwareSigner` plus a re-encoded checkpoint whose `merkle_root` is set to 32 chosen bytes yields an arbitrary `Hash32`.
+  - `redaction_set_hash` is public.
+  - `Count::new(n)` is public.
+  - `CaseDisposed` is a public variant, so nothing forces it to come from a `RedactionPlan`.
+
+  PoC (`auditlog-r2-poc/src/bin/forge.rs`): an investigator emits `case.opened` for a victim case. The insider launders `redaction_set_hash([(seq, commit)])` into a `Hash32`, emits `case.disposed` for an unrelated or fake case with count 1, waits for the daily checkpoint, and replaces the victim record with a stub bound to that tombstone. `verify_stream(.., trusted_latest = latest cp)` returns `Ok(records=2, redacted=1)`. The stub belongs to a case other than the one named in the tombstone, and the verifier cannot tell.
+- Exploit scenario: ADV insider with code execution in the C-24 writer process (or anything linking candor-log with the instance's sink/signer, e.g. root on the audit host) plus store write. They retroactively erase who opened, exported or decrypted any case. The remaining trace is a plausible-looking `case.disposed` of some case, and the witness and OVERSIGHT verification still pass. This is the attack LOG-01 was meant to close, now one precondition further away. Severity stays High because the verifier's tamper-evidence guarantee (AUD-004/AUD-012) is defeated and the root cause is easy to fix.
+- Fix recommendation: (1) Make `case.disposed` constructible only from `RedactionPlan::tombstone` (e.g. a private-field payload struct, or a sealed `DisposalToken`), and make `RedactionPlan` buildable from any `CaseRecordSource` trait so production stores can use it (today only `MemoryStore` can build it; see LOG-23). (2) Make `Hash32::checkpoint_root` (and `Seq::checkpoint_end`, `SeqRange::of_checkpoint`, see LOG-17) accept only checkpoints produced by *this* log, e.g. as methods on `AuditLog` that verify against `self.verifying_key()`. (3) Defence in depth: bind each stub to its case through a keyed case tag kept in the stub (`HMAC(K_tenant, case)`), committed in the leaf preimage, and have the verifier require stub tag == tombstone case tag. (4) Add the PoC as a regression test.
+- Spec / requirement reference: 20 §8, §12, AUD-004, AUD-012, IMPL-RM1 §4 A12.
+- Status: Open
+
+### AUD-RM1-LOG-17 — Laundering paths remain after the LOG-03 fix
+- Severity: Medium
+- Location: crates/candor-log/src/ids.rs `Hash32::checkpoint_root`, `X::derive(&AuditIdKey, raw)`; src/field.rs `Seq::checkpoint_end`, `SeqRange::of_checkpoint` (fc64069)
+- Category: B1.4 (CWE-532)
+- Description: PoC (`auditlog-r2-poc/src/main.rs`):
+  - `Hash32::checkpoint_root(self_signed_cp, own_key)` → `20010db8…0007…` (an IPv6 address carried in 32 chosen bytes), then used as `records.search_performed.query_hash`. Compiled and ran.
+  - `Seq::checkpoint_end(&forged)` → `0xcb007107000001bb` (IPv4 203.0.113.7 with port 443 packed into 64 bits). It does not even check a signature. `SeqRange::of_checkpoint` carries 128 bits the same way.
+  - `CaseRef::derive(&key, ip.octets())` and `Hash32::derive(&key, Query, ip)` compile and give a *linkable, keyed pseudonym* of any input. The writer holds the key, so it can reverse IPv4 in about 2³² HMACs. P-01 forbids IP data in any form.
+- Exploit scenario: As in LOG-03: a trust-path developer can still record a peer address or filename with code that passes review and the type system.
+- Fix recommendation: Use the LOG-16 fix (2) for checkpoint-derived values. Make `derive` take typed inputs (`&Uuid`-like random id types from the owner crates, or `ResourceId` newtypes that can only be minted from a CSPRNG), not `&[u8]`. Restrict `Hash32::derive(Query, ..)` to a `QueryText` newtype that only the search component creates. Add trybuild cases.
+- Spec / requirement reference: 20 §6.1 P-01/P-05/P-07, LOG-001/003, IMPL-RM1 §4 A12.
+- Status: Open
+
+### AUD-RM1-LOG-18 — Magnitude differencing through linear combinations of releases
+- Severity: Medium
+- Location: crates/candor-log/src/metrics.rs `PeriodRegistry::release_magnitude` (fc64069)
+- Category: B1.7 (THR-039)
+- Description: Populations are compared only pairwise (|ΔA,B| = 0 or ≥ k). PoC with k = 10: A = X∪P (30 cases), B = X∪Q (30), C = X∪P∪Q∪{r} (41), D = X (20). Every pair differs by ≥ 10, and all four means were released (201, 224, 280, 166). Then S_C − S_A − S_B + S_D = x_r: one case's value, exact when sums are exact, and within about ±121 here because means are floored (the target value 2027 stands out against 100–380). A mean is a linear fact, but those facts never enter the LP disclosure audit used for tables. Also, `Percentile(10)` with n = 10 returns the minimum (PoC: 1000), which is one case's exact extreme value.
+- Exploit scenario: An M2 consumer combines the fixed catalog's magnitude reports (per channel, per group, overall) for one month and recovers a single case's duration or size class (24 line 293, "reconstruction … through magnitude statistics").
+- Fix recommendation: Record each mean as a linear fact (Σ members = n·mean ± rounding interval) in the period's disclosure state, and run it through the same simplex audit, with every individual micro-value as a protected quantity (range ≥ some width). For percentiles, require at least k values strictly below and at least k strictly above the reported rank (n ≥ k / min(p, 100−p) × 100). Add the PoC as a regression.
+- Spec / requirement reference: 24 §9.5–§9.6, TEL-015, ADR-046(5).
+- Status: Open
+
+### AUD-RM1-LOG-19 — Up to 24 h of CASE/SYSTEM events are unattested (tail truncation undetectable)
+- Severity: Medium
+- Location: crates/candor-log/src/chain.rs `CheckpointPolicy::slot_ms` (CASE/SYS daily) (fc64069)
+- Category: B12 / integrity trade-off (CWE-354)
+- Description: The LOG-02 fix checkpoints CASE and SYSTEM once per UTC day, so the witness learns a CASE/SYS head only daily. An insider who truncates the store tail removes up to 24 h of CASE events (who opened, exported or decrypted what) without detection. Before the fix this window was 5 min. SPEC-NOTES says this was "accepted per lead decision", but §F.2 requires a written lead-auditor acceptance in this report (risk statement, compensating controls, expiry ≤ 90 days).
+- Fix recommendation: Keep the timing protection and restore freshness with blinded head commitments. Each SECURITY slot checkpoint (5 min) also carries `H("candor/v1/audit/head-commit\0" ‖ r_slot ‖ case_head ‖ case_end_seq)` with a fresh random `r_slot`, and the openings are stored locally. The commitment reveals nothing about whether CASE changed. At the daily checkpoint (or on audit) the openings let the verifier check that the CASE chain at each 5-min slot is a prefix of the attested chain. Alternatively accept it formally. Add a truncation test.
+- Spec / requirement reference: 20 §8, AUD-002/003/004, THR-037.
+- Status: Open (needs a fix or written acceptance)
+
+### AUD-RM1-LOG-20 — Verifier enforces only the minimum retention bound
+- Severity: Low
+- Location: crates/candor-log/src/verify.rs `min_retention_ms` (fc64069)
+- Category: B12 (CWE-354)
+- Description: The prune check allows deletion once the anchor is 90 days old (SECURITY) or 7 days old (SYSTEM), even when the deployment policy is 400 days or 7 years. An insider who can emit `audit.retention_tombstone` can therefore delete SECURITY history early, and verification still passes. The tombstone is visible, which is why this is Low.
+- Fix recommendation: Add `min_retention_days` to `VerifyParams` (from the signed, configured policy), and have OVERSIGHT verification pass the configured value.
+- Status: Open
+
+### AUD-RM1-LOG-21 — Free-text lint misses panic-message variants and process logging
+- Severity: Low
+- Location: crates/candor-log/scripts/lint-logging.sh; clippy.toml (fc64069)
+- Category: B1.3 (P-13)
+- Description: These pass both the lint and clippy: `assert!(ok, "peer {ip}")`, `assert_eq!(x, y, "{}", ip)`, `r.expect(&format!("peer {ip}"))`, `std::panic::panic_any(ip)` and `Command::new("logger").arg(ip)`. With `panic = "abort"`, the message still goes to stderr and then journald.
+- Fix recommendation: Extend the panic pattern to `assert*!`/`debug_assert*!` messages with format arguments and to `expect(&format!` / `expect(format!(`. Ban `std::panic::panic_any` and `std::process::Command::new` (allow-list per crate). Add fixtures.
+- Status: Open
+
+### AUD-RM1-LOG-22 — Suppression audit relies on the LP relaxation (integer attacker may be stronger)
+- Severity: Low
+- Location: crates/candor-log/src/metrics.rs (simplex audit) (fc64069)
+- Category: B1.7
+- Description: Feasible ranges are computed over the reals. With priors on cell *sums*, folded-channel protections and facts from several releases, the constraint matrix is not totally unimodular, so the integer feasible range can be narrower than the LP range. The audit could then pass a table that pins a cell for an integer attacker. The builder records this as a residual covered by brute-force tests only.
+- Fix recommendation: Shrink each LP bound to an integer (ceil for lower, floor for upper) and require the range to be ≥ k−1 on those integer bounds. For tables of practical size (≤ a few hundred unknowns) add an exact integer check (branch and bound on the two extreme objectives), failing closed past a budget.
+- Status: Open
+
+### AUD-RM1-LOG-23 — API observations (production redaction path; Site trait)
+- Severity: Info
+- Location: crates/candor-log/src/sink.rs `RedactionPlan` (only built by `MemoryStore::plan_case_redaction`); src/diag.rs `__private::Site` (fc64069)
+- Description: (a) A production C-24 store (PostgreSQL) cannot build a `RedactionPlan`, so disposal needs crate changes. When that API is added, make sure it does not reopen LOG-16. (b) A hand-written `Site` impl can call `__private::emit` directly, which bypasses the `Info`/`Trace` release ceiling. Its `MODULE` constant is not validated. Everything stays compile-time constant, so this has no data-leak impact.
+- Status: Open
+
+### Assessment of the builder's deferrals (SFS-08)
+
+| Deferral | Assessment |
+|---|---|
+| `O_TMPFILE` + link | **Acceptable as a tracked deferral (Info), but the justification is inaccurate.** `linkat(AT_FDCWD, "/proc/self/fd/N", dirfd, name, AT_SYMLINK_FOLLOW)` needs no capability, only procfs. Access to the process's own fds survives `ProtectProc=invisible`. `CAP_DAC_READ_SEARCH` is needed only for the `AT_EMPTY_PATH` form. Because `O_TMPFILE` would also fix SFS-10, it should be scheduled before RM-2 intake goes live. Track it under SL-R-001 |
+| inotify "no inode outside root" test | **Acceptable** as a deferral to the C-17 integration suite. It remains an IMPL-RM1 §1.6 Verify item and must be ticked before the RM-1 exit (§7) |
+| Nightly fuzz CI job (both crates) | **Acceptable short-term only.** Targets and seeds exist and the smoke runs are clean. ST-048/049/051 require them to run in CI, so the job must land before the RM-1 exit. Add `-seed_inputs`/a scratch corpus dir so that CI never writes into `fuzz/seeds/` |
+
+### Summary (round 2)
+
+| Severity | Open (new + carried) |
+|---|---|
+| Critical | 0 |
+| High | 2 (LOG-02 record-order channel; LOG-16 tombstone forgery) |
+| Medium | 3 (LOG-17, LOG-18, LOG-19) |
+| Low | 6 (SFS-10, SFS-11, LOG-20, LOG-21, LOG-22; LOG-14 accepted-residual pending signature) |
+| Info | 3 (SFS-08 deferrals, SFS-12, LOG-23) |
+
+Fixed and verified: SFS-01, 02, 04, 05, 06, 07, 09; LOG-04, 05, 07, 08, 09, 10, 11, 12, 13, 15. Fixed with variants tracked under new IDs: SFS-03, LOG-01, LOG-03, LOG-06.
+
+`candor-safefs` has no open Critical, High or Medium findings, so it meets the gate (§F) once the lead tracks the Lows and Infos.
+
+Gate: **FAIL** 2026-10-01 fc64069. `candor-log` has 2 open High (LOG-02 residual channel, LOG-16), and 3 Medium need a fix or written acceptance (LOG-17, LOG-18, LOG-19).

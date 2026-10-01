@@ -582,9 +582,9 @@ mod tests {
         #[test]
         fn any_change_is_stale(s in "[a-z]{1,40}", i in 0usize..40, c in "[A-Z]") {
             let k = key(9);
-            let i = i % s.len();
+            let i = i.checked_rem(s.len()).unwrap_or(0);
             let mut changed = s.clone();
-            changed.replace_range(i..i + 1, &c);
+            changed.replace_range(i..i.saturating_add(1), &c);
             let v = pv(&k, "text", 0..s.len(), &s);
             let p = piece(&v);
             prop_assert!(splice_piece(&k, "text", &s, &p, "z").is_ok());
