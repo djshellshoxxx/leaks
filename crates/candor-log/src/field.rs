@@ -32,6 +32,15 @@ pub trait AuditField: sealed::Sealed {
     {
         &[]
     }
+    /// Whether a value derived from an audit artefact (checkpoint,
+    /// verification report or failure) was derived under the checkpoint key
+    /// `key` of the log that is emitting it (AUD-RM1-LOG-17: a value from a
+    /// self-signed or foreign checkpoint is refused). `true` for every
+    /// other field type.
+    #[doc(hidden)]
+    fn origin_ok(&self, _key: &[u8; 32]) -> bool {
+        true
+    }
 }
 
 /// Deterministic sample values for catalog-wide tests (not for production use).
@@ -63,7 +72,11 @@ impl Sample for StaffTimer {
 }
 impl Sample for SeqRange {
     fn sample() -> Self {
-        SeqRange { first: 0, last: 9 }
+        SeqRange {
+            first: 0,
+            last: 9,
+            origin: [0; 32],
+        }
     }
 }
 impl Sample for Count {
@@ -73,7 +86,18 @@ impl Sample for Count {
 }
 impl Sample for Seq {
     fn sample() -> Self {
-        Seq(7)
+        Seq {
+            v: 7,
+            origin: [0; 32],
+        }
+    }
+}
+impl Sample for CheckpointRoot {
+    fn sample() -> Self {
+        CheckpointRoot {
+            root: [0x5a; 32],
+            origin: [0; 32],
+        }
     }
 }
 impl Sample for Version {
@@ -129,6 +153,9 @@ impl<T: AuditField> AuditField for Option<T> {
     }
     fn schema_codes() -> &'static [&'static str] {
         T::schema_codes()
+    }
+    fn origin_ok(&self, key: &[u8; 32]) -> bool {
+        self.as_ref().is_none_or(|v| v.origin_ok(key))
     }
 }
 
@@ -257,56 +284,65 @@ impl AuditField for Count {
     }
 }
 
-/// Audit sequence number. Constructible only from audit artefacts
-/// (checkpoints, verification failures), never from caller integers.
+/// Audit sequence number. Constructible only from audit artefacts of the
+/// emitting log ([`crate::AuditLog::checkpoint_seq`], [`Seq::of_failure`]),
+/// never from caller integers, and bound to the checkpoint key it was
+/// derived under (AUD-RM1-LOG-17).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub struct Seq(u64);
+pub struct Seq {
+    v: u64,
+    origin: [u8; 32],
+}
 
 impl Seq {
-    /// One past the last sequence number covered by a checkpoint.
-    pub fn checkpoint_end(cp: &crate::chain::SignedCheckpoint) -> Self {
-        Self(cp.body().end_seq)
+    pub(crate) fn bound(v: u64, origin: [u8; 32]) -> Self {
+        Self { v, origin }
     }
-    /// The offending sequence number of a verification failure.
+    /// The offending sequence number of a verification failure (bound to
+    /// the key the stream was verified under).
     pub fn of_failure(e: &crate::verify::VerifyError) -> Self {
-        Self(e.seq)
+        Self {
+            v: e.seq,
+            origin: e.origin,
+        }
     }
     /// Value.
     pub fn get(self) -> u64 {
-        self.0
+        self.v
     }
 }
 
 impl sealed::Sealed for Seq {}
 impl AuditField for Seq {
     fn to_value(&self) -> Value {
-        Value::Uint(self.0)
+        Value::Uint(self.v)
+    }
+    fn origin_ok(&self, key: &[u8; 32]) -> bool {
+        &self.origin == key
     }
 }
 
 /// Inclusive audit sequence range `[first, last]`. Constructible only from
-/// audit artefacts (checkpoints, verification reports), never from caller
-/// integers (AUD-RM1-LOG-03).
+/// audit artefacts of the emitting log (its checkpoints, verification
+/// reports under its key), never from caller integers (AUD-RM1-LOG-03,
+/// AUD-RM1-LOG-17).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct SeqRange {
     pub(crate) first: u64,
     pub(crate) last: u64,
+    pub(crate) origin: [u8; 32],
 }
 
 impl SeqRange {
-    /// The (non-empty) interval of a checkpoint.
-    pub fn of_checkpoint(cp: &crate::chain::SignedCheckpoint) -> Option<Self> {
-        let b = cp.body();
-        (b.end_seq > b.first_seq).then(|| Self {
-            first: b.first_seq,
-            last: b.end_seq.saturating_sub(1),
-        })
-    }
     /// The records covered by a successful verification, optionally
     /// narrowed to `[first, last]` inside it (viewer/exports).
     pub fn within(report: &crate::verify::VerifyReport, first: u64, last: u64) -> Option<Self> {
         let lo = report.first_seq?;
-        (lo <= first && first <= last && last < report.next_seq).then_some(Self { first, last })
+        (lo <= first && first <= last && last < report.next_seq).then_some(Self {
+            first,
+            last,
+            origin: report.origin,
+        })
     }
     /// First sequence number.
     pub fn first(self) -> u64 {
@@ -322,6 +358,36 @@ impl sealed::Sealed for SeqRange {}
 impl AuditField for SeqRange {
     fn to_value(&self) -> Value {
         Value::Array(vec![Value::Uint(self.first), Value::Uint(self.last)])
+    }
+    fn origin_ok(&self, key: &[u8; 32]) -> bool {
+        &self.origin == key
+    }
+}
+
+/// Merkle root of one of the emitting log's own checkpoints
+/// (`audit.checkpoint_signed.root`), obtainable only through
+/// [`crate::AuditLog::checkpoint_root`] (AUD-RM1-LOG-16/17: no arbitrary
+/// 32 bytes through a self-signed checkpoint).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct CheckpointRoot {
+    pub(crate) root: [u8; 32],
+    pub(crate) origin: [u8; 32],
+}
+
+impl CheckpointRoot {
+    /// Root bytes.
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.root
+    }
+}
+
+impl sealed::Sealed for CheckpointRoot {}
+impl AuditField for CheckpointRoot {
+    fn to_value(&self) -> Value {
+        Value::Bytes(self.root.to_vec())
+    }
+    fn origin_ok(&self, key: &[u8; 32]) -> bool {
+        &self.origin == key
     }
 }
 

@@ -109,20 +109,21 @@ and with the users from `sysusers.d` created.
 | Check | Result (2026-10-01, this container: systemd 255, tor 0.4.9.11, nft 1.0.9, jq 1.7, AppArmor 4 parser, PG 16.13) |
 |---|---|
 | shellcheck (tools, tests) | clean |
-| `config-check.sh` on the shipped tree (base, `--profile ce-single`, `--profile ce-hardened`) | 635 checks OK, exit 0 |
+| `config-check.sh` on the shipped tree (base, `--profile ce-single`, `--profile ce-hardened`) | 863 checks OK, exit 0 |
 | `config-check.sh --host --root` on a synthetic installed host (CE-SINGLE layout) | exit 0 (live-only checks reported as SKIP) |
-| `config-check.sh` on 162 deliberately broken copies (80 original, every AUD-RM2-deploy bypass, new artefacts; 21 of them host-root cases) | every copy rejected with exit 30 |
-| `config-check.sh --host --only pg` against a live cluster (`postgres -C`) | clean cluster passes; `ALTER SYSTEM`-style `postgresql.auto.conf` override rejected (exit 30) |
-| `systemd-analyze verify --man=no` (10 units) | clean apart from the expected messages below |
-| `systemd-analyze security --offline --threshold` | web 0.4, sealer 0.4, store 0.4, PostgreSQL 0.5 (budget 0.5); tor 1.4 (budget 1.5, 17 §5.3) |
+| `config-check.sh` on 238 deliberately broken copies (every AUD-RM2-deploy round-1 and round-2 bypass, SEA-16, the STO-08/11/23/24 settings and timers; 45 of them host-root cases; symlinked inputs point at a marker file that must never appear in a report) | every copy rejected with exit 30, no marker printed |
+| `config-check.sh` invocation and integrity | `--only typo`, `--only tor,typo`, a selection running no check: exit 2; edited baseline, baseline + re-written manifest: exit 30; work base root 0700 and empty afterwards |
+| `config-check.sh --host --only pg` against a live cluster (`postgres -C`) | clean cluster passes (stats link in place); `pg_stat` as a real directory, a data directory behind a symlink and an `ALTER SYSTEM`-style `postgresql.auto.conf` override are rejected (exit 30) |
+| `systemd-analyze verify --man=no` (14 units) | clean apart from the expected messages below |
+| `systemd-analyze security --offline --threshold` | web 0.4, sealer 0.4, store 0.4, vacuum 0.4, maint 0.4, PostgreSQL 0.5 (budget 0.5); tor 1.4 (budget 1.5, 17 §5.3) |
 | `nft -c -f nftables.conf` | OK |
-| `apparmor_parser -Q -K` (5 profiles, exit status checked) | OK |
+| `apparmor_parser -Q -K` (6 profiles, exit status checked) | OK |
 | `tor --verify-config` (as `_tor-candor-intake`) | valid |
 | `check-placement.sh` | 3 positive cases pass; 22 negative cases fail as expected (exit 30 or 2) |
-| PostgreSQL 16 with `candor-intake.conf` | effective settings match (incl. `max_wal_size=256MB`, `wal_recycle=off`). Peer map, database restriction and socket permissions refuse other users and roles, including `postgres`. The server writes zero bytes of log output, even after errors. |
+| PostgreSQL 16 with `candor-intake.conf` | effective settings match (incl. `max_wal_size=256MB`, `wal_recycle=off`, `autovacuum=off`, `track_counts=off`, `track_activities=off`, `temp_file_limit=256MB`). Peer map, database restriction and socket permissions refuse other users and roles, including `postgres`. The server writes zero bytes of log output, even after errors. |
 
 **Expected `systemd-analyze verify` messages**, filtered by `validate.sh`:
-`Command /usr/lib/candor/{source-web/candor-web,sealer/candor-sealer,intake-store/candor-intake-store} is not executable: No such file or directory`.
+`Command /usr/lib/candor/{source-web/candor-web,sealer/candor-sealer,intake-store/candor-intake-store,intake-store/candor-intake-maint} is not executable: No such file or directory`.
 These binaries are not built yet; the units name their future install paths. On systemd < 257,
 any later `PrivatePIDs=` addition would appear as `Unknown key name`; that message is filtered
 too.

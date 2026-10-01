@@ -10,6 +10,7 @@ use core::any::Any;
 
 use crate::cbor::{MapBuilder, Value};
 use crate::codes::*;
+use crate::disposal::{CaseDisposal, RetentionPrune};
 use crate::field::*;
 use crate::ids::*;
 
@@ -25,12 +26,24 @@ pub enum EventClass {
 }
 
 impl EventClass {
-    /// The C-24 stream for this class.
+    /// The C-24 stream for this class (exact-time events).
     pub const fn stream(self) -> StreamId {
         match self {
             Self::Security => StreamId::Sec,
             Self::Case => StreamId::Case,
             Self::System => StreamId::Sys,
+        }
+    }
+
+    /// The stream for this class's **date-only** events (AUD-RM1-LOG-02):
+    /// `case-slot` / `sys-slot`, written only at import-slot boundaries in
+    /// shuffled order, so no date-only record ever has an exact-time
+    /// neighbour. SECURITY has no date-only events.
+    pub const fn slot_stream(self) -> StreamId {
+        match self {
+            Self::Security => StreamId::Sec,
+            Self::Case => StreamId::CaseSlot,
+            Self::System => StreamId::SysSlot,
         }
     }
 }
@@ -126,6 +139,19 @@ macro_rules! catalog {
             pub fn field_names(&self) -> &'static [&'static str] {
                 match self { $( Self::$v { .. } => &[ $( stringify!($f) ),* ] ),* }
             }
+            /// Whether every artefact-derived field (sequence numbers,
+            /// ranges, checkpoint roots) was derived under checkpoint key
+            /// `key` (AUD-RM1-LOG-17).
+            pub(crate) fn origins_ok(&self, key: &[u8; 32]) -> bool {
+                match self {
+                    $( Self::$v { $( $f ),* } => {
+                        #[allow(unused_mut)]
+                        let mut ok = true;
+                        $( ok &= AuditField::origin_ok($f, key); )*
+                        ok
+                    } ),*
+                }
+            }
             /// The case this event refers to, if any (for per-case redaction, AUD-012).
             pub fn case_ref(&self) -> Option<CaseRef> {
                 match self {
@@ -192,16 +218,17 @@ catalog! {
     KeydirConsistencyFailure = "keydir.consistency_failure" [Security, Staff] { observer: Observer, detail_code: Code<KeydirDetail> }
     KeydirSnapshotRejected = "keydir.snapshot_rejected" [Security, Staff] {}
     KeydirEpochDestroyed = "keydir.epoch_destroyed" [Security, Staff] {}
-    AuditCheckpointSigned = "audit.checkpoint_signed" [Security, Staff] { stream: StreamId, seq_range: SeqRange, root: Hash32 }
+    AuditCheckpointSigned = "audit.checkpoint_signed" [Security, Staff] { stream: StreamId, seq_range: SeqRange, root: CheckpointRoot }
     AuditWitnessCosigned = "audit.witness_cosigned" [Security, Staff] { witness_id: WitnessId, checkpoint_seq: Seq }
     AuditWitnessFailed = "audit.witness_failed" [Security, Staff] { witness_id: WitnessId, checkpoint_seq: Seq }
     AuditVerificationFailed = "audit.verification_failed" [Security, Staff] { stream: StreamId, seq: Seq, failure_code: VerifyFailureCode }
     AuditExported = "audit.exported" [Security, Staff] { stream: StreamId, seq_range: SeqRange, destination_class: DestinationClass, approvers: Approvers, recipient_key_fingerprint: Hash32 }
     AuditViewed = "audit.viewed" [Security, Staff] { stream: StreamId, seq_range: SeqRange }
     AuditRead = "audit.read" [Security, Staff] { stream: StreamId, filter_kind: Code<FilterKind>, result_count_bucket: CountBucket }
-    /// Retention tombstone written before whole checkpoint intervals are
-    /// deleted (20 §12, AUD-005). Implementation-defined name; see SPEC-NOTES.
-    AuditRetentionTombstone = "audit.retention_tombstone" [Security, Staff] { stream: StreamId, seq_range: SeqRange, last_deleted_checkpoint_root: Hash32 }
+    /// Retention tombstone written before whole checkpoint intervals of the
+    /// SECURITY stream are deleted (20 §12, AUD-005); dual-approved
+    /// (AUD-RM1-LOG-16/20). Implementation-defined name; see SPEC-NOTES.
+    AuditRetentionTombstone = "audit.retention_tombstone" [Security, Staff] { prune: RetentionPrune }
     SecretPlacementViolation = "secret.placement_violation" [Security, Staff] { host_role: HostRole, secret_kind: Code<SecretKind> }
     SelftestLoggingViolation = "selftest.logging_violation" [Security, Staff] { host_role: HostRole, check_code: LoggingCheck }
     UpdateApplied = "update.applied" [Security, Staff] { component: Component, version: Version, reason_code: Option<UpdateReason> }
@@ -230,7 +257,9 @@ catalog! {
     CaseWrapDeletionExecuted = "case.wrap_deletion_executed" [Case, Staff] { case: CaseRef, target: UserRef, approvers: Option<Approvers>, not_before_day: DayStamp }
     CaseRekeyed = "case.rekeyed" [Case, Staff] { case: CaseRef, key_generation: KeyGeneration }
     CaseCoiAttested = "case.coi_attested" [Case, Staff] { case: CaseRef, attester: UserRef }
-    CaseCoiTagsUpdated = "case.coi_tags_updated" [Case, Staff] { case: CaseRef }
+    /// Date-only (AUD-RM1-LOG-14): lands in the shuffled `case-slot`
+    /// stream, so it is never adjacent to a COI-caused membership change.
+    CaseCoiTagsUpdated = "case.coi_tags_updated" [Case, DateOnly] { case: CaseRef }
     CaseCoiWrapViolation = "case.coi_wrap_violation" [Case, Staff] { case: CaseRef, detail_code: CoiWrapDetail }
     CaseSlaReminder = "case.sla_reminder" [Case, Staff] { case: CaseRef, timer_id: TimerId, due_date: DayStamp }
     CaseSlaBreached = "case.sla_breached" [Case, Staff] { case: CaseRef, timer_id: TimerId, due_date: DayStamp }
@@ -267,11 +296,15 @@ catalog! {
     LegalholdReleased = "legalhold.released" [Case, Staff] { case: CaseRef, hold_ref: HoldRef }
     CaseDisposalRequested = "case.disposal_requested" [Case, Staff] {}
     CaseDisposalApproved = "case.disposal_approved" [Case, Staff] {}
-    /// Disposal tombstone (AUD-012): CaseRef, receipt, the count of removed
-    /// CASE events (20 §12) and the commitment to exactly which records
-    /// were redacted (`redacted_set`, AUD-RM1-LOG-01); disposal date =
-    /// envelope `ts`. Built by [`crate::sink::RedactionPlan::tombstone`].
-    CaseDisposed = "case.disposed" [Case, Staff] { case: CaseRef, receipt_id: ReceiptId, removed_event_count: Count, redacted_set: Hash32 }
+    /// Disposal tombstone in the CASE stream (AUD-012): CaseRef, receipt,
+    /// the count of removed events (20 §12), the commitments to exactly
+    /// which CASE and CASE-SLOT records were redacted (AUD-RM1-LOG-01) and
+    /// two disposal-approver signatures (AUD-RM1-LOG-16); disposal date =
+    /// envelope `ts`. Built only by [`crate::AuditLog::emit_case_disposal`].
+    CaseDisposed = "case.disposed" [Case, Staff] { disposal: CaseDisposal }
+    /// The same tombstone in the date-only `case-slot` stream, which the
+    /// redacted import/system-actor records of the case bind to.
+    CaseSlotDisposed = "case.slot_disposed" [Case, DateOnly] { disposal: CaseDisposal }
     CaseDataPurged = "case.data_purged" [Case, Staff] { case: CaseRef, reason_code: PurgeReason }
     OversightOpened = "oversight.opened" [Case, Staff] { case: CaseRef, mode: OversightMode }
     CaseRewrappedAfterVaultLoss = "case.rewrapped_after_vault_loss" [Case, Staff] { case: CaseRef, approvers: Approvers }
@@ -298,7 +331,9 @@ catalog! {
     /// Retention tombstone of the SYSTEM stream, written into that stream
     /// before its whole intervals are deleted (AUD-RM1-LOG-01: the verifier
     /// needs the tombstone in the pruned stream). Implementation-defined.
-    SysRetentionTombstone = "sys.retention_tombstone" [System, System] { stream: StreamId, seq_range: SeqRange, last_deleted_checkpoint_root: Hash32 }
+    SysRetentionTombstone = "sys.retention_tombstone" [System, System] { prune: RetentionPrune }
+    /// Retention tombstone of the date-only `sys-slot` stream.
+    SysSlotRetentionTombstone = "sys.slot_retention_tombstone" [System, DateOnly] { prune: RetentionPrune }
 }
 
 impl AuditEvent {
@@ -337,6 +372,19 @@ impl AuditEvent {
                     | Self::PlatformMismatch { .. }
             ),
         }
+    }
+
+    /// Whether this is a tombstone, which only the disposal API may write
+    /// (AUD-RM1-LOG-16).
+    pub fn is_tombstone(&self) -> bool {
+        matches!(
+            self,
+            Self::CaseDisposed { .. }
+                | Self::CaseSlotDisposed { .. }
+                | Self::AuditRetentionTombstone { .. }
+                | Self::SysRetentionTombstone { .. }
+                | Self::SysSlotRetentionTombstone { .. }
+        )
     }
 
     /// Whether this is an import-related event (always date-only, LOG-013/LOG-021).
@@ -408,6 +456,19 @@ mod tests {
         let Value::Map(m) = e.payload() else { panic!() };
         assert_eq!(m.len(), 1);
         assert_eq!(e.field_names(), &["dc_code", "approver", "effective_date"]);
+    }
+
+    // AUD-RM1-LOG-17: every artefact-derived field is origin-checked.
+    #[test]
+    fn origin_check_covers_artefact_fields() {
+        let key = [9u8; 32];
+        let n = AuditEvent::samples()
+            .iter()
+            .filter(|e| !e.origins_ok(&key))
+            .count();
+        // checkpoint_signed (range, root), witness_cosigned/failed (seq),
+        // verification_failed (seq), exported (range), viewed (range).
+        assert_eq!(n, 6);
     }
 
     #[test]

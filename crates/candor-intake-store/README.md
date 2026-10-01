@@ -33,7 +33,7 @@ let cfg = DeadDropConfig { slots_per_day: 4, per_slot: 16, max_pending: 5_000,
 let store = PgIntakeStore::open(opts.username("candor_istore").database(db), tenant, 8,
                                 cfg, Box::new(real_format_dummies)).await?;  // starts restore-pending
 store.init(tenant, kdf_salt).await?;
-store.apply_pushed_deletion_list(&core_copy, &signed_core_head, &core_pk, &k31_pk, &CoreReplyHasher).await?;
+store.apply_pushed_deletion_list(&core_copy, &signed_core_head, &core_pk, &k31_pk, &CoreReplyHasher, today).await?;
 let acct = store.create_account(new_account, today).await?;     // separate from envelopes
 let r = store.commit_envelope(CommitEnvelope { objects: [main, bundle, identity], /* … */ }).await?;
 // At each fixed import slot:
@@ -43,9 +43,11 @@ store.apply_replies(today, replies).await?;
 store.rebuild_published_set(slot).await?;                       // K new entries
 store.acknowledge_deletion_head(&signed_core_head, &core_pk).await?;     // RL-11
 store.uniform_rewrite(slot, &counter_deltas, &active_accounts).await?;   // last
-vacuum_after_rewrite(&owner_opts).await?;   // as candor-migrate (table owner), right after
+vacuum_after_rewrite(&vacuum_opts).await?;  // as candor_intake_vacuum (database owner, no table), right after
 // Daily job, separate process as candor_intake_maint:
 PgIntakeMaintenance::open(maint_opts, tenant, core_pk).await?.prune_deletion_list(today).await?;
+// Daily, fixed maintenance window (intake serving paused), as candor_intake_vacuum:
+vacuum_full_daily(&vacuum_opts).await?;
 
 // Tests of other crates:
 let mem = MemoryStore::new()?;
@@ -63,5 +65,5 @@ crates/candor-intake-store/scripts/pg-test.sh cargo test -p candor-intake-store 
 
 1. It creates the unprivileged OS user `pgtest` if needed and runs `initdb` as that user in a private 0700 directory.
 2. The cluster listens only on a Unix socket, with peer authentication through an ident map.
-3. It applies the intake settings: `wal_level=minimal`, `max_wal_senders=0`, `archive_mode=off`, `track_commit_timestamp=off`, `log_min_messages=panic`, and no SQL text or bind parameters in logs.
+3. It applies the intake settings: `wal_level=minimal`, `max_wal_senders=0`, `archive_mode=off`, `track_commit_timestamp=off`, `log_min_messages=panic`, no SQL text or bind parameters in logs, and (default profile `CANDOR_TEST_PG_PROFILE=intake`) `track_counts=off` and `autovacuum=off`; `CANDOR_TEST_PG_PROFILE=stock` keeps both on.
 4. It exports `CANDOR_TEST_PG=<socket dir>` and `CANDOR_TEST_PG_LOG=<0600 server log>` (only so a test can prove that no ERROR line is written), runs the given command, and always deletes the cluster, and the OS user if it created it, afterwards.

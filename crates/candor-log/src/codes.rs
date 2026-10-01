@@ -168,6 +168,8 @@ code_space! {
     FilterKind = "filter_kind";
     /// Sandbox image identifiers (`sys.sandbox_image`).
     SandboxImage = "sandbox_image";
+    /// Ordinals of enumerated configuration values (`cfg.changed.new_value`).
+    ConfigEnumValue = "config_enum_value";
 }
 
 code_enum!(
@@ -275,8 +277,11 @@ code_enum!(
     /// Who observed a Key Directory inconsistency.
     Observer { Desk => "DESK", Witness => "WITNESS", Monitor => "MONITOR", Core => "CORE" });
 code_enum!(
-    /// Audit stream identifier (20 §4 `stream`).
-    StreamId { Sec => "sec", Case => "case", Sys => "sys" });
+    /// Audit stream identifier (20 §4 `stream`). `case-slot` and `sys-slot`
+    /// carry only date-only events (imports, relay, source-load health,
+    /// system-actor CASE events), written in shuffled order at import-slot
+    /// boundaries (AUD-RM1-LOG-02).
+    StreamId { Sec => "sec", Case => "case", Sys => "sys", CaseSlot => "case-slot", SysSlot => "sys-slot" });
 code_enum!(
 /// Audit verification failure codes (`audit.verification_failed`).
 VerifyFailureCode {
@@ -535,8 +540,9 @@ impl AuditField for CaseOrChannel {
 pub enum ConfigValue {
     /// Boolean key.
     Bool(bool),
-    /// Enumerated key (registry ordinal).
-    Enum(u16),
+    /// Enumerated key (registry ordinal, compile-time constant only so no
+    /// runtime value can be laundered into it, AUD-RM1-LOG-17).
+    Enum(Code<ConfigEnumValue>),
     /// Any other value, hashed.
     Hash(crate::ids::Hash32),
 }
@@ -551,7 +557,7 @@ impl AuditField for ConfigValue {
     fn to_value(&self) -> Value {
         match self {
             Self::Bool(b) => Value::Bool(*b),
-            Self::Enum(e) => Value::Uint(u64::from(*e)),
+            Self::Enum(e) => Value::Uint(u64::from(e.get())),
             Self::Hash(h) => h.to_value(),
         }
     }

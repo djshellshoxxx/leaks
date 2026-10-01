@@ -544,7 +544,7 @@ check_pg() {
     if printf '%s\n' "$hba" | awk '$1 != "local" {bad=1} END {exit bad?0:1}'; then fail pg.hba_local_only "non-local (TCP) line present"; else ok pg.hba_local_only; fi
     if printf '%s\n' "$hba" | awk '$1=="include" || $1=="include_dir" || $1=="include_if_exists" || $0 ~ /@/ {bad=1} END {exit bad?0:1}'; then fail pg.hba_no_include "include or @file reference present"; else ok pg.hba_no_include; fi
     if printf '%s\n' "$hba" | awk '{m=$4} m!="peer" && m!="reject" {bad=1} END {exit bad?0:1}'; then fail pg.hba_methods "only peer/reject allowed"; else ok pg.hba_methods; fi
-    if printf '%s\n' "$hba" | awk '$3 ~ /(^|,)\+?(postgres|all)(,|$)/ && $4!="reject" {bad=1} END {exit bad?0:1}'; then fail pg.hba_no_superuser "a postgres/all line other than reject is present (09 §10, D-11)"; else ok pg.hba_no_superuser; fi
+    if printf '%s\n' "$hba" | awk '$3 ~ /(^|,)\+?(postgres|all)(,|$)/ && $4!="reject" {bad=1} END {exit bad?0:1}'; then fail pg.hba_no_superuser "a postgres/all line other than reject is present (09 s10, D-11)"; else ok pg.hba_no_superuser; fi
     last=$(printf '%s\n' "$hba" | tail -n 1)
     if [ "$last" = "local all all reject" ]; then ok pg.hba_reject_last; else fail pg.hba_reject_last "last line must be 'local all all reject'"; fi
     pg_exact pg.hba_exact hba "$hba"

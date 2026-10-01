@@ -1375,19 +1375,31 @@ impl<'c> State<'c> {
                 categories: c.categories.clone(),
             })
             .collect();
+        // Usable only while signed by the member's *current* K08 and neither
+        // the MEK nor that K08 is revoked (§12.1 step 6, VR-11).
+        let live = |k: &MekRec| self.usable(&k.key_id) && self.user_k08(&k.user) == Some(k.signer);
+        let mut live_count: BTreeMap<([u8; 16], u32), usize> = BTreeMap::new();
+        for k in self.meks.iter().filter(|k| k.channel == id && live(k)) {
+            let c = live_count.entry((k.user, k.epoch)).or_insert(0);
+            *c = c.saturating_add(1);
+        }
         let meks = self
             .meks
             .iter()
             .filter(|k| k.channel == id && k.usable_suite)
-            .map(|k| MemberEpochKey {
-                user_id: k.user,
-                epoch_id: k.epoch,
-                valid_from_day: k.from,
-                valid_until_day: k.until,
-                // Usable only while signed by the member's *current* K08 and
-                // neither the MEK nor that K08 is revoked (§12.1 step 6, VR-11).
-                revoked: !self.usable(&k.key_id) || self.user_k08(&k.user) != Some(k.signer),
-                public_key: k.pk.clone(),
+            .map(|k| {
+                // §14.4 rule 5: at most one unrevoked MEMBER_EPOCH per
+                // (channel, member, epoch). More than one is ambiguous: none
+                // of them is used (fail closed).
+                let unrevoked = live_count.get(&(k.user, k.epoch)).copied().unwrap_or(0);
+                MemberEpochKey {
+                    user_id: k.user,
+                    epoch_id: k.epoch,
+                    valid_from_day: k.from,
+                    valid_until_day: k.until,
+                    revoked: !live(k) || unrevoked > 1,
+                    public_key: k.pk.clone(),
+                }
             })
             .collect();
         ChannelView {
