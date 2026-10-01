@@ -6,7 +6,16 @@
 #   cargo install --locked --version =0.5.9 cargo-cyclonedx
 #
 # Gaps vs 28 §9.3 (tracked; release pipeline must close them before 1.0):
-#   * cargo-cyclonedx 0.5.9 emits CycloneDX <= 1.5, not 1.6, and no CBOM section;
+#   * cargo-cyclonedx 0.5.9 emits CycloneDX <= 1.5, not 1.6, and no CBOM section.
+#     Re-checked 2026-10-01 against crates.io: 0.5.9 (2026-03-19, MSRV 1.85, builds
+#     with rustc 1.94.1) is still the newest release, and its library
+#     cyclonedx-bom 0.8.1 has no 1.6 model (`--spec-version` accepts 1.3/1.4/1.5).
+#     No pin bump is possible; the pin stays =0.5.9 and SBOMs are emitted as 1.5.
+#     Until a release with 1.6 lands (then: bump here, in the Makefile and in
+#     .github/workflows/ci.yml together, after the 14-day cooling of 28 §5.1),
+#     a 1.5 -> 1.6 upgrade step would have to be added to the release pipeline;
+#     the 1.6-only fields 28 §9.3 needs (CBOM cryptoProperties) cannot be
+#     produced by this tool at all and need a separate generator;
 #   * no SPDX 3.0 output yet;
 #   * SBOMs here are unsigned evidence; signing/attestation happens at release.
 # serialNumber is a random UUID, so SBOMs are compared after normalisation
