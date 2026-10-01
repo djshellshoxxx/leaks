@@ -24,18 +24,20 @@
 {%- if p.vm.files.files.is_empty() %}
 <p>{{ p.t("sui-files-none") }}</p>
 {%- else %}
-<form method="post" action="{{ p.href(Route::Files) }}" id="desc-form">{% include "ft.html" %}<input type="hidden" name="nav" value="continue"></form>
+{%- let last_key = "" %}
+{% include "parts_note.html" %}
+<form method="post" action="{{ p.href(Route::Files) }}" id="desc-form">{% include "ft.html" %}</form>
 <table>
 <caption>{{ p.t("sui-files-caption") }}</caption>
 <thead><tr><th scope="col">{{ p.t("sui-files-col-name") }}</th><th scope="col">{{ p.t("sui-files-col-size") }}</th><th scope="col">{{ p.t("sui-files-col-describe") }}</th><th scope="col">{{ p.t("sui-files-col-remove") }}</th></tr></thead>
 <tbody>
-{%- for f in p.vm.files.files %}
-<tr><td><bdi class="mono">{{ f.name }}</bdi></td><td>{{ p.file_size(f) }}</td>
-<td><label class="vh" for="f-desc_{{ loop.index0 }}">{{ p.t1("sui-files-describe-label", "name", f.name.as_str()) }}</label><input type="text" id="f-desc_{{ loop.index0 }}" name="desc_{{ loop.index0 }}" form="desc-form" maxlength="500" dir="auto" value="{{ f.description }}"></td>
-<td><form method="post" action="{{ p.href(Route::Files) }}">{% include "ft.html" %}<input type="hidden" name="action" value="remove"><input type="hidden" name="part_index" value="{{ loop.index0 }}"><button type="submit">{{ p.t1("sui-files-remove", "name", f.name.as_str()) }}</button></form></td></tr>
+{%- for s in p.region(Region::FileRows) %}
+{{ s|safe }}
 {%- endfor %}
 </tbody>
 </table>
+{%- let navform = "desc-form" %}
+{% include "parts_nav.html" %}
 {%- endif %}
 <p class="note">{{ p.t("sui-draft-limits") }}</p>
 <div class="actions">
@@ -43,7 +45,7 @@
 {%- if p.vm.files.files.is_empty() %}
 <a class="btn btn-primary" href="{{ p.href(Route::Review) }}">{{ p.t("sui-btn-continue") }}</a>
 {%- else %}
-<button type="submit" form="desc-form" class="btn-primary">{{ p.t("sui-btn-continue") }}</button>
+<button type="submit" form="desc-form" name="nav" value="continue" class="btn-primary">{{ p.t("sui-btn-continue") }}</button>
 {%- endif %}
 </div>
 {% endblock %}

@@ -1,10 +1,15 @@
 {#- SPDX-License-Identifier: AGPL-3.0-or-later -#}
 {% extends "layout.html" %}
 {#- S12 Secure Conversation. GC-36 warning (SUI-034), follow-up rule (SUI-074), delivery timing
-    (SUI-067); the form follows the thread with its own skip link. -#}
+    (SUI-067); the form follows the thread with its own skip link. A long thread or draft is
+    split into parts (AUD-RM1-SUI-01); the reply form's send controls are on the last part and
+    the message text field is tied to the form with `form="reply"`. -#}
 {% block main %}
+{%- let reply_here = p.region_open(Region::Composer) || p.is_last_part() %}
 <h1>{{ p.t("sui-conv-h1") }}</h1>
+{%- if reply_here %}
 <p><a href="#reply">{{ p.t("sui-conv-skip") }}</a></p>
+{%- endif %}
 {% include "errors.html" %}
 {%- if p.vm.conversation.just_sent %}
 <p class="box" role="status">{{ p.t("sui-conv-sent") }}</p>
@@ -14,23 +19,28 @@
 {%- endif %}
 <p class="note">{{ p.t("sui-conv-gc36") }}</p>
 <p>{{ p.t("sui-conv-recipients") }}</p>
-{%- let msgs = p.vm.conversation.messages %}
-{%- let deletable = true %}
-{% include "messages.html" %}
+{%- let last_key = "sui-part-reply-last" %}
+{% include "parts_note.html" %}
+{%- if p.vm.conversation.messages.is_empty() %}
+<p>{{ p.t("sui-inbox-none") }}</p>
+{%- endif %}
+{%- for s in p.region(Region::Messages) %}
+{{ s|safe }}
+{%- endfor %}
 {%- if p.vm.conversation.has_older || p.vm.conversation.has_newer %}
 <form method="post" action="{{ p.href(Route::Conversation) }}">{% include "ft.html" %}<input type="hidden" name="page" value="{{ p.vm.conversation.page }}">
 <div class="actions">{% if p.vm.conversation.has_newer %}<button type="submit" name="nav" value="newer">{{ p.t("sui-conv-newer") }}</button>{% endif %}{% if p.vm.conversation.has_older %}<button type="submit" name="nav" value="older">{{ p.t("sui-conv-older") }}</button>{% endif %}</div></form>
 {%- endif %}
+{%- if reply_here %}
 <h2 id="reply" tabindex="-1">{{ p.t("sui-conv-reply") }}</h2>
-<form method="post" action="{{ p.href(Route::Conversation) }}" enctype="multipart/form-data">
+{%- endif %}
+{%- for s in p.region(Region::Composer) %}
+{{ s|safe }}
+{%- endfor %}
+<form id="reply" method="post" action="{{ p.href(Route::Conversation) }}" enctype="multipart/form-data">
 {% include "ft.html" %}
-{%- let fid = "text" %}
-<div class="field">
-<label for="f-text">{{ p.t("sui-conv-text") }}</label>
-<div class="hint" id="h-text"><p>{{ p.t("sui-q-ai") }}</p><p>{{ p.t1("sui-q-maxlen", "max", 60000u64) }}</p></div>
-{% include "field_error.html" %}
-<textarea id="f-text" name="text" rows="10" maxlength="60000" dir="auto" aria-describedby="{{ p.describedby(fid, true) }}"{% if p.has_field_error(fid) %} aria-invalid="true"{% endif %}>{{ p.vm.conversation.draft_text }}</textarea>
-</div>
+{%- if p.part_nav().is_some() %}<input type="hidden" name="page" value="{{ p.vm.conversation.page }}">{% endif %}
+{%- if p.is_last_part() %}
 <div class="field">
 {%- let fid = "file" %}
 <label for="f-file">{{ p.t("sui-conv-file") }}</label>
@@ -41,6 +51,9 @@
 {%- let delayed = p.vm.conversation.delayed_delivery %}
 {% include "delivery.html" %}
 <div class="actions"><button type="submit" name="action" value="send" class="btn-primary">{{ p.t(p.mode().message_send_key()) }}</button></div>
+{%- endif %}
+{%- let navform = "" %}
+{% include "parts_nav.html" %}
 </form>
 <ul>
 {%- if !p.mode().is_disclosed() %}

@@ -522,6 +522,8 @@ sui-cred-h2 = Your passphrase
 # @class tier0
 sui-cred-all-or-none = Write down all the words or none. A partly written passphrase is easier to guess.
 sui-cred-oneline = All { $n } words on one line, to copy
+# @class tier0
+sui-cred-copy-warning = If you copy it, some computers and phones keep or sync what you copy. Clear it afterwards.
 sui-cred-spell = Spell out each word
 # @class tier0
 sui-cred-next-info = On the next page you will type 3 of these words to show you have kept them. This page will not be shown again.
@@ -723,3 +725,13 @@ sui-signedout-text = For your safety, a session ends after 20 minutes without ac
 sui-method-step = Not allowed
 sui-method-h1 = This request is not allowed
 sui-method-text = Go back to the start page and try again.
+
+## Multi-part pages (AUD-RM1-SUI-01): long text is split into parts, never cut.
+
+sui-part-status = This page is in { $total } parts so that it loads reliably. You are on part { $n }. Nothing is left out.
+sui-part-continue-last = Check every part. The button to go on is on the last part.
+sui-part-reply-last = The form to write a message is on the last part.
+sui-part-nav = Parts of this page
+sui-part-prev = Previous part
+sui-part-next = Next part
+sui-part-of = (part { $n } of { $total })

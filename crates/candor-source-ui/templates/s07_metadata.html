@@ -4,13 +4,14 @@
 {% block main %}
 <h1>{{ p.t("sui-meta-h1") }}</h1>
 <p class="honesty">{{ p.t("sui-meta-honest") }}</p>
+{%- let last_key = "sui-part-continue-last" %}
+{% include "parts_note.html" %}
 <table>
 <caption>{{ p.t("sui-meta-caption") }}</caption>
 <thead><tr><th scope="col">{{ p.t("sui-meta-col-file") }}</th><th scope="col">{{ p.t("sui-meta-col-type") }}</th><th scope="col">{{ p.t("sui-meta-col-risks") }}</th></tr></thead>
 <tbody>
-{%- for f in p.vm.files.files %}
-<tr><th scope="row"><bdi class="mono">{{ f.name }}</bdi></th><td>{{ p.file_class_names(f) }}</td>
-<td><ul>{% for c in p.file_classes(f) %}{% for k in c.risk_keys() %}<li>{{ p.t(k) }}</li>{% endfor %}{% endfor %}</ul></td></tr>
+{%- for s in p.region(Region::MetaRows) %}
+{{ s|safe }}
 {%- endfor %}
 </tbody>
 </table>
@@ -24,7 +25,11 @@
 {% include "ft.html" %}
 <div class="actions pair">
 <button type="submit" name="action" value="change">{{ p.t("sui-meta-change") }}</button>
+{%- if p.is_last_part() %}
 <button type="submit" name="action" value="continue">{{ p.t("sui-meta-continue") }}</button>
+{%- endif %}
 </div>
+{%- let navform = "" %}
+{% include "parts_nav.html" %}
 </form>
 {% endblock %}

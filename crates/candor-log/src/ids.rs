@@ -10,6 +10,7 @@
 
 use core::fmt;
 
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
@@ -55,8 +56,11 @@ macro_rules! opaque_id {
         pub struct $name([u8; $len]);
 
         impl $name {
-            /// Wrap raw identifier bytes (random IDs minted by the owning service).
-            pub const fn from_bytes(b: [u8; $len]) -> Self {
+            /// Wrap raw identifier bytes. Crate-internal only (stored records,
+            /// samples): callers derive identifiers with a keyed hash
+            /// ([`AuditIdKey`]) so no raw caller data can be laundered into an
+            /// identifier field (AUD-RM1-LOG-03).
+            pub(crate) const fn from_bytes(b: [u8; $len]) -> Self {
                 Self(b)
             }
             /// Raw bytes.
@@ -84,6 +88,67 @@ macro_rules! opaque_id {
             }
         }
     };
+}
+
+/// Keyed pseudonymisation key for audit identifiers and value hashes
+/// (deployment/stream key, AUD-RM1-LOG-03). Secret: zeroized, never printed,
+/// not `Clone`.
+pub struct AuditIdKey(Zeroizing<[u8; 32]>);
+
+impl AuditIdKey {
+    /// Wrap a 32-byte key (from the deployment key store).
+    pub fn new(k: [u8; 32]) -> Self {
+        Self(Zeroizing::new(k))
+    }
+}
+
+impl fmt::Debug for AuditIdKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("AuditIdKey(<redacted>)")
+    }
+}
+
+/// `HMAC-SHA-256(key, label ‖ 0x00 ‖ data)`. Labels are NUL-terminated,
+/// so the encoding is prefix-free.
+pub(crate) fn keyed32(key: &[u8; 32], label: &[u8], data: &[u8]) -> [u8; 32] {
+    match <Hmac<Sha256> as KeyInit>::new_from_slice(key) {
+        Ok(mut m) => {
+            m.update(label);
+            m.update(&[0]);
+            m.update(data);
+            m.finalize().into_bytes().into()
+        }
+        // HMAC accepts keys of any length, so this arm is unreachable; it
+        // still yields a keyed (secret-prefixed) digest rather than panicking.
+        Err(_) => {
+            let mut h = Sha256::new();
+            h.update(b"candor/v1/audit/keyed-fallback\0");
+            h.update(key);
+            h.update(label);
+            h.update([0]);
+            h.update(data);
+            h.finalize().into()
+        }
+    }
+}
+
+macro_rules! derived_id {
+    ($($name:ident),+ $(,)?) => { $(
+        impl $name {
+            /// Derive this identifier from the owning service's raw ID with
+            /// the keyed pseudonymisation key:
+            /// `HMAC-SHA-256(key, "candor/v1/audit/id/<Type>" ‖ 0 ‖ raw)[..16]`.
+            /// The audit log never stores the raw ID.
+            pub fn derive(key: &AuditIdKey, raw: &[u8]) -> Self {
+                let d = keyed32(&key.0, concat!("candor/v1/audit/id/", stringify!($name)).as_bytes(), raw);
+                let mut out = [0u8; 16];
+                for (o, i) in out.iter_mut().zip(d.iter()) {
+                    *o = *i;
+                }
+                Self(out)
+            }
+        }
+    )+ };
 }
 
 opaque_id!(
@@ -144,10 +209,78 @@ opaque_id!(
     /// Salted, truncated (64-bit) staff session hash (20 §4, LOG-012).
     SessionTag, 8);
 
+derived_id!(
+    CaseRef, EvidRef, UserRef, PersonRef, DeviceKeyId, TenantRef, ChannelId, PackageId, XformId,
+    BackupId, ReceiptId, PsrId, HoldRef, TimerId, ReportId, WitnessId,
+);
+
+/// Purpose label of a keyed value hash (domain separation per field).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[non_exhaustive]
+pub enum HashPurpose {
+    /// `records.search_performed.query_hash`.
+    Query,
+    /// `cfg.changed.old_value_hash`.
+    ConfigValue,
+    /// `*.policy_hash` (channel membership, COI map, SLA pack).
+    Policy,
+    /// `keydir.entry_published.entry_hash`.
+    KeydirEntry,
+    /// `audit.exported.recipient_key_fingerprint`.
+    RecipientKey,
+    /// `custody.head.custody_mac`.
+    CustodyHead,
+    /// `auth.stepup_*.descriptor_hash_prefix`.
+    ApprovalDescriptor,
+    /// `platform.mismatch.expected_manifest_hash_prefix`.
+    Manifest,
+}
+
+impl HashPurpose {
+    const fn label(self) -> &'static [u8] {
+        match self {
+            Self::Query => b"candor/v1/audit/hash/query",
+            Self::ConfigValue => b"candor/v1/audit/hash/config-value",
+            Self::Policy => b"candor/v1/audit/hash/policy",
+            Self::KeydirEntry => b"candor/v1/audit/hash/keydir-entry",
+            Self::RecipientKey => b"candor/v1/audit/hash/recipient-key",
+            Self::CustodyHead => b"candor/v1/audit/hash/custody-head",
+            Self::ApprovalDescriptor => b"candor/v1/audit/hash/approval-descriptor",
+            Self::Manifest => b"candor/v1/audit/hash/manifest",
+        }
+    }
+}
+
 impl Hash32 {
-    /// SHA-256 of `data`.
-    pub fn digest(data: &[u8]) -> Self {
-        Self(Sha256::digest(data).into())
+    /// Keyed, purpose-separated value hash
+    /// `HMAC-SHA-256(key, label(purpose) ‖ 0 ‖ data)` (AUD-RM1-LOG-03): an
+    /// unkeyed digest of a search term, filename or config value could be
+    /// confirmed by dictionary; a keyed one cannot without the key.
+    pub fn derive(key: &AuditIdKey, purpose: HashPurpose, data: &[u8]) -> Self {
+        Self(keyed32(&key.0, purpose.label(), data))
+    }
+
+    /// The Merkle root of a checkpoint whose signature verifies under `key`
+    /// (for `audit.checkpoint_signed`); `None` if the signature is invalid,
+    /// so arbitrary bytes cannot be laundered through a parsed checkpoint.
+    pub fn checkpoint_root(
+        cp: &crate::chain::SignedCheckpoint,
+        key: &ed25519_dalek::VerifyingKey,
+    ) -> Option<Self> {
+        cp.verify_signature(key)
+            .then(|| Self(cp.body().merkle_root))
+    }
+}
+
+impl HashPrefix8 {
+    /// First 8 bytes of [`Hash32::derive`].
+    pub fn derive(key: &AuditIdKey, purpose: HashPurpose, data: &[u8]) -> Self {
+        let d = keyed32(&key.0, purpose.label(), data);
+        let mut out = [0u8; 8];
+        for (o, i) in out.iter_mut().zip(d.iter()) {
+            *o = *i;
+        }
+        Self(out)
     }
 }
 
@@ -212,16 +345,27 @@ impl UtcMillis {
 /// A UTC date (days since 1970-01-01). The only time type for
 /// source-originated or import-related facts (ADR-038(1), `DayDate`).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub struct DayStamp(pub u32);
+pub struct DayStamp(pub(crate) u32);
 
 impl DayStamp {
+    /// Largest accepted day number (2243-10-17); bounds the field so it
+    /// cannot carry 32 bits of arbitrary data (AUD-RM1-LOG-03).
+    pub const MAX_DAYS: u32 = 100_000;
+    /// From days since 1970-01-01; `None` above [`DayStamp::MAX_DAYS`].
+    pub fn from_days(days: u32) -> Option<Self> {
+        (days <= Self::MAX_DAYS).then_some(Self(days))
+    }
+    /// Days since 1970-01-01.
+    pub const fn days(self) -> u32 {
+        self.0
+    }
     /// Construct from a civil date; `None` if invalid or before 1970.
     pub fn from_ymd(y: i32, m: u32, d: u32) -> Option<Self> {
         if !(1..=12).contains(&m) || d == 0 || d > days_in_month(y, m) {
             return None;
         }
         let days = days_from_civil(i64::from(y), i64::from(m), i64::from(d));
-        u32::try_from(days).ok().map(Self)
+        u32::try_from(days).ok().and_then(Self::from_days)
     }
     /// Midnight UTC of this day.
     pub fn start(self) -> UtcMillis {

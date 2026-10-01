@@ -62,7 +62,9 @@ pub fn sample_view_model(screen: Screen, mode: Mode, with_errors: bool) -> ViewM
         errors: Vec::new(),
         page_error: None,
         text_kept: false,
-        offered_locales: Vec::new(),
+        // Previews and CI list every built-in locale (worst-case footer size).
+        offered_locales: Locale::ALL.to_vec(),
+        part: 0,
     };
     vm.deployment = DeploymentInfo {
         onion_address: "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion".to_owned(),

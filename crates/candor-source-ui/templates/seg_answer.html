@@ -1,0 +1,5 @@
+{#- SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{#- One S08 answer, or one piece of a long one. `text` is already escaped. -#}
+<dt>{{ p.text_html(a.question)|safe }}{% if let Some(pc) = piece %} {{ p.t2("sui-part-of", "n", pc.n, "total", pc.total) }}{% endif %}</dt>
+<dd>{% if a.answer.is_empty() %}<p>{{ p.t("sui-review-no-answer") }}</p>{% else %}<p class="ut" dir="auto">{{ text|safe }}</p>{% endif %}
+<form method="post" action="{{ p.href(Route::Questionnaire) }}" class="inline">{% include "ft.html" %}<input type="hidden" name="nav" value="goto"><input type="hidden" name="step" value="{{ a.step }}"><button type="submit" class="btn-link">{{ p.t1("sui-review-edit", "question", p.text_plain(a.question)) }}</button></form></dd>

@@ -2,10 +2,14 @@
 //! Input validation and decision logic shared by both implementations, so that the
 //! memory and PostgreSQL stores enforce byte-for-byte the same rules.
 
+use std::collections::{BTreeMap, HashSet};
+
+use subtle::ConstantTimeEq;
+
 use crate::deletion::{DeletionEntry, verify_chain};
 use crate::error::{Result, StoreError};
 use crate::types::{
-    AccountLink, ClaimLimits, CommitEnvelope, DISPOSITION_CT_LEN_STD, IncomingReply,
+    AccountLink, BackupSnapshot, ClaimLimits, CounterDelta, CommitEnvelope, DISPOSITION_CT_LEN_STD, IncomingReply,
     InstallOutcome, KdHighWater, MAX_CLAIM_BYTES, MAX_CLAIM_OBJECTS, MAX_HEADER_CT,
     MAX_MANIFEST_CT, MAX_PART_PADDED_SIZE, MAX_PARTS, MAX_PREFS_CT, MAX_PUSHED_DELETION_LIST,
     MAX_RELEASE_OFFSET_DAYS, MAX_REPLY_CT, MAX_SNAPSHOT_BODY, MAX_SNAPSHOT_SIGNATURES, NewAccount,
@@ -63,6 +67,63 @@ pub(crate) fn new_account(a: &NewAccount) -> Result<()> {
     }
     if a.prefs_ct.is_empty() || a.prefs_ct.len() > MAX_PREFS_CT {
         return Err(StoreError::InvalidInput("prefs_ct size"));
+    }
+    Ok(())
+}
+
+/// A monthly counter delta flushed at an import slot.
+pub(crate) fn counter_delta(c: &CounterDelta) -> Result<()> {
+    if !c.month.is_month_start() {
+        return Err(StoreError::InvalidInput("month"));
+    }
+    day_i32(c.month)?;
+    i32::try_from(c.delta).map_err(|_| StoreError::InvalidInput("counter overflow"))?;
+    Ok(())
+}
+
+/// Structural checks of an RL-10 backup before anything is restored, so that the
+/// restore never relies on a database constraint violation (AUD-RM2-STO-02).
+pub(crate) fn backup(b: &BackupSnapshot) -> Result<()> {
+    let mut ids = HashSet::new();
+    let mut tags = HashSet::new();
+    for a in &b.accounts {
+        new_account(&NewAccount {
+            lookup_tag: a.lookup_tag,
+            auth_pk: a.auth_pk,
+            xwing_pk: a.xwing_pk.clone(),
+            prefs_ct: a.prefs_ct.clone(),
+        })?;
+        if !a.activity_month.is_month_start() {
+            return Err(StoreError::InvalidInput("activity month"));
+        }
+        day_i32(a.activity_month)?;
+        if !ids.insert(a.account_id) || !tags.insert(a.lookup_tag) {
+            return Err(StoreError::InvalidInput("duplicate account in backup"));
+        }
+    }
+    if b
+        .deletion_list
+        .windows(2)
+        .any(|w| matches!(w, [x, y] if y.seq <= x.seq))
+    {
+        return Err(StoreError::DeletionList("unordered backup list"));
+    }
+    for e in &b.deletion_list {
+        if e.seq == 0 || i64::try_from(e.seq).is_err() {
+            return Err(StoreError::DeletionList("seq out of range"));
+        }
+        day_i32(e.del_day)?;
+    }
+    if let Some(d) = b.meta.kd.checkpoint_day {
+        day_i32(d)?;
+    }
+    for v in [
+        b.meta.relay_req_counter,
+        b.meta.last_batch_no,
+        b.meta.kd.tree_size,
+        b.meta.kd.directory_version,
+    ] {
+        i64::try_from(v).map_err(|_| StoreError::InvalidInput("value out of range"))?;
     }
     Ok(())
 }
@@ -192,27 +253,92 @@ impl From<SnapshotDecision> for InstallOutcome {
     }
 }
 
-/// Merge a pushed deletion list into the local one (RL-12). `local` is sorted by
-/// seq. Returns the pushed entries that are new locally (marked relayed).
+/// RL-12 step 1 (outside any lock, AUD-RM2-STO-12): bound the size and verify
+/// the pushed run's internal chain and every strict Ed25519 signature under K31.
+pub(crate) fn verify_pushed(pushed: &[DeletionEntry], k31_pk: &[u8; 32]) -> Result<()> {
+    if pushed.len() > MAX_PUSHED_DELETION_LIST {
+        return Err(StoreError::InvalidInput("deletion list too long"));
+    }
+    verify_chain(pushed, k31_pk, None)
+}
+
+fn links(prev: &DeletionEntry, next: &DeletionEntry) -> bool {
+    prev.seq.checked_add(1) == Some(next.seq)
+        && bool::from(prev.next_prev_hash().ct_eq(&next.prev_hash))
+}
+
+/// RL-12 step 2 (under the row lock): merge an already signature-verified
+/// pushed run into the local list (AUD-RM2-STO-04). `local` is sorted by seq;
+/// `acked` is the highest seq the relay has acknowledged; `core_head` is the
+/// Z-CORE head seq the relay asserts. Fails closed on:
+/// - a non-empty push whose last seq is not `core_head` (truncation);
+/// - an empty push when `core_head > 0` (missing list);
+/// - `core_head < acked` (Z-CORE lost entries it acknowledged);
+/// - a gap between the local head and the pushed run;
+/// - a run that neither links to a local entry nor overlaps the local list
+///   (unanchored), unless the local list is empty;
+/// - any overlapping entry that differs (fork), a filled hole that does not link
+///   to its local successor, or a merged list that is not contiguous.
+///
+/// Returns the pushed entries that are new locally (marked relayed).
 pub(crate) fn merge_pushed(
     local: &[DeletionEntry],
+    acked: u64,
     pushed: &[DeletionEntry],
-    k31_pk: &[u8; 32],
+    core_head: u64,
 ) -> Result<Vec<DeletionEntry>> {
     if pushed.len() > MAX_PUSHED_DELETION_LIST {
         return Err(StoreError::InvalidInput("deletion list too long"));
     }
-    let Some(first) = pushed.first() else {
-        return Ok(Vec::new());
+    if core_head < acked {
+        return Err(StoreError::DeletionList(
+            "Z-CORE head behind acknowledged entries",
+        ));
+    }
+    let Some(last) = pushed.last() else {
+        return if core_head == 0 {
+            Ok(Vec::new())
+        } else {
+            Err(StoreError::DeletionList("empty push for non-empty list"))
+        };
     };
-    let anchor = first
-        .seq
-        .checked_sub(1)
-        .and_then(|s| local.iter().find(|e| e.seq == s));
-    verify_chain(pushed, k31_pk, anchor)?;
+    if last.seq != core_head {
+        return Err(StoreError::DeletionList("truncated push"));
+    }
+    // Internal contiguity again (cheap; signatures were verified before the lock).
+    if pushed.windows(2).any(|w| match w {
+        [a, b] => !links(a, b),
+        _ => false,
+    }) {
+        return Err(StoreError::DeletionList("broken hash chain"));
+    }
+    let map: BTreeMap<u64, &DeletionEntry> = local.iter().map(|e| (e.seq, e)).collect();
+    let first = pushed.first().ok_or(StoreError::DeletionList("empty"))?;
+    if first.seq == 1 && first.prev_hash != [0u8; 32] {
+        return Err(StoreError::DeletionList("bad genesis link"));
+    }
+    if let Some((&local_head, _)) = map.last_key_value() {
+        if first.seq > local_head.saturating_add(1) {
+            return Err(StoreError::DeletionList("gap after local head"));
+        }
+        let anchored = first
+            .seq
+            .checked_sub(1)
+            .and_then(|s| map.get(&s))
+            .is_some_and(|a| links(a, first));
+        let overlaps = pushed.iter().any(|p| map.contains_key(&p.seq));
+        if !anchored && !overlaps {
+            return Err(StoreError::DeletionList("unanchored push"));
+        }
+        if let Some(a) = first.seq.checked_sub(1).and_then(|s| map.get(&s))
+            && !links(a, first)
+        {
+            return Err(StoreError::DeletionList("broken anchor link"));
+        }
+    }
     let mut new = Vec::new();
     for p in pushed {
-        match local.iter().find(|e| e.seq == p.seq) {
+        match map.get(&p.seq) {
             Some(l) => {
                 if !l.same_signed(p) {
                     return Err(StoreError::DeletionList("fork with local list"));
@@ -225,20 +351,29 @@ pub(crate) fn merge_pushed(
             }
         }
     }
-    // A pushed entry below the local head that is missing locally means the local
-    // list has a hole that the pushed copy fills; if the local successor exists it
-    // must link to it.
+    // A filled hole must link to its local successor.
     for n in &new {
-        if let Some(succ) = local.iter().find(|e| Some(e.seq) == n.seq.checked_add(1)) {
-            verify_chain(std::slice::from_ref(succ), k31_pk, Some(n))?;
+        if let Some(succ) = n.seq.checked_add(1).and_then(|s| map.get(&s))
+            && !links(n, succ)
+        {
+            return Err(StoreError::DeletionList("broken link to local successor"));
         }
+    }
+    // The merged list must be contiguous from its lowest retained seq.
+    let mut seqs: Vec<u64> = map.keys().copied().chain(new.iter().map(|e| e.seq)).collect();
+    seqs.sort_unstable();
+    if seqs
+        .windows(2)
+        .any(|w| matches!(w, [a, b] if a.checked_add(1) != Some(*b)))
+    {
+        return Err(StoreError::DeletionList("merged list not contiguous"));
     }
     Ok(new)
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
+    #![allow(clippy::unwrap_used, clippy::cast_possible_truncation)]
     use super::*;
     use crate::types::Day;
 
@@ -295,6 +430,68 @@ mod tests {
             snapshot(&zero, None, &snap(1, 10, 1, 0)).unwrap(),
             SnapshotDecision::Install
         );
+    }
+
+    fn chain(n: usize) -> (Vec<DeletionEntry>, [u8; 32]) {
+        use crate::deletion::{DeletionKind, Ed25519DeletionSigner, make_entry};
+        let s = Ed25519DeletionSigner::new(candor_core::sig::SigningKey::from_seed(&[4u8; 32]));
+        let mut v: Vec<DeletionEntry> = Vec::new();
+        for i in 0..n {
+            let e = make_entry(v.last(), DeletionKind::Account, [i as u8; 32], Day(9), &s).unwrap();
+            v.push(e);
+        }
+        (v, s.verifying_key())
+    }
+
+    /// AUD-RM2-STO-04: gapped, truncated, empty, unanchored and forked pushes
+    /// are rejected; a proper push merges.
+    #[test]
+    fn merge_rules() {
+        let (all, pk) = chain(8);
+        verify_pushed(&all, &pk).unwrap();
+        let local = &all[..2];
+        // Gap: local [1,2] + pushed [5..=6].
+        assert_eq!(
+            merge_pushed(local, 0, &all[4..6], 6),
+            Err(StoreError::DeletionList("gap after local head"))
+        );
+        // Empty push while Z-CORE has entries.
+        assert!(merge_pushed(local, 0, &[], 6).is_err());
+        // Empty push when Z-CORE has none and nothing was acknowledged: fine.
+        assert_eq!(merge_pushed(local, 0, &[], 0).unwrap().len(), 0);
+        // Z-CORE behind what it acknowledged.
+        assert!(merge_pushed(local, 2, &[], 0).is_err());
+        // Truncated: the run ends before the asserted head.
+        assert_eq!(
+            merge_pushed(local, 0, &all[..5], 8),
+            Err(StoreError::DeletionList("truncated push"))
+        );
+        // Proper: anchored at 2, through the head.
+        let new = merge_pushed(local, 0, &all[2..], 8).unwrap();
+        assert_eq!(new.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![3, 4, 5, 6, 7, 8]);
+        assert!(new.iter().all(|e| e.relayed));
+        // Overlapping full copy.
+        assert_eq!(merge_pushed(local, 0, &all, 8).unwrap().len(), 6);
+        // Local list empty: unanchored suffix accepted (only option).
+        assert_eq!(merge_pushed(&[], 0, &all[3..], 8).unwrap().len(), 5);
+        // Unanchored with a local list: other chain's suffix.
+        let (other, _) = {
+            use crate::deletion::{DeletionKind, Ed25519DeletionSigner, make_entry};
+            let s = Ed25519DeletionSigner::new(candor_core::sig::SigningKey::from_seed(&[4u8; 32]));
+            let mut v: Vec<DeletionEntry> = Vec::new();
+            for i in 0..4 {
+                v.push(make_entry(v.last(), DeletionKind::Reply, [i as u8; 32], Day(9), &s).unwrap());
+            }
+            (v, ())
+        };
+        assert!(merge_pushed(local, 0, &other[2..], 4).is_err());
+        // Fork on overlap.
+        assert_eq!(
+            merge_pushed(&all[..3], 0, &other, 4),
+            Err(StoreError::DeletionList("fork with local list"))
+        );
+        // Local head beyond Z-CORE (unrelayed local entries) is accepted.
+        assert_eq!(merge_pushed(&all[..6], 0, &all[..4], 4).unwrap().len(), 0);
     }
 
     #[test]

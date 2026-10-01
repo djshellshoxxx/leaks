@@ -14,10 +14,10 @@ use std::sync::Arc;
 use crate::deletion::{DeletionEntry, DeletionSigner, ReplyObjectHasher};
 use crate::error::Result;
 use crate::types::{
-    AccountId, AckResult, ApplyRepliesResult, BackupSnapshot, ChannelId, ClaimLimits, ClaimedBatch,
-    CommitEnvelope, CounterCell, CounterName, Day, EnvelopeRef, IncomingReply, InstallOutcome,
-    KdHighWater, LookupTag, MailboxId, ObjectData, PartSelector, ReplyIndex, ReplyRef,
-    SourceAccount, StoredReply, TenantId, VerifiedSnapshot,
+    AccountId, AckResult, ApplyRepliesResult, BackupSnapshot, ClaimLimits, ClaimedBatch,
+    CommitEnvelope, CounterCell, CounterDelta, Day, EnvelopeRef, ImportSlot, IncomingReply,
+    InstallOutcome, KdHighWater, LookupTag, MailboxId, ObjectData, PartSelector, ReplyIndex,
+    ReplyRef, SourceAccount, StoredReply, TenantId, VerifiedSnapshot,
 };
 
 /// `(version, body, signatures)` of the installed Key Directory snapshot.
@@ -41,13 +41,21 @@ pub trait IntakeStore: Send + Sync {
     fn accept_relay_counter(&self, counter: u64) -> impl Future<Output = Result<()>> + Send;
 
     /// `false` while a restore awaits its deletion list (07 BE-074; RL-01
-    /// `restored`). Source-facing callers must show the busy page.
+    /// `restored`). Source-facing callers must show the busy page. The PostgreSQL
+    /// store enters this state at every process start (failover to a recovered
+    /// node, AUD-RM2-STO-05) until [`IntakeStore::apply_pushed_deletion_list`]
+    /// confirms the Z-CORE head.
     fn serving_allowed(&self) -> impl Future<Output = Result<bool>> + Send;
+
+    /// Persistently enter restore-pending (idempotent). Used at process start and
+    /// by the failover runbook (`candorctl`).
+    fn mark_restore_pending(&self) -> impl Future<Output = Result<()>> + Send;
 
     // ----- accounts (Tier W) -----
 
-    /// Look up an account by `lookup_tag`. Verifier checks and uniform timing for
-    /// unknown tags are the caller's job (07 §5.3, BE-010).
+    /// Look up an account by `lookup_tag` (`RestorePending` while restoring).
+    /// Verifier checks and uniform timing for unknown tags are the caller's job
+    /// (07 §5.3, BE-010). Never writes (no "last seen", ADR-010).
     fn lookup_account(
         &self,
         tag: &LookupTag,
@@ -62,17 +70,8 @@ pub trait IntakeStore: Send + Sync {
         signer: &dyn DeletionSigner,
     ) -> impl Future<Output = Result<()>> + Send;
 
-    /// Consume `amount` of today's quota if the result stays ≤ `limit`; returns the
-    /// new value (BE-064).
-    fn quota_consume(
-        &self,
-        account: AccountId,
-        amount: u16,
-        limit: u16,
-    ) -> impl Future<Output = Result<u16>> + Send;
-
-    /// Daily `quota_reset`: set every `quota_bucket` to 0. No history (ADR-038(3)).
-    fn quota_reset(&self) -> impl Future<Output = Result<u64>> + Send;
+    // Quota (BE-064) is held in process RAM by C-06/C-07 and never written to
+    // the database (AUD-RM2-STO-01): this trait deliberately has no quota API.
 
     // ----- envelopes / relay export -----
 
@@ -105,7 +104,9 @@ pub trait IntakeStore: Send + Sync {
 
     /// RL-04: delete exactly the envelopes whose `header_sha256` is listed (all must
     /// belong to the batch, else nothing changes); the rest of the batch returns to
-    /// the claimable pool (BE-014).
+    /// the claimable pool (BE-014). The linked accounts' `activity_month` is folded
+    /// in inside the same transaction, which also rewrites every source-linkable
+    /// row (import slot only, AUD-RM2-STO-01).
     fn ack_batch(
         &self,
         batch_no: u64,
@@ -117,14 +118,16 @@ pub trait IntakeStore: Send + Sync {
     /// RL-05: store pushed replies with `available_day = today`; replies whose
     /// target account is gone, or whose mailbox or reply hash is listed, count as
     /// accepted and are dropped (ADR-047(9)). Tier W replies get the lowest free
-    /// fixed-mailbox slot; a full mailbox rejects the reply.
+    /// fixed-mailbox slot; a full mailbox, or a full publication backlog
+    /// (`max_pending`, AUD-RM2-STO-07), rejects the reply (the relay retries).
     fn apply_replies(
         &self,
         today: Day,
         replies: Vec<IncomingReply>,
     ) -> impl Future<Output = Result<ApplyRepliesResult>> + Send;
 
-    /// `MAILBOX_LIST` (Tier W): the account's replies ordered by slot.
+    /// `MAILBOX_LIST` (Tier W): the account's replies ordered by slot
+    /// (`RestorePending` while restoring).
     fn mailbox_list(
         &self,
         account: AccountId,
@@ -132,6 +135,8 @@ pub trait IntakeStore: Send + Sync {
 
     /// Source deletes replies of its own account; one signed `reply` entry per
     /// reply (`object_hash` supplied by the caller) in the same transaction.
+    /// Account, reply and mailbox deletions return `RestorePending` while
+    /// restoring (AUD-RM2-STO-09).
     fn delete_replies(
         &self,
         account: AccountId,
@@ -151,7 +156,8 @@ pub trait IntakeStore: Send + Sync {
         signer: &dyn DeletionSigner,
     ) -> impl Future<Output = Result<u32>> + Send;
 
-    /// Daily `reply_expiry` and RL-08: delete replies with `available_day < cutoff`.
+    /// Daily `reply_expiry` and RL-08: delete replies and published dummies with
+    /// `available_day < cutoff` (the padding pool is not dated and is kept).
     /// The store also refuses to keep anything older than 30 days: callers pass
     /// `cutoff ≥ today − 30` (enforced by [`IntakeStore::expire_replies`]).
     fn purge_replies_before(&self, cutoff: Day) -> impl Future<Output = Result<u64>> + Send;
@@ -165,9 +171,15 @@ pub trait IntakeStore: Send + Sync {
         retention_days: u32,
     ) -> impl Future<Output = Result<u64>> + Send;
 
-    /// Rebuild the published set from every reply in the 30-day window (called
-    /// only at import slots, so `set_version` changes only then; BE-063).
-    fn rebuild_published_set(&self, today: Day) -> impl Future<Output = Result<ReplyIndex>> + Send;
+    /// Publish generation `slot` (exactly K new entries, see [`crate::deaddrop`];
+    /// idempotent per slot, missed slots back-filled with dummies) and rebuild the
+    /// pages from the persisted generations in the window. Called only at import
+    /// slots and once at process start, so `set_version` changes only then
+    /// (BE-063, AUD-RM2-STO-06).
+    fn rebuild_published_set(
+        &self,
+        slot: ImportSlot,
+    ) -> impl Future<Output = Result<ReplyIndex>> + Send;
 
     /// SA-19 index of the current published set.
     fn reply_index(&self) -> impl Future<Output = Result<ReplyIndex>> + Send;
@@ -177,27 +189,30 @@ pub trait IntakeStore: Send + Sync {
 
     // ----- deletion list -----
 
-    /// RL-11: entries with `seq > after`, at most `limit` (≤ 10,000). Entries with
-    /// `seq ≤ after` are marked relayed (the relay holds them).
+    /// RL-11: entries with `seq > after`, at most `limit` (≤ 10,000). `after` is
+    /// the relay's last copied seq: it is recorded (monotonically) as the
+    /// acknowledged seq; `after` above the local head is `InvalidInput` and
+    /// changes nothing (AUD-RM2-STO-10). Entries are flagged relayed only by the
+    /// maintenance role ([`IntakeMaintenance::prune_deletion_list`]).
     fn deletion_list_after(
         &self,
         after: u64,
         limit: u32,
     ) -> impl Future<Output = Result<Vec<DeletionEntry>>> + Send;
 
-    /// RL-12 / restore: verify the pushed Z-CORE copy (chain, K31, no gaps, no fork
-    /// with local entries), merge newer entries, delete every listed account and
-    /// reply, then clear the restore-pending flag. Returns `applied_through_seq`.
+    /// RL-12 / restore: verify the pushed Z-CORE copy (chain, K31, contiguous from
+    /// the local head, ending exactly at the asserted Z-CORE head `core_head`, no
+    /// fork with local entries), merge newer entries, delete every listed account
+    /// and reply, then clear the restore-pending flag. Any validation failure
+    /// persists restore-pending (fail closed, AUD-RM2-STO-04). Returns
+    /// `applied_through_seq`.
     fn apply_pushed_deletion_list(
         &self,
         entries: &[DeletionEntry],
+        core_head: u64,
         k31_pk: &[u8; 32],
         hasher: &dyn ReplyObjectHasher,
     ) -> impl Future<Output = Result<u64>> + Send;
-
-    /// Daily `deletion_list_prune`: delete relayed entries older than 35 days,
-    /// always keeping the newest entry as the chain head.
-    fn prune_deletion_list(&self, today: Day) -> impl Future<Output = Result<u64>> + Send;
 
     // ----- key directory -----
 
@@ -217,15 +232,18 @@ pub trait IntakeStore: Send + Sync {
         &self,
     ) -> impl Future<Output = Result<Option<InstalledSnapshot>>> + Send;
 
-    // ----- monthly counters (ADR-046(5)) -----
+    // ----- import-slot rewrite and monthly counters (ADR-046(5)) -----
 
-    /// Add to a monthly counter cell. `month` must be the first day of a month.
-    fn counter_add(
+    /// Run at every fixed import slot, after the slot's relay work (AUD-RM2-STO-01):
+    /// in one transaction, add the RAM-accumulated monthly counter deltas, fold
+    /// each account's `activity_month` from its stored envelopes and replies (never
+    /// beyond `slot.day`), and rewrite **every** row of every source-linkable table,
+    /// so that row `xmin` reveals only the slot. All deltas are validated before
+    /// anything is written.
+    fn uniform_rewrite(
         &self,
-        month: Day,
-        channel: ChannelId,
-        name: CounterName,
-        delta: u32,
+        slot: ImportSlot,
+        counters: &[CounterDelta],
     ) -> impl Future<Output = Result<()>> + Send;
 
     /// RL-09 raw cells of a month (suppression per 24 §TEL is the exporter's job).
@@ -245,4 +263,14 @@ pub trait IntakeStore: Send + Sync {
     /// Restore into an empty store. The KD high-water mark keeps the higher of the
     /// backup and current values; the store is left restore-pending.
     fn restore_backup(&self, backup: BackupSnapshot) -> impl Future<Output = Result<()>> + Send;
+}
+
+/// Operations reserved for the separate maintenance role (`candor_intake_maint`,
+/// AUD-RM2-STO-03): the application role cannot flag or delete deletion-list
+/// entries.
+pub trait IntakeMaintenance: Send + Sync {
+    /// Daily `deletion_list_prune`: flag entries up to the acknowledged seq as
+    /// relayed, then delete relayed entries older than 35 days, always keeping
+    /// the newest entry as the chain head (the database refuses anything else).
+    fn prune_deletion_list(&self, today: Day) -> impl Future<Output = Result<u64>> + Send;
 }

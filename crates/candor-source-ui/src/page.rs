@@ -145,8 +145,15 @@ pub struct Page {
     pub body: Zeroizing<Vec<u8>>,
     /// The size class.
     pub class: SizeClass,
-    /// The unpadded length (for CI budget reporting).
+    /// The unpadded length, for CI budget reporting only. It is the true content size: never
+    /// log it, export it as a metric or put it in a header (AUD-RM1-SUI-09).
+    #[doc(hidden)]
     pub unpadded_len: usize,
+    /// The part shown (0-based; 0 on screens without parts).
+    pub part: usize,
+    /// Number of parts of this screen (1 when everything fits). Like `unpadded_len` it depends
+    /// on content length: use it only to build navigation, never log or export it.
+    pub parts: usize,
 }
 
 impl fmt::Debug for Page {
@@ -159,8 +166,7 @@ impl fmt::Debug for Page {
                 &format_args!("[{} bytes redacted]", self.body.len()),
             )
             .field("class", &self.class)
-            .field("unpadded_len", &self.unpadded_len)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -262,6 +268,8 @@ pub fn robots_txt() -> Page {
         body,
         class,
         unpadded_len: text.len(),
+        part: 0,
+        parts: 1,
     }
 }
 

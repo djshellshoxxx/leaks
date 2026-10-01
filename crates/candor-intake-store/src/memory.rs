@@ -3,27 +3,39 @@
 //! PostgreSQL store (shared `validate` module; same conformance suite). Not for
 //! production: nothing is durable.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use tokio::sync::{Mutex, RwLock};
 
-use crate::deaddrop::{self, DummyReplies, PublishedSet, RandomDummyReplies};
+use crate::deaddrop::{
+    self, DeadDropConfig, DummyReplies, PADDING_GENERATION, PageBuilder, PublishedSet,
+    RandomDummyReplies,
+};
 use crate::deletion::{
     DeletionEntry, DeletionKind, DeletionSigner, ReplyObjectHasher, account_del_hash,
     mailbox_del_hash, make_entry, reply_del_hash,
 };
 use crate::error::{Result, StoreError};
-use crate::store::IntakeStore;
+use crate::store::{IntakeMaintenance, IntakeStore};
 use crate::types::{
     AccountId, AccountLink, AckResult, ApplyRepliesResult, BackupSnapshot, BlobId, ChannelId,
-    ClaimLimits, ClaimedBatch, ClaimedObject, CommitEnvelope, CounterCell, CounterName,
-    DELETION_LIST_RETENTION_DAYS, Day, EnvelopeRef, IncomingReply, InstallOutcome, KdHighWater,
-    LookupTag, MAILBOX_SLOTS, MAX_DELETION_LIST_PAGE, MAX_REPLIES_PER_PUSH, MailboxId,
-    MetaSnapshot, ObjectData, PartRef, PartSelector, REPLY_WINDOW_DAYS, ReplyIndex, ReplyRef,
-    SourceAccount, StoredReply, TenantId, VerifiedSnapshot, random_id16,
+    ClaimLimits, ClaimedBatch, ClaimedObject, CommitEnvelope, CounterCell, CounterDelta,
+    CounterName, DELETION_LIST_RETENTION_DAYS, Day, EnvelopeRef, ImportSlot, IncomingReply,
+    InstallOutcome, KdHighWater, LookupTag, MAILBOX_SLOTS, MAX_DELETION_LIST_PAGE,
+    MAX_REPLIES_PER_PUSH, MailboxId, MetaSnapshot, ObjectData, PartRef, PartSelector,
+    REPLY_WINDOW_DAYS, ReplyIndex, ReplyRef, SourceAccount, StoredReply, TenantId,
+    VerifiedSnapshot, random_id16,
 };
 use crate::validate::{self, SnapshotDecision, has_duplicates};
+
+/// Published-set configuration used by [`MemoryStore::new`]: one slot per day,
+/// two entries per slot (one page), a 64-reply backlog.
+pub const MEMORY_DEADDROP_CONFIG: DeadDropConfig = DeadDropConfig {
+    slots_per_day: 1,
+    per_slot: 2,
+    max_pending: 64,
+};
 
 #[derive(Clone)]
 struct Meta {
@@ -33,6 +45,7 @@ struct Meta {
     last_batch_no: u64,
     kd: KdHighWater,
     restore_pending: bool,
+    deletion_acked_seq: u64,
 }
 
 #[derive(Clone)]
@@ -44,6 +57,7 @@ struct EnvRow {
     header_sha256: [u8; 32],
     disposition_ct: Vec<u8>,
     epoch_index: u32,
+    received_date: Day,
     release_day: Day,
     batch_no: Option<u64>,
     parts: Vec<PartRef>,
@@ -56,6 +70,9 @@ struct ReplyRow {
     size_bucket: u8,
     available_day: Day,
     slot: Option<u8>,
+    /// `None` = real reply awaiting publication; `Some(0)` = padding pool;
+    /// `Some(g)` = published in generation `g`.
+    pub_gen: Option<u64>,
 }
 
 #[derive(Default)]
@@ -76,6 +93,14 @@ impl State {
     fn meta_mut(&mut self) -> Result<&mut Meta> {
         self.meta.as_mut().ok_or(StoreError::NotInitialized)
     }
+    /// Source-facing operations refuse while a restore is pending (BE-074).
+    fn serving(&self) -> Result<&Meta> {
+        let m = self.meta()?;
+        if m.restore_pending {
+            return Err(StoreError::RestorePending);
+        }
+        Ok(m)
+    }
     fn head(&self) -> Option<&DeletionEntry> {
         self.deletion.values().next_back()
     }
@@ -95,6 +120,12 @@ impl State {
             .values()
             .any(|e| e.kind == kind && &e.del_hash == h)
     }
+    fn with_relayed(&self, e: &DeletionEntry) -> DeletionEntry {
+        let acked = self.meta.as_ref().map_or(0, |m| m.deletion_acked_seq);
+        let mut e = *e;
+        e.relayed = e.relayed || e.seq <= acked;
+        e
+    }
 }
 
 /// In-memory store.
@@ -102,6 +133,7 @@ pub struct MemoryStore {
     state: Mutex<State>,
     published: RwLock<Arc<PublishedSet>>,
     dummies: Box<dyn DummyReplies>,
+    cfg: DeadDropConfig,
 }
 
 impl core::fmt::Debug for MemoryStore {
@@ -111,18 +143,22 @@ impl core::fmt::Debug for MemoryStore {
 }
 
 impl MemoryStore {
-    /// New empty store with random-byte dummy replies.
+    /// New empty store with random-byte dummy replies and
+    /// [`MEMORY_DEADDROP_CONFIG`].
     pub fn new() -> Result<Self> {
-        Self::with_dummies(Box::new(RandomDummyReplies))
+        Self::with_config(MEMORY_DEADDROP_CONFIG, Box::new(RandomDummyReplies))
     }
 
-    /// New empty store with a caller-supplied dummy reply source.
-    pub fn with_dummies(dummies: Box<dyn DummyReplies>) -> Result<Self> {
-        let empty = deaddrop::empty(dummies.as_ref())?;
+    /// New empty store with a caller-supplied published-set configuration and
+    /// dummy reply source.
+    pub fn with_config(cfg: DeadDropConfig, dummies: Box<dyn DummyReplies>) -> Result<Self> {
+        cfg.validate()?;
+        let empty = deaddrop::empty(&cfg, dummies.as_ref())?;
         Ok(Self {
             state: Mutex::new(State::default()),
             published: RwLock::new(Arc::new(empty)),
             dummies,
+            cfg,
         })
     }
 }
@@ -136,6 +172,32 @@ fn delete_replies_where(st: &mut State, pred: impl Fn(&ReplyRow) -> bool) -> u64
     let before = st.replies.len();
     st.replies.retain(|_, r| !pred(r));
     u64::try_from(before.saturating_sub(st.replies.len())).unwrap_or(u64::MAX)
+}
+
+/// Fold `activity_month` from the account's stored envelopes and replies (never
+/// beyond `limit`). Called only at import-slot operations (AUD-RM2-STO-01).
+fn fold_activity(st: &mut State, limit: Day, only: Option<&HashSet<AccountId>>) {
+    let mut best: HashMap<AccountId, Day> = HashMap::new();
+    let mut note = |a: Option<AccountId>, d: Day| {
+        if let Some(a) = a
+            && d <= limit
+            && only.is_none_or(|o| o.contains(&a))
+        {
+            let m = d.month_start();
+            best.entry(a).and_modify(|x| *x = (*x).max(m)).or_insert(m);
+        }
+    };
+    for e in st.envelopes.values() {
+        note(e.account, e.received_date);
+    }
+    for r in st.replies.values() {
+        note(r.account, r.available_day);
+    }
+    for (a, m) in best {
+        if let Some(acc) = st.accounts.get_mut(&a) {
+            acc.activity_month = acc.activity_month.max(m);
+        }
+    }
 }
 
 impl IntakeStore for MemoryStore {
@@ -152,6 +214,7 @@ impl IntakeStore for MemoryStore {
                     last_batch_no: 0,
                     kd: KdHighWater::default(),
                     restore_pending: false,
+                    deletion_acked_seq: 0,
                 });
                 Ok(())
             }
@@ -177,9 +240,14 @@ impl IntakeStore for MemoryStore {
         Ok(!self.state.lock().await.meta()?.restore_pending)
     }
 
+    async fn mark_restore_pending(&self) -> Result<()> {
+        self.state.lock().await.meta_mut()?.restore_pending = true;
+        Ok(())
+    }
+
     async fn lookup_account(&self, tag: &LookupTag) -> Result<Option<SourceAccount>> {
         let st = self.state.lock().await;
-        st.meta()?;
+        st.serving()?;
         Ok(st.accounts.values().find(|a| a.lookup_tag == *tag).cloned())
     }
 
@@ -191,7 +259,7 @@ impl IntakeStore for MemoryStore {
     ) -> Result<()> {
         validate::day_i32(today)?;
         let mut st = self.state.lock().await;
-        let tenant = st.meta()?.tenant;
+        let tenant = st.serving()?.tenant;
         let tag = st
             .accounts
             .get(&account)
@@ -213,39 +281,10 @@ impl IntakeStore for MemoryStore {
         Ok(())
     }
 
-    async fn quota_consume(&self, account: AccountId, amount: u16, limit: u16) -> Result<u16> {
-        let limit = limit.min(i16::MAX as u16);
-        let mut st = self.state.lock().await;
-        st.meta()?;
-        let a = st.accounts.get_mut(&account).ok_or(StoreError::NotFound)?;
-        let next = a
-            .quota_bucket
-            .checked_add(amount)
-            .filter(|n| *n <= limit)
-            .ok_or(StoreError::QuotaExceeded)?;
-        a.quota_bucket = next;
-        Ok(next)
-    }
-
-    async fn quota_reset(&self) -> Result<u64> {
-        let mut st = self.state.lock().await;
-        st.meta()?;
-        let mut n = 0u64;
-        for a in st.accounts.values_mut() {
-            if a.quota_bucket != 0 {
-                a.quota_bucket = 0;
-                n = n.saturating_add(1);
-            }
-        }
-        Ok(n)
-    }
-
     async fn commit_envelope(&self, env: CommitEnvelope) -> Result<EnvelopeRef> {
         validate::commit(&env)?;
         let mut st = self.state.lock().await;
-        if st.meta()?.restore_pending {
-            return Err(StoreError::RestorePending);
-        }
+        st.serving()?;
         let digest = sha256(&env.header_ct);
         if st.envelopes.values().any(|e| e.header_sha256 == digest) {
             return Err(StoreError::DuplicateEnvelope);
@@ -261,9 +300,12 @@ impl IntakeStore for MemoryStore {
         let month = env.received_date.month_start();
         let account = match env.account {
             AccountLink::None => None,
+            // No account write per action (AUD-RM2-STO-01): activity is folded
+            // in at the next import-slot rewrite.
             AccountLink::Existing(id) => {
-                let a = st.accounts.get_mut(&id).ok_or(StoreError::NotFound)?;
-                a.activity_month = a.activity_month.max(month);
+                if !st.accounts.contains_key(&id) {
+                    return Err(StoreError::NotFound);
+                }
                 Some(id)
             }
             AccountLink::New(n) => {
@@ -280,7 +322,6 @@ impl IntakeStore for MemoryStore {
                         xwing_pk: n.xwing_pk,
                         prefs_ct: n.prefs_ct,
                         activity_month: month,
-                        quota_bucket: 0,
                     },
                 );
                 Some(id)
@@ -297,6 +338,7 @@ impl IntakeStore for MemoryStore {
                 header_sha256: digest,
                 disposition_ct: env.disposition_ct,
                 epoch_index: env.epoch_index,
+                received_date: env.received_date,
                 release_day: env.received_date.plus(u32::from(env.release_offset_days))?,
                 batch_no: None,
                 parts: env.parts,
@@ -338,17 +380,24 @@ impl IntakeStore for MemoryStore {
                 objects,
             });
         }
-        // Ordered by the random envelope_ref (same order as the PG store).
-        let cands: Vec<(EnvelopeRef, u64)> = st
+        // Ordered by (release_day, random envelope_ref), same as the PG store:
+        // the oldest released envelopes go first (AUD-RM2-STO-16).
+        let mut eligible: Vec<(Day, EnvelopeRef)> = st
             .envelopes
             .iter()
             .filter(|(_, e)| e.release_day <= today)
+            .map(|(r, e)| (e.release_day, *r))
+            .collect();
+        eligible.sort_unstable();
+        let cands: Vec<(EnvelopeRef, u64)> = eligible
+            .iter()
             .take(usize::try_from(limits.max_objects).unwrap_or(usize::MAX))
+            .filter_map(|(_, r)| st.envelopes.get(r).map(|e| (*r, e)))
             .map(|(r, e)| {
                 let parts: Vec<u64> = e.parts.iter().map(|p| p.padded_size).collect();
                 let len = |v: &Vec<u8>| u64::try_from(v.len()).unwrap_or(u64::MAX);
                 (
-                    *r,
+                    r,
                     validate::object_bytes(len(&e.header_ct), len(&e.manifest_ct), &parts),
                 )
             })
@@ -378,6 +427,7 @@ impl IntakeStore for MemoryStore {
             e.batch_no = Some(b);
             objects.push(describe(&r, e));
         }
+        objects.sort_by_key(|o| o.envelope_ref);
         Ok(ClaimedBatch {
             batch_no: b,
             replayed: false,
@@ -427,6 +477,20 @@ impl IntakeStore for MemoryStore {
                 return Err(StoreError::InvalidInput("digest not in batch"));
             }
         }
+        // Fold the acked envelopes' activity before their rows disappear.
+        let acked_accounts: HashSet<AccountId> = in_batch
+            .iter()
+            .filter_map(|r| st.envelopes.get(r))
+            .filter(|e| committed.contains(&e.header_sha256))
+            .filter_map(|e| e.account)
+            .collect();
+        let limit = in_batch
+            .iter()
+            .filter_map(|r| st.envelopes.get(r))
+            .map(|e| e.received_date)
+            .max()
+            .unwrap_or(Day(0));
+        fold_activity(&mut st, limit, Some(&acked_accounts));
         let mut res = AckResult {
             deleted: 0,
             blobs_to_delete: Vec::new(),
@@ -459,10 +523,9 @@ impl IntakeStore for MemoryStore {
             return Err(StoreError::InvalidInput("too many replies"));
         }
         let mut st = self.state.lock().await;
-        if st.meta()?.restore_pending {
-            return Err(StoreError::RestorePending);
-        }
-        let tenant = st.meta()?.tenant;
+        let tenant = st.serving()?.tenant;
+        let max_pending = usize::try_from(self.cfg.max_pending).unwrap_or(usize::MAX);
+        let mut pending = st.replies.values().filter(|r| r.pub_gen.is_none()).count();
         let mut res = ApplyRepliesResult::default();
         for (i, r) in replies.into_iter().enumerate() {
             let idx = u32::try_from(i).unwrap_or(u32::MAX);
@@ -479,6 +542,10 @@ impl IntakeStore for MemoryStore {
                 }) || r.account.is_some_and(|a| !st.accounts.contains_key(&a));
             if dropped {
                 res.accepted = res.accepted.saturating_add(1);
+                continue;
+            }
+            if pending >= max_pending {
+                res.rejected.push(idx);
                 continue;
             }
             let slot = match r.account {
@@ -499,9 +566,6 @@ impl IntakeStore for MemoryStore {
                     }
                 }
             };
-            if let Some(a) = r.account.and_then(|a| st.accounts.get_mut(&a)) {
-                a.activity_month = a.activity_month.max(today.month_start());
-            }
             st.replies.insert(
                 ReplyRef(random_id16()?),
                 ReplyRow {
@@ -510,8 +574,10 @@ impl IntakeStore for MemoryStore {
                     size_bucket: r.size_bucket,
                     available_day: today,
                     slot,
+                    pub_gen: None,
                 },
             );
+            pending = pending.saturating_add(1);
             res.accepted = res.accepted.saturating_add(1);
         }
         Ok(res)
@@ -519,7 +585,7 @@ impl IntakeStore for MemoryStore {
 
     async fn mailbox_list(&self, account: AccountId) -> Result<Vec<StoredReply>> {
         let st = self.state.lock().await;
-        st.meta()?;
+        st.serving()?;
         let mut v: Vec<StoredReply> = st
             .replies
             .iter()
@@ -552,7 +618,7 @@ impl IntakeStore for MemoryStore {
             return Err(StoreError::InvalidInput("duplicate reply"));
         }
         let mut st = self.state.lock().await;
-        let tenant = st.meta()?.tenant;
+        let tenant = st.serving()?.tenant;
         if !st.accounts.contains_key(&account) {
             return Err(StoreError::NotFound);
         }
@@ -601,7 +667,7 @@ impl IntakeStore for MemoryStore {
             return Err(StoreError::InvalidInput("duplicate reply"));
         }
         let mut st = self.state.lock().await;
-        let tenant = st.meta()?.tenant;
+        let tenant = st.serving()?.tenant;
         if !st.accounts.contains_key(&account) {
             return Err(StoreError::NotFound);
         }
@@ -626,7 +692,9 @@ impl IntakeStore for MemoryStore {
     async fn purge_replies_before(&self, cutoff: Day) -> Result<u64> {
         let mut st = self.state.lock().await;
         st.meta()?;
-        Ok(delete_replies_where(&mut st, |r| r.available_day < cutoff))
+        Ok(delete_replies_where(&mut st, |r| {
+            r.available_day < cutoff && r.pub_gen != Some(PADDING_GENERATION)
+        }))
     }
 
     async fn expire_replies(&self, today: Day, retention_days: u32) -> Result<u64> {
@@ -635,17 +703,102 @@ impl IntakeStore for MemoryStore {
             .await
     }
 
-    async fn rebuild_published_set(&self, today: Day) -> Result<ReplyIndex> {
-        let cts: Vec<Vec<u8>> = {
-            let st = self.state.lock().await;
+    async fn rebuild_published_set(&self, slot: ImportSlot) -> Result<ReplyIndex> {
+        let cfg = self.cfg;
+        let g = cfg.generation(slot)?;
+        let k = usize::from(cfg.per_slot);
+        let total = cfg.total_entries()?;
+        let set = {
+            let mut st = self.state.lock().await;
             st.meta()?;
-            st.replies
+            let last = st
+                .replies
                 .values()
-                .filter(|r| deaddrop::in_window(r.available_day, today))
-                .map(|r| r.reply_ct.clone())
-                .collect()
+                .filter_map(|r| r.pub_gen)
+                .filter(|g| *g != PADDING_GENERATION)
+                .max();
+            for h in deaddrop::generations_to_publish(&cfg, last, g) {
+                let day = cfg.day_of(h)?;
+                let mut reals: Vec<(Day, ReplyRef)> = Vec::new();
+                if h == g {
+                    reals = st
+                        .replies
+                        .iter()
+                        .filter(|(_, r)| r.pub_gen.is_none())
+                        .map(|(k, r)| (r.available_day, *k))
+                        .collect();
+                    reals.sort_unstable();
+                    reals.truncate(k);
+                }
+                let mut hint = deaddrop::DEFAULT_DUMMY_BODY_LEN;
+                if !reals.is_empty() {
+                    let pick = reals
+                        .get(deaddrop::uniform_below(reals.len())?)
+                        .map(|x| x.1);
+                    if let Some(r) = pick.and_then(|p| st.replies.get(&p)) {
+                        hint = r.reply_ct.len();
+                    }
+                }
+                for (_, r) in &reals {
+                    if let Some(row) = st.replies.get_mut(r) {
+                        row.pub_gen = Some(h);
+                        row.available_day = day;
+                    }
+                }
+                for _ in reals.len()..k {
+                    let (body, bucket) = deaddrop::dummy_row(self.dummies.as_ref(), hint)?;
+                    st.replies.insert(
+                        ReplyRef(random_id16()?),
+                        ReplyRow {
+                            account: None,
+                            reply_ct: body,
+                            size_bucket: bucket,
+                            available_day: day,
+                            slot: None,
+                            pub_gen: Some(h),
+                        },
+                    );
+                }
+            }
+            // Padding pool: keep window + padding at exactly `total`.
+            let lo = cfg.window_start(g);
+            let in_window = |r: &ReplyRow| r.pub_gen.is_some_and(|p| p >= lo && p <= g);
+            let window = st.replies.values().filter(|r| in_window(r)).count();
+            let want = total.checked_sub(window).ok_or(StoreError::Capacity)?;
+            let padding: Vec<ReplyRef> = st
+                .replies
+                .iter()
+                .filter(|(_, r)| r.pub_gen == Some(PADDING_GENERATION))
+                .map(|(k, _)| *k)
+                .collect();
+            for r in padding.iter().skip(want) {
+                st.replies.remove(r);
+            }
+            for _ in padding.len()..want {
+                let (body, bucket) = deaddrop::dummy_row(
+                    self.dummies.as_ref(),
+                    deaddrop::DEFAULT_DUMMY_BODY_LEN,
+                )?;
+                st.replies.insert(
+                    ReplyRef(random_id16()?),
+                    ReplyRow {
+                        account: None,
+                        reply_ct: body,
+                        size_bucket: bucket,
+                        available_day: slot.day,
+                        slot: None,
+                        pub_gen: Some(PADDING_GENERATION),
+                    },
+                );
+            }
+            let mut b = PageBuilder::new(cfg.page_count()?)?;
+            for r in st.replies.values() {
+                if in_window(r) || r.pub_gen == Some(PADDING_GENERATION) {
+                    b.push(&r.reply_ct)?;
+                }
+            }
+            b.finish(self.dummies.as_ref())?
         };
-        let set = deaddrop::build(&cts, self.dummies.as_ref())?;
         let idx = set.index();
         *self.published.write().await = Arc::new(set);
         Ok(idx)
@@ -661,40 +814,58 @@ impl IntakeStore for MemoryStore {
 
     async fn deletion_list_after(&self, after: u64, limit: u32) -> Result<Vec<DeletionEntry>> {
         let limit = usize::try_from(limit.min(MAX_DELETION_LIST_PAGE)).unwrap_or(0);
+        i64::try_from(after).map_err(|_| StoreError::InvalidInput("after"))?;
         let mut st = self.state.lock().await;
         st.meta()?;
-        for e in st.deletion.values_mut().filter(|e| e.seq <= after) {
-            e.relayed = true;
+        let head = st.head().map_or(0, |e| e.seq);
+        if after > head {
+            return Err(StoreError::InvalidInput("after beyond head"));
         }
+        let m = st.meta_mut()?;
+        m.deletion_acked_seq = m.deletion_acked_seq.max(after);
         Ok(st
             .deletion
             .values()
             .filter(|e| e.seq > after)
             .take(limit)
-            .copied()
+            .map(|e| st.with_relayed(e))
             .collect())
     }
 
     async fn apply_pushed_deletion_list(
         &self,
         entries: &[DeletionEntry],
+        core_head: u64,
         k31_pk: &[u8; 32],
         hasher: &dyn ReplyObjectHasher,
     ) -> Result<u64> {
         let mut st = self.state.lock().await;
-        let tenant = st.meta()?.tenant;
+        let (tenant, acked) = {
+            let m = st.meta()?;
+            (m.tenant, m.deletion_acked_seq)
+        };
         let local: Vec<DeletionEntry> = st.deletion.values().copied().collect();
-        let new = validate::merge_pushed(&local, entries, k31_pk)?;
+        let merged = validate::verify_pushed(entries, k31_pk)
+            .and_then(|()| validate::merge_pushed(&local, acked, entries, core_head));
+        let new = match merged {
+            Ok(n) => n,
+            Err(e) => {
+                // Fail closed: any rejected push leaves (or puts) the store in
+                // restore-pending (AUD-RM2-STO-04).
+                st.meta_mut()?.restore_pending = true;
+                return Err(e);
+            }
+        };
         for e in new {
             st.deletion.insert(e.seq, e);
         }
-        let acct: Vec<[u8; 32]> = st
+        let acct: HashSet<[u8; 32]> = st
             .deletion
             .values()
             .filter(|e| e.kind == DeletionKind::Account)
             .map(|e| e.del_hash)
             .collect();
-        let reps: Vec<[u8; 32]> = st
+        let reps: HashSet<[u8; 32]> = st
             .deletion
             .values()
             .filter(|e| e.kind == DeletionKind::Reply)
@@ -725,17 +896,6 @@ impl IntakeStore for MemoryStore {
         Ok(through)
     }
 
-    async fn prune_deletion_list(&self, today: Day) -> Result<u64> {
-        let cutoff = today.saturating_minus(DELETION_LIST_RETENTION_DAYS);
-        let mut st = self.state.lock().await;
-        st.meta()?;
-        let head = st.head().map_or(0, |e| e.seq);
-        let before = st.deletion.len();
-        st.deletion
-            .retain(|s, e| !(e.relayed && e.del_day < cutoff && *s < head));
-        Ok(u64::try_from(before.saturating_sub(st.deletion.len())).unwrap_or(u64::MAX))
-    }
-
     async fn kd_high_water(&self) -> Result<KdHighWater> {
         Ok(self.state.lock().await.meta()?.kd)
     }
@@ -756,8 +916,11 @@ impl IntakeStore for MemoryStore {
         if d == SnapshotDecision::AlreadyInstalled {
             return Ok(InstallOutcome::AlreadyInstalled);
         }
-        st.snapshots
-            .insert(snap.version, (snap.body, snap.signatures, today));
+        // applied_day is stored at month granularity (AUD-RM2-STO-01).
+        st.snapshots.insert(
+            snap.version,
+            (snap.body, snap.signatures, today.month_start()),
+        );
         let m = st.meta_mut()?;
         m.kd = KdHighWater {
             tree_size: m.kd.tree_size.max(snap.tree_size),
@@ -781,25 +944,27 @@ impl IntakeStore for MemoryStore {
             .map(|(b, s, _)| (v, b.clone(), s.clone())))
     }
 
-    async fn counter_add(
-        &self,
-        month: Day,
-        channel: ChannelId,
-        name: CounterName,
-        delta: u32,
-    ) -> Result<()> {
-        if !month.is_month_start() {
-            return Err(StoreError::InvalidInput("month"));
-        }
-        validate::day_i32(month)?;
+    async fn uniform_rewrite(&self, slot: ImportSlot, counters: &[CounterDelta]) -> Result<()> {
+        validate::day_i32(slot.day)?;
         let mut st = self.state.lock().await;
         st.meta()?;
-        let c = st.counters.entry((month, channel, name)).or_insert(0);
-        let next = c
-            .checked_add(delta)
-            .filter(|v| i32::try_from(*v).is_ok())
-            .ok_or(StoreError::InvalidInput("counter overflow"))?;
-        *c = next;
+        // Validate every delta (including the accumulated value) before writing.
+        let mut next: BTreeMap<(Day, ChannelId, CounterName), u32> = BTreeMap::new();
+        for c in counters {
+            validate::counter_delta(c)?;
+            let key = (c.month, c.channel_id, c.name);
+            let cur = match next.get(&key) {
+                Some(v) => *v,
+                None => st.counters.get(&key).copied().unwrap_or(0),
+            };
+            let v = cur
+                .checked_add(c.delta)
+                .filter(|v| i32::try_from(*v).is_ok())
+                .ok_or(StoreError::InvalidInput("counter overflow"))?;
+            next.insert(key, v);
+        }
+        st.counters.extend(next);
+        fold_activity(&mut st, slot.day, None);
         Ok(())
     }
 
@@ -840,7 +1005,7 @@ impl IntakeStore for MemoryStore {
                 kd: m.kd,
             },
             accounts,
-            deletion_list: st.deletion.values().copied().collect(),
+            deletion_list: st.deletion.values().map(|e| st.with_relayed(e)).collect(),
         })
     }
 
@@ -857,21 +1022,10 @@ impl IntakeStore for MemoryStore {
         if prior.as_ref().is_some_and(|p| p.tenant != b.meta.tenant_id) {
             return Err(StoreError::TenantMismatch);
         }
-        for a in &b.accounts {
-            validate::new_account(&crate::types::NewAccount {
-                lookup_tag: a.lookup_tag,
-                auth_pk: a.auth_pk,
-                xwing_pk: a.xwing_pk.clone(),
-                prefs_ct: a.prefs_ct.clone(),
-            })?;
+        if prior.as_ref().is_some_and(|p| p.kdf_salt != b.meta.kdf_salt) {
+            return Err(StoreError::Conflict("kdf salt differs"));
         }
-        let pk_less_check: Vec<u64> = b.deletion_list.iter().map(|e| e.seq).collect();
-        if pk_less_check
-            .windows(2)
-            .any(|w| matches!(w, [x, y] if y <= x))
-        {
-            return Err(StoreError::DeletionList("unordered backup list"));
-        }
+        validate::backup(&b)?;
         let kd = prior
             .as_ref()
             .map_or(b.meta.kd, |p| merge_hwm(p.kd, b.meta.kd));
@@ -888,6 +1042,7 @@ impl IntakeStore for MemoryStore {
                 .max(b.meta.last_batch_no),
             kd,
             restore_pending: true,
+            deletion_acked_seq: 0,
         });
         for a in b.accounts {
             st.accounts.insert(a.account_id, a);
@@ -896,6 +1051,22 @@ impl IntakeStore for MemoryStore {
             st.deletion.insert(e.seq, e);
         }
         Ok(())
+    }
+}
+
+impl IntakeMaintenance for MemoryStore {
+    async fn prune_deletion_list(&self, today: Day) -> Result<u64> {
+        let cutoff = today.saturating_minus(DELETION_LIST_RETENTION_DAYS);
+        let mut st = self.state.lock().await;
+        let acked = st.meta()?.deletion_acked_seq;
+        for e in st.deletion.values_mut().filter(|e| e.seq <= acked) {
+            e.relayed = true;
+        }
+        let head = st.head().map_or(0, |e| e.seq);
+        let before = st.deletion.len();
+        st.deletion
+            .retain(|s, e| !(e.relayed && e.del_day < cutoff && *s < head));
+        Ok(u64::try_from(before.saturating_sub(st.deletion.len())).unwrap_or(u64::MAX))
     }
 }
 

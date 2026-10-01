@@ -3,7 +3,8 @@
 
 use askama::Template;
 
-use crate::model::{Mode, OperatorStatement, QuestionKind, ViewModel};
+use crate::model::{Mode, OperatorStatement, ViewModel};
+use crate::paging::Region;
 use crate::routes::Route;
 use crate::view::PageView;
 
@@ -345,43 +346,46 @@ templates! {
     MethodTpl => "s405_method.html",
 }
 
-/// Renders the screen's template (unpadded HTML).
-pub(crate) fn render_template(p: &PageView<'_>) -> Result<String, askama::Error> {
+/// Renders the screen's template (unpadded HTML) into `w`.
+pub(crate) fn render_template(
+    p: &PageView<'_>,
+    w: &mut dyn core::fmt::Write,
+) -> Result<(), askama::Error> {
     match p.screen {
-        Screen::Landing => LandingTpl { p }.render(),
-        Screen::Safety => SafetyTpl { p }.render(),
-        Screen::SafetyTips => SafetyTipsTpl { p }.render(),
-        Screen::Status => StatusTpl { p }.render(),
-        Screen::NewReport => NewReportTpl { p }.render(),
-        Screen::Concerns => ConcernsTpl { p }.render(),
-        Screen::NoReader => NoReaderTpl { p }.render(),
-        Screen::Questionnaire => QuestionnaireTpl { p }.render(),
-        Screen::Identity => IdentityTpl { p }.render(),
-        Screen::IdentityConfirm => IdentityConfirmTpl { p }.render(),
-        Screen::ModeChanged => ModeChangedTpl { p }.render(),
-        Screen::Files => FilesTpl { p }.render(),
-        Screen::MetadataWarning => MetadataTpl { p }.render(),
-        Screen::Review => ReviewTpl { p }.render(),
-        Screen::Credential | Screen::RotateCredential => CredentialTpl { p }.render(),
-        Screen::Confirm | Screen::RotateConfirm => ConfirmTpl { p }.render(),
-        Screen::Sent => SentTpl { p }.render(),
-        Screen::Login => LoginTpl { p }.render(),
-        Screen::Inbox => InboxTpl { p }.render(),
-        Screen::RotateExplain => RotateExplainTpl { p }.render(),
-        Screen::RotateDone => RotateDoneTpl { p }.render(),
-        Screen::Conversation => ConversationTpl { p }.render(),
-        Screen::Discard => DiscardTpl { p }.render(),
-        Screen::Discarded => DiscardedTpl { p }.render(),
-        Screen::CloseMailbox => CloseTpl { p }.render(),
-        Screen::Closed => ClosedTpl { p }.render(),
-        Screen::AskDelete => AskDeleteTpl { p }.render(),
-        Screen::DeleteRequested => DeleteRequestedTpl { p }.render(),
-        Screen::Leave => LeaveTpl { p }.render(),
-        Screen::Busy => BusyTpl { p }.render(),
-        Screen::NotFound => NotFoundTpl { p }.render(),
-        Screen::ServerError => ServerErrorTpl { p }.render(),
-        Screen::Maintenance => MaintenanceTpl { p }.render(),
-        Screen::SignedOut => SignedOutTpl { p }.render(),
-        Screen::MethodNotAllowed => MethodTpl { p }.render(),
+        Screen::Landing => LandingTpl { p }.render_into(w),
+        Screen::Safety => SafetyTpl { p }.render_into(w),
+        Screen::SafetyTips => SafetyTipsTpl { p }.render_into(w),
+        Screen::Status => StatusTpl { p }.render_into(w),
+        Screen::NewReport => NewReportTpl { p }.render_into(w),
+        Screen::Concerns => ConcernsTpl { p }.render_into(w),
+        Screen::NoReader => NoReaderTpl { p }.render_into(w),
+        Screen::Questionnaire => QuestionnaireTpl { p }.render_into(w),
+        Screen::Identity => IdentityTpl { p }.render_into(w),
+        Screen::IdentityConfirm => IdentityConfirmTpl { p }.render_into(w),
+        Screen::ModeChanged => ModeChangedTpl { p }.render_into(w),
+        Screen::Files => FilesTpl { p }.render_into(w),
+        Screen::MetadataWarning => MetadataTpl { p }.render_into(w),
+        Screen::Review => ReviewTpl { p }.render_into(w),
+        Screen::Credential | Screen::RotateCredential => CredentialTpl { p }.render_into(w),
+        Screen::Confirm | Screen::RotateConfirm => ConfirmTpl { p }.render_into(w),
+        Screen::Sent => SentTpl { p }.render_into(w),
+        Screen::Login => LoginTpl { p }.render_into(w),
+        Screen::Inbox => InboxTpl { p }.render_into(w),
+        Screen::RotateExplain => RotateExplainTpl { p }.render_into(w),
+        Screen::RotateDone => RotateDoneTpl { p }.render_into(w),
+        Screen::Conversation => ConversationTpl { p }.render_into(w),
+        Screen::Discard => DiscardTpl { p }.render_into(w),
+        Screen::Discarded => DiscardedTpl { p }.render_into(w),
+        Screen::CloseMailbox => CloseTpl { p }.render_into(w),
+        Screen::Closed => ClosedTpl { p }.render_into(w),
+        Screen::AskDelete => AskDeleteTpl { p }.render_into(w),
+        Screen::DeleteRequested => DeleteRequestedTpl { p }.render_into(w),
+        Screen::Leave => LeaveTpl { p }.render_into(w),
+        Screen::Busy => BusyTpl { p }.render_into(w),
+        Screen::NotFound => NotFoundTpl { p }.render_into(w),
+        Screen::ServerError => ServerErrorTpl { p }.render_into(w),
+        Screen::Maintenance => MaintenanceTpl { p }.render_into(w),
+        Screen::SignedOut => SignedOutTpl { p }.render_into(w),
+        Screen::MethodNotAllowed => MethodTpl { p }.render_into(w),
     }
 }

@@ -1,0 +1,6 @@
+{#- SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{#- One S05 question, or one piece of a long text answer. `shown` tells C-07 which questions
+    were on this part (absent checkboxes of other questions are not "cleared"). -#}
+{%- let q = q %}
+<input type="hidden" name="shown" value="{{ q.id }}">
+{% include "question.html" %}

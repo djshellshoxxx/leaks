@@ -40,6 +40,9 @@ pub enum StoreError {
     Rng,
     /// The deletion-list signer failed.
     Signer,
+    /// A bounded resource (published-set pages, reply backlog) is at capacity;
+    /// the request is refused instead of growing memory (AUD-RM2-STO-07).
+    Capacity,
     /// Database/driver failure; deliberately content-free.
     Backend,
 }
@@ -62,6 +65,7 @@ impl fmt::Display for StoreError {
             Self::Integrity(w) => write!(f, "integrity failure: {w}"),
             Self::Rng => f.write_str("random number generator failure"),
             Self::Signer => f.write_str("signer failure"),
+            Self::Capacity => f.write_str("capacity exhausted"),
             Self::Backend => f.write_str("storage backend failure"),
         }
     }

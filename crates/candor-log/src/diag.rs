@@ -51,18 +51,38 @@ pub enum DiagLevel {
     Trace,
 }
 
-/// The value of one enumerated code.
+/// The value of one enumerated code. Opaque: only the sealed [`DiagCode`]
+/// implementations of this crate can create one (AUD-RM1-LOG-04).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum DiagCodeValue {
-    /// Closed-enum code text (e.g. `"IDLE_TIMEOUT"`).
+pub struct DiagCodeValue(CodeInner);
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum CodeInner {
     Code(&'static str),
-    /// Numeric registry code.
-    Registry {
-        /// Registry name ([`crate::codes::CodeSpace::NAME`]).
-        space: &'static str,
-        /// Code number.
-        code: u16,
-    },
+    Registry { space: &'static str, code: u16 },
+}
+
+impl DiagCodeValue {
+    pub(crate) const fn closed(code: &'static str) -> Self {
+        Self(CodeInner::Code(code))
+    }
+    pub(crate) const fn registry(space: &'static str, code: u16) -> Self {
+        Self(CodeInner::Registry { space, code })
+    }
+    /// Closed-enum code text (e.g. `"IDLE_TIMEOUT"`), if this is one.
+    pub fn text(&self) -> Option<&'static str> {
+        match self.0 {
+            CodeInner::Code(s) => Some(s),
+            CodeInner::Registry { .. } => None,
+        }
+    }
+    /// `(registry name, code)` of a numeric registry code, if this is one.
+    pub fn registry_code(&self) -> Option<(&'static str, u16)> {
+        match self.0 {
+            CodeInner::Registry { space, code } => Some((space, code)),
+            CodeInner::Code(_) => None,
+        }
+    }
 }
 
 /// Types `diag!` accepts as codes. Sealed: implemented only by the closed
@@ -72,7 +92,7 @@ pub trait DiagCode: Sealed {
     fn diag_code(&self) -> DiagCodeValue;
 }
 
-/// One diagnostic. All contents are static or enumerated.
+/// One diagnostic. All contents are compile-time constants or enumerated.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct DiagRecord {
     level: DiagLevel,
@@ -83,11 +103,8 @@ pub struct DiagRecord {
 }
 
 impl DiagRecord {
-    /// Used by [`diag!`](crate::diag!); extra codes beyond
-    /// [`MAX_DIAG_CODES`] are impossible (compile-time check) and would be
-    /// dropped, never stored.
-    #[doc(hidden)]
-    pub fn __new(
+    /// Crate-internal constructor; callers go through [`diag!`](crate::diag!).
+    pub(crate) fn new(
         level: DiagLevel,
         module: &'static str,
         line: u32,
@@ -147,15 +164,13 @@ pub fn set_sink(sink: &'static dyn DiagSink) -> Result<(), SinkAlreadySet> {
 
 /// Whether `level` is compiled in, given the calling crate's
 /// `debug_assertions` (release ceiling: `Warn`).
-#[doc(hidden)]
-pub const fn __enabled(level: DiagLevel, debug_assertions: bool) -> bool {
+const fn enabled(level: DiagLevel, debug_assertions: bool) -> bool {
     debug_assertions || matches!(level, DiagLevel::Error | DiagLevel::Warn)
 }
 
-/// Compile-time message check: 1..=[`MAX_DIAG_MSG_BYTES`] bytes, printable
-/// ASCII (0x20..=0x7E) only.
-#[doc(hidden)]
-pub const fn __message_ok(m: &str) -> bool {
+/// Message check: 1..=[`MAX_DIAG_MSG_BYTES`] bytes, printable ASCII
+/// (0x20..=0x7E) only.
+const fn message_ok(m: &str) -> bool {
     let b = m.as_bytes();
     if b.is_empty() || b.len() > MAX_DIAG_MSG_BYTES {
         return false;
@@ -173,11 +188,54 @@ pub const fn __message_ok(m: &str) -> bool {
     true
 }
 
-/// Delivers a record to the installed sink, if any.
+/// Macro support. Not an API: everything a caller can reach here takes its
+/// message, module and line from the associated **constants** of a
+/// [`__private::Site`] type, so no runtime string (e.g. a leaked
+/// `format!`) can become a diagnostic message; codes are opaque
+/// [`DiagCodeValue`]s that only the sealed [`DiagCode`] types can produce
+/// (AUD-RM1-LOG-04).
 #[doc(hidden)]
-pub fn __emit(r: &DiagRecord) {
-    if let Some(s) = SINK.get() {
-        s.record(r);
+pub mod __private {
+    use super::{DiagCodeValue, DiagLevel, DiagRecord, MAX_DIAG_CODES, SINK};
+
+    /// A `diag!` call site. All items are compile-time constants.
+    pub trait Site {
+        /// Level.
+        const LEVEL: DiagLevel;
+        /// Static message (validated at compile time and again at emission).
+        const MESSAGE: &'static str;
+        /// `module_path!()` of the call site.
+        const MODULE: &'static str;
+        /// `line!()` of the call site.
+        const LINE: u32;
+    }
+
+    /// Whether `level` is compiled in.
+    pub const fn enabled(level: DiagLevel, debug_assertions: bool) -> bool {
+        super::enabled(level, debug_assertions)
+    }
+
+    /// Compile-time message check used by the macro.
+    pub const fn message_ok(m: &str) -> bool {
+        super::message_ok(m)
+    }
+
+    /// Delivers the diagnostic of site `S` to the installed sink, if any.
+    /// The message is checked again at monomorphisation time and at run
+    /// time; a record failing either check is dropped, never stored.
+    pub fn emit<S: Site>(codes: &[DiagCodeValue]) {
+        const {
+            assert!(
+                super::message_ok(S::MESSAGE),
+                "diag!: message must be 1..=120 bytes of printable ASCII"
+            );
+        }
+        if !super::message_ok(S::MESSAGE) || codes.len() > MAX_DIAG_CODES {
+            return;
+        }
+        if let Some(s) = SINK.get() {
+            s.record(&DiagRecord::new(S::LEVEL, S::MODULE, S::LINE, S::MESSAGE, codes));
+        }
     }
 }
 
@@ -197,25 +255,31 @@ macro_rules! __diag_unit {
 #[macro_export]
 macro_rules! diag {
     ($level:ident, $msg:literal $(, $code:expr)* $(,)?) => {{
-        const __CANDOR_DIAG_MSG: &str = $msg;
-        const _: () = assert!(
-            $crate::diag::__message_ok(__CANDOR_DIAG_MSG),
+        struct __CandorDiagSite;
+        impl $crate::diag::__private::Site for __CandorDiagSite {
+            const LEVEL: $crate::diag::DiagLevel = $crate::diag::DiagLevel::$level;
+            const MESSAGE: &'static str = $msg;
+            const MODULE: &'static str = ::core::module_path!();
+            const LINE: u32 = ::core::line!();
+        }
+        const _: () = ::core::assert!(
+            $crate::diag::__private::message_ok(
+                <__CandorDiagSite as $crate::diag::__private::Site>::MESSAGE
+            ),
             "diag!: message must be 1..=120 bytes of printable ASCII"
         );
         const __CANDOR_DIAG_ARITY: &[()] = &[ $( $crate::__diag_unit!($code) ),* ];
-        const _: () = assert!(
+        const _: () = ::core::assert!(
             __CANDOR_DIAG_ARITY.len() <= $crate::diag::MAX_DIAG_CODES,
             "diag!: at most 4 codes"
         );
-        const __CANDOR_DIAG_LEVEL: $crate::diag::DiagLevel = $crate::diag::DiagLevel::$level;
-        if $crate::diag::__enabled(__CANDOR_DIAG_LEVEL, cfg!(debug_assertions)) {
-            $crate::diag::__emit(&$crate::diag::DiagRecord::__new(
-                __CANDOR_DIAG_LEVEL,
-                module_path!(),
-                line!(),
-                __CANDOR_DIAG_MSG,
+        if $crate::diag::__private::enabled(
+            <__CandorDiagSite as $crate::diag::__private::Site>::LEVEL,
+            ::core::cfg!(debug_assertions),
+        ) {
+            $crate::diag::__private::emit::<__CandorDiagSite>(
                 &[ $( $crate::diag::DiagCode::diag_code(&$code) ),* ],
-            ));
+            );
         }
     }};
 }
@@ -270,41 +334,35 @@ mod tests {
 
     #[test]
     fn message_check() {
-        assert!(__message_ok("ok"));
-        assert!(!__message_ok(""));
-        assert!(!__message_ok("line\nbreak"));
-        assert!(!__message_ok("tab\there"));
-        assert!(!__message_ok("caf\u{e9}"));
-        assert!(!__message_ok("\u{202e}rtl"));
-        assert!(__message_ok(&"x".repeat(MAX_DIAG_MSG_BYTES)));
-        assert!(!__message_ok(&"x".repeat(MAX_DIAG_MSG_BYTES + 1)));
+        assert!(message_ok("ok"));
+        assert!(!message_ok(""));
+        assert!(!message_ok("line\nbreak"));
+        assert!(!message_ok("tab\there"));
+        assert!(!message_ok("caf\u{e9}"));
+        assert!(!message_ok("\u{202e}rtl"));
+        assert!(message_ok(&"x".repeat(MAX_DIAG_MSG_BYTES)));
+        assert!(!message_ok(&"x".repeat(MAX_DIAG_MSG_BYTES + 1)));
     }
 
     #[test]
     fn release_ceiling_is_warn() {
-        assert!(__enabled(DiagLevel::Error, false));
-        assert!(__enabled(DiagLevel::Warn, false));
-        assert!(!__enabled(DiagLevel::Info, false));
-        assert!(!__enabled(DiagLevel::Trace, false));
-        assert!(__enabled(DiagLevel::Trace, true));
+        assert!(enabled(DiagLevel::Error, false));
+        assert!(enabled(DiagLevel::Warn, false));
+        assert!(!enabled(DiagLevel::Info, false));
+        assert!(!enabled(DiagLevel::Trace, false));
+        assert!(enabled(DiagLevel::Trace, true));
     }
 
     #[test]
     fn record_holds_codes_in_order_and_bounded() {
-        let a = DiagCodeValue::Code("A");
-        let r = DiagRecord::__new(DiagLevel::Warn, "m", 1, "msg", &[a; 6]);
+        let a = DiagCodeValue::closed("A");
+        let r = DiagRecord::new(DiagLevel::Warn, "m", 1, "msg", &[a; 6]);
         assert_eq!(r.codes().count(), MAX_DIAG_CODES);
-        let c = Code::<OperationClass>::new(7).diag_code();
+        let c = Code::<OperationClass>::of::<7>().diag_code();
+        assert_eq!(c.registry_code(), Some(("operation_class", 7)));
         assert_eq!(
-            c,
-            DiagCodeValue::Registry {
-                space: "operation_class",
-                code: 7
-            }
-        );
-        assert_eq!(
-            SessionEndReason::IdleTimeout.diag_code(),
-            DiagCodeValue::Code("IDLE_TIMEOUT")
+            SessionEndReason::IdleTimeout.diag_code().text(),
+            Some("IDLE_TIMEOUT")
         );
     }
 
@@ -312,7 +370,7 @@ mod tests {
     fn ring_is_bounded_and_drops_oldest() {
         let ring = DiagRing::new(2);
         for line in 1..=5u32 {
-            ring.record(&DiagRecord::__new(DiagLevel::Error, "m", line, "x", &[]));
+            ring.record(&DiagRecord::new(DiagLevel::Error, "m", line, "x", &[]));
         }
         let s = ring.snapshot();
         assert_eq!(s.iter().map(DiagRecord::line).collect::<Vec<_>>(), [4, 5]);

@@ -1,22 +1,25 @@
 {#- SPDX-License-Identifier: AGPL-3.0-or-later -#}
 {#- One questionnaire field (11 §7 S05). Every control has a visible label; hints and
-    errors are linked with aria-describedby; month + year only (GC-30, SUI-020). -#}
+    errors are linked with aria-describedby; month + year only (GC-30, SUI-020). Text values
+    arrive escaped in `val`; a long value may be one piece (`piece`, AUD-RM1-SUI-01). -#}
 {%- let fid = q.id.as_str() %}
 {%- let desc = p.describedby(fid, p.q_has_hint(q)) %}
 <div class="field">
 {%- match q.kind %}
 {%- when QuestionKind::ShortText | QuestionKind::LongText %}
-<label for="f-{{ fid }}">{{ p.text_html(q.label)|safe }} {% if q.required %}{{ p.t("sui-required") }}{% else %}{{ p.t("sui-optional") }}{% endif %}</label>
+<label for="f-{{ fid }}">{{ p.text_html(q.label)|safe }} {% if q.required %}{{ p.t("sui-required") }}{% else %}{{ p.t("sui-optional") }}{% endif %}{% if let Some(pc) = piece %} {{ p.t2("sui-part-of", "n", pc.n, "total", pc.total) }}{% endif %}</label>
 {%- if p.q_has_hint(q) %}
 <div class="hint" id="h-{{ fid }}">{% if let Some(h) = q.hint %}<p>{{ p.text_html(h)|safe }}</p>{% endif %}{% if q.kind == QuestionKind::LongText %}<p>{{ p.t("sui-q-ai") }}</p>{% endif %}<p>{{ p.t1("sui-q-maxlen", "max", p.q_maxlen(q)) }}</p></div>
 {%- endif %}
 {% include "field_error.html" %}
 {%- if q.kind == QuestionKind::LongText %}
-<textarea id="f-{{ fid }}" name="{{ fid }}" rows="10" maxlength="60000" dir="auto"{% if q.required %} required{% endif %}{% if !desc.is_empty() %} aria-describedby="{{ desc }}"{% endif %}{% if p.has_field_error(fid) %} aria-invalid="true"{% endif %}>{{ p.q_value(q) }}</textarea>
+<textarea id="f-{{ fid }}" name="{{ fid }}" rows="10" maxlength="60000" dir="auto"{% if q.required && piece.is_none() %} required{% endif %}{% if !desc.is_empty() %} aria-describedby="{{ desc }}"{% endif %}{% if p.has_field_error(fid) %} aria-invalid="true"{% endif %}>
+{{ val|safe }}</textarea>
 <details><summary>{{ p.t("sui-q-details") }}</summary>{% let c = p.card("GC-30").unwrap_or(crate::guidance::GC30) %}{% for b in c.normal %}{{ p.block_html(b)|safe }}{% endfor %}</details>
 {%- else %}
-<input type="text" id="f-{{ fid }}" name="{{ fid }}" maxlength="500" dir="auto" value="{{ p.q_value(q) }}"{% if q.required %} required{% endif %}{% if !desc.is_empty() %} aria-describedby="{{ desc }}"{% endif %}{% if p.has_field_error(fid) %} aria-invalid="true"{% endif %}>
+<input type="text" id="f-{{ fid }}" name="{{ fid }}" maxlength="500" dir="auto" value="{{ val|safe }}"{% if q.required && piece.is_none() %} required{% endif %}{% if !desc.is_empty() %} aria-describedby="{{ desc }}"{% endif %}{% if p.has_field_error(fid) %} aria-invalid="true"{% endif %}>
 {%- endif %}
+{%- if !piece_value.is_empty() %}<input type="hidden" name="piece" value="{{ piece_value }}">{% endif %}
 {%- when QuestionKind::SingleChoice(opts) | QuestionKind::MultiChoice(opts) %}
 {%- let multi = matches!(q.kind, QuestionKind::MultiChoice(_)) %}
 <fieldset{% if !desc.is_empty() %} aria-describedby="{{ desc }}"{% endif %}>

@@ -20,13 +20,13 @@ pub mod store;
 pub mod types;
 mod validate;
 
-pub use deaddrop::{DummyReplies, RandomDummyReplies};
+pub use deaddrop::{DeadDropConfig, DummyReplies, RandomDummyReplies};
 pub use deletion::{
     CoreReplyHasher, DeletionEntry, DeletionKind, DeletionSigner, Ed25519DeletionSigner,
     ReplyObjectHasher,
 };
 pub use error::{Result, StoreError};
-pub use memory::MemoryStore;
-pub use pg::{PgIntakeStore, migrate, schema_hash};
-pub use store::IntakeStore;
+pub use memory::{MEMORY_DEADDROP_CONFIG, MemoryStore};
+pub use pg::{PgIntakeMaintenance, PgIntakeStore, migrate, schema_hash};
+pub use store::{IntakeMaintenance, IntakeStore};
 pub use types::*;

@@ -2,16 +2,33 @@
 //! Hash chain, RFC 6962 Merkle checkpoints, Ed25519 checkpoint signing and
 //! the [`AuditLog`] writer (20 §8, AUD-001, AUD-002).
 //!
-//! * Chain: `h_i = SHA-256("candor/v1/audit/chain" ‖ h_{i-1} ‖ canonical_bytes(event_i))`
-//!   with `h_{-1} = SHA-256("candor/v1/audit/genesis" ‖ tenant ‖ stream)`.
+//! * Record commitment: `c_i = SHA-256("candor/v1/audit/record-commit\0" ‖
+//!   salt_i ‖ canonical_bytes(event_i))`. `salt_i` is all-zero except for
+//!   redactable CASE records, where it is
+//!   `HMAC-SHA-256(K_case, "candor/v1/audit/redaction-salt" ‖ 0 ‖ tenant ‖
+//!   stream ‖ seq)` with a per-case key that is destroyed at disposal, so a
+//!   redacted stub cannot be brute-forced back to its (low-entropy) record
+//!   (AUD-RM1-LOG-08).
+//! * Chain: `h_i = SHA-256("candor/v1/audit/chain\0" ‖ h_{i-1} ‖ c_i)` with
+//!   `h_{-1} = SHA-256("candor/v1/audit/genesis\0" ‖ tenant ‖ stream)`.
 //!   Each envelope also carries `prev = h_{i-1}`.
-//! * Merkle: RFC 6962 §2.1 (`leaf = SHA-256(0x00 ‖ canonical_bytes)`,
+//! * Merkle: RFC 6962 §2.1 (`leaf = SHA-256(0x00 ‖ c_i)`,
 //!   `node = SHA-256(0x01 ‖ left ‖ right)`) over each checkpoint interval.
-//! * Checkpoint: every `max_events` (≤ 1000) events or `max_interval`
-//!   (≤ 5 min), whichever first; signed with Ed25519 over
-//!   `"candor/v1/audit/checkpoint-sig" ‖ canonical_bytes(checkpoint)`.
+//! * Checkpoints follow a **fixed, data-independent schedule** per stream
+//!   (AUD-RM1-LOG-02): one checkpoint per slot boundary whether or not
+//!   anything happened (empty intervals allowed), `signed_at` = the slot
+//!   boundary. SECURITY: every 5 min (hourly on Z-INTAKE); CASE and SYSTEM,
+//!   which carry date-only events, once per UTC day at 00:00. Signed with
+//!   Ed25519 over `"candor/v1/audit/checkpoint-sig\0" ‖ canonical_bytes`.
+//! * Sinks: one primary durable sink is the commit point; secondaries are
+//!   fed from an outbox after the primary accepted, so a secondary failure
+//!   can never fork the chain (AUD-RM1-LOG-07).
+//!
+//! All domain labels are NUL-terminated and therefore prefix-free
+//! (AUD-RM1-LOG-12).
 
 use core::fmt;
+use std::collections::{BTreeMap, VecDeque};
 
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use sha2::{Digest, Sha256};
@@ -24,28 +41,35 @@ use crate::envelope::{
 };
 use crate::event::AuditEvent;
 use crate::field::AuditField;
-use crate::ids::{TenantRef, UtcMillis};
+use crate::ids::{CaseRef, MS_PER_DAY, MS_PER_HOUR, TenantRef, UtcMillis, keyed32};
 use crate::sink::{AuditSink, SinkError};
 
 /// Chain domain separator.
-pub const CHAIN_DOMAIN: &[u8] = b"candor/v1/audit/chain";
+pub const CHAIN_DOMAIN: &[u8] = b"candor/v1/audit/chain\0";
 /// Genesis domain separator.
-pub const GENESIS_DOMAIN: &[u8] = b"candor/v1/audit/genesis";
+pub const GENESIS_DOMAIN: &[u8] = b"candor/v1/audit/genesis\0";
 /// Checkpoint hash domain separator.
-pub const CHECKPOINT_DOMAIN: &[u8] = b"candor/v1/audit/checkpoint";
+pub const CHECKPOINT_DOMAIN: &[u8] = b"candor/v1/audit/checkpoint\0";
 /// Checkpoint-chain genesis domain separator.
-pub const CHECKPOINT_GENESIS_DOMAIN: &[u8] = b"candor/v1/audit/checkpoint-genesis";
+pub const CHECKPOINT_GENESIS_DOMAIN: &[u8] = b"candor/v1/audit/checkpoint-genesis\0";
 /// Signature context prefix.
-pub const CHECKPOINT_SIG_DOMAIN: &[u8] = b"candor/v1/audit/checkpoint-sig";
+pub const CHECKPOINT_SIG_DOMAIN: &[u8] = b"candor/v1/audit/checkpoint-sig\0";
 /// Witness cosignature context prefix.
-pub const WITNESS_SIG_DOMAIN: &[u8] = b"candor/v1/audit/witness-cosign";
+pub const WITNESS_SIG_DOMAIN: &[u8] = b"candor/v1/audit/witness-cosign\0";
+/// Record commitment domain separator.
+pub const COMMIT_DOMAIN: &[u8] = b"candor/v1/audit/record-commit\0";
+/// Redaction-set commitment domain separator (`case.disposed.redacted_set`).
+pub const REDACTION_SET_DOMAIN: &[u8] = b"candor/v1/audit/redaction-set\0";
+/// Per-case redaction salt label (HMAC input, NUL-terminated by `keyed32`).
+const SALT_LABEL: &[u8] = b"candor/v1/audit/redaction-salt";
 
-/// Spec maximum events per checkpoint (20 §8).
-pub const MAX_EVENTS_PER_CHECKPOINT: u64 = 1000;
-/// Spec maximum checkpoint interval: 5 minutes (20 §8).
+/// Default (and maximum) SECURITY checkpoint interval: 5 minutes (20 §8).
 pub const MAX_CHECKPOINT_INTERVAL_MS: u64 = 5 * 60 * 1000;
+/// Checkpoint interval of streams that carry date-only events (CASE,
+/// SYSTEM): one UTC day.
+pub const DAILY_CHECKPOINT_INTERVAL_MS: u64 = MS_PER_DAY;
 
-fn stream_byte(s: StreamId) -> u8 {
+pub(crate) fn stream_byte(s: StreamId) -> u8 {
     match s {
         StreamId::Sec => 1,
         StreamId::Case => 2,
@@ -71,20 +95,42 @@ pub fn checkpoint_genesis(tenant: &TenantRef, stream: StreamId) -> [u8; 32] {
     h.finalize().into()
 }
 
-/// `h_i` from `h_{i-1}` and the canonical event bytes.
-pub fn chain_hash(prev: &[u8; 32], canonical: &[u8]) -> [u8; 32] {
+/// Record commitment `c_i` over the salt and the canonical event bytes.
+pub fn record_commit(salt: &[u8; 32], canonical: &[u8]) -> [u8; 32] {
     let mut h = Sha256::new();
-    h.update(CHAIN_DOMAIN);
-    h.update(prev);
+    h.update(COMMIT_DOMAIN);
+    h.update(salt);
     h.update(canonical);
     h.finalize().into()
 }
 
-/// RFC 6962 leaf hash of canonical event bytes.
-pub fn leaf_hash(canonical: &[u8]) -> [u8; 32] {
+/// `h_i` from `h_{i-1}` and the record commitment.
+pub fn chain_hash(prev: &[u8; 32], commit: &[u8; 32]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(CHAIN_DOMAIN);
+    h.update(prev);
+    h.update(commit);
+    h.finalize().into()
+}
+
+/// RFC 6962 leaf hash of a record commitment.
+pub fn leaf_hash(commit: &[u8; 32]) -> [u8; 32] {
     let mut h = Sha256::new();
     h.update([0x00]);
-    h.update(canonical);
+    h.update(commit);
+    h.finalize().into()
+}
+
+/// Commitment to an ordered set of redacted records `(seq, c_i)`, carried
+/// by the `case.disposed` tombstone (AUD-RM1-LOG-01).
+pub fn redaction_set_hash(entries: &[(u64, [u8; 32])]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(REDACTION_SET_DOMAIN);
+    h.update(u64::try_from(entries.len()).unwrap_or(u64::MAX).to_be_bytes());
+    for (seq, c) in entries {
+        h.update(seq.to_be_bytes());
+        h.update(c);
+    }
     h.finalize().into()
 }
 
@@ -111,6 +157,90 @@ pub fn merkle_root(leaves: &[[u8; 32]]) -> [u8; 32] {
             let (l, r) = leaves.split_at(k.min(n));
             node_hash(&merkle_root(l), &merkle_root(r))
         }
+    }
+}
+
+/// Per-case redaction-commitment key (AUD-RM1-LOG-08). Destroying it at
+/// disposal makes the salts of the case's redacted records unrecoverable.
+/// Secret: zeroized, never printed, not `Clone`.
+pub struct CaseCommitKey(Zeroizing<[u8; 32]>);
+
+impl CaseCommitKey {
+    /// Wrap a random 32-byte key (minted by the case service at case
+    /// creation, held in its key store).
+    pub fn new(k: [u8; 32]) -> Self {
+        Self(Zeroizing::new(k))
+    }
+    fn salt(&self, tenant: &TenantRef, stream: StreamId, seq: u64) -> [u8; 32] {
+        let mut data = [0u8; 25];
+        for (o, i) in data.iter_mut().zip(
+            tenant
+                .as_bytes()
+                .iter()
+                .chain([stream_byte(stream)].iter())
+                .chain(seq.to_be_bytes().iter()),
+        ) {
+            *o = *i;
+        }
+        keyed32(&self.0, SALT_LABEL, &data)
+    }
+}
+
+impl fmt::Debug for CaseCommitKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("CaseCommitKey(<redacted>)")
+    }
+}
+
+/// The key store has no key for a case (fail closed: the event is not
+/// written).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct KeyUnavailable;
+
+/// Source of per-case commitment keys. A store must hand out a key for every
+/// live case and must mint a fresh key for a case whose previous key was
+/// destroyed by disposal.
+pub trait CaseKeyStore {
+    /// Key of `case`.
+    fn commit_key(&mut self, case: CaseRef) -> Result<CaseCommitKey, KeyUnavailable>;
+}
+
+/// In-memory [`CaseKeyStore`] (tests, single-process deployments whose key
+/// material comes from elsewhere). Keys are zeroized on destruction.
+#[derive(Default)]
+pub struct MemoryCaseKeys {
+    keys: BTreeMap<CaseRef, Zeroizing<[u8; 32]>>,
+}
+
+impl fmt::Debug for MemoryCaseKeys {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MemoryCaseKeys")
+            .field("cases", &self.keys.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl MemoryCaseKeys {
+    /// Empty store.
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// Install the key of `case`.
+    pub fn insert(&mut self, case: CaseRef, key: [u8; 32]) {
+        self.keys.insert(case, Zeroizing::new(key));
+    }
+    /// Destroy the key of `case` (disposal); `true` if one existed.
+    pub fn destroy(&mut self, case: CaseRef) -> bool {
+        self.keys.remove(&case).is_some()
+    }
+}
+
+impl CaseKeyStore for MemoryCaseKeys {
+    fn commit_key(&mut self, case: CaseRef) -> Result<CaseCommitKey, KeyUnavailable> {
+        self.keys
+            .get(&case)
+            .map(|k| CaseCommitKey::new(**k))
+            .ok_or(KeyUnavailable)
     }
 }
 
@@ -146,13 +276,26 @@ impl AuditClock for SystemClock {
     }
 }
 
+/// The exact message a checkpoint signature covers:
+/// `"candor/v1/audit/checkpoint-sig\0" ‖ checkpoint_bytes`.
+pub fn checkpoint_signing_message(checkpoint_bytes: &[u8]) -> Vec<u8> {
+    let mut m = CHECKPOINT_SIG_DOMAIN.to_vec();
+    m.extend_from_slice(checkpoint_bytes);
+    m
+}
+
 /// Checkpoint signer. Production: non-exportable key in TPM 2.0 (CE) or
 /// HSM (EE, C-29); [`SoftwareSigner`] is for tests and development.
+///
+/// The signer is given the canonical checkpoint bytes and adds the signing
+/// context itself ([`checkpoint_signing_message`]); it is never asked to
+/// sign an arbitrary message, so a key shared with another purpose cannot
+/// be used as a cross-protocol oracle through this trait (AUD-RM1-LOG-12).
 pub trait CheckpointSigner {
     /// Public key (published in C-14).
     fn verifying_key(&self) -> VerifyingKey;
-    /// Sign `msg` (already domain-prefixed).
-    fn sign(&self, msg: &[u8]) -> Result<Signature, SignerError>;
+    /// Sign `checkpoint_signing_message(checkpoint_bytes)`.
+    fn sign_checkpoint(&self, checkpoint_bytes: &[u8]) -> Result<Signature, SignerError>;
 }
 
 /// Signer failure (HSM/TPM unavailable). No fallback key exists (ADR-046(2)).
@@ -184,13 +327,14 @@ impl CheckpointSigner for SoftwareSigner {
     fn verifying_key(&self) -> VerifyingKey {
         self.0.verifying_key()
     }
-    fn sign(&self, msg: &[u8]) -> Result<Signature, SignerError> {
-        Ok(self.0.sign(msg))
+    fn sign_checkpoint(&self, checkpoint_bytes: &[u8]) -> Result<Signature, SignerError> {
+        Ok(self.0.sign(&checkpoint_signing_message(checkpoint_bytes)))
     }
 }
 
-/// Checkpoint contents (20 §8: stream, first/last seq, Merkle root,
-/// previous checkpoint hash, time; plus chain head and drift flag).
+/// Checkpoint contents (20 §8: stream, seq range, Merkle root, previous
+/// checkpoint hash, time; plus chain head and drift flag). The interval is
+/// `[first_seq, end_seq)`; it is empty when `first_seq == end_seq`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct CheckpointBody {
     /// Tenant.
@@ -199,15 +343,16 @@ pub struct CheckpointBody {
     pub stream: StreamId,
     /// First sequence number covered.
     pub first_seq: u64,
-    /// Last sequence number covered.
-    pub last_seq: u64,
-    /// Chain hash `h_last`.
+    /// One past the last sequence number covered.
+    pub end_seq: u64,
+    /// Chain hash after the interval (`h_{end_seq-1}`, or the previous head
+    /// for an empty interval).
     pub chain_head: [u8; 32],
-    /// RFC 6962 root over the interval's leaves.
+    /// RFC 6962 root over the interval's leaves (`SHA-256("")` if empty).
     pub merkle_root: [u8; 32],
     /// Hash of the previous checkpoint (or the checkpoint genesis).
     pub prev_checkpoint: [u8; 32],
-    /// Signing time (allow-listed exact system timestamp, 09 §8 L3 (e)).
+    /// Schedule slot boundary the checkpoint closes (never a clock reading).
     pub signed_at: UtcMillis,
     /// Clock drift > 5 min observed (AUD-015).
     pub clock_flagged: bool,
@@ -216,12 +361,12 @@ pub struct CheckpointBody {
 impl CheckpointBody {
     fn to_value(self) -> Value {
         let mut m = MapBuilder::new();
-        m.put("v", Value::Uint(1))
+        m.put("v", Value::Uint(2))
             .put("kind", Value::text("checkpoint"))
             .put("tenant", self.tenant.to_value())
             .put("stream", self.stream.to_value())
             .put("first_seq", Value::Uint(self.first_seq))
-            .put("last_seq", Value::Uint(self.last_seq))
+            .put("end_seq", Value::Uint(self.end_seq))
             .put("chain_head", Value::Bytes(self.chain_head.to_vec()))
             .put("merkle_root", Value::Bytes(self.merkle_root.to_vec()))
             .put(
@@ -234,10 +379,10 @@ impl CheckpointBody {
     }
 
     fn from_value(v: &Value) -> Option<Self> {
-        if v.get("v")?.as_u64()? != 1 || v.get("kind")?.as_text()? != "checkpoint" {
+        if v.get("v")?.as_u64()? != 2 || v.get("kind")?.as_text()? != "checkpoint" {
             return None;
         }
-        if matches!(v, Value::Map(m) if m.len() != 11) {
+        if !matches!(v, Value::Map(m) if m.len() == 11) {
             return None;
         }
         let tenant: [u8; 16] = v.get("tenant")?.as_bytes()?.try_into().ok()?;
@@ -247,17 +392,27 @@ impl CheckpointBody {
             "sys" => StreamId::Sys,
             _ => return None,
         };
+        let first_seq = v.get("first_seq")?.as_u64()?;
+        let end_seq = v.get("end_seq")?.as_u64()?;
+        if end_seq < first_seq {
+            return None;
+        }
         Some(Self {
             tenant: TenantRef::from_bytes(tenant),
             stream,
-            first_seq: v.get("first_seq")?.as_u64()?,
-            last_seq: v.get("last_seq")?.as_u64()?,
+            first_seq,
+            end_seq,
             chain_head: v.get("chain_head")?.as_bytes32()?,
             merkle_root: v.get("merkle_root")?.as_bytes32()?,
             prev_checkpoint: v.get("prev_checkpoint")?.as_bytes32()?,
             signed_at: UtcMillis(v.get("signed_at")?.as_u64()?),
             clock_flagged: v.get("clock_flagged")?.as_bool()?,
         })
+    }
+
+    /// Whether the interval is empty.
+    pub fn is_empty(&self) -> bool {
+        self.end_seq == self.first_seq
     }
 }
 
@@ -301,25 +456,20 @@ impl SignedCheckpoint {
     pub fn signature(&self) -> &[u8; 64] {
         &self.signature
     }
-    /// `SHA-256("candor/v1/audit/checkpoint" ‖ bytes)`.
+    /// `SHA-256("candor/v1/audit/checkpoint\0" ‖ bytes)`.
     pub fn hash(&self) -> [u8; 32] {
         let mut h = Sha256::new();
         h.update(CHECKPOINT_DOMAIN);
         h.update(&self.bytes);
         h.finalize().into()
     }
-    fn signing_message(bytes: &[u8]) -> Vec<u8> {
-        let mut m = CHECKPOINT_SIG_DOMAIN.to_vec();
-        m.extend_from_slice(bytes);
-        m
-    }
     /// Verify the instance signature (strict Ed25519).
     pub fn verify_signature(&self, key: &VerifyingKey) -> bool {
         let sig = Signature::from_bytes(&self.signature);
-        key.verify_strict(&Self::signing_message(&self.bytes), &sig)
+        key.verify_strict(&checkpoint_signing_message(&self.bytes), &sig)
             .is_ok()
     }
-    /// Message a witness cosigns: `"candor/v1/audit/witness-cosign" ‖ checkpoint hash`.
+    /// Message a witness cosigns: `"candor/v1/audit/witness-cosign\0" ‖ checkpoint hash`.
     pub fn witness_message(&self) -> Vec<u8> {
         let mut m = WITNESS_SIG_DOMAIN.to_vec();
         m.extend_from_slice(&self.hash());
@@ -333,27 +483,38 @@ impl SignedCheckpoint {
     }
 }
 
-/// Checkpoint cadence. Values may only be stricter than the spec maxima.
+/// Checkpoint schedule (AUD-RM1-LOG-02). Only the SECURITY interval is
+/// configurable, and only stricter (shorter) than 5 minutes; it must divide
+/// an hour so slots are aligned to wall-clock boundaries. CASE and SYSTEM
+/// always checkpoint daily; Z-INTAKE SECURITY hourly.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct CheckpointPolicy {
-    max_events: u64,
-    max_interval_ms: u64,
+    sec_interval_ms: u64,
 }
 
 impl CheckpointPolicy {
-    /// Spec default: 1000 events or 5 minutes.
+    /// Spec default: SECURITY every 5 minutes.
     pub const DEFAULT: Self = Self {
-        max_events: MAX_EVENTS_PER_CHECKPOINT,
-        max_interval_ms: MAX_CHECKPOINT_INTERVAL_MS,
+        sec_interval_ms: MAX_CHECKPOINT_INTERVAL_MS,
     };
-    /// `None` if either value is zero or exceeds the spec maximum.
-    pub fn new(max_events: u64, max_interval_ms: u64) -> Option<Self> {
-        ((1..=MAX_EVENTS_PER_CHECKPOINT).contains(&max_events)
-            && (1..=MAX_CHECKPOINT_INTERVAL_MS).contains(&max_interval_ms))
-        .then_some(Self {
-            max_events,
-            max_interval_ms,
-        })
+    /// `None` unless `1 s ≤ sec_interval_ms ≤ 5 min`, a whole number of
+    /// seconds, and a divisor of one hour.
+    pub fn new(sec_interval_ms: u64) -> Option<Self> {
+        ((1000..=MAX_CHECKPOINT_INTERVAL_MS).contains(&sec_interval_ms)
+            && sec_interval_ms.is_multiple_of(1000)
+            && MS_PER_HOUR.is_multiple_of(sec_interval_ms))
+        .then_some(Self { sec_interval_ms })
+    }
+    /// Slot length of `stream` on a host of role `host`.
+    pub fn slot_ms(&self, stream: StreamId, host: HostRole) -> u64 {
+        match stream {
+            // Both carry date-only events (imports, relay, source-load
+            // health): a checkpoint more often than daily would time them.
+            StreamId::Case | StreamId::Sys => DAILY_CHECKPOINT_INTERVAL_MS,
+            // Z-INTAKE timestamps are hour-truncated (LOG-004).
+            StreamId::Sec if host == HostRole::Intake => MS_PER_HOUR,
+            StreamId::Sec => self.sec_interval_ms,
+        }
     }
 }
 
@@ -363,15 +524,31 @@ impl Default for CheckpointPolicy {
     }
 }
 
+fn slot_floor(now: UtcMillis, slot: u64) -> u64 {
+    now.0.saturating_sub(now.0.checked_rem(slot).unwrap_or(0))
+}
+
 /// A record committed by [`AuditLog`]. Only the log can construct one, so
 /// sinks can only ever receive typed, allow-listed events.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CommittedRecord {
     header: EnvelopeHeader,
     event: AuditEvent,
     bytes: Vec<u8>,
+    salt: [u8; 32],
+    commit: [u8; 32],
     hash: [u8; 32],
     leaf: [u8; 32],
+}
+
+impl fmt::Debug for CommittedRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The salt is omitted: it is what keeps a redacted stub opaque.
+        f.debug_struct("CommittedRecord")
+            .field("header", &self.header)
+            .field("event", &self.event)
+            .finish_non_exhaustive()
+    }
 }
 
 impl CommittedRecord {
@@ -387,6 +564,16 @@ impl CommittedRecord {
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
+    /// Redaction salt (all-zero unless the record is redactable). Sinks
+    /// store it next to the record and delete it with the record content
+    /// at redaction.
+    pub fn salt(&self) -> &[u8; 32] {
+        &self.salt
+    }
+    /// Record commitment `c_i`.
+    pub fn commit(&self) -> &[u8; 32] {
+        &self.commit
+    }
     /// Chain hash `h_i`.
     pub fn hash(&self) -> &[u8; 32] {
         &self.hash
@@ -399,41 +586,46 @@ impl CommittedRecord {
     pub fn to_chain_record(&self) -> ChainRecord {
         ChainRecord::Full {
             bytes: self.bytes.clone(),
+            salt: self.salt,
             claimed_hash: Some(self.hash),
-        }
-    }
-    /// Redacted stub (AUD-012): keeps only seq, prev, leaf and chain hash.
-    pub fn to_redacted(&self) -> ChainRecord {
-        ChainRecord::Redacted {
-            seq: self.header.seq,
-            prev: self.header.prev,
-            leaf: self.leaf,
-            hash: self.hash,
         }
     }
 }
 
 /// A stored record as presented to the verifier.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum ChainRecord {
     /// Full canonical event.
     Full {
         /// Canonical CBOR.
         bytes: Vec<u8>,
+        /// Redaction salt (all-zero for non-redactable records).
+        salt: [u8; 32],
         /// Stored chain hash, if the store keeps one (checked when present).
         claimed_hash: Option<[u8; 32]>,
     },
-    /// Redacted event (per-case disposal, AUD-012): content removed.
+    /// Redacted event (per-case disposal, AUD-012): content and salt
+    /// removed. Valid only in the CASE stream and only when the
+    /// `case.disposed` record at `tombstone_seq` commits to it.
     Redacted {
         /// Sequence number.
         seq: u64,
-        /// `h_{i-1}`.
-        prev: [u8; 32],
-        /// Leaf hash (for Merkle recomputation).
-        leaf: [u8; 32],
-        /// `h_i`.
-        hash: [u8; 32],
+        /// Record commitment `c_i`.
+        commit: [u8; 32],
+        /// Sequence number of the covering `case.disposed` tombstone.
+        tombstone_seq: u64,
     },
+}
+
+impl fmt::Debug for ChainRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Full { bytes, .. } => write!(f, "ChainRecord::Full(<{} bytes>)", bytes.len()),
+            Self::Redacted {
+                seq, tombstone_seq, ..
+            } => write!(f, "ChainRecord::Redacted(seq={seq}, tombstone={tombstone_seq})"),
+        }
+    }
 }
 
 /// Errors from [`AuditLog`].
@@ -445,10 +637,15 @@ pub enum LogError {
     Encoding,
     /// Sequence space exhausted.
     SeqOverflow,
-    /// A sink failed; the stream state was not advanced.
+    /// The primary sink failed; nothing was committed.
     Sink(SinkError),
-    /// Checkpoint signing failed (no fallback key, ADR-046(2)).
+    /// No primary sink is attached (fail closed).
+    NoPrimarySink,
+    /// Checkpoint signing failed (no fallback key, ADR-046(2)); nothing was
+    /// committed.
     Signer,
+    /// No commitment key for the event's case (fail closed).
+    CaseKeyUnavailable,
 }
 
 impl fmt::Display for LogError {
@@ -457,8 +654,10 @@ impl fmt::Display for LogError {
             Self::Envelope(_) => "audit: envelope rule violated",
             Self::Encoding => "audit: encoding failed",
             Self::SeqOverflow => "audit: sequence overflow",
-            Self::Sink(_) => "audit: sink failure",
+            Self::Sink(_) => "audit: primary sink failure",
+            Self::NoPrimarySink => "audit: no primary sink",
             Self::Signer => "audit: checkpoint signing failed",
+            Self::CaseKeyUnavailable => "audit: case commitment key unavailable",
         };
         f.write_str(s)
     }
@@ -486,7 +685,8 @@ struct StreamState {
     head: [u8; 32],
     pending: Vec<[u8; 32]>,
     last_cp_hash: [u8; 32],
-    last_cp_time: UtcMillis,
+    /// Start of the currently open schedule slot.
+    open_slot: u64,
 }
 
 /// Result of [`AuditLog::emit`].
@@ -494,11 +694,79 @@ struct StreamState {
 pub struct Emitted {
     /// The committed record.
     pub record: CommittedRecord,
-    /// A checkpoint produced because the event threshold was reached.
+    /// The scheduled checkpoint that closed the previous slot of this
+    /// stream before the record was appended, if one was due.
     pub checkpoint: Option<SignedCheckpoint>,
+    /// At least one secondary sink has not yet received everything
+    /// (outbox non-empty or desynchronised).
+    pub secondary_lag: bool,
+}
+
+/// Maximum items queued for one secondary sink before it is declared
+/// desynchronised (and must be rebuilt from the primary store).
+pub const MAX_SECONDARY_OUTBOX: usize = 65_536;
+
+#[derive(Clone)]
+enum Outgoing {
+    Record(Box<CommittedRecord>),
+    Checkpoint(Box<SignedCheckpoint>),
+}
+
+struct Secondary {
+    sink: Box<dyn AuditSink + Send>,
+    outbox: VecDeque<Outgoing>,
+    desynced: bool,
+}
+
+impl Secondary {
+    /// Queue `item` and drain as far as the sink accepts. Returns whether
+    /// the sink is lagging afterwards.
+    fn deliver(&mut self, item: Option<Outgoing>) -> bool {
+        if self.desynced {
+            return true;
+        }
+        if let Some(item) = item {
+            if self.outbox.len() >= MAX_SECONDARY_OUTBOX {
+                self.desynced = true;
+                self.outbox.clear();
+                return true;
+            }
+            self.outbox.push_back(item);
+        }
+        while let Some(front) = self.outbox.front() {
+            let ok = match front {
+                Outgoing::Record(r) => self.sink.write_record(r).is_ok(),
+                Outgoing::Checkpoint(c) => self.sink.write_checkpoint(c).is_ok(),
+            };
+            if !ok {
+                break;
+            }
+            self.outbox.pop_front();
+        }
+        !self.outbox.is_empty()
+    }
+}
+
+/// Delivery state of one secondary sink.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SecondaryStatus {
+    /// Items waiting in the outbox.
+    pub queued: usize,
+    /// The outbox overflowed; the sink receives nothing more until it is
+    /// rebuilt from the primary store and re-attached.
+    pub desynced: bool,
 }
 
 /// Class-separated, hash-chained audit writer (C-24).
+///
+/// Sink semantics (AUD-RM1-LOG-07): the record (and its chain hash) is
+/// computed once; the **primary** sink is the commit point. If the primary
+/// write fails, nothing is committed and the stream state is unchanged, so
+/// the next event reuses the same `seq` without forking any store. After
+/// the primary accepted, secondaries receive the identical record through a
+/// per-sink outbox, retried in order on every later emission and
+/// [`AuditLog::tick`]; a secondary failure never reaches the caller as an
+/// error and never re-issues a `seq`.
 pub struct AuditLog<S: CheckpointSigner, C: AuditClock> {
     tenant: TenantRef,
     host_role: HostRole,
@@ -506,7 +774,9 @@ pub struct AuditLog<S: CheckpointSigner, C: AuditClock> {
     clock: C,
     policy: CheckpointPolicy,
     streams: [StreamState; 3],
-    sinks: Vec<Box<dyn AuditSink + Send>>,
+    primary: Option<Box<dyn AuditSink + Send>>,
+    secondaries: Vec<Secondary>,
+    case_keys: Option<Box<dyn CaseKeyStore + Send>>,
 }
 
 impl<S: CheckpointSigner, C: AuditClock> fmt::Debug for AuditLog<S, C> {
@@ -543,7 +813,7 @@ impl<S: CheckpointSigner, C: AuditClock> AuditLog<S, C> {
             head: genesis(&tenant, stream),
             pending: Vec::new(),
             last_cp_hash: checkpoint_genesis(&tenant, stream),
-            last_cp_time: now,
+            open_slot: slot_floor(now, policy.slot_ms(stream, host_role)),
         };
         Self {
             tenant,
@@ -552,25 +822,54 @@ impl<S: CheckpointSigner, C: AuditClock> AuditLog<S, C> {
             clock,
             policy,
             streams: [mk(StreamId::Sec), mk(StreamId::Case), mk(StreamId::Sys)],
-            sinks: Vec::new(),
+            primary: None,
+            secondaries: Vec::new(),
+            case_keys: None,
         }
     }
 
     /// Resume a stream from verified state.
     pub fn resume(&mut self, stream: StreamId, r: StreamResume) {
         let now = self.clock.read().now;
+        let slot = self.policy.slot_ms(stream, self.host_role);
         if let Some(st) = self.streams.get_mut(idx(stream)) {
             st.next_seq = r.next_seq;
             st.head = r.head;
             st.pending = r.pending_leaves;
             st.last_cp_hash = r.last_checkpoint;
-            st.last_cp_time = now;
+            st.open_slot = slot_floor(now, slot);
         }
     }
 
-    /// Attach a sink. Records and checkpoints are written to every sink.
-    pub fn add_sink(&mut self, sink: Box<dyn AuditSink + Send>) {
-        self.sinks.push(sink);
+    /// Set the primary (durable, commit-point) sink.
+    pub fn set_primary_sink(&mut self, sink: Box<dyn AuditSink + Send>) {
+        self.primary = Some(sink);
+    }
+
+    /// Attach a secondary sink, fed from the outbox after the primary.
+    pub fn add_secondary_sink(&mut self, sink: Box<dyn AuditSink + Send>) {
+        self.secondaries.push(Secondary {
+            sink,
+            outbox: VecDeque::new(),
+            desynced: false,
+        });
+    }
+
+    /// Delivery state of each secondary sink, in attachment order.
+    pub fn secondary_status(&self) -> Vec<SecondaryStatus> {
+        self.secondaries
+            .iter()
+            .map(|s| SecondaryStatus {
+                queued: s.outbox.len(),
+                desynced: s.desynced,
+            })
+            .collect()
+    }
+
+    /// Install the per-case commitment key store (required for CASE events
+    /// that refer to a case).
+    pub fn set_case_keys(&mut self, keys: Box<dyn CaseKeyStore + Send>) {
+        self.case_keys = Some(keys);
     }
 
     /// Tenant.
@@ -583,133 +882,176 @@ impl<S: CheckpointSigner, C: AuditClock> AuditLog<S, C> {
         self.signer.verifying_key()
     }
 
+    fn to_secondaries(&mut self, item: Option<Outgoing>) -> bool {
+        let mut lag = false;
+        for s in &mut self.secondaries {
+            lag |= s.deliver(item.clone());
+        }
+        lag
+    }
+
+    fn salt_for(&mut self, stream: StreamId, seq: u64, event: &AuditEvent) -> Result<[u8; 32], LogError> {
+        if stream != StreamId::Case || matches!(event, AuditEvent::CaseDisposed { .. }) {
+            return Ok([0; 32]);
+        }
+        let Some(case) = event.case_ref() else {
+            return Ok([0; 32]);
+        };
+        let keys = self
+            .case_keys
+            .as_mut()
+            .ok_or(LogError::CaseKeyUnavailable)?;
+        let key = keys
+            .commit_key(case)
+            .map_err(|_| LogError::CaseKeyUnavailable)?;
+        Ok(key.salt(&self.tenant, stream, seq))
+    }
+
     /// Emit one typed event (the only way to write an audit record).
+    ///
+    /// A checkpoint due for this stream's previous slot is produced first
+    /// (so a record is never covered by a checkpoint dated before it); if
+    /// that fails, nothing is written.
     pub fn emit(&mut self, ctx: EventContext, event: AuditEvent) -> Result<Emitted, LogError> {
         ctx.validate().map_err(LogError::Envelope)?;
         if self.host_role == HostRole::Intake && !event.allowed_on_intake() {
             return Err(LogError::Envelope(EnvelopeError::NotAllowedOnHost));
         }
+        if self.primary.is_none() {
+            return Err(LogError::NoPrimarySink);
+        }
         let reading = self.clock.read();
         let stream = event.class().stream();
+        let checkpoint = self.close_due(stream, reading)?;
         let st = self.streams.get(idx(stream)).ok_or(LogError::Encoding)?;
+        let (seq, head) = (st.next_seq, st.head);
         let precision = ts_precision(&event, &ctx.actor, self.host_role);
         let header = EnvelopeHeader {
             stream,
-            seq: st.next_seq,
+            seq,
             ts: truncate(reading.now, precision),
             precision,
             tenant: self.tenant,
             host_role: self.host_role,
             ctx,
-            prev: st.head,
+            prev: head,
         };
-        let next_seq = st.next_seq.checked_add(1).ok_or(LogError::SeqOverflow)?;
+        let next_seq = seq.checked_add(1).ok_or(LogError::SeqOverflow)?;
         let bytes =
             cbor::encode(&envelope_value(&header, &event)).map_err(|_| LogError::Encoding)?;
-        let hash = chain_hash(&st.head, &bytes);
-        let leaf = leaf_hash(&bytes);
+        let salt = self.salt_for(stream, seq, &event)?;
+        let commit = record_commit(&salt, &bytes);
+        let hash = chain_hash(&head, &commit);
+        let leaf = leaf_hash(&commit);
         let record = CommittedRecord {
             header,
             event,
             bytes,
+            salt,
+            commit,
             hash,
             leaf,
         };
-        for s in &mut self.sinks {
-            s.write_record(&record).map_err(LogError::Sink)?;
-        }
-        let pending_len = {
-            let st = self
-                .streams
-                .get_mut(idx(stream))
-                .ok_or(LogError::Encoding)?;
-            st.next_seq = next_seq;
-            st.head = hash;
-            st.pending.push(leaf);
-            u64::try_from(st.pending.len()).unwrap_or(u64::MAX)
-        };
-        let checkpoint = if pending_len >= self.policy.max_events {
-            Some(self.checkpoint_stream(stream, reading)?)
-        } else {
-            None
-        };
-        Ok(Emitted { record, checkpoint })
+        self.primary
+            .as_mut()
+            .ok_or(LogError::NoPrimarySink)?
+            .write_record(&record)
+            .map_err(LogError::Sink)?;
+        let st = self
+            .streams
+            .get_mut(idx(stream))
+            .ok_or(LogError::Encoding)?;
+        st.next_seq = next_seq;
+        st.head = hash;
+        st.pending.push(leaf);
+        let secondary_lag = self.to_secondaries(Some(Outgoing::Record(Box::new(record.clone()))));
+        Ok(Emitted {
+            record,
+            checkpoint,
+            secondary_lag,
+        })
     }
 
-    /// Produce time-triggered checkpoints for streams whose interval elapsed
-    /// and that have unattested events.
+    /// Close every stream slot that has ended (one checkpoint per stream
+    /// whose slot boundary passed, empty or not) and retry lagging
+    /// secondaries. Call at least once per SECURITY slot.
     pub fn tick(&mut self) -> Result<Vec<SignedCheckpoint>, LogError> {
         let reading = self.clock.read();
         let mut out = Vec::new();
         for stream in [StreamId::Sec, StreamId::Case, StreamId::Sys] {
-            let due = self.streams.get(idx(stream)).is_some_and(|st| {
-                !st.pending.is_empty()
-                    && reading.now.0.saturating_sub(st.last_cp_time.0)
-                        >= self.policy.max_interval_ms
-            });
-            if due {
-                out.push(self.checkpoint_stream(stream, reading)?);
+            if let Some(cp) = self.close_due(stream, reading)? {
+                out.push(cp);
             }
         }
+        self.to_secondaries(None);
         Ok(out)
     }
 
-    /// Force a checkpoint of `stream` now (`None` if nothing is pending).
-    pub fn checkpoint_now(
+    /// If the slot that was open for `stream` has ended at `reading`, sign
+    /// the checkpoint for it, dated at the latest passed boundary. One
+    /// checkpoint is produced even if several boundaries passed (downtime).
+    fn close_due(
         &mut self,
         stream: StreamId,
+        reading: ClockReading,
     ) -> Result<Option<SignedCheckpoint>, LogError> {
-        let reading = self.clock.read();
-        if self
+        let slot = self.policy.slot_ms(stream, self.host_role);
+        let boundary = slot_floor(reading.now, slot);
+        let open = self
             .streams
             .get(idx(stream))
-            .is_none_or(|st| st.pending.is_empty())
-        {
+            .ok_or(LogError::Encoding)?
+            .open_slot;
+        if boundary <= open {
             return Ok(None);
         }
-        self.checkpoint_stream(stream, reading).map(Some)
+        self.checkpoint_stream(stream, boundary, reading.drift_exceeded)
+            .map(Some)
     }
 
     fn checkpoint_stream(
         &mut self,
         stream: StreamId,
-        reading: ClockReading,
+        boundary: u64,
+        drift: bool,
     ) -> Result<SignedCheckpoint, LogError> {
         let st = self.streams.get(idx(stream)).ok_or(LogError::Encoding)?;
         let n = u64::try_from(st.pending.len()).map_err(|_| LogError::Encoding)?;
-        let last_seq = st.next_seq.checked_sub(1).ok_or(LogError::Encoding)?;
         let first_seq = st.next_seq.checked_sub(n).ok_or(LogError::Encoding)?;
         let body = CheckpointBody {
             tenant: self.tenant,
             stream: st.stream,
             first_seq,
-            last_seq,
+            end_seq: st.next_seq,
             chain_head: st.head,
             merkle_root: merkle_root(&st.pending),
             prev_checkpoint: st.last_cp_hash,
-            signed_at: reading.now,
-            clock_flagged: reading.drift_exceeded,
+            signed_at: UtcMillis(boundary),
+            clock_flagged: drift,
         };
         let bytes = cbor::encode(&body.to_value()).map_err(|_| LogError::Encoding)?;
         let sig = self
             .signer
-            .sign(&SignedCheckpoint::signing_message(&bytes))
+            .sign_checkpoint(&bytes)
             .map_err(|_| LogError::Signer)?;
         let cp = SignedCheckpoint {
             body,
             bytes,
             signature: sig.to_bytes(),
         };
-        for s in &mut self.sinks {
-            s.write_checkpoint(&cp).map_err(LogError::Sink)?;
-        }
+        self.primary
+            .as_mut()
+            .ok_or(LogError::NoPrimarySink)?
+            .write_checkpoint(&cp)
+            .map_err(LogError::Sink)?;
         let st = self
             .streams
             .get_mut(idx(stream))
             .ok_or(LogError::Encoding)?;
         st.pending.clear();
         st.last_cp_hash = cp.hash();
-        st.last_cp_time = reading.now;
+        st.open_slot = boundary;
+        self.to_secondaries(Some(Outgoing::Checkpoint(Box::new(cp.clone()))));
         Ok(cp)
     }
 }
@@ -757,9 +1099,38 @@ mod tests {
 
     #[test]
     fn policy_bounds() {
-        assert!(CheckpointPolicy::new(1001, 1000).is_none());
-        assert!(CheckpointPolicy::new(10, MAX_CHECKPOINT_INTERVAL_MS + 1).is_none());
-        assert!(CheckpointPolicy::new(0, 1).is_none());
-        assert!(CheckpointPolicy::new(10, 1000).is_some());
+        assert!(CheckpointPolicy::new(MAX_CHECKPOINT_INTERVAL_MS + 60_000).is_none());
+        assert!(CheckpointPolicy::new(0).is_none());
+        assert!(CheckpointPolicy::new(1500).is_none());
+        assert!(CheckpointPolicy::new(7000).is_none()); // does not divide an hour
+        assert!(CheckpointPolicy::new(60_000).is_some());
+        let p = CheckpointPolicy::DEFAULT;
+        assert_eq!(p.slot_ms(StreamId::Case, HostRole::Core), MS_PER_DAY);
+        assert_eq!(p.slot_ms(StreamId::Sys, HostRole::Core), MS_PER_DAY);
+        assert_eq!(p.slot_ms(StreamId::Sec, HostRole::Intake), MS_PER_HOUR);
+        assert_eq!(p.slot_ms(StreamId::Sec, HostRole::Core), 300_000);
+    }
+
+    #[test]
+    fn labels_are_prefix_free() {
+        let labels = [
+            CHAIN_DOMAIN,
+            GENESIS_DOMAIN,
+            CHECKPOINT_DOMAIN,
+            CHECKPOINT_GENESIS_DOMAIN,
+            CHECKPOINT_SIG_DOMAIN,
+            WITNESS_SIG_DOMAIN,
+            COMMIT_DOMAIN,
+            REDACTION_SET_DOMAIN,
+        ];
+        for a in labels {
+            assert_eq!(a.iter().filter(|b| **b == 0).count(), 1);
+            assert_eq!(a.last(), Some(&0));
+            for b in labels {
+                if a != b {
+                    assert!(!b.starts_with(a), "label is a prefix of another");
+                }
+            }
+        }
     }
 }

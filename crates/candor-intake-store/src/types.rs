@@ -52,8 +52,9 @@ pub const DELETION_LIST_RETENTION_DAYS: u32 = 35;
 pub const MAX_SNAPSHOT_BODY: usize = 32 * 1024 * 1024;
 /// Largest accepted Key Directory snapshot signature block (implementation decision).
 pub const MAX_SNAPSHOT_SIGNATURES: usize = 1024 * 1024;
-/// Largest number of entries a pushed deletion list (RL-12) may carry.
-pub const MAX_PUSHED_DELETION_LIST: usize = 1_000_000;
+/// Largest number of entries a pushed deletion list (RL-12) may carry: the
+/// 35-day retained list at well above EE deletion rates (AUD-RM2-STO-12).
+pub const MAX_PUSHED_DELETION_LIST: usize = 200_000;
 
 /// A UTC day number (days since 1970-01-01). The only wall-clock granularity the
 /// Intake Store ever accepts or stores (ADR-010, 07 §12 `EpochDay`).
@@ -213,10 +214,9 @@ pub struct SourceAccount {
     pub xwing_pk: Vec<u8>,
     /// `prefs_ct` (≤ 4096 bytes, ciphertext).
     pub prefs_ct: Vec<u8>,
-    /// First day of the month of the last stored envelope or reply.
+    /// First day of the month of the last stored envelope or reply. Folded in
+    /// only at import-slot rewrites, never per action (AUD-RM2-STO-01).
     pub activity_month: Day,
-    /// Quota consumed today (reset daily, no history).
-    pub quota_bucket: u16,
 }
 
 impl fmt::Debug for SourceAccount {
@@ -422,7 +422,8 @@ impl fmt::Debug for StoredReply {
 pub struct ReplyIndex {
     /// Random per rebuild; changes only at rebuilds (import slots).
     pub set_version: u64,
-    /// Power of two, ≥ 1.
+    /// Power of two, ≥ 1; fixed by the deployment's [`crate::DeadDropConfig`]
+    /// (never by the number of replies).
     pub page_count: u16,
     /// Always 64.
     pub page_size: u16,
@@ -519,6 +520,38 @@ pub struct CounterCell {
     pub name: CounterName,
     /// Value.
     pub value: u32,
+}
+
+/// A monthly counter increment flushed at an import slot (ADR-046(5)). Counters
+/// are accumulated in process RAM and written only by
+/// [`crate::IntakeStore::uniform_rewrite`], so no counter row is written next to
+/// a real envelope (AUD-RM2-STO-01, ADR-047(3)).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct CounterDelta {
+    /// First day of the month.
+    pub month: Day,
+    /// Channel.
+    pub channel_id: ChannelId,
+    /// Name.
+    pub name: CounterName,
+    /// Increment.
+    pub delta: u32,
+}
+
+impl fmt::Debug for CounterDelta {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("CounterDelta(<redacted>)")
+    }
+}
+
+/// A fixed import slot (ADR-038(1)): the slot's UTC day and its index within the
+/// day (`0..slots_per_day`). Slot times are public configuration.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct ImportSlot {
+    /// UTC day of the slot.
+    pub day: Day,
+    /// Index of the slot within the day.
+    pub index: u8,
 }
 
 /// `intake_meta` contents carried in a backup snapshot (RL-10).

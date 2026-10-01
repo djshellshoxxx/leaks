@@ -5,7 +5,9 @@
 //! violations; an empty list means the schema passes.
 
 /// Expected columns per table: 09 §5.1 plus the documented additions
-/// (`envelope.epoch_index`, `intake_meta.restore_pending`, `schema_migration`).
+/// (`envelope.epoch_index`, `intake_meta.restore_pending`,
+/// `intake_meta.deletion_acked_seq`, `reply.pub_gen`, `schema_migration`) and
+/// without `source_account.quota_bucket` (quota is RAM-only, AUD-RM2-STO-01).
 pub const EXPECTED: &[(&str, &[&str])] = &[
     (
         "intake_meta",
@@ -20,6 +22,7 @@ pub const EXPECTED: &[(&str, &[&str])] = &[
             "kd_checkpoint_day_hwm",
             "config_version",
             "restore_pending",
+            "deletion_acked_seq",
         ],
     ),
     (
@@ -31,7 +34,6 @@ pub const EXPECTED: &[(&str, &[&str])] = &[
             "xwing_pk",
             "prefs_ct",
             "activity_month",
-            "quota_bucket",
         ],
     ),
     (
@@ -64,6 +66,7 @@ pub const EXPECTED: &[(&str, &[&str])] = &[
             "size_bucket",
             "available_day",
             "slot",
+            "pub_gen",
         ],
     ),
     (

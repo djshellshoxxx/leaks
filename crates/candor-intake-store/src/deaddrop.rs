@@ -3,10 +3,21 @@
 //! API-037/API-040; 04 §13.5).
 //!
 //! Every page holds exactly 64 entries of exactly 70,000 bytes; each entry is
-//! `u32be entry_len ‖ body ‖ random fill`. Real and dummy entries are placed in
-//! uniformly random positions over all pages, and the page count is the next power
-//! of two (≥ 1). Pages are built once per rebuild and served byte-identically to
-//! every requester until the next rebuild; no access state is recorded.
+//! `u32be entry_len ‖ body ‖ random fill`. Pages are built once per rebuild and
+//! served byte-identically to every requester until the next rebuild; no access
+//! state is recorded.
+//!
+//! **Generations (AUD-RM2-STO-06).** The set is a persistent sequence of
+//! *generations*, one per fixed import slot. Each publication adds exactly
+//! `per_slot` (K) entries: up to K pending real replies (oldest first), topped up
+//! with fresh dummies; excess real replies wait for the next slot (bounded by
+//! `max_pending`). Real and dummy entries are stored the same way, live exactly
+//! the 30-day window and are never regenerated, so two rebuilds differ by exactly
+//! K added and K expired entries whatever the real reply volume. Missed slots are
+//! back-filled with dummy generations (the first publication back-fills the whole
+//! window), so the entry count is a constant of the configuration and the page
+//! count never depends on the reply count (AUD-RM2-STO-07). A persistent padding
+//! pool fills the last page.
 
 use std::sync::Arc;
 
@@ -14,36 +25,168 @@ use zeroize::Zeroizing;
 
 use crate::error::{Result, StoreError};
 use crate::types::{
-    MAX_REPLY_CT, REPLY_ENTRY_LEN, REPLY_PAGE_ENTRIES, REPLY_PAGE_LEN, REPLY_WINDOW_DAYS,
-    ReplyIndex,
+    Day, ImportSlot, MAX_REPLY_CT, REPLY_ENTRY_LEN, REPLY_PAGE_ENTRIES, REPLY_PAGE_LEN,
+    REPLY_WINDOW_DAYS, ReplyIndex,
 };
 
-/// Fallback dummy body length when no real reply exists (approximately one
-/// 4096-byte REPLY bucket plus header, MAC, STREAM tag and an X-Wing stanza).
+/// Default dummy body length when no real reply is being published (approximately
+/// one 4096-byte REPLY bucket plus header, MAC, STREAM tag and an X-Wing stanza).
 pub const DEFAULT_DUMMY_BODY_LEN: usize = 5_440;
-/// Largest page count we build (u16 page numbers; bounds memory).
-pub const MAX_PAGE_COUNT: usize = 1 << 15;
+/// Hard upper bound on the published page count (08 SA-19 EE figure: 128 pages ≈
+/// 573 MB). With the double buffer during a rebuild, peak RAM is bounded by
+/// 2 × 128 × 4.48 MB (AUD-RM2-STO-07).
+pub const HARD_MAX_PAGES: u16 = 128;
+/// Hard upper bound on the backlog of real replies awaiting publication.
+pub const HARD_MAX_PENDING: u32 = 100_000;
+/// Generation number reserved for the padding pool.
+pub const PADDING_GENERATION: u64 = 0;
 
-/// Produces dummy entry bodies. Production deployments should supply bodies that
-/// are structurally real REPLY objects sealed to a random key (08 §3.8 "dummy reply
-/// ciphertexts under a random key"); [`RandomDummyReplies`] is the fallback.
+/// Produces dummy entry bodies. Production deployments supply bodies that are
+/// structurally real REPLY objects sealed to a random key (08 §3.8 "dummy reply
+/// ciphertexts under a random key"); [`RandomDummyReplies`] is for tests.
 pub trait DummyReplies: Send + Sync {
     /// Return a dummy body of about `len_hint` bytes (≤ `MAX_REPLY_CT`).
     fn dummy_body(&self, len_hint: usize) -> Result<Vec<u8>>;
 }
 
 /// CSPRNG bytes of exactly `len_hint` length. Size-indistinguishable from real
-/// entries (API-037); structurally distinguishable (no CoreHeader magic), which
-/// reveals only the number of real replies in the window (SPEC-NOTES residual).
+/// entries (API-037) but structurally distinguishable (no CoreHeader magic): for
+/// tests and the in-memory store only. The PostgreSQL store requires an explicit
+/// [`DummyReplies`].
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RandomDummyReplies;
 
 impl DummyReplies for RandomDummyReplies {
     fn dummy_body(&self, len_hint: usize) -> Result<Vec<u8>> {
-        let mut v = vec![0u8; len_hint.min(MAX_REPLY_CT)];
+        let mut v = vec![0u8; len_hint.clamp(1, MAX_REPLY_CT)];
         fill_random(&mut v)?;
         Ok(v)
     }
+}
+
+/// Deployment configuration of the published set.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct DeadDropConfig {
+    /// Fixed import slots per day (ADR-038(1): 4 by default, 1 for HIGH/GOV).
+    pub slots_per_day: u8,
+    /// Entries added per slot (K).
+    pub per_slot: u16,
+    /// Largest backlog of real replies awaiting publication; further pushes are
+    /// rejected (the relay keeps them and retries, like a full mailbox).
+    pub max_pending: u32,
+}
+
+impl DeadDropConfig {
+    /// Validate the configuration against the hard memory bounds.
+    pub fn validate(&self) -> Result<()> {
+        if !(1..=24).contains(&self.slots_per_day) {
+            return Err(StoreError::InvalidInput("slots_per_day"));
+        }
+        if self.per_slot == 0 {
+            return Err(StoreError::InvalidInput("per_slot"));
+        }
+        if self.max_pending < u32::from(self.per_slot) || self.max_pending > HARD_MAX_PENDING {
+            return Err(StoreError::InvalidInput("max_pending"));
+        }
+        let pages = self.pages_needed()?;
+        if pages > usize::from(HARD_MAX_PAGES) {
+            return Err(StoreError::Capacity);
+        }
+        Ok(())
+    }
+
+    /// Generations in the 30-day window.
+    #[must_use]
+    pub fn window_generations(&self) -> u64 {
+        u64::from(REPLY_WINDOW_DAYS).saturating_mul(u64::from(self.slots_per_day))
+    }
+
+    /// Entries in the window (K × generations).
+    pub fn window_entries(&self) -> Result<usize> {
+        usize::try_from(self.window_generations())
+            .ok()
+            .and_then(|g| g.checked_mul(usize::from(self.per_slot)))
+            .ok_or(StoreError::Capacity)
+    }
+
+    fn pages_needed(&self) -> Result<usize> {
+        self.window_entries()?
+            .div_ceil(REPLY_PAGE_ENTRIES)
+            .max(1)
+            .checked_next_power_of_two()
+            .ok_or(StoreError::Capacity)
+    }
+
+    /// Page count (power of two; a constant of the configuration).
+    pub fn page_count(&self) -> Result<u16> {
+        u16::try_from(self.pages_needed()?).map_err(|_| StoreError::Capacity)
+    }
+
+    /// Entries in the whole set (`page_count × 64`).
+    pub fn total_entries(&self) -> Result<usize> {
+        self.pages_needed()?
+            .checked_mul(REPLY_PAGE_ENTRIES)
+            .ok_or(StoreError::Capacity)
+    }
+
+    /// Generation number of a slot (`day × slots_per_day + index`, ≥ 1 for day ≥ 1).
+    pub fn generation(&self, slot: ImportSlot) -> Result<u64> {
+        if slot.index >= self.slots_per_day || slot.day.0 == 0 {
+            return Err(StoreError::InvalidInput("import slot"));
+        }
+        u64::from(slot.day.0)
+            .checked_mul(u64::from(self.slots_per_day))
+            .and_then(|g| g.checked_add(u64::from(slot.index)))
+            .ok_or(StoreError::InvalidInput("import slot"))
+    }
+
+    /// Day of a generation.
+    pub fn day_of(&self, generation: u64) -> Result<Day> {
+        let d = generation
+            .checked_div(u64::from(self.slots_per_day))
+            .ok_or(StoreError::InvalidInput("slots_per_day"))?;
+        u32::try_from(d)
+            .map(Day)
+            .map_err(|_| StoreError::InvalidInput("generation"))
+    }
+
+    /// Lowest generation still in the window when `current` is the newest.
+    #[must_use]
+    pub fn window_start(&self, current: u64) -> u64 {
+        current
+            .saturating_add(1)
+            .saturating_sub(self.window_generations())
+            .max(1)
+    }
+}
+
+/// Generations to create when publishing generation `current`, given the newest
+/// generation already published (`None` before the first publication). Missed
+/// slots inside the window are back-filled; nothing is created when `current`
+/// was already published (idempotent per slot). Bounded by the window length.
+pub(crate) fn generations_to_publish(
+    cfg: &DeadDropConfig,
+    last: Option<u64>,
+    current: u64,
+) -> Vec<u64> {
+    let start = cfg.window_start(current);
+    let start = match last {
+        Some(l) if l >= current => return Vec::new(),
+        Some(l) => start.max(l.saturating_add(1)),
+        None => start,
+    };
+    (start..=current).collect()
+}
+
+/// A dummy row: body and its REPLY size bucket (4096 × k, k in 1..=16).
+pub(crate) fn dummy_row(dummies: &dyn DummyReplies, len_hint: usize) -> Result<(Vec<u8>, u8)> {
+    let body = dummies.dummy_body(len_hint)?;
+    if body.is_empty() || body.len() > MAX_REPLY_CT {
+        return Err(StoreError::InvalidInput("dummy body size"));
+    }
+    let k = body.len().div_ceil(4096).clamp(1, 16);
+    let bucket = u8::try_from(k).map_err(|_| StoreError::InvalidInput("bucket"))?;
+    Ok((body, bucket))
 }
 
 /// A built published set.
@@ -93,7 +236,7 @@ fn random_u64() -> Result<u64> {
 }
 
 /// Uniform integer in `[0, n)` (rejection sampling, no modulo bias).
-fn uniform_below(n: usize) -> Result<usize> {
+pub(crate) fn uniform_below(n: usize) -> Result<usize> {
     let n64 = u64::try_from(n).map_err(|_| StoreError::InvalidInput("range"))?;
     if n64 == 0 {
         return Err(StoreError::InvalidInput("empty range"));
@@ -139,67 +282,116 @@ fn write_entry(out: &mut [u8], body: &[u8]) -> Result<()> {
     fill_random(pad)
 }
 
-/// Whether a reply available on `available_day` is in the published window on
-/// `today` (`today - available_day < 30`).
-#[must_use]
-pub fn in_window(available_day: crate::types::Day, today: crate::types::Day) -> bool {
-    today.0.saturating_sub(available_day.0) < REPLY_WINDOW_DAYS
+/// Streaming page builder (AUD-RM2-STO-07): the page buffers are reserved up
+/// front with fallible allocation for the configured page count, entries are
+/// written straight into a uniformly random position, and nothing else is
+/// materialised. More entries than positions is a typed `Capacity` error.
+pub struct PageBuilder {
+    pages: Vec<Vec<u8>>,
+    positions: Vec<u32>,
+    next: usize,
 }
 
-/// Build the published set from the reply ciphertexts in the window.
-pub fn build(reply_cts: &[Vec<u8>], dummies: &dyn DummyReplies) -> Result<PublishedSet> {
-    let n = reply_cts.len();
-    let pages_needed = n.div_ceil(REPLY_PAGE_ENTRIES).max(1);
-    let page_count = pages_needed
-        .checked_next_power_of_two()
-        .filter(|c| *c <= MAX_PAGE_COUNT)
-        .ok_or(StoreError::InvalidInput("published set too large"))?;
-    let total = page_count
-        .checked_mul(REPLY_PAGE_ENTRIES)
-        .ok_or(StoreError::InvalidInput("published set too large"))?;
-
-    // Positions: Some(i) = real reply i, None = dummy; randomly permuted.
-    let mut slots: Vec<Option<usize>> = (0..total).map(|i| (i < n).then_some(i)).collect();
-    shuffle(&mut slots)?;
-
-    let mut pages = Vec::with_capacity(page_count);
-    for page_slots in slots.chunks(REPLY_PAGE_ENTRIES) {
-        let mut page = vec![0u8; REPLY_PAGE_LEN];
-        for (entry, slot) in page.chunks_mut(REPLY_ENTRY_LEN).zip(page_slots) {
-            match slot {
-                Some(i) => {
-                    let body = reply_cts
-                        .get(*i)
-                        .ok_or(StoreError::Integrity("reply index"))?;
-                    write_entry(entry, body)?;
-                }
-                None => {
-                    let hint = if n == 0 {
-                        DEFAULT_DUMMY_BODY_LEN
-                    } else {
-                        reply_cts
-                            .get(uniform_below(n)?)
-                            .map_or(DEFAULT_DUMMY_BODY_LEN, Vec::len)
-                    };
-                    let body = Zeroizing::new(dummies.dummy_body(hint)?);
-                    write_entry(entry, &body)?;
-                }
-            }
-        }
-        pages.push(Arc::<[u8]>::from(page));
+impl core::fmt::Debug for PageBuilder {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("PageBuilder")
     }
-    let index = ReplyIndex {
-        set_version: random_u64()?,
-        page_count: u16::try_from(page_count).map_err(|_| StoreError::InvalidInput("pages"))?,
-        page_size: REPLY_PAGE_ENTRIES as u16,
-        window_days: REPLY_WINDOW_DAYS as u16,
-    };
-    Ok(PublishedSet { index, pages })
 }
 
-/// An empty set (one dummy page), used before the first rebuild.
-pub fn empty(dummies: &dyn DummyReplies) -> Result<PublishedSet> {
-    build(&[], dummies)
+impl PageBuilder {
+    /// Reserve `page_count` pages (≤ [`HARD_MAX_PAGES`]).
+    pub fn new(page_count: u16) -> Result<Self> {
+        if page_count == 0 || page_count > HARD_MAX_PAGES {
+            return Err(StoreError::Capacity);
+        }
+        let n = usize::from(page_count);
+        let mut pages: Vec<Vec<u8>> = Vec::new();
+        pages.try_reserve_exact(n).map_err(|_| StoreError::Capacity)?;
+        for _ in 0..n {
+            let mut p: Vec<u8> = Vec::new();
+            p.try_reserve_exact(REPLY_PAGE_LEN)
+                .map_err(|_| StoreError::Capacity)?;
+            p.resize(REPLY_PAGE_LEN, 0);
+            pages.push(p);
+        }
+        let total = n
+            .checked_mul(REPLY_PAGE_ENTRIES)
+            .ok_or(StoreError::Capacity)?;
+        let mut positions: Vec<u32> = Vec::new();
+        positions
+            .try_reserve_exact(total)
+            .map_err(|_| StoreError::Capacity)?;
+        for i in 0..total {
+            positions.push(u32::try_from(i).map_err(|_| StoreError::Capacity)?);
+        }
+        shuffle(&mut positions)?;
+        Ok(Self {
+            pages,
+            positions,
+            next: 0,
+        })
+    }
+
+    /// Entries written so far.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.next
+    }
+
+    /// Whether nothing was written yet.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.next == 0
+    }
+
+    /// Positions left.
+    #[must_use]
+    pub fn remaining(&self) -> usize {
+        self.positions.len().saturating_sub(self.next)
+    }
+
+    /// Write the next entry at its random position.
+    pub fn push(&mut self, body: &[u8]) -> Result<()> {
+        let pos = *self.positions.get(self.next).ok_or(StoreError::Capacity)?;
+        let pos = usize::try_from(pos).map_err(|_| StoreError::Capacity)?;
+        let (p, e) = (pos / REPLY_PAGE_ENTRIES, pos % REPLY_PAGE_ENTRIES);
+        let page = self.pages.get_mut(p).ok_or(StoreError::Capacity)?;
+        let start = e.checked_mul(REPLY_ENTRY_LEN).ok_or(StoreError::Capacity)?;
+        let end = start
+            .checked_add(REPLY_ENTRY_LEN)
+            .ok_or(StoreError::Capacity)?;
+        let slot = page.get_mut(start..end).ok_or(StoreError::Capacity)?;
+        write_entry(slot, body)?;
+        self.next = self.next.saturating_add(1);
+        Ok(())
+    }
+
+    /// Fill any remaining positions with ephemeral dummies (only after a
+    /// restart, early deletions or a concurrent purge; see SPEC-NOTES) and
+    /// freeze the pages under a fresh random `set_version`.
+    pub fn finish(mut self, dummies: &dyn DummyReplies) -> Result<PublishedSet> {
+        while self.remaining() > 0 {
+            let body = Zeroizing::new(dummies.dummy_body(DEFAULT_DUMMY_BODY_LEN)?);
+            self.push(&body)?;
+        }
+        let page_count =
+            u16::try_from(self.pages.len()).map_err(|_| StoreError::InvalidInput("pages"))?;
+        let pages = self.pages.into_iter().map(Arc::<[u8]>::from).collect();
+        let index = ReplyIndex {
+            set_version: random_u64()?,
+            page_count,
+            page_size: REPLY_PAGE_ENTRIES as u16,
+            window_days: REPLY_WINDOW_DAYS as u16,
+        };
+        Ok(PublishedSet { index, pages })
+    }
+}
+
+/// The set served before the first rebuild after start: the configured page
+/// count, all ephemeral dummies (source routes are busy until the store has
+/// synchronised and rebuilt, BE-074).
+pub fn empty(cfg: &DeadDropConfig, dummies: &dyn DummyReplies) -> Result<PublishedSet> {
+    PageBuilder::new(cfg.page_count()?)?.finish(dummies)
 }
 
 /// Parse a page into its 64 entry bodies (test and client helper).
@@ -225,52 +417,132 @@ pub fn parse_page(page: &[u8]) -> Result<Vec<&[u8]>> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
     use super::*;
     use proptest::prelude::*;
 
-    /// BE-063 / API-037: page shape for 0, 1, 64, 65, 200 replies.
+    fn cfg(spd: u8, k: u16) -> DeadDropConfig {
+        DeadDropConfig {
+            slots_per_day: spd,
+            per_slot: k,
+            max_pending: 1000,
+        }
+    }
+
+    /// BE-063 / API-037: page shape is fixed by the configuration only.
     #[test]
-    fn page_shape() {
-        for (n, expect_pages) in [(0usize, 1u16), (1, 1), (64, 1), (65, 2), (129, 4), (200, 4)] {
-            let cts: Vec<Vec<u8>> = (0..n).map(|i| vec![(i % 251) as u8; 100 + i]).collect();
-            let set = build(&cts, &RandomDummyReplies).unwrap();
-            assert_eq!(set.index().page_count, expect_pages, "n={n}");
+    fn page_shape_from_config() {
+        for (spd, k, pages) in [(1u8, 1u16, 1u16), (1, 2, 1), (1, 3, 2), (4, 16, 32), (4, 8, 16)] {
+            let c = cfg(spd, k);
+            c.validate().unwrap();
+            assert_eq!(c.page_count().unwrap(), pages, "spd={spd} k={k}");
+            let set = empty(&c, &RandomDummyReplies).unwrap();
+            assert_eq!(set.index().page_count, pages);
             assert_eq!(set.index().page_size, 64);
             assert_eq!(set.index().window_days, 30);
-            let mut found = Vec::new();
-            for p in 0..set.index().page_count {
+            for p in 0..pages {
                 let page = set.page(p).unwrap();
                 assert_eq!(page.len(), REPLY_PAGE_LEN);
-                let entries = parse_page(&page).unwrap();
-                assert_eq!(entries.len(), 64);
-                for e in entries {
-                    if let Some(i) = cts.iter().position(|c| c.as_slice() == e) {
-                        found.push(i);
-                    }
+                assert_eq!(parse_page(&page).unwrap().len(), 64);
+            }
+            assert_eq!(set.page(pages), Err(StoreError::NotFound));
+        }
+    }
+
+    /// AUD-RM2-STO-07: configurations beyond the hard page bound are refused
+    /// with a typed error; the builder never exceeds its reservation.
+    #[test]
+    fn capacity_bounds() {
+        assert_eq!(cfg(24, 100).validate(), Err(StoreError::Capacity));
+        assert!(cfg(4, 64).validate().is_ok()); // 7,680 entries -> 128 pages
+        assert_eq!(cfg(4, 69).validate(), Err(StoreError::Capacity));
+        assert!(cfg(0, 1).validate().is_err());
+        assert!(cfg(1, 0).validate().is_err());
+        assert!(
+            DeadDropConfig {
+                slots_per_day: 1,
+                per_slot: 4,
+                max_pending: HARD_MAX_PENDING + 1
+            }
+            .validate()
+            .is_err()
+        );
+        assert_eq!(
+            PageBuilder::new(HARD_MAX_PAGES + 1).unwrap_err(),
+            StoreError::Capacity
+        );
+        let mut b = PageBuilder::new(1).unwrap();
+        for _ in 0..64 {
+            b.push(&[1, 2, 3]).unwrap();
+        }
+        assert_eq!(b.push(&[1]), Err(StoreError::Capacity));
+    }
+
+    /// Every pushed body appears exactly once; the rest is filled.
+    #[test]
+    fn builder_places_each_entry_once() {
+        let mut b = PageBuilder::new(2).unwrap();
+        let cts: Vec<Vec<u8>> = (0..100).map(|i| vec![(i % 251) as u8; 100 + i]).collect();
+        for c in &cts {
+            b.push(c).unwrap();
+        }
+        let set = b.finish(&RandomDummyReplies).unwrap();
+        let mut found = Vec::new();
+        for p in 0..2 {
+            for e in parse_page(&set.page(p).unwrap()).unwrap() {
+                if let Some(i) = cts.iter().position(|c| c.as_slice() == e) {
+                    found.push(i);
                 }
             }
-            found.sort_unstable();
-            assert_eq!(
-                found,
-                (0..n).collect::<Vec<_>>(),
-                "every real reply exactly once"
-            );
-            assert_eq!(set.page(set.index().page_count), Err(StoreError::NotFound));
         }
+        found.sort_unstable();
+        assert_eq!(found, (0..100).collect::<Vec<_>>());
     }
 
     #[test]
     fn oversize_body_rejected() {
-        let cts = vec![vec![0u8; MAX_REPLY_CT + 1]];
-        assert!(build(&cts, &RandomDummyReplies).is_err());
+        let mut b = PageBuilder::new(1).unwrap();
+        assert!(b.push(&vec![0u8; MAX_REPLY_CT + 1]).is_err());
     }
 
     #[test]
     fn set_version_changes_per_build() {
-        let a = build(&[], &RandomDummyReplies).unwrap().index().set_version;
-        let b = build(&[], &RandomDummyReplies).unwrap().index().set_version;
+        let c = cfg(1, 1);
+        let a = empty(&c, &RandomDummyReplies).unwrap().index().set_version;
+        let b = empty(&c, &RandomDummyReplies).unwrap().index().set_version;
         assert_ne!(a, b);
+    }
+
+    /// Generation planning: bootstrap back-fills the window, a missed slot is
+    /// back-filled, a repeated slot creates nothing.
+    #[test]
+    fn generation_plan() {
+        let c = cfg(4, 2);
+        let g = c
+            .generation(ImportSlot {
+                day: Day(100),
+                index: 3,
+            })
+            .unwrap();
+        assert_eq!(g, 403);
+        assert!(
+            c.generation(ImportSlot {
+                day: Day(100),
+                index: 4
+            })
+            .is_err()
+        );
+        assert_eq!(c.day_of(403).unwrap(), Day(100));
+        let boot = generations_to_publish(&c, None, g);
+        assert_eq!(boot.len(), 120);
+        assert_eq!(*boot.first().unwrap(), 284);
+        assert_eq!(generations_to_publish(&c, Some(401), g), vec![402, 403]);
+        assert!(generations_to_publish(&c, Some(403), g).is_empty());
+        assert_eq!(generations_to_publish(&c, Some(1), g).len(), 120);
     }
 
     proptest! {
@@ -288,6 +560,16 @@ mod tests {
             shuffle(&mut v).unwrap();
             v.sort_unstable();
             prop_assert_eq!(v, sorted);
+        }
+
+        /// The plan never exceeds the window and is strictly increasing.
+        #[test]
+        fn plan_bounded(spd in 1u8..=24, last in proptest::option::of(0u64..100_000), cur in 1u64..100_000) {
+            let c = cfg(spd, 1);
+            let v = generations_to_publish(&c, last, cur);
+            prop_assert!(v.len() as u64 <= c.window_generations());
+            prop_assert!(v.windows(2).all(|w| w[0] < w[1]));
+            if let Some(l) = last { prop_assert!(v.iter().all(|g| *g > l)); }
         }
     }
 }

@@ -117,6 +117,8 @@ code,.mono{font-family:ui-monospace,"Cascadia Mono","DejaVu Sans Mono",monospace
 /* Source and team content: plain text, line breaks kept (11 §5.7). */
 .ut{white-space:pre-wrap;overflow-wrap:anywhere}
 article{border-block-start:2px solid var(--line);padding-block:.5rem}
+/* Team messages are framed so their text cannot pass for page text (AUD-RM1-SUI-10). */
+article.msg{border:2px solid var(--line);padding:.5rem 1rem;margin-block:1rem}
 article h3{font-size:1rem}
 /* Passphrase: large type, always LTR (11 §11). */
 .phrase{font-size:1.4rem;font-family:ui-monospace,"Cascadia Mono","DejaVu Sans Mono",monospace;display:grid;grid-template-columns:repeat(auto-fill,minmax(10rem,1fr));gap:.25rem 1rem;padding-inline-start:2.5rem}

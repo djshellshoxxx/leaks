@@ -16,31 +16,34 @@
 <dt>{{ p.t("sui-review-others") }}</dt><dd>{% if p.vm.review.others.is_empty() %}{{ p.t("sui-none") }}{% else %}{{ p.join(p.vm.review.others) }}{% endif %}</dd>
 <dt>{{ p.t("sui-review-kept") }}</dt><dd>{% if p.vm.review.kept_out.is_empty() && p.vm.review.kept_out_auto == 0 %}{{ p.t("sui-none") }}{% else %}{{ p.join(p.vm.review.kept_out) }}{% if p.vm.review.kept_out_auto > 0 %} {{ p.t1("sui-review-kept-auto", "n", p.vm.review.kept_out_auto) }}{% endif %}{% endif %}</dd>
 </dl>
+{%- let last_key = "sui-part-continue-last" %}
+{% include "parts_note.html" %}
+{%- if p.region_open(Region::Answers) || p.vm.review.answers.is_empty() %}
 <h2>{{ p.t("sui-review-answers") }}</h2>
 <dl>
-{%- for a in p.vm.review.answers %}
-<dt>{{ p.text_html(a.question)|safe }}</dt>
-<dd>{% if a.answer.is_empty() %}<p>{{ p.t("sui-review-no-answer") }}</p>{% else %}<p class="ut" dir="auto">{{ a.answer }}</p>{% endif %}
-<form method="post" action="{{ p.href(Route::Questionnaire) }}" class="inline">{% include "ft.html" %}<input type="hidden" name="nav" value="goto"><input type="hidden" name="step" value="{{ a.step }}"><button type="submit" class="btn-link">{{ p.t1("sui-review-edit", "question", p.text_plain(a.question)) }}</button></form></dd>
+{%- for s in p.region(Region::Answers) %}
+{{ s|safe }}
 {%- endfor %}
 </dl>
+{%- endif %}
+{%- if p.region_open(Region::ReviewFiles) || p.vm.review.files.is_empty() %}
 <h2>{{ p.t("sui-review-files") }}</h2>
 {%- if p.vm.review.files.is_empty() %}
 <p>{{ p.t("sui-files-none") }}</p>
 {%- else %}
-<ul>{% for f in p.vm.review.files %}<li><bdi class="mono">{{ f.name }}</bdi> ({{ p.file_class_names(f) }})</li>{% endfor %}</ul>
+<ul>{% for s in p.region(Region::ReviewFiles) %}{{ s|safe }}{% endfor %}</ul>
 {%- endif %}
 <p><a href="{{ p.href(Route::Files) }}">{{ p.t("sui-review-edit-files") }}</a></p>
+{%- endif %}
 <section aria-labelledby="hints-h2">
 <h2 id="hints-h2">{{ p.t("sui-review-hints-h2") }}</h2>
 {%- if p.vm.review.hints.is_empty() && p.vm.review.invisible_chars == 0 %}
 <p>{{ p.t("sui-review-no-hints") }}</p>
 {%- endif %}
-{%- if !p.vm.review.hints.is_empty() %}
+{%- if p.region_open(Region::Hints) %}
 <ul>
-{%- for h in p.vm.review.hints %}
-<li>{{ p.fmt_hint(h) }}
-<form method="post" action="{{ p.href(Route::Questionnaire) }}" class="inline">{% include "ft.html" %}<input type="hidden" name="nav" value="goto"><input type="hidden" name="step" value="{{ h.step }}"><button type="submit" class="btn-link">{{ p.t1("sui-review-edit", "question", p.text_plain(h.field)) }}</button></form></li>
+{%- for s in p.region(Region::Hints) %}
+{{ s|safe }}
 {%- endfor %}
 </ul>
 {%- endif %}
@@ -60,6 +63,13 @@
 <li>{{ p.t("sui-review-style-3") }}</li>
 <li>{{ p.t("sui-review-style-4") }}</li>
 </ul>
+{%- if p.part_nav().is_some() %}
+<form method="post" action="{{ p.href(Route::Review) }}">{% include "ft.html" %}
+{%- let navform = "" %}
+{% include "parts_nav.html" %}
+</form>
+{%- endif %}
+{%- if p.is_last_part() %}
 {%- if p.vm.review.has_identity %}
 <h2>{{ p.t("sui-review-identity-h2") }}</h2>
 <form method="post" action="{{ p.href(Route::Identity) }}">{% include "ft.html" %}<button type="submit" name="nav" value="remove">{{ p.t("sui-review-identity-remove") }}</button></form>
@@ -75,4 +85,5 @@
 <a href="{{ p.href(Route::End) }}">{{ p.t("sui-review-discard") }}</a>
 </div>
 </form>
+{%- endif %}
 {% endblock %}

@@ -225,7 +225,7 @@ pub struct Banners {
 }
 
 /// One field error (11 §5.7). `field` is the question/control id.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct FieldError {
     /// Control id (validated `[a-z0-9_]{1,32}`).
     pub field: String,
@@ -234,7 +234,7 @@ pub struct FieldError {
 }
 
 /// A catalog message with arguments.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Msg {
     /// Catalog key.
     pub key: &'static str,
@@ -260,7 +260,7 @@ impl Msg {
 }
 
 /// A message argument.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Arg {
     /// Untrusted text (escaped on output).
     Text(String),
@@ -315,7 +315,7 @@ impl From<u32> for Arg {
 }
 
 /// Data common to every page.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct PageContext {
     /// Request method (with `has_session_cookie`, the only size-class input, 11 §5.4).
     pub method: Method,
@@ -337,8 +337,13 @@ pub struct PageContext {
     pub page_error: Option<Msg>,
     /// Whether posted text was kept in RAM after an error (§5.7 "Your text is kept").
     pub text_kept: bool,
-    /// Locales offered in the language list (allow-list; empty = all built-in).
+    /// Locales offered in the language list (allow-list; empty = the production locales,
+    /// [`crate::Locale::PRODUCTION`]; pseudo-locales are never offered by default).
     pub offered_locales: Vec<crate::Locale>,
+    /// Part of a multi-part page to show (0-based, from the `part` button; clamped to the last
+    /// part). Long source and team text is split into parts instead of being cut
+    /// (AUD-RM1-SUI-01).
+    pub part: u16,
 }
 
 /// Configuration-derived statements used by guidance cards and S01/S03 (05 GC-01).
@@ -438,7 +443,7 @@ pub struct ChannelOption {
 }
 
 /// S04 Create Report data.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct NewReportData {
     /// Channel options (one option = implicit, not shown).
     pub channels: Vec<ChannelOption>,
@@ -451,7 +456,7 @@ pub struct NewReportData {
 }
 
 /// S04b data.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct ConcernsData {
     /// Triage Set role labels of the chosen channel.
     pub triage: Vec<String>,
@@ -509,7 +514,7 @@ pub struct ChoiceOption {
 }
 
 /// A question and its current value.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Question {
     /// Field id (`[a-z0-9_]{1,32}`), used as form name and element id.
     pub id: String,
@@ -526,7 +531,7 @@ pub struct Question {
 }
 
 /// S05 Questionnaire data.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct QuestionnaireData {
     /// Step number (3..=6 for the default template; carried in the form body).
     pub step: u8,
@@ -535,7 +540,7 @@ pub struct QuestionnaireData {
 }
 
 /// S05b data.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct IdentityData {
     /// The mode being chosen (CONFIDENTIAL or IDENTIFIED).
     pub target: Mode,
@@ -550,7 +555,7 @@ pub struct IdentityData {
 }
 
 /// An attached file (S06/S07/S08).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct AttachedFile {
     /// Neutral (or opted-in original) display name.
     pub name: String,
@@ -561,7 +566,7 @@ pub struct AttachedFile {
 }
 
 /// S06 data.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct FilesData {
     /// Files attached in this session.
     pub files: Vec<AttachedFile>,
@@ -576,7 +581,7 @@ pub struct FilesData {
 }
 
 /// An answer row on S08.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ReviewAnswer {
     /// The question.
     pub question: Text,
@@ -620,7 +625,7 @@ impl HintKind {
 }
 
 /// An identity hint (non-blocking).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct IdentityHint {
     /// Kind.
     pub kind: HintKind,
@@ -633,7 +638,7 @@ pub struct IdentityHint {
 }
 
 /// S08 data.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct ReviewData {
     /// Channel name.
     pub channel: String,
@@ -694,7 +699,7 @@ pub struct ConfirmData {
 }
 
 /// S10s data.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SentData {
     /// Day sent (UTC).
     pub sent: Day,
@@ -728,7 +733,7 @@ impl CaseStatus {
 }
 
 /// A message from the team.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct InboxMessage {
     /// Sender label (team or display name).
     pub sender: String,
@@ -748,7 +753,7 @@ pub struct LoginData {
 }
 
 /// S11 inbox / S12 data.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct InboxData {
     /// Coarse status.
     pub status: CaseStatus,
@@ -759,7 +764,7 @@ pub struct InboxData {
 }
 
 /// S12 data.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct ConversationData {
     /// Thread page (newest first).
     pub messages: Vec<InboxMessage>,
@@ -789,7 +794,7 @@ pub struct BusyData {
 }
 
 /// All per-screen data. Each screen reads only its own part; the rest stays default.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct ViewModel {
     /// Common page data.
     pub ctx: PageContext,
@@ -937,5 +942,59 @@ pub fn default_questionnaire_step(
             ),
         ],
         _ => Vec::new(),
+    }
+}
+
+/// Debug output for types that can hold source text, identity data, file names, team messages,
+/// the form token or the source's choices: the type name only (AUD-RM1-SUI-02, SG-21). These
+/// types must never derive `Debug`; `tests/debug_redaction.rs` enforces this.
+macro_rules! redacted_debug {
+    ($($t:ident),* $(,)?) => {
+        $(
+            impl fmt::Debug for $t {
+                fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    f.write_str(concat!(stringify!($t), " { [redacted] }"))
+                }
+            }
+        )*
+    };
+}
+
+redacted_debug!(
+    Arg,
+    PageContext,
+    NewReportData,
+    ConcernsData,
+    Question,
+    QuestionnaireData,
+    IdentityData,
+    AttachedFile,
+    FilesData,
+    ReviewAnswer,
+    IdentityHint,
+    ReviewData,
+    SentData,
+    InboxMessage,
+    InboxData,
+    ConversationData,
+    ViewModel,
+);
+
+impl fmt::Debug for Msg {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The catalog key is a constant; argument values may be untrusted.
+        f.debug_struct("Msg")
+            .field("key", &self.key)
+            .field("args", &format_args!("[{} redacted]", self.args.len()))
+            .finish()
+    }
+}
+
+impl fmt::Debug for FieldError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FieldError")
+            .field("field", &self.field)
+            .field("message", &self.message)
+            .finish()
     }
 }

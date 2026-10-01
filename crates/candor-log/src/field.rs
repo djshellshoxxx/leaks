@@ -66,6 +66,16 @@ impl Sample for SeqRange {
         SeqRange { first: 0, last: 9 }
     }
 }
+impl Sample for Count {
+    fn sample() -> Self {
+        Count(7)
+    }
+}
+impl Sample for Seq {
+    fn sample() -> Self {
+        Seq(7)
+    }
+}
 impl Sample for Version {
     fn sample() -> Self {
         Version {
@@ -131,9 +141,30 @@ impl AuditField for DayStamp {
 }
 
 /// A staff/system timer instant (e.g., `cfg.dangerous_*` expiry). Never a
-/// source time; encoded truncated to the minute.
+/// source time; encoded truncated to the minute. Constructible only from the
+/// audit clock plus a bounded duration, so no caller-supplied instant (e.g.
+/// a source-event time) can be laundered into it (AUD-RM1-LOG-03).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub struct StaffTimer(pub UtcMillis);
+pub struct StaffTimer(UtcMillis);
+
+impl StaffTimer {
+    /// Maximum timer duration: 90 days, in minutes.
+    pub const MAX_MINUTES: u32 = 90 * 24 * 60;
+    /// `clock.now + minutes`; `None` above [`StaffTimer::MAX_MINUTES`].
+    pub fn after(clock: &dyn crate::chain::AuditClock, minutes: u32) -> Option<Self> {
+        if minutes > Self::MAX_MINUTES {
+            return None;
+        }
+        let now = clock.read().now.0;
+        Some(Self(UtcMillis(
+            now.saturating_add(u64::from(minutes).saturating_mul(60_000)),
+        )))
+    }
+    /// The instant (minute-truncated when encoded).
+    pub fn instant(self) -> UtcMillis {
+        self.0
+    }
+}
 
 impl sealed::Sealed for StaffTimer {}
 impl AuditField for StaffTimer {
@@ -143,10 +174,25 @@ impl AuditField for StaffTimer {
 }
 
 macro_rules! bounded_count {
-    ($(#[$m:meta])* $name:ident, $inner:ty) => {
+    ($(#[$m:meta])* $name:ident, $inner:ty, $max:expr) => {
         $(#[$m])*
+        ///
+        /// The value is private and bounded (AUD-RM1-LOG-03): a field this
+        /// small cannot carry an address, a size or a timestamp.
         #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-        pub struct $name(pub $inner);
+        pub struct $name($inner);
+        impl $name {
+            /// Largest accepted value.
+            pub const MAX: $inner = $max;
+            /// `None` above [`Self::MAX`].
+            pub fn new(v: $inner) -> Option<Self> {
+                (v <= Self::MAX).then_some(Self(v))
+            }
+            /// Value.
+            pub fn get(self) -> $inner {
+                self.0
+            }
+        }
         impl sealed::Sealed for $name {}
         impl AuditField for $name {
             fn to_value(&self) -> Value {
@@ -162,39 +208,121 @@ macro_rules! bounded_count {
 }
 
 bounded_count!(
-    /// A small count of staff-visible objects (evidence items in an export,
-    /// transform inputs/outputs, removed audit events). Never a byte size or
-    /// a per-submission attachment count (P-07).
-    Count, u32);
-bounded_count!(
     /// Small counter (authenticators remaining, relay slots, clock sources).
-    SmallCount, u8);
+    SmallCount, u8, 100);
 bounded_count!(
     /// Case key generation.
-    KeyGeneration, u32);
+    KeyGeneration, u32, 65_535);
 bounded_count!(
-    /// Audit sequence number.
-    Seq, u64);
-bounded_count!(
-    /// Break-glass grant duration in minutes.
-    DurationMin, u16);
+    /// Break-glass grant duration in minutes (≤ 24 h).
+    DurationMin, u16, 1440);
 bounded_count!(
     /// Age of a sandbox image in days.
-    AgeDays, u16);
+    AgeDays, u16, 3660);
 bounded_count!(
     /// Process exit status.
-    ExitCode, u8);
+    ExitCode, u8, 255);
 bounded_count!(
-    /// Index of an import slot within a day.
-    SlotIndex, u8);
+    /// Index of a 15-minute import slot within a day.
+    SlotIndex, u8, 95);
 
-/// Inclusive audit sequence range `[first, last]`.
+/// A small count of staff-visible objects (evidence items in an export,
+/// transform inputs/outputs, removed audit events). Never a byte size or
+/// a per-submission attachment count (P-07). Caller-constructed counts are
+/// bounded by [`Count::MAX`]; the log itself may record larger internal
+/// counts (e.g. removed events at disposal).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct Count(u32);
+
+impl Count {
+    /// Largest caller-constructible value.
+    pub const MAX: u32 = 10_000;
+    /// `None` above [`Count::MAX`].
+    pub fn new(v: u32) -> Option<Self> {
+        (v <= Self::MAX).then_some(Self(v))
+    }
+    pub(crate) fn internal(v: u32) -> Self {
+        Self(v)
+    }
+    /// Value.
+    pub fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl sealed::Sealed for Count {}
+impl AuditField for Count {
+    fn to_value(&self) -> Value {
+        Value::Uint(u64::from(self.0))
+    }
+}
+
+/// Audit sequence number. Constructible only from audit artefacts
+/// (checkpoints, verification failures), never from caller integers.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct Seq(u64);
+
+impl Seq {
+    pub(crate) fn internal(v: u64) -> Self {
+        Self(v)
+    }
+    /// One past the last sequence number covered by a checkpoint.
+    pub fn checkpoint_end(cp: &crate::chain::SignedCheckpoint) -> Self {
+        Self(cp.body().end_seq)
+    }
+    /// The offending sequence number of a verification failure.
+    pub fn of_failure(e: &crate::verify::VerifyError) -> Self {
+        Self(e.seq)
+    }
+    /// Value.
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl sealed::Sealed for Seq {}
+impl AuditField for Seq {
+    fn to_value(&self) -> Value {
+        Value::Uint(self.0)
+    }
+}
+
+/// Inclusive audit sequence range `[first, last]`. Constructible only from
+/// audit artefacts (checkpoints, verification reports), never from caller
+/// integers (AUD-RM1-LOG-03).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct SeqRange {
+    pub(crate) first: u64,
+    pub(crate) last: u64,
+}
+
+impl SeqRange {
+    /// The (non-empty) interval of a checkpoint.
+    pub fn of_checkpoint(cp: &crate::chain::SignedCheckpoint) -> Option<Self> {
+        let b = cp.body();
+        (b.end_seq > b.first_seq).then(|| Self {
+            first: b.first_seq,
+            last: b.end_seq.saturating_sub(1),
+        })
+    }
+    /// The records covered by a successful verification, optionally
+    /// narrowed to `[first, last]` inside it (viewer/exports).
+    pub fn within(
+        report: &crate::verify::VerifyReport,
+        first: u64,
+        last: u64,
+    ) -> Option<Self> {
+        let lo = report.first_seq?;
+        (lo <= first && first <= last && last < report.next_seq).then_some(Self { first, last })
+    }
     /// First sequence number.
-    pub first: u64,
+    pub fn first(self) -> u64 {
+        self.first
+    }
     /// Last sequence number.
-    pub last: u64,
+    pub fn last(self) -> u64 {
+        self.last
+    }
 }
 
 impl sealed::Sealed for SeqRange {}
@@ -204,15 +332,33 @@ impl AuditField for SeqRange {
     }
 }
 
-/// Software version `major.minor.patch`.
+/// Software version `major.minor.patch`, each component ≤ 255 (bounded so
+/// the field cannot carry arbitrary data, AUD-RM1-LOG-03).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Version {
-    /// Major.
-    pub major: u16,
-    /// Minor.
-    pub minor: u16,
-    /// Patch.
-    pub patch: u16,
+    major: u16,
+    minor: u16,
+    patch: u16,
+}
+
+impl Version {
+    /// Largest accepted component.
+    pub const MAX_COMPONENT: u16 = 255;
+    /// `None` if any component exceeds [`Version::MAX_COMPONENT`].
+    pub fn new(major: u16, minor: u16, patch: u16) -> Option<Self> {
+        (major <= Self::MAX_COMPONENT
+            && minor <= Self::MAX_COMPONENT
+            && patch <= Self::MAX_COMPONENT)
+            .then_some(Self {
+                major,
+                minor,
+                patch,
+            })
+    }
+    /// `(major, minor, patch)`.
+    pub fn parts(self) -> (u16, u16, u16) {
+        (self.major, self.minor, self.patch)
+    }
 }
 
 impl sealed::Sealed for Version {}

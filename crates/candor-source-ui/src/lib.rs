@@ -12,9 +12,12 @@
 
 mod files;
 mod guidance;
+mod items;
 mod locale;
 mod model;
 mod page;
+mod paging;
+#[cfg(feature = "preview")]
 pub mod preview;
 mod routes;
 mod screens;
@@ -31,6 +34,10 @@ pub use model::*;
 pub use page::{
     MAX_CSS_BYTES, MAX_SVG_BYTES, OverBudget, PERMISSIONS_POLICY, PROHIBITED_HEADERS, Page,
     SizeClass, content_security_policy, pad_html, robots_txt, stylesheet, stylesheet_hash,
+};
+pub use paging::{
+    PART_FIELD, PIECE_FIELD, PieceRef, SHOWN_FIELD, SpliceError, escaped_len, parse_piece,
+    splice_piece,
 };
 pub use routes::Route;
 pub use screens::Screen;
@@ -137,22 +144,49 @@ fn validate(screen: Screen, vm: &ViewModel) -> Result<(), RenderError> {
 ///
 /// The size class comes only from `vm.ctx.method` and `vm.ctx.has_session_cookie`
 /// (11 §5.4), except the 405 page, which is always P1 (SUI-056).
+///
+/// Screens with source or team text (S05, S06, S07, S08, S11 inbox, S12) are split into parts
+/// when their escaped content does not fit the class (AUD-RM1-SUI-01); `vm.ctx.part` selects the
+/// part (clamped to the last one). Nothing is truncated.
+///
+/// The page is written into a buffer allocated once at the class budget and zeroized on drop;
+/// it never reallocates, so no partial copy of a passphrase or source text is left in freed
+/// heap memory (AUD-RM1-SUI-03).
 pub fn render(screen: Screen, vm: &ViewModel, locale: &Locale) -> Result<Page, RenderError> {
     let cat = locale::catalog().map_err(RenderError::Catalog)?;
     validate(screen, vm)?;
-    let mut pv = view::PageView::new(*locale, vm, screen, cat, stylesheet());
-    pv.title = build_title(&pv, screen, vm);
-    let html = Zeroizing::new(
-        screens::render_template(&pv).map_err(|e| RenderError::Template(e.to_string()))?,
-    );
-    let missing = pv.take_missing();
-    if !missing.is_empty() {
-        return Err(RenderError::MissingStrings(missing));
-    }
     let class = if screen == Screen::MethodNotAllowed {
         SizeClass::P1
     } else {
         SizeClass::for_request(vm.ctx.method, vm.ctx.has_session_cookie)
+    };
+    let max = class.max_unpadded();
+    let over = |len| RenderError::OverBudget(OverBudget { len, class });
+    let mut pv = view::PageView::new(*locale, vm, screen, cat, stylesheet());
+    pv.title = build_title(&pv, screen, vm);
+    if items::is_paged(screen) {
+        pv.paging = paging::Paging::Measure;
+        let chrome = render_page(&pv, max)?.ok_or_else(|| over(max))?.len();
+        let budget = max
+            .checked_sub(chrome.saturating_add(paging::SLACK))
+            .ok_or_else(|| over(chrome))?;
+        let list = items::build(&pv, budget, class)?;
+        let parts = paging::pack(&list, budget).ok_or_else(|| over(max))?;
+        let cur = usize::from(vm.ctx.part).min(parts.len().saturating_sub(1));
+        pv.paging = paging::Paging::Show {
+            items: list,
+            parts,
+            cur,
+        };
+    }
+    let html = render_page(&pv, max)?.ok_or_else(|| over(max))?;
+    let missing = pv.take_missing();
+    if !missing.is_empty() {
+        return Err(RenderError::MissingStrings(missing));
+    }
+    let (part, parts) = match &pv.paging {
+        paging::Paging::Show { parts, cur, .. } => (*cur, parts.len()),
+        paging::Paging::Off | paging::Paging::Measure => (0, 1),
     };
     let body = pad_html(&html, class).map_err(RenderError::OverBudget)?;
     let headers = page::html_headers(locale.tag(), body.len(), screen.clears_site_data());
@@ -162,7 +196,22 @@ pub fn render(screen: Screen, vm: &ViewModel, locale: &Locale) -> Result<Page, R
         body,
         class,
         unpadded_len: html.len(),
+        part,
+        parts,
     })
+}
+
+/// Renders the screen template into a fixed buffer of `cap` bytes (`None` = does not fit).
+fn render_page(
+    pv: &view::PageView<'_>,
+    cap: usize,
+) -> Result<Option<Zeroizing<String>>, RenderError> {
+    let mut w = paging::CappedWriter::new(cap);
+    match screens::render_template(pv, &mut w) {
+        Ok(()) => Ok(Some(w.into_inner())),
+        Err(_) if w.overflow => Ok(None),
+        Err(e) => Err(RenderError::Template(e.to_string())),
+    }
 }
 
 fn build_title(pv: &view::PageView<'_>, screen: Screen, vm: &ViewModel) -> String {

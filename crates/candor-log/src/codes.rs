@@ -40,7 +40,7 @@ macro_rules! code_enum {
         }
         impl $crate::diag::DiagCode for $name {
             fn diag_code(&self) -> $crate::diag::DiagCodeValue {
-                $crate::diag::DiagCodeValue::Code(self.code())
+                $crate::diag::DiagCodeValue::closed(self.code())
             }
         }
         impl Sample for $name {
@@ -62,15 +62,26 @@ fn unreachable_first<T>() -> T {
 pub trait CodeSpace: 'static {
     /// Registry name (for documentation and the schema registry).
     const NAME: &'static str;
+    /// Largest registered code (registries are small closed sets).
+    const MAX: u16 = 127;
 }
 
-/// A code from a numeric registry. Numeric codes cannot carry request data.
+/// A code from a numeric registry.
+///
+/// Codes can only be created from **compile-time constants**
+/// ([`Code::of`]) that are within the registry bound, so no runtime value
+/// (an address, a port, a size) can be laundered into one
+/// (AUD-RM1-LOG-03). Map runtime enumerations to codes with a `match` over
+/// constant codes.
 pub struct Code<S: CodeSpace>(u16, PhantomData<S>);
 
 impl<S: CodeSpace> Code<S> {
-    /// Registry code `n`.
-    pub const fn new(n: u16) -> Self {
-        Self(n, PhantomData)
+    /// Registry code `N`; a compile error if `N > S::MAX`.
+    pub const fn of<const N: u16>() -> Self {
+        const {
+            assert!(N <= S::MAX, "code outside its registry");
+        }
+        Self(N, PhantomData)
     }
     /// Numeric value.
     pub const fn get(&self) -> u16 {
@@ -102,7 +113,7 @@ impl<S: CodeSpace> core::fmt::Debug for Code<S> {
 }
 impl<S: CodeSpace> Sample for Code<S> {
     fn sample() -> Self {
-        Self::new(3)
+        Self::of::<3>()
     }
 }
 impl<S: CodeSpace> Sealed for Code<S> {}
@@ -113,10 +124,7 @@ impl<S: CodeSpace> AuditField for Code<S> {
 }
 impl<S: CodeSpace> crate::diag::DiagCode for Code<S> {
     fn diag_code(&self) -> crate::diag::DiagCodeValue {
-        crate::diag::DiagCodeValue::Registry {
-            space: S::NAME,
-            code: self.0,
-        }
+        crate::diag::DiagCodeValue::registry(S::NAME, self.0)
     }
 }
 
@@ -283,6 +291,8 @@ VerifyFailureCode {
     Truncated => "TRUNCATED",
     Rollback => "ROLLBACK",
     MissingPrefix => "MISSING_PREFIX",
+    UnboundRedaction => "UNBOUND_REDACTION",
+    UnboundPrune => "UNBOUND_PRUNE",
 });
 code_enum!(
 /// Audit export destination classes.

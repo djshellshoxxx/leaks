@@ -149,7 +149,7 @@ tip-passphrase-title = Your passphrase
 # @class critical
 tip-passphrase-n = Keep your passphrase in your head, or on paper hidden at home. Never in work email, notes apps or cloud storage.
 # @class critical
-tip-passphrase-h = Learn it by heart, then destroy the paper. A password manager is fine only if it does not sync online. Anyone with your passphrase can read your replies and write as you. Never type it into any other site, and the team will never ask for it.
+tip-passphrase-h = Learn it by heart, then destroy the paper. A password manager is fine only on a device only you use, and only if it does not sync online. Anyone with your passphrase can read your replies and write as you. Never type it into any other site, and the team will never ask for it.
 
 ## Return visits
 

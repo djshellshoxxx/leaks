@@ -10,9 +10,20 @@
 {%- endif %}
 <p class="note">{{ p.t("sui-inbox-retention") }}</p>
 <h2>{{ p.t("sui-inbox-messages") }}</h2>
-{%- let msgs = p.vm.inbox.messages %}
-{%- let deletable = false %}
-{% include "messages.html" %}
+{%- let last_key = "" %}
+{% include "parts_note.html" %}
+{%- if p.vm.inbox.messages.is_empty() %}
+<p>{{ p.t("sui-inbox-none") }}</p>
+{%- endif %}
+{%- for s in p.region(Region::Messages) %}
+{{ s|safe }}
+{%- endfor %}
+{%- if p.part_nav().is_some() %}
+<form method="post" action="{{ p.href(Route::Inbox) }}">{% include "ft.html" %}
+{%- let navform = "" %}
+{% include "parts_nav.html" %}
+</form>
+{%- endif %}
 <h2>{{ p.t("sui-inbox-actions") }}</h2>
 <ul>
 <li><a href="{{ p.href(Route::Conversation) }}">{{ p.t("sui-inbox-write") }}</a></li>

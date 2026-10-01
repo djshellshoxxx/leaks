@@ -267,9 +267,11 @@ catalog! {
     LegalholdReleased = "legalhold.released" [Case, Staff] { case: CaseRef, hold_ref: HoldRef }
     CaseDisposalRequested = "case.disposal_requested" [Case, Staff] {}
     CaseDisposalApproved = "case.disposal_approved" [Case, Staff] {}
-    /// Disposal tombstone (AUD-012): CaseRef, receipt, and the count of
-    /// removed CASE events (20 §12); disposal date = envelope `ts`.
-    CaseDisposed = "case.disposed" [Case, Staff] { case: CaseRef, receipt_id: ReceiptId, removed_event_count: Count }
+    /// Disposal tombstone (AUD-012): CaseRef, receipt, the count of removed
+    /// CASE events (20 §12) and the commitment to exactly which records
+    /// were redacted (`redacted_set`, AUD-RM1-LOG-01); disposal date =
+    /// envelope `ts`. Built by [`crate::sink::RedactionPlan::tombstone`].
+    CaseDisposed = "case.disposed" [Case, Staff] { case: CaseRef, receipt_id: ReceiptId, removed_event_count: Count, redacted_set: Hash32 }
     CaseDataPurged = "case.data_purged" [Case, Staff] { case: CaseRef, reason_code: PurgeReason }
     OversightOpened = "oversight.opened" [Case, Staff] { case: CaseRef, mode: OversightMode }
     CaseRewrappedAfterVaultLoss = "case.rewrapped_after_vault_loss" [Case, Staff] { case: CaseRef, approvers: Approvers }
@@ -293,6 +295,10 @@ catalog! {
     SysJob = "sys.job" [System, System] { job_kind: JobKind, outcome: Outcome }
     SysClock = "sys.clock" [System, System] { drift_ms_bucket: DriftBucket, source_count: SmallCount }
     SysSandboxImage = "sys.sandbox_image" [System, System] { image_name: Code<SandboxImage>, age_days: AgeDays }
+    /// Retention tombstone of the SYSTEM stream, written into that stream
+    /// before its whole intervals are deleted (AUD-RM1-LOG-01: the verifier
+    /// needs the tombstone in the pruned stream). Implementation-defined.
+    SysRetentionTombstone = "sys.retention_tombstone" [System, System] { stream: StreamId, seq_range: SeqRange, last_deleted_checkpoint_root: Hash32 }
 }
 
 impl AuditEvent {
@@ -410,8 +416,8 @@ mod tests {
         let e = AuditEvent::CaseImported {
             case: c,
             channel_id: ChannelId::from_bytes([2; 16]),
-            received_day: DayStamp(1),
-            import_slot_date: DayStamp(1),
+            received_day: DayStamp::from_days(1).unwrap(),
+            import_slot_date: DayStamp::from_days(1).unwrap(),
         };
         assert!(e.is_import_related());
         assert_eq!(e.time_policy(), TimePolicy::DateOnly);

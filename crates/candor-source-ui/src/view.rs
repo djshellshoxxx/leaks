@@ -5,8 +5,11 @@
 use core::cell::RefCell;
 use core::fmt;
 
+use zeroize::Zeroizing;
+
 use crate::guidance::{Block, Card, Group, JurisdictionText};
 use crate::locale::{Catalog, Locale};
+use crate::paging::{MAX_PARTS, Paging, Region};
 use crate::model::{
     Arg, AttachedFile, ChannelOption, FieldError, Mode, Msg, OperatorStatement, Question,
     QuestionKind, Text, ViewModel,
@@ -14,18 +17,74 @@ use crate::model::{
 use crate::routes::Route;
 use crate::screens::Screen;
 
-/// HTML-escapes text for element content and attribute values.
+/// HTML-escapes text for element content and attribute values (same output as askama's HTML
+/// escaper, so [`crate::paging::escaped_len`] predicts both exactly).
 pub(crate) fn escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
+    let mut out = String::with_capacity(crate::paging::escaped_len(s));
     for c in s.chars() {
         match c {
             '&' => out.push_str("&amp;"),
             '<' => out.push_str("&lt;"),
             '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
+            '"' => out.push_str("&#34;"),
             '\'' => out.push_str("&#39;"),
             c => out.push(c),
         }
+    }
+    out
+}
+
+/// Escapes source or team text into a buffer sized exactly once and zeroized on drop
+/// (AUD-RM1-SUI-03: no reallocation copies of plaintext).
+pub(crate) fn escape_z(s: &str) -> Zeroizing<String> {
+    let mut out = Zeroizing::new(String::with_capacity(crate::paging::escaped_len(s)));
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&#34;"),
+            '\'' => out.push_str("&#39;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Bidi embedding, override and isolate controls (U+202A–U+202E, U+2066–U+2069). In team text
+/// they could make a message read like page chrome or another sender (AUD-RM1-SUI-10).
+pub(crate) fn is_bidi_control(c: char) -> bool {
+    matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+/// Visible stand-in for a neutralised bidi control (same UTF-8 length, 3 bytes).
+const BIDI_MARK: char = '\u{FFFD}';
+
+/// Replaces bidi controls with a visible U+FFFD. Zeroized on drop; sized once.
+pub(crate) fn neutralize_bidi(s: &str) -> Zeroizing<String> {
+    let mut out = Zeroizing::new(String::with_capacity(s.len()));
+    out.extend(
+        s.chars()
+            .map(|c| if is_bidi_control(c) { BIDI_MARK } else { c }),
+    );
+    out
+}
+
+/// Longest untrusted label (sender label, file name) shown in full, in characters.
+pub(crate) const LABEL_MAX_CHARS: usize = 256;
+
+/// An untrusted label for display: bidi controls neutralised, and anything past
+/// [`LABEL_MAX_CHARS`] replaced by a visible "…" so that one label can never fill a page.
+/// Only labels are shortened; message, answer and draft text are never shortened (they are
+/// split into parts instead).
+pub(crate) fn label(s: &str) -> String {
+    let mut out = String::with_capacity(s.len().min(LABEL_MAX_CHARS.saturating_mul(4)));
+    for (n, c) in s.chars().enumerate() {
+        if n >= LABEL_MAX_CHARS {
+            out.push('…');
+            break;
+        }
+        out.push(if is_bidi_control(c) { BIDI_MARK } else { c });
     }
     out
 }
@@ -108,8 +167,18 @@ pub(crate) struct PageView<'a> {
     pub(crate) screen: Screen,
     pub(crate) css: &'static str,
     pub(crate) title: String,
+    pub(crate) paging: Paging,
     cat: &'static Catalog,
     missing: RefCell<Vec<String>>,
+}
+
+/// Part navigation shown on a multi-part page (1-based `cur`/`total` for display, 0-based
+/// `prev`/`next` as button values).
+pub(crate) struct PartNav {
+    pub(crate) cur: u64,
+    pub(crate) total: u64,
+    pub(crate) prev: Option<u64>,
+    pub(crate) next: Option<u64>,
 }
 
 impl fmt::Debug for PageView<'_> {
@@ -135,6 +204,7 @@ impl<'a> PageView<'a> {
             screen,
             css,
             title: String::new(),
+            paging: Paging::Off,
             cat,
             missing: RefCell::new(Vec::new()),
         }
@@ -337,7 +407,7 @@ impl<'a> PageView<'a> {
     /// Language list: (tag, own-language name, href, is_current).
     pub(crate) fn languages(&self) -> Vec<(&'static str, String, String, bool)> {
         let offered: Vec<Locale> = if self.vm.ctx.offered_locales.is_empty() {
-            Locale::ALL.to_vec()
+            Locale::PRODUCTION.to_vec()
         } else {
             self.vm.ctx.offered_locales.clone()
         };
@@ -502,6 +572,66 @@ impl<'a> PageView<'a> {
         self.vm.ctx.form_token.as_deref()
     }
 
+    // ---- paging (AUD-RM1-SUI-01) ------------------------------------------------------
+
+    /// Rendered items of `r` on the current part (escaped HTML; templates use `|safe`).
+    pub(crate) fn region(&self, r: Region) -> Vec<&str> {
+        match &self.paging {
+            Paging::Show { items, parts, cur } => parts
+                .get(*cur)
+                .and_then(|range| items.get(range.clone()))
+                .unwrap_or(&[])
+                .iter()
+                .filter(|i| i.region == r)
+                .map(|i| i.html.as_str())
+                .collect(),
+            Paging::Off | Paging::Measure => Vec::new(),
+        }
+    }
+
+    /// Whether the container of `r` is rendered on this part.
+    pub(crate) fn region_open(&self, r: Region) -> bool {
+        match &self.paging {
+            Paging::Measure => true,
+            Paging::Off => false,
+            Paging::Show { .. } => !self.region(r).is_empty(),
+        }
+    }
+
+    /// Part navigation, if the page has more than one part (always in measure mode, with
+    /// the widest numbers).
+    pub(crate) fn part_nav(&self) -> Option<PartNav> {
+        let max = u64::try_from(MAX_PARTS).unwrap_or(u64::MAX);
+        match &self.paging {
+            Paging::Measure => Some(PartNav {
+                cur: max,
+                total: max,
+                prev: Some(max),
+                next: Some(max),
+            }),
+            Paging::Show { parts, cur, .. } if parts.len() > 1 => {
+                let n = u64::try_from(*cur).unwrap_or(u64::MAX);
+                let total = u64::try_from(parts.len()).unwrap_or(u64::MAX);
+                Some(PartNav {
+                    cur: n.saturating_add(1),
+                    total,
+                    prev: n.checked_sub(1),
+                    next: (n.saturating_add(1) < total).then_some(n.saturating_add(1)),
+                })
+            }
+            Paging::Off | Paging::Show { .. } => None,
+        }
+    }
+
+    /// True on the last (or only) part; end-of-flow controls (S07 continue, S08 send, S12
+    /// reply form) are shown only there, so the source passes every part first.
+    pub(crate) fn is_last_part(&self) -> bool {
+        match &self.paging {
+            Paging::Show { parts, cur, .. } => cur.saturating_add(1) >= parts.len(),
+            Paging::Off | Paging::Measure => true,
+        }
+    }
+
     // ---- errors ----------------------------------------------------------------------
 
     pub(crate) fn errors(&self) -> &[FieldError] {
@@ -552,10 +682,6 @@ impl<'a> PageView<'a> {
             QuestionKind::LongText => 60_000,
             _ => 500,
         }
-    }
-
-    pub(crate) fn q_value(&self, q: &Question) -> String {
-        q.value.first().cloned().unwrap_or_default()
     }
 
     pub(crate) fn q_selected(&self, q: &Question, value: &str) -> bool {
@@ -782,24 +908,35 @@ impl<'a> PageView<'a> {
         groups
     }
 
-    /// Spelled-out word: letters separated by spaces (S10 `<details>`).
-    pub(crate) fn spell(&self, w: &str) -> String {
-        let letters: Vec<String> = w.chars().map(|c| c.to_string()).collect();
-        letters.join(" ")
+    /// Spelled-out word: letters separated by spaces (S10 `<details>`). Built in one
+    /// allocation and zeroized on drop (AUD-RM1-SUI-03).
+    pub(crate) fn spell(&self, w: &str) -> Zeroizing<String> {
+        let cap = w.len().saturating_mul(2);
+        let mut out = Zeroizing::new(String::with_capacity(cap));
+        for (i, c) in w.chars().enumerate() {
+            if i > 0 {
+                out.push(' ');
+            }
+            out.push(c);
+        }
+        out
     }
 
     /// The passphrase words on one line (S10 read-only field). Zeroized by the caller's page
     /// buffer; this temporary is zeroized on drop.
-    pub(crate) fn passphrase_line(&self) -> zeroize::Zeroizing<String> {
-        let words: Vec<&str> = self
-            .vm
-            .credential
-            .passphrase
-            .words
+    pub(crate) fn passphrase_line(&self) -> Zeroizing<String> {
+        let words = &self.vm.credential.passphrase.words;
+        let cap = words
             .iter()
-            .map(|w| w.as_str())
-            .collect();
-        zeroize::Zeroizing::new(words.join(" "))
+            .fold(words.len(), |n, w| n.saturating_add(w.len()));
+        let mut out = Zeroizing::new(String::with_capacity(cap));
+        for (i, w) in words.iter().enumerate() {
+            if i > 0 {
+                out.push(' ');
+            }
+            out.push_str(w);
+        }
+        out
     }
 
     pub(crate) fn wordlist_lang(&self) -> &str {
