@@ -1,0 +1,17 @@
+
+# cargo-vet audits file
+
+[criteria.candor-crypto-reviewed]
+description = """
+Candor crypto-set review (28-SUPPLY-CHAIN.md §5.2; 27 §11.3). In addition to
+safe-to-deploy, a Candor Crypto Reviewer has checked that this crate version:
+(1) implements the claimed primitive/construction correctly against its standard
+and published test vectors (KAT/Wycheproof where available); (2) is constant-time
+where it claims to be, with no secret-dependent branches or table lookups in the
+paths Candor uses; (3) zeroizes secret material it owns, or documents that the
+caller must; (4) contains no `unsafe` beyond what is documented and justified;
+(5) has no build-time network access or code generation from untrusted input.
+"""
+implies = "safe-to-deploy"
+
+[audits]

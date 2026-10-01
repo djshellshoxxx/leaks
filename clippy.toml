@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Workspace clippy configuration (27 §12). The deny set lives in [workspace.lints]
+# in the root Cargo.toml; this file only tunes lint behaviour.
+msrv = "1.94"
+# Tests may unwrap/expect/panic/index: a failing test SHOULD panic. Production code
+# keeps the deny set (no panics on hostile input, 27 §12.2).
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true
+# Secrets must not be printed; dbg! leaks values into stderr.
+disallowed-macros = [
+    { path = "std::dbg", reason = "may print secrets; use typed logging (27 §12.3)" },
+]

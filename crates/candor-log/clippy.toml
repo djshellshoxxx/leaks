@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# 20 §7 / LOG-001: free-text logging macros are banned in trust-path crates.
+disallowed-macros = [
+  { path = "std::println", reason = "LOG-001: use the candor-log typed API" },
+  { path = "std::eprintln", reason = "LOG-001: use the candor-log typed API" },
+  { path = "std::print", reason = "LOG-001: use the candor-log typed API" },
+  { path = "std::eprint", reason = "LOG-001: use the candor-log typed API" },
+  { path = "std::dbg", reason = "LOG-001: use the candor-log typed API" },
+]

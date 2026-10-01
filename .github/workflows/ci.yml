@@ -1,0 +1,252 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Candor CI — PR/push gate subset (RM-0, 38; 27 §13; 28 §6–§8).
+#
+# Hardening (28 §7, ST-133):
+#  * every external action pinned by full commit SHA with a version comment;
+#  * workflow-level permissions are empty; each job requests contents: read only;
+#  * pull_request_target is never used; fork PRs get a read-only token, no secrets;
+#  * checkout never persists credentials;
+#  * tools installed with cargo install --locked --version =x.y.z (no downloaded
+#    binaries, no piped install scripts);
+#  * no caches (release jobs must never consume PR-written caches);
+#  * no github.event values are interpolated into run blocks (passed via env).
+#
+# Gate mapping: fmt/clippy -> SG-03 (clippy deny set, ST-007); test -> SG-06/SG-08
+# (as suites land); deny/vet -> SG-05 (ST-010/ST-011); docs-lint -> SG-25 (ST-167);
+# reproducibility -> SG-13 smoke (single-host build-twice; the 2-builder comparison is
+# the release pipeline's job); sbom -> SG-14 (CycloneDX; signing happens at release);
+# workflow-lint -> ST-133; dco -> OSG-003.
+#
+# Tool pins (bump only via reviewed PR; 14-day cooling, 28 §5.1):
+#   cargo-deny =0.20.2, cargo-vet =0.10.2, cargo-cyclonedx =0.5.9, zizmor =1.30.1
+
+name: ci
+
+on:
+  push:
+    branches: [main, "release/**"]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Daily advisory re-check against the RustSec DB (28 §6).
+    - cron: "17 4 * * *"
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  fmt:
+    name: fmt (rustfmt --check)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy (-D warnings)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: clippy
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  test:
+    name: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt
+      - run: cargo test --workspace --all-features --locked --no-fail-fast
+
+  cargo-deny:
+    name: cargo-deny (advisories, bans, licenses, sources)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt
+      - uses: ./.github/actions/cargo-install
+        with:
+          crate: cargo-deny
+          version: 0.20.2
+      - run: cargo deny --locked check advisories bans licenses sources
+
+  cargo-vet:
+    name: cargo-vet
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt
+      - uses: ./.github/actions/cargo-install
+        with:
+          crate: cargo-vet
+          version: 0.10.2
+      - run: cargo vet --locked
+
+  docs-lint:
+    name: docs-lint (traceability + SG-25 constants lint)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Traceability matrix + lint
+        run: python3 tools/traceability.py
+      - name: Spec-constant consistency lint (ST-167, SG-25)
+        run: python3 tools/constants_lint.py
+      - name: Generated traceability matrix is committed and current
+        run: git diff --exit-code -- specs/39-REQUIREMENTS-TRACEABILITY.md
+
+  workflow-lint:
+    name: workflow-lint (SHA pins, zizmor)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: SHA-pin / trigger / remote-script check
+        run: sh scripts/check-actions-pinned.sh
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt
+      - uses: ./.github/actions/cargo-install
+        with:
+          crate: zizmor
+          version: 1.30.1
+      - name: zizmor (offline audits)
+        run: zizmor --offline --persona=auditor .github/workflows .github/actions
+
+  dco:
+    name: dco (Signed-off-by)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Check DCO sign-off on every PR commit
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: sh scripts/check-dco.sh "$BASE_SHA" "$HEAD_SHA"
+
+  reproducibility:
+    name: reproducibility (build twice, compare sha256)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt
+      - name: Build twice in clean target dirs and compare
+        env:
+          REPRO_SUMS_OUT: ${{ runner.temp }}/SHA256SUMS
+        run: |
+          set -euo pipefail
+          SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+          export SOURCE_DATE_EPOCH
+          sh scripts/repro-check.sh "$RUNNER_TEMP/repro"
+          if [ ! -f "$REPRO_SUMS_OUT" ]; then : > "$REPRO_SUMS_OUT"; fi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: repro-sha256sums
+          path: ${{ runner.temp }}/SHA256SUMS
+          if-no-files-found: ignore
+          retention-days: 30
+
+  sbom:
+    name: sbom (CycloneDX)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt
+      - uses: ./.github/actions/cargo-install
+        with:
+          crate: cargo-cyclonedx
+          version: 0.5.9
+      - name: Generate CycloneDX SBOMs
+        env:
+          SBOM_OUT: ${{ runner.temp }}/sbom
+        run: |
+          set -euo pipefail
+          SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+          export SOURCE_DATE_EPOCH
+          sh scripts/sbom.sh "$SBOM_OUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom-cyclonedx
+          path: ${{ runner.temp }}/sbom
+          if-no-files-found: ignore
+          retention-days: 90

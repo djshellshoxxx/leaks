@@ -1,0 +1,69 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Dependency update proposals (28-SUPPLY-CHAIN.md §5.1). Dependabot only OPENS PRs;
+# every bump still needs human diff review, a cargo-vet record and 2 approvals.
+# cooldown enforces the 14-day adoption delay for new upstream versions (28 §5.1 item 4);
+# security updates are not delayed.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directories: ["/", "/.github/actions/*"]
+    schedule:
+      interval: weekly
+      day: monday
+      time: "05:23"
+      timezone: Etc/UTC
+    cooldown:
+      default-days: 14
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+    labels: ["dependencies", "supply-chain", "ci"]
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "05:37"
+      timezone: Etc/UTC
+    cooldown:
+      default-days: 14
+    open-pull-requests-limit: 10
+    # Dependencies are pinned "=x.y.z"; keep them exact.
+    versioning-strategy: increase
+    commit-message:
+      prefix: "deps"
+    labels: ["dependencies", "supply-chain"]
+    groups:
+      # Crypto-set crates get their own PR (Crypto Reviewer required, 27 §11.3).
+      crypto-set:
+        patterns:
+          - "chacha20poly1305"
+          - "aes-gcm"
+          - "hkdf"
+          - "hmac"
+          - "sha2"
+          - "sha3"
+          - "x25519-dalek"
+          - "ed25519-dalek"
+          - "curve25519-dalek"
+          - "ml-kem"
+          - "ml-dsa"
+          - "x-wing"
+          - "hpke"
+          - "argon2"
+          - "blake3"
+          - "aws-lc-rs"
+          - "zeroize"
+          - "subtle"
+          - "rand_core"
+          - "getrandom"
+      dev-dependencies:
+        dependency-type: development
+        patterns: ["*"]
+      rust-dependencies:
+        dependency-type: production
+        patterns: ["*"]

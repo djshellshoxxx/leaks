@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Code owners (27 §11.1; 36 §6.1). PLACEHOLDER team handles: the @candor-project/*
+# teams do not exist yet. Replace them when the forge organisation is created; until
+# then GitHub ignores unknown owners, so branch protection must not rely on this file.
+# Changes to this file need 2 approvals including the Security Lead.
+# Later matching rules take precedence.
+
+# Default: any maintainer (T2 baseline)
+*                                   @candor-project/maintainers
+
+# T0 — crypto & key core (Crypto Reviewer + reviewer from another org, 27 §11.1/§11.3)
+/crates/candor-core/                @candor-project/crypto-reviewers @candor-project/trust-path-maintainers
+/crates/candor-safefs/              @candor-project/crypto-reviewers @candor-project/trust-path-maintainers
+
+# T1 — all other Trust Path crates
+/crates/                            @candor-project/trust-path-maintainers
+# Logging schema / source UI: anonymity review (27 §11.4)
+/crates/candor-log/                 @candor-project/trust-path-maintainers @candor-project/anonymity-reviewers
+/crates/candor-source-ui/           @candor-project/trust-path-maintainers @candor-project/anonymity-reviewers
+
+# Supply chain, CI, build (Release/Supply-chain owner, 27 §11.1)
+/.github/                           @candor-project/release-supply-chain @candor-project/security-team
+/deny.toml                          @candor-project/release-supply-chain @candor-project/security-team
+/supply-chain/                      @candor-project/release-supply-chain @candor-project/security-team
+/.cargo/                            @candor-project/release-supply-chain
+/scripts/                           @candor-project/release-supply-chain
+/Makefile                           @candor-project/release-supply-chain
+/rust-toolchain.toml                @candor-project/release-supply-chain @candor-project/security-team
+/Cargo.toml                         @candor-project/release-supply-chain @candor-project/trust-path-maintainers
+/Cargo.lock                         @candor-project/release-supply-chain @candor-project/trust-path-maintainers
+
+# Specs, constants registry and lints (SG-25)
+/specs/                             @candor-project/tsc
+/tools/                             @candor-project/tsc @candor-project/release-supply-chain
+
+# Governance and policy files
+/.github/CODEOWNERS                 @candor-project/security-lead
+/SECURITY.md                        @candor-project/security-team
+/GOVERNANCE.md                      @candor-project/tsc
+/LICENSE                            @candor-project/tsc
+/LICENSES/                          @candor-project/tsc
