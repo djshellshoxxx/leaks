@@ -112,7 +112,12 @@ deny = [
     { crate = "subtle", deny-multiple-versions = true },
     { crate = "aws-lc-rs", deny-multiple-versions = true },
 ]
-skip = []
+skip = [
+    # PROPOSED exception, NOT enabled (27 §13.2 needs Security Lead + Trust-Path
+    # Maintainer approval and an expiry <= 90 days): hpke =0.14.1 (mandated by the
+    # build brief) depends on sha3 0.12 directly and on sha3 0.11 via ml-kem 0.3.2.
+    # { crate = "sha3@0.11.0", reason = "hpke 0.14.1 -> ml-kem 0.3.2; remove when ml-kem moves to sha3 0.12; expires YYYY-MM-DD; approved by <SL>+<TPM>" },
+]
 skip-tree = []
 
 [bans.build]
@@ -140,6 +145,8 @@ bypass = [
     { crate = "libc@0.2.189", allow-globs = ["etc/libc-util.py"] },
     # Upstream CI/dev scripts; zerocopy's build.rs only detects rustc version.
     { crate = "zerocopy@0.8.59", allow-globs = ["cargo.sh", "win-cargo.bat", "ci/*.sh"] },
+    # Upstream test helper; build.rs only selects the backend cfg (no Command, no I/O).
+    { crate = "curve25519-dalek@5.0.0", allow-globs = ["tests/build_tests.sh"] },
     # windows-rs import libraries (link-time stubs, no code executed at build time).
     { crate = "windows_x86_64_gnu@0.52.6", allow-globs = ["lib/*.a"] },
     { crate = "windows_x86_64_msvc@0.52.6", allow-globs = ["lib/*.lib"] },

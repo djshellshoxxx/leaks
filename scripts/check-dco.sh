@@ -14,9 +14,19 @@ fi
 BASE=$1
 HEAD=${2:-HEAD}
 
+# Commits made before the DCO policy existed (recorded in .dco-epoch) are exempt;
+# everything after it must be signed off.
+EPOCH=""
+if [ -f .dco-epoch ]; then
+    EPOCH=$(grep -v '^#' .dco-epoch | head -n 1)
+fi
+
 fail=0
 n=0
 for c in $(git rev-list --no-merges "$BASE..$HEAD"); do
+    if [ -n "$EPOCH" ] && git merge-base --is-ancestor "$c" "$EPOCH" 2>/dev/null; then
+        continue
+    fi
     n=$((n + 1))
     author=$(git log -1 --format='%an <%ae>' "$c")
     if ! git log -1 --format='%(trailers:key=Signed-off-by,valueonly)' "$c" \
