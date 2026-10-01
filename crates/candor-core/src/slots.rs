@@ -33,7 +33,7 @@ use crate::rand::{OsRandom, RandomSource, permutation};
 use crate::secret::ContentKey;
 use crate::suite::{CK_LEN, Suite, XWING_NENC};
 use rand_chacha::rand_core::{Rng as _, SeedableRng as _};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// Slots per block (tenant-fixed at 16 in v1).
 pub const SLOT_COUNT: usize = 16;
@@ -138,37 +138,58 @@ impl Slot {
 pub const RECIPIENT_ENTRY_LEN: usize = 1 + 32 + ENCAP_RANDOMNESS_LEN;
 
 /// One Recipient List entry (ADR-050(3)): the slot position, the recipient key id and
-/// the 64-byte X-Wing encapsulation randomness used for that slot. Carried only inside
-/// the AEAD-protected payload; `enc_rand` gives a CK holder nothing beyond CK.
-#[derive(Clone, PartialEq, Eq)]
+/// the 64-byte X-Wing encapsulation randomness used for that slot.
+///
+/// **Secret (AUD-RM1-CORE-01).** X-Wing encapsulation is deterministic given its
+/// randomness, so `enc_rand` together with the recipient's *public* key recomputes the
+/// HPKE shared secret and hence the slot plaintext, CK. For anyone who does not
+/// already hold CK, an entry is exactly as sensitive as CK. Entries therefore:
+/// have private fields and no accessor for `enc_rand`; are not `Clone`/`Copy`; have
+/// no `PartialEq` (use the constant-time [`RecipientListEntry::ct_eq`]); zeroize on
+/// drop; print nothing in `Debug`; and serialize only into a zeroizing buffer
+/// ([`RecipientListEntry::to_bytes`]) whose sole legitimate destination is the signed,
+/// AEAD-protected Recipient List inside the payload (§13.4). Never log, persist or
+/// transmit them outside that encrypted encoding.
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct RecipientListEntry {
-    /// Slot position (0..15).
-    pub slot_index: u8,
-    /// `key_id` of the recipient public key (§13.2; kind MEK or custodian).
-    pub key_id: [u8; 32],
-    /// Encapsulation randomness drawn from the CSPRNG at sealing.
-    pub enc_rand: [u8; ENCAP_RANDOMNESS_LEN],
-}
-
-impl Drop for RecipientListEntry {
-    fn drop(&mut self) {
-        self.enc_rand.zeroize();
-    }
+    slot_index: u8,
+    key_id: [u8; 32],
+    enc_rand: [u8; ENCAP_RANDOMNESS_LEN],
 }
 
 impl core::fmt::Debug for RecipientListEntry {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("RecipientListEntry")
-            .field("slot_index", &self.slot_index)
-            .finish_non_exhaustive()
+        f.write_str("RecipientListEntry(<redacted>)")
     }
 }
 
 impl RecipientListEntry {
-    /// Serialize: `u8 slot_index ‖ key_id ‖ enc_rand` (97 bytes).
+    /// Slot position (0..15).
     #[must_use]
-    pub fn to_bytes(&self) -> [u8; RECIPIENT_ENTRY_LEN] {
-        let mut out = [0u8; RECIPIENT_ENTRY_LEN];
+    pub fn slot_index(&self) -> u8 {
+        self.slot_index
+    }
+
+    /// `key_id` of the recipient public key (§13.2; kind MEK or custodian).
+    #[must_use]
+    pub fn key_id(&self) -> &[u8; 32] {
+        &self.key_id
+    }
+
+    /// Constant-time equality of all three fields.
+    #[must_use]
+    pub fn ct_eq(&self, other: &Self) -> bool {
+        let a = ct_eq(&[self.slot_index], &[other.slot_index]);
+        let b = ct_eq(&self.key_id, &other.key_id);
+        let c = ct_eq(&self.enc_rand, &other.enc_rand);
+        a & b & c
+    }
+
+    /// Serialize: `u8 slot_index ‖ key_id ‖ enc_rand` (97 bytes) into a buffer that is
+    /// zeroized on drop. Only for embedding in the encrypted Recipient List.
+    #[must_use]
+    pub fn to_bytes(&self) -> Zeroizing<[u8; RECIPIENT_ENTRY_LEN]> {
+        let mut out = Zeroizing::new([0u8; RECIPIENT_ENTRY_LEN]);
         let (a, rest) = out.split_at_mut(1);
         let (b, c) = rest.split_at_mut(32);
         a.copy_from_slice(&[self.slot_index]);
@@ -179,19 +200,57 @@ impl RecipientListEntry {
 
     /// Parse exactly 97 bytes; `slot_index` must be < 16.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let mut out = Self::empty();
         let mut r = Reader::new(bytes);
-        let slot_index = r.u8()?;
-        if usize::from(slot_index) >= SLOT_COUNT {
+        out.slot_index = r.u8()?;
+        if usize::from(out.slot_index) >= SLOT_COUNT {
             return Err(Error::Malformed("slot_index"));
         }
-        let key_id = r.array()?;
-        let enc_rand = r.array()?;
+        out.key_id.copy_from_slice(r.take(32)?);
+        out.enc_rand.copy_from_slice(r.take(ENCAP_RANDOMNESS_LEN)?);
         r.finish()?;
-        Ok(Self {
-            slot_index,
-            key_id,
-            enc_rand,
-        })
+        Ok(out)
+    }
+
+    fn empty() -> Self {
+        Self {
+            slot_index: 0,
+            key_id: [0; 32],
+            enc_rand: [0; ENCAP_RANDOMNESS_LEN],
+        }
+    }
+}
+
+/// The Recipient List entries produced by [`RecipientSlotBlock::build`], in recipient
+/// order. Secret like its entries (AUD-RM1-CORE-01): not `Clone`, redacted `Debug`,
+/// entries zeroized on drop. The backing vector is allocated once at its final size
+/// and never grows or moves, so no stale copies of `enc_rand` are left in freed heap.
+#[derive(Default)]
+pub struct RecipientList(Vec<RecipientListEntry>);
+
+impl core::fmt::Debug for RecipientList {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "RecipientList(<{} redacted entries>)", self.0.len())
+    }
+}
+
+impl RecipientList {
+    /// The entries, for encoding into the encrypted Recipient List.
+    #[must_use]
+    pub fn as_slice(&self) -> &[RecipientListEntry] {
+        &self.0
+    }
+
+    /// Number of entries.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// No entries (non-intake objects, or an all-dummy block).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 }
 
@@ -220,11 +279,13 @@ pub(crate) fn dummy_slot(ck: &ContentKey, b: &SlotBinding, i: u8) -> Result<Slot
     )?;
     let (kp_seed, r) = seed.split_at(32);
     let kp = KemKeyPair::derive(b.suite, kp_seed)?;
-    let mut r32: [u8; 32] = r.try_into().map_err(|_| Error::Internal)?;
-    let mut eseed = [0u8; ENCAP_RANDOMNESS_LEN];
-    let mut chacha = rand_chacha::ChaCha20Rng::from_seed(r32);
-    chacha.fill_bytes(&mut eseed);
-    r32.zeroize();
+    let mut r32 = Zeroizing::new([0u8; 32]);
+    r32.copy_from_slice(r);
+    // AUD-RM1-CORE-07: `eseed` is zeroized on every exit path (guard).
+    let mut eseed = Zeroizing::new([0u8; ENCAP_RANDOMNESS_LEN]);
+    let mut chacha = rand_chacha::ChaCha20Rng::from_seed(*r32);
+    chacha.fill_bytes(eseed.as_mut());
+    drop(chacha);
     let mut pt = Zeroizing::new([0u8; 32]);
     hkdf(
         ck.expose(),
@@ -234,8 +295,7 @@ pub(crate) fn dummy_slot(ck: &ContentKey, b: &SlotBinding, i: u8) -> Result<Slot
     )?;
     let info = b.context.info(b.suite);
     let aad = slot_aad(&b.object_id, &b.payload_nonce);
-    let (enc, ct) = seal_base_with_randomness(&kp.public, &info, &aad, pt.as_ref(), eseed)?;
-    eseed.zeroize();
+    let (enc, ct) = seal_base_with_randomness(&kp.public, &info, &aad, pt.as_ref(), &eseed)?;
     Slot::from_parts(enc, ct)
 }
 
@@ -248,7 +308,7 @@ impl RecipientSlotBlock {
         ck: &ContentKey,
         binding: &SlotBinding,
         recipients: &[KemPublicKey],
-    ) -> Result<(Self, Vec<RecipientListEntry>)> {
+    ) -> Result<(Self, RecipientList)> {
         Self::build_with(&mut OsRandom, ck, binding, recipients)
     }
 
@@ -257,10 +317,20 @@ impl RecipientSlotBlock {
         ck: &ContentKey,
         b: &SlotBinding,
         recipients: &[KemPublicKey],
-    ) -> Result<(Self, Vec<RecipientListEntry>)> {
+    ) -> Result<(Self, RecipientList)> {
         b.suite.require_supported()?;
         if recipients.len() > SLOT_COUNT {
             return Err(Error::TooManyRecipients);
+        }
+        // AUD-RM1-CORE-09(a): IDENTITY has exactly one real slot (to K13).
+        if matches!(b.context, SlotContext::Custodian { .. }) && recipients.len() > 1 {
+            return Err(Error::TooManyRecipients);
+        }
+        // AUD-RM1-CORE-09(a): one key may not occupy two slots.
+        for (i, pk) in recipients.iter().enumerate() {
+            if recipients.iter().skip(i.saturating_add(1)).any(|o| o == pk) {
+                return Err(Error::Malformed("duplicate recipient"));
+            }
         }
         // perm[p] < recipients.len() ⇒ position p holds recipient perm[p]; else dummy.
         let perm = permutation(rng, SLOT_COUNT)?;
@@ -268,40 +338,33 @@ impl RecipientSlotBlock {
         let aad = slot_aad(&b.object_id, &b.payload_nonce);
         let kind = kind_for(&b.context);
         let mut slots = Vec::with_capacity(SLOT_COUNT);
-        let mut entries: Vec<(usize, RecipientListEntry)> = Vec::with_capacity(recipients.len());
+        // AUD-RM1-CORE-01: entries are allocated once, indexed by recipient, and filled
+        // in place (no sort/collect moves leaving stale `enc_rand` copies).
+        let mut entries: Vec<RecipientListEntry> = Vec::with_capacity(recipients.len());
+        entries.resize_with(recipients.len(), RecipientListEntry::empty);
         for (pos, who) in perm.iter().enumerate() {
             let pos_u8 = u8::try_from(pos).map_err(|_| Error::Internal)?;
-            let slot = match recipients.get(*who) {
-                Some(pk) => {
+            let slot = match (recipients.get(*who), entries.get_mut(*who)) {
+                (Some(pk), Some(entry)) => {
                     // ADR-050(3): CSPRNG-drawn encapsulation randomness, disclosed to
-                    // recipients inside the Recipient List.
-                    let mut enc_rand = [0u8; ENCAP_RANDOMNESS_LEN];
-                    rng.fill(&mut enc_rand)?;
-                    let sealed = seal_base_with_randomness(pk, &info, &aad, ck.expose(), enc_rand);
-                    entries.push((
-                        *who,
-                        RecipientListEntry {
-                            slot_index: pos_u8,
-                            key_id: key_id(b.suite, kind, &pk.to_bytes()),
-                            enc_rand,
-                        },
-                    ));
-                    enc_rand.zeroize();
-                    let (enc, ct) = sealed?;
+                    // recipients inside the encrypted Recipient List only.
+                    rng.fill(&mut entry.enc_rand)?;
+                    entry.slot_index = pos_u8;
+                    entry.key_id = key_id(b.suite, kind, &pk.to_bytes());
+                    let (enc, ct) =
+                        seal_base_with_randomness(pk, &info, &aad, ck.expose(), &entry.enc_rand)?;
                     Slot::from_parts(enc, ct)?
                 }
-                None => dummy_slot(ck, b, pos_u8)?,
+                _ => dummy_slot(ck, b, pos_u8)?,
             };
             slots.push(slot);
         }
-        entries.sort_by_key(|(who, _)| *who);
-        let list = entries.into_iter().map(|(_, e)| e).collect();
         Ok((
             Self {
                 suite: b.suite,
                 slots,
             },
-            list,
+            RecipientList(entries),
         ))
     }
 
@@ -398,6 +461,20 @@ impl RecipientSlotBlock {
         if b.suite != self.suite || self.slots.len() != SLOT_COUNT || list.len() > SLOT_COUNT {
             return Err(Error::SlotVerification);
         }
+        // AUD-RM1-CORE-09(a): IDENTITY (custodian) has at most one real slot.
+        if matches!(b.context, SlotContext::Custodian { .. }) && list.len() > 1 {
+            return Err(Error::SlotVerification);
+        }
+        // AUD-RM1-CORE-09(a): one member may not occupy two slots (public data).
+        for (i, e) in list.iter().enumerate() {
+            if list
+                .iter()
+                .skip(i.saturating_add(1))
+                .any(|o| o.key_id == e.key_id)
+            {
+                return Err(Error::SlotVerification);
+            }
+        }
         let mut by_pos: [Option<&RecipientListEntry>; SLOT_COUNT] = [None; SLOT_COUNT];
         for e in list {
             let cell = by_pos
@@ -417,7 +494,7 @@ impl RecipientSlotBlock {
                 Some(e) => match resolve_pk(&e.key_id) {
                     Some(pk) if key_id(b.suite, kind, &pk.to_bytes()) == e.key_id => {
                         let (enc, ct) =
-                            seal_base_with_randomness(&pk, &info, &aad, ck.expose(), e.enc_rand)?;
+                            seal_base_with_randomness(&pk, &info, &aad, ck.expose(), &e.enc_rand)?;
                         Some(Slot::from_parts(enc, ct)?)
                     }
                     _ => None,
@@ -484,12 +561,12 @@ mod tests {
         let b = binding();
         let (blk, list) = RecipientSlotBlock::build_with(&mut rng, &ck, &b, &pks).unwrap();
         assert_eq!(list.len(), 3);
-        for (e, pk) in list.iter().zip(&pks) {
+        for (e, pk) in list.as_slice().iter().zip(&pks) {
             assert_eq!(
-                e.key_id,
+                *e.key_id(),
                 key_id(Suite::CandorStd1, KeyKind::Mek, &pk.to_bytes())
             );
-            assert_eq!(RecipientListEntry::from_bytes(&e.to_bytes()).unwrap(), *e);
+            assert!(RecipientListEntry::from_bytes(e.to_bytes().as_ref()).unwrap().ct_eq(e));
         }
         let enc = blk.encode();
         assert_eq!(enc.len(), SLOT_BLOCK_LEN);
@@ -499,9 +576,9 @@ mod tests {
         for (i, m) in members.iter().enumerate() {
             let (got, pos) = blk2.trial_open(&m.private, &b).unwrap();
             assert_eq!(got.expose(), ck.expose());
-            assert_eq!(usize::from(list[i].slot_index), pos);
+            assert_eq!(usize::from(list.as_slice()[i].slot_index()), pos);
             // Honest envelope verifies (ADR-050(3)).
-            blk2.verify_slot_block(&got, &b, &list, directory(&pks, KeyKind::Mek))
+            blk2.verify_slot_block(&got, &b, list.as_slice(), directory(&pks, KeyKind::Mek))
                 .unwrap();
         }
         // Outsider cannot open.
@@ -519,7 +596,7 @@ mod tests {
         };
         assert!(blk2.trial_open(&members[0].private, &wrong).is_err());
         assert!(
-            blk2.verify_slot_block(&ck, &wrong, &list, directory(&pks, KeyKind::Mek))
+            blk2.verify_slot_block(&ck, &wrong, list.as_slice(), directory(&pks, KeyKind::Mek))
                 .is_err()
         );
         let mut wrong = b.clone();
@@ -528,7 +605,7 @@ mod tests {
         // Wrong CK: nothing re-derives.
         let ck2 = ContentKey::from_bytes([0x12; 32]);
         assert!(
-            blk2.verify_slot_block(&ck2, &b, &list, directory(&pks, KeyKind::Mek))
+            blk2.verify_slot_block(&ck2, &b, list.as_slice(), directory(&pks, KeyKind::Mek))
                 .is_err()
         );
     }
@@ -544,25 +621,33 @@ mod tests {
         let pks = [a.public.clone(), hidden.public.clone()];
         let (blk, list) = RecipientSlotBlock::build_with(&mut rng, &ck, &b, &pks).unwrap();
         let dir = directory(&pks, KeyKind::Mek);
-        assert!(blk.verify_slot_block(&ck, &b, &list, &dir).is_ok());
+        let list = list.as_slice();
+        assert!(blk.verify_slot_block(&ck, &b, list, &dir).is_ok());
         // Recipient List omits the hidden recipient's entry.
         assert_eq!(
             blk.verify_slot_block(&ck, &b, &list[..1], &dir).err(),
             Some(Error::SlotVerification)
         );
         // Duplicate / out-of-range slot indices are rejected.
-        let dup = vec![list[0].clone(), list[0].clone()];
+        let dup = [copy(&list[0]), copy(&list[0])];
         assert!(blk.verify_slot_block(&ck, &b, &dup, &dir).is_err());
-        let mut oob = list[0].clone();
+        let mut oob = copy(&list[0]);
         oob.slot_index = 16;
         assert!(blk.verify_slot_block(&ck, &b, &[oob], &dir).is_err());
+        // AUD-RM1-CORE-09(a): the same key id at two positions is rejected.
+        let mut twice = copy(&list[1]);
+        twice.key_id = list[0].key_id;
+        assert_eq!(
+            blk.verify_slot_block(&ck, &b, &[copy(&list[0]), twice], &dir).err(),
+            Some(Error::SlotVerification)
+        );
         // Unresolvable key id.
-        assert!(blk.verify_slot_block(&ck, &b, &list, |_| None).is_err());
+        assert!(blk.verify_slot_block(&ck, &b, list, |_| None).is_err());
         // Permuting slots breaks verification (slots are position-bound).
         let mut swapped = blk.clone();
         swapped.slots.swap(0, 15);
         swapped.slots.swap(1, 14);
-        assert!(swapped.verify_slot_block(&ck, &b, &list, &dir).is_err());
+        assert!(swapped.verify_slot_block(&ck, &b, list, &dir).is_err());
     }
 
     /// ADR-050(3): a slot sealed to an attacker key while the list names a member is
@@ -583,15 +668,15 @@ mod tests {
             core::slice::from_ref(&attacker.public),
         )
         .unwrap();
-        list[0].key_id = key_id(Suite::CandorStd1, KeyKind::Mek, &member.public.to_bytes());
+        list.0[0].key_id = key_id(Suite::CandorStd1, KeyKind::Mek, &member.public.to_bytes());
         let dir = directory(core::slice::from_ref(&member.public), KeyKind::Mek);
         assert_eq!(
-            blk.verify_slot_block(&ck, &b, &list, &dir).err(),
+            blk.verify_slot_block(&ck, &b, list.as_slice(), &dir).err(),
             Some(Error::SlotVerification)
         );
         // A directory that maps the listed id to a different key is also rejected.
         let lying = |_: &[u8; 32]| Some(attacker.public.clone());
-        assert!(blk.verify_slot_block(&ck, &b, &list, lying).is_err());
+        assert!(blk.verify_slot_block(&ck, &b, list.as_slice(), lying).is_err());
         // Tampered enc_rand is detected.
         let (blk2, mut list2) = RecipientSlotBlock::build_with(
             &mut rng,
@@ -600,9 +685,9 @@ mod tests {
             core::slice::from_ref(&member.public),
         )
         .unwrap();
-        assert!(blk2.verify_slot_block(&ck, &b, &list2, &dir).is_ok());
-        list2[0].enc_rand[0] ^= 1;
-        assert!(blk2.verify_slot_block(&ck, &b, &list2, &dir).is_err());
+        assert!(blk2.verify_slot_block(&ck, &b, list2.as_slice(), &dir).is_ok());
+        list2.0[0].enc_rand[0] ^= 1;
+        assert!(blk2.verify_slot_block(&ck, &b, list2.as_slice(), &dir).is_err());
     }
 
     #[test]
@@ -619,12 +704,27 @@ mod tests {
         let pks = [k13.public.clone()];
         let (blk, list) = RecipientSlotBlock::build_with(&mut rng, &ck, &b, &pks).unwrap();
         assert!(
-            blk.verify_slot_block(&ck, &b, &list, directory(&pks, KeyKind::Custodian))
+            blk.verify_slot_block(&ck, &b, list.as_slice(), directory(&pks, KeyKind::Custodian))
                 .is_ok()
         );
         assert!(
-            blk.verify_slot_block(&ck, &b, &list, directory(&pks, KeyKind::Mek))
+            blk.verify_slot_block(&ck, &b, list.as_slice(), directory(&pks, KeyKind::Mek))
                 .is_err()
+        );
+        // AUD-RM1-CORE-09(a): at most one real custodian slot.
+        let k13b = KemKeyPair::generate_with(Suite::CandorStd1, &mut rng).unwrap();
+        let two = [k13.public.clone(), k13b.public.clone()];
+        assert_eq!(
+            RecipientSlotBlock::build_with(&mut rng, &ck, &b, &two).err(),
+            Some(Error::TooManyRecipients)
+        );
+        let mut me = binding();
+        let (blk2, list2) = RecipientSlotBlock::build_with(&mut rng, &ck, &me, &two).unwrap();
+        me.context = b.context.clone();
+        assert_eq!(
+            blk2.verify_slot_block(&ck, &me, list2.as_slice(), directory(&two, KeyKind::Custodian))
+                .err(),
+            Some(Error::SlotVerification)
         );
         // Dummy derivation is deterministic.
         assert_eq!(
@@ -635,6 +735,103 @@ mod tests {
             dummy_slot(&ck, &b, 3).unwrap(),
             dummy_slot(&ck, &b, 4).unwrap()
         );
+    }
+
+    /// Field-by-field copy for negative tests (entries are deliberately not `Clone`).
+    fn copy(e: &RecipientListEntry) -> RecipientListEntry {
+        RecipientListEntry {
+            slot_index: e.slot_index,
+            key_id: e.key_id,
+            enc_rand: e.enc_rand,
+        }
+    }
+
+    /// AUD-RM1-CORE-01 regression: `RecipientListEntry` and `RecipientList` are not
+    /// `Clone` (compile-time check: the probe is ambiguous if either implements it).
+    #[test]
+    fn recipient_entries_are_secret() {
+        trait AmbiguousIfClone<A> {
+            fn probe() {}
+        }
+        impl<T: ?Sized> AmbiguousIfClone<()> for T {}
+        #[allow(dead_code)]
+        struct IsClone;
+        impl<T: ?Sized + Clone> AmbiguousIfClone<IsClone> for T {}
+        <RecipientListEntry as AmbiguousIfClone<_>>::probe();
+        <RecipientList as AmbiguousIfClone<_>>::probe();
+
+        let mut rng = TestRng::new(16);
+        let ck = ContentKey::from_bytes([0x55; 32]);
+        let m = KemKeyPair::generate_with(Suite::CandorStd1, &mut rng).unwrap();
+        let (_, list) =
+            RecipientSlotBlock::build_with(&mut rng, &ck, &binding(), core::slice::from_ref(&m.public))
+                .unwrap();
+        assert_eq!(format!("{list:?}"), "RecipientList(<1 redacted entries>)");
+        assert_eq!(
+            format!("{:?}", list.as_slice()[0]),
+            "RecipientListEntry(<redacted>)"
+        );
+        // Duplicate recipients are refused at build time.
+        let dup = [m.public.clone(), m.public.clone()];
+        assert!(RecipientSlotBlock::build_with(&mut rng, &ck, &binding(), &dup).is_err());
+    }
+
+    /// INC-SL-08 / AUD-RM1-CORE-05(c): substituting exactly one slot k (k = 0..15) is
+    /// rejected for every k, whether k is a real or a dummy position, and for three
+    /// kinds of replacement (same-position slot of another honest block, a slot sealed
+    /// to an attacker key, random bytes).
+    #[test]
+    fn single_slot_substitution_rejected_for_every_k() {
+        let mut rng = TestRng::new(17);
+        let ck = ContentKey::from_bytes([0x66; 32]);
+        let members: Vec<KemKeyPair> = (0..3)
+            .map(|_| KemKeyPair::generate_with(Suite::CandorStd1, &mut rng).unwrap())
+            .collect();
+        let pks: Vec<KemPublicKey> = members.iter().map(|m| m.public.clone()).collect();
+        let attacker = KemKeyPair::generate_with(Suite::CandorStd1, &mut rng).unwrap();
+        let b = binding();
+        let dir = directory(&pks, KeyKind::Mek);
+        let (blk, list) = RecipientSlotBlock::build_with(&mut rng, &ck, &b, &pks).unwrap();
+        blk.verify_slot_block(&ck, &b, list.as_slice(), &dir).unwrap();
+        let other_ck = ContentKey::from_bytes([0x67; 32]);
+        let (other, _) = RecipientSlotBlock::build_with(&mut rng, &other_ck, &b, &pks).unwrap();
+        let real: Vec<usize> = list.as_slice().iter().map(|e| usize::from(e.slot_index)).collect();
+        let (mut saw_real, mut saw_dummy) = (0, 0);
+        for k in 0..SLOT_COUNT {
+            if real.contains(&k) {
+                saw_real += 1;
+            } else {
+                saw_dummy += 1;
+            }
+            let info = b.context.info(b.suite);
+            let aad = slot_aad(&b.object_id, &b.payload_nonce);
+            let mut r = [0u8; ENCAP_RANDOMNESS_LEN];
+            rng.fill(&mut r).unwrap();
+            let (enc, ct) =
+                seal_base_with_randomness(&attacker.public, &info, &aad, ck.expose(), &r).unwrap();
+            let mut noise_ct = [0u8; SLOT_CT_LEN];
+            rng.fill(&mut noise_ct).unwrap();
+            let mut noise_enc = vec![0u8; XWING_NENC];
+            rng.fill(&mut noise_enc).unwrap();
+            let replacements = [
+                other.slots[k].clone(),
+                Slot::from_parts(enc, ct).unwrap(),
+                Slot {
+                    enc: noise_enc,
+                    ct: noise_ct,
+                },
+            ];
+            for rep in replacements {
+                let mut t = blk.clone();
+                t.slots[k] = rep;
+                assert_eq!(
+                    t.verify_slot_block(&ck, &b, list.as_slice(), &dir).err(),
+                    Some(Error::SlotVerification),
+                    "slot {k} substitution not detected"
+                );
+            }
+        }
+        assert_eq!((saw_real, saw_dummy), (3, 13));
     }
 
     #[test]

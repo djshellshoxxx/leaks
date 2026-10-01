@@ -24,6 +24,8 @@ struct Info {
     mode: Option<u32>,
     encrypted: bool,
     method: CompressionMethod,
+    crc: u32,
+    usize: u64,
 }
 
 fn malformed<E>(_: E) -> ArchiveError {
@@ -123,10 +125,13 @@ fn run<R: Read + Seek>(reader: &mut R, s: &mut Session<'_>) -> Result<(), Archiv
                 mode: f.unix_mode(),
                 encrypted: f.encrypted(),
                 method: f.compression(),
+                crc: f.crc32(),
+                usize: f.size(),
             });
         }
-        v
+        (v, cd_start)
     };
+    let (infos, cd_start) = infos;
 
     // Pass 2: overlap check (Fifield). Each entry occupies
     // [header_start, data_start + csize); ranges must be disjoint and
@@ -146,6 +151,10 @@ fn run<R: Read + Seek>(reader: &mut R, s: &mut Session<'_>) -> Result<(), Archiv
             .ok_or(ArchiveError::Malformed("offset overflow"))?;
         if end > archive_len {
             return Err(ArchiveError::Malformed("member beyond end of file"));
+        }
+        // Member data must lie before the central directory (AUD-RM1-SFS-09).
+        if end > cd_start {
+            return Err(ArchiveError::Malformed("member overlaps central directory"));
         }
         ranges.push((inf.header_start, end));
     }
@@ -187,6 +196,32 @@ fn run<R: Read + Seek>(reader: &mut R, s: &mut Session<'_>) -> Result<(), Archiv
             .and_then(|v| v.checked_add(extra_len));
         if expect != Some(inf.data_start) {
             return Err(ArchiveError::Malformed("local header offset mismatch"));
+        }
+        // AUD-RM1-SFS-09: method, encryption flag and (without a data
+        // descriptor) CRC and sizes must also agree, so no later
+        // local-header parser sees a different member.
+        let flags = u16::from_le_bytes([fixed[6], fixed[7]]);
+        let method = u16::from_le_bytes([fixed[8], fixed[9]]);
+        let central_method = match inf.method {
+            CompressionMethod::Stored => Some(0u16),
+            CompressionMethod::Deflated => Some(8u16),
+            _ => None,
+        };
+        if central_method.is_some_and(|m| m != method) {
+            return Err(ArchiveError::Malformed("local/central method mismatch"));
+        }
+        if (flags & 1 == 1) != inf.encrypted {
+            return Err(ArchiveError::Malformed("local/central flags mismatch"));
+        }
+        if flags & 0x0008 == 0 {
+            let crc = u32::from_le_bytes([fixed[14], fixed[15], fixed[16], fixed[17]]);
+            let csize = u32::from_le_bytes([fixed[18], fixed[19], fixed[20], fixed[21]]);
+            let usize_ = u32::from_le_bytes([fixed[22], fixed[23], fixed[24], fixed[25]]);
+            let sizes_ok = (csize == u32::MAX || u64::from(csize) == inf.csize)
+                && (usize_ == u32::MAX || u64::from(usize_) == inf.usize);
+            if crc != inf.crc || !sizes_ok {
+                return Err(ArchiveError::Malformed("local/central size or crc mismatch"));
+            }
         }
     }
     reader.seek(SeekFrom::Start(0)).map_err(malformed)?;

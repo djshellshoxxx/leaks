@@ -37,9 +37,7 @@ impl KemPublicKey {
         }
         // AUD-RM1-CORE-14 (defence in depth, IMPL-RM1 §4 A8): reject an X25519
         // component that is non-canonical or of low order.
-        let (_, pk_x) = bytes
-            .split_last_chunk::<32>()
-            .ok_or(Error::Length)?;
+        let (_, pk_x) = bytes.split_last_chunk::<32>().ok_or(Error::Length)?;
         if !x25519_public_ok(pk_x) {
             return Err(Error::InvalidKey);
         }

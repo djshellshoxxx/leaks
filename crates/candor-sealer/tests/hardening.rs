@@ -44,7 +44,11 @@ fn production_sealer(f: &Fixture, peer_uid: u32) -> Sealer {
     .unwrap()
 }
 
-async fn serve_result(s: &Sealer, dir: &std::path::Path, name: &str) -> Option<std::io::Result<()>> {
+async fn serve_result(
+    s: &Sealer,
+    dir: &std::path::Path,
+    name: &str,
+) -> Option<std::io::Result<()>> {
     let listener = tokio::net::UnixListener::bind(dir.join(name)).unwrap();
     let s = s.clone();
     let h = tokio::spawn(async move { s.serve(listener).await });
@@ -109,7 +113,11 @@ fn hardening_is_applied_and_enforced_before_serving() {
         (full, outside, inside)
     });
     let (full, outside, inside) = t.join().unwrap();
-    assert_eq!(full, Ok(true), "hardening must apply with Landlock enforced");
+    assert_eq!(
+        full,
+        Ok(true),
+        "hardening must apply with Landlock enforced"
+    );
     assert!(inside, "staging must stay writable");
     assert!(!outside, "Landlock enforced but outside path readable");
     assert_eq!(
@@ -137,7 +145,10 @@ fn hardening_is_applied_and_enforced_before_serving() {
     }
     // 4. Hardened and a distinct peer UID: the sealer serves (does not return).
     let s = production_sealer(&f, 54_321);
-    assert!(rt.block_on(serve_result(&s, sock_dir.path(), "c.sock")).is_none());
+    assert!(
+        rt.block_on(serve_result(&s, sock_dir.path(), "c.sock"))
+            .is_none()
+    );
 }
 
 /// The developer override can only be obtained by writing a typed audit event;

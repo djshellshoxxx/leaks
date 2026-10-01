@@ -13,8 +13,11 @@
 
 use crate::aead::{chacha_open, chacha_seal};
 use crate::error::{Error, Result};
-use crate::secret::AeadKey;
-use crate::suite::AEAD_TAG_LEN;
+use crate::kdf::{derive_payload_key, derive_stage_part_key};
+use crate::rand::{OsRandom, RandomSource};
+use crate::secret::{AeadKey, ContentKey, SessionKey};
+use crate::suite::{AEAD_TAG_LEN, Suite};
+use core::sync::atomic::{AtomicBool, Ordering};
 use zeroize::Zeroizing;
 
 /// Plaintext chunk size (64 KiB).
@@ -66,7 +69,59 @@ pub fn chunk_nonce(i: u64, last: bool) -> [u8; 12] {
     n
 }
 
+/// Length of the CoreHeader `payload_nonce` (§13.1 offset 112).
+pub const PAYLOAD_NONCE_LEN: usize = 16;
+
+/// A single-use Tier W staged-part identifier (§9.13, AUD-RM1-CORE-04).
+///
+/// It can only be created fresh from the OS CSPRNG ([`PartId::generate`]); it is not
+/// `Clone`/`Copy` and cannot be built from bytes, and
+/// [`StreamEncryptor::for_staged_part`] accepts each `PartId` at most once (a second
+/// call fails closed with [`Error::Stream`]). So two staged-part streams can never be
+/// encrypted under the same `HKDF(K36, part_id)` key. The decrypt side takes the raw
+/// 16 bytes ([`StreamDecryptor::for_staged_part`]).
+pub struct PartId {
+    id: [u8; 16],
+    used: AtomicBool,
+}
+
+impl core::fmt::Debug for PartId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("PartId(<redacted>)")
+    }
+}
+
+impl PartId {
+    /// Draw a fresh 128-bit part id from the OS CSPRNG.
+    pub fn generate() -> Result<Self> {
+        Self::generate_with(&mut OsRandom)
+    }
+
+    pub(crate) fn generate_with(rng: &mut dyn RandomSource) -> Result<Self> {
+        let mut id = [0u8; 16];
+        rng.fill(&mut id)?;
+        Ok(Self {
+            id,
+            used: AtomicBool::new(false),
+        })
+    }
+
+    /// The id bytes (sent to the client and stored with the staged part; not secret).
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8; 16] {
+        &self.id
+    }
+}
+
 /// Incremental STREAM encryptor for a payload of known length.
+///
+/// AUD-RM1-CORE-04: there is no public constructor that takes a key or a nonce. A
+/// `StreamEncryptor` is created only by [`StreamEncryptor::for_payload`] (key derived
+/// from CK and a `payload_nonce` drawn internally from the CSPRNG and returned to the
+/// caller for the CoreHeader) or [`StreamEncryptor::for_staged_part`] (key derived
+/// from K36 and a single-use [`PartId`]). It is not `Clone`; each chunk nonce
+/// `u88be(i) ‖ last` is used once because the counter only moves forward, and
+/// [`StreamEncryptor::finish`] / [`StreamEncryptor::encrypt_all`] consume it.
 pub struct StreamEncryptor {
     key: AeadKey,
     plaintext_len: u64,
@@ -84,15 +139,50 @@ impl core::fmt::Debug for StreamEncryptor {
 }
 
 impl StreamEncryptor {
-    /// New encryptor for `plaintext_len` bytes.
-    #[must_use]
-    pub fn new(key: AeadKey, plaintext_len: u64) -> Self {
+    fn with_key(key: AeadKey, plaintext_len: u64) -> Self {
         Self {
             key,
             plaintext_len,
             n: chunk_count(plaintext_len),
             next: 0,
         }
+    }
+
+    /// Encryptor for a Sealed Object payload (§13.3): draws a fresh 16-byte
+    /// `payload_nonce` from the OS CSPRNG, derives
+    /// `K_pay = HKDF(CK, payload_nonce, "candor/v1/payload" ‖ suite)` and returns the
+    /// encryptor together with the nonce, which the caller must put in the CoreHeader
+    /// (and the slot binding).
+    pub fn for_payload(
+        suite: Suite,
+        ck: &ContentKey,
+        plaintext_len: u64,
+    ) -> Result<(Self, [u8; PAYLOAD_NONCE_LEN])> {
+        Self::for_payload_with(&mut OsRandom, suite, ck, plaintext_len)
+    }
+
+    pub(crate) fn for_payload_with(
+        rng: &mut dyn RandomSource,
+        suite: Suite,
+        ck: &ContentKey,
+        plaintext_len: u64,
+    ) -> Result<(Self, [u8; PAYLOAD_NONCE_LEN])> {
+        suite.require_supported()?;
+        let mut payload_nonce = [0u8; PAYLOAD_NONCE_LEN];
+        rng.fill(&mut payload_nonce)?;
+        let key = derive_payload_key(suite, ck, &payload_nonce)?;
+        Ok((Self::with_key(key, plaintext_len), payload_nonce))
+    }
+
+    /// Encryptor for a Tier W staged upload part (§9.13):
+    /// `HKDF(K36, salt = part_id, info = "candor/v1/stage/part")`. Each [`PartId`] is
+    /// accepted once; reuse fails with [`Error::Stream`] (fail closed).
+    pub fn for_staged_part(k36: &SessionKey, part_id: &PartId, plaintext_len: u64) -> Result<Self> {
+        if part_id.used.swap(true, Ordering::SeqCst) {
+            return Err(Error::Stream("part id already used"));
+        }
+        let key = derive_stage_part_key(k36, &part_id.id)?;
+        Ok(Self::with_key(key, plaintext_len))
     }
 
     /// Encrypt the next chunk. Every chunk except the last must be exactly 64 KiB;
@@ -110,6 +200,26 @@ impl StreamEncryptor {
         Ok(ct)
     }
 
+    /// Encrypt a whole payload of exactly the declared length and consume the
+    /// encryptor.
+    pub fn encrypt_all(mut self, plaintext: &[u8]) -> Result<Vec<u8>> {
+        let len = u64::try_from(plaintext.len()).map_err(|_| Error::TooLarge)?;
+        if len != self.plaintext_len || self.next != 0 {
+            return Err(Error::Stream("wrong payload length"));
+        }
+        let total = usize::try_from(ciphertext_len(len)?).map_err(|_| Error::TooLarge)?;
+        let mut out = Vec::with_capacity(total);
+        if plaintext.is_empty() {
+            out.extend_from_slice(&self.encrypt_chunk(&[])?);
+        } else {
+            for c in plaintext.chunks(CHUNK_SIZE) {
+                out.extend_from_slice(&self.encrypt_chunk(c)?);
+            }
+        }
+        self.finish()?;
+        Ok(out)
+    }
+
     /// Require that all chunks were produced.
     pub fn finish(self) -> Result<()> {
         if self.next == self.n {
@@ -120,21 +230,12 @@ impl StreamEncryptor {
     }
 }
 
-/// Encrypt a whole payload.
-pub fn encrypt(key: AeadKey, plaintext: &[u8]) -> Result<Vec<u8>> {
+/// Encrypt a whole payload under a raw key — test/vector generation only; production
+/// code has no way to choose a STREAM key (AUD-RM1-CORE-04).
+#[cfg(test)]
+pub(crate) fn encrypt(key: AeadKey, plaintext: &[u8]) -> Result<Vec<u8>> {
     let len = u64::try_from(plaintext.len()).map_err(|_| Error::TooLarge)?;
-    let total = usize::try_from(ciphertext_len(len)?).map_err(|_| Error::TooLarge)?;
-    let mut enc = StreamEncryptor::new(key, len);
-    let mut out = Vec::with_capacity(total);
-    if plaintext.is_empty() {
-        out.extend_from_slice(&enc.encrypt_chunk(&[])?);
-    } else {
-        for c in plaintext.chunks(CHUNK_SIZE) {
-            out.extend_from_slice(&enc.encrypt_chunk(c)?);
-        }
-    }
-    enc.finish()?;
-    Ok(out)
+    StreamEncryptor::with_key(key, len).encrypt_all(plaintext)
 }
 
 /// Chunk-at-a-time STREAM decryptor. See the module documentation for the release
@@ -159,7 +260,8 @@ impl core::fmt::Debug for StreamDecryptor {
 
 impl StreamDecryptor {
     /// New decryptor for a payload whose plaintext length is `plaintext_len` (from the
-    /// authenticated CoreHeader).
+    /// authenticated CoreHeader). Decryption under a caller-supplied key cannot cause
+    /// nonce reuse, so this constructor stays public.
     #[must_use]
     pub fn new(key: AeadKey, plaintext_len: u64) -> Self {
         Self {
@@ -169,6 +271,26 @@ impl StreamDecryptor {
             next: 0,
             poisoned: false,
         }
+    }
+
+    /// Decryptor for a Sealed Object payload: `K_pay` from CK and the header's
+    /// `payload_nonce` (§13.3). Callers must have verified `header_mac` first;
+    /// `object::ParsedObject::open_stream` does both.
+    pub fn for_payload(
+        suite: Suite,
+        ck: &ContentKey,
+        payload_nonce: &[u8; PAYLOAD_NONCE_LEN],
+        plaintext_len: u64,
+    ) -> Result<Self> {
+        Ok(Self::new(
+            derive_payload_key(suite, ck, payload_nonce)?,
+            plaintext_len,
+        ))
+    }
+
+    /// Decryptor for a Tier W staged part (§9.13) identified by its stored id bytes.
+    pub fn for_staged_part(k36: &SessionKey, part_id: &[u8; 16], plaintext_len: u64) -> Result<Self> {
+        Ok(Self::new(derive_stage_part_key(k36, part_id)?, plaintext_len))
     }
 
     /// Expected ciphertext length of the next chunk, or `None` when complete.
@@ -289,13 +411,21 @@ impl<R: std::io::Read> ChunkReader<R> {
 /// Buffered decryption: returns plaintext only if the ciphertext has exactly the
 /// expected length and every chunk, including the final one, verifies.
 pub fn decrypt(key: AeadKey, plaintext_len: u64, ct: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+    decrypt_with(StreamDecryptor::new(key, plaintext_len), ct)
+}
+
+/// Buffered decryption with a fresh decryptor (see [`decrypt`]).
+pub fn decrypt_with(mut dec: StreamDecryptor, ct: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+    if dec.next != 0 || dec.poisoned {
+        return Err(Error::Stream("decryptor already used"));
+    }
+    let plaintext_len = dec.plaintext_len;
     let expected = ciphertext_len(plaintext_len)?;
     if u64::try_from(ct.len()).ok() != Some(expected) {
         return Err(Error::Stream("wrong payload length"));
     }
     let cap = usize::try_from(plaintext_len).map_err(|_| Error::TooLarge)?;
     let mut out = Zeroizing::new(Vec::with_capacity(cap));
-    let mut dec = StreamDecryptor::new(key, plaintext_len);
     let mut rest = ct;
     while let Some(len) = dec.next_chunk_ct_len() {
         let (chunk, tail) = rest
@@ -439,13 +569,66 @@ mod tests {
 
     #[test]
     fn encryptor_enforces_lengths() {
-        let mut e = StreamEncryptor::new(key(), 10);
+        let mut e = StreamEncryptor::with_key(key(), 10);
         assert!(e.encrypt_chunk(&[0; 9]).is_err());
         assert!(e.encrypt_chunk(&[0; 10]).is_ok());
         assert!(e.encrypt_chunk(&[]).is_err());
         assert!(e.finish().is_ok());
-        let e = StreamEncryptor::new(key(), 10);
+        let e = StreamEncryptor::with_key(key(), 10);
         assert!(e.finish().is_err());
+        let e = StreamEncryptor::with_key(key(), 10);
+        assert!(e.encrypt_all(&[0; 9]).is_err());
+    }
+
+    /// AUD-RM1-CORE-04: payload encryptors draw a fresh nonce each time (so two
+    /// encryptors for the same CK never share a key), and the payload round-trips
+    /// through the matching decrypt-side constructor.
+    #[test]
+    fn payload_encryptor_fresh_nonce_roundtrip() {
+        let ck = ContentKey::from_bytes([9; 32]);
+        let pt = vec![5u8; CHUNK_SIZE + 3];
+        let len = pt.len() as u64;
+        let (e1, n1) = StreamEncryptor::for_payload(Suite::CandorStd1, &ck, len).unwrap();
+        let (e2, n2) = StreamEncryptor::for_payload(Suite::CandorStd1, &ck, len).unwrap();
+        assert_ne!(n1, n2);
+        let c1 = e1.encrypt_all(&pt).unwrap();
+        let c2 = e2.encrypt_all(&pt).unwrap();
+        assert_ne!(c1, c2);
+        let d = StreamDecryptor::for_payload(Suite::CandorStd1, &ck, &n1, len).unwrap();
+        let mut rd = d.reader(&c1[..]);
+        let got: Vec<u8> = rd.by_ref().flat_map(|c| c.unwrap().to_vec()).collect();
+        rd.finish().unwrap();
+        assert_eq!(got, pt);
+        assert_eq!(
+            StreamEncryptor::for_payload(Suite::CandorFips1, &ck, len).err(),
+            Some(Error::UnsupportedSuite)
+        );
+    }
+
+    /// AUD-RM1-CORE-04: a `PartId` yields at most one encryptor (reuse fails closed).
+    #[test]
+    fn staged_part_id_is_single_use() {
+        let k36 = SessionKey::from_bytes([4; 32]);
+        let part = PartId::generate().unwrap();
+        let e = StreamEncryptor::for_staged_part(&k36, &part, 3).unwrap();
+        assert_eq!(
+            StreamEncryptor::for_staged_part(&k36, &part, 3).err(),
+            Some(Error::Stream("part id already used"))
+        );
+        let ct = e.encrypt_all(b"abc").unwrap();
+        let d = StreamDecryptor::for_staged_part(&k36, part.as_bytes(), 3).unwrap();
+        let mut rd = d.reader(&ct[..]);
+        let got: Vec<u8> = rd.by_ref().flat_map(|c| c.unwrap().to_vec()).collect();
+        rd.finish().unwrap();
+        assert_eq!(got, b"abc");
+        assert_eq!(format!("{part:?}"), "PartId(<redacted>)");
+        // Distinct parts under one K36 get distinct keys.
+        let p2 = PartId::generate().unwrap();
+        let ct2 = StreamEncryptor::for_staged_part(&k36, &p2, 3)
+            .unwrap()
+            .encrypt_all(b"abc")
+            .unwrap();
+        assert_ne!(ct, ct2);
     }
 
     proptest! {

@@ -344,7 +344,11 @@ fn civil_from_days(days: u64) -> Option<(u64, u64, u64)> {
     let d = doy
         .checked_sub(mp.checked_mul(153)?.checked_add(2)?.checked_div(5)?)?
         .checked_add(1)?;
-    let m = if mp < 10 { mp.checked_add(3)? } else { mp.checked_sub(9)? };
+    let m = if mp < 10 {
+        mp.checked_add(3)?
+    } else {
+        mp.checked_sub(9)?
+    };
     let y = if m <= 2 { y.checked_add(1)? } else { y };
     Some((y, m, d))
 }
@@ -509,7 +513,9 @@ pub mod merkle {
             fn_ >>= 1;
             sn >>= 1;
         }
-        sn == 0 && candor_core::kdf::ct_eq(&fr, first_hash) && candor_core::kdf::ct_eq(&sr, second_hash)
+        sn == 0
+            && candor_core::kdf::ct_eq(&fr, first_hash)
+            && candor_core::kdf::ct_eq(&sr, second_hash)
     }
 }
 
@@ -531,8 +537,7 @@ impl core::ops::Deref for VerifiedSnapshot {
 
 fn check_invariants(v: &DirectorySnapshot) -> Result<(), SnapshotError> {
     for (i, ch) in v.channels.iter().enumerate() {
-        if v
-            .channels
+        if v.channels
             .get(..i)
             .is_some_and(|prev| prev.iter().any(|c| c.channel_id == ch.channel_id))
         {

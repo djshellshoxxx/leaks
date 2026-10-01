@@ -165,22 +165,22 @@ Jobs: at each fixed import slot (relay control cycle) `rebuild_published_set(slo
 | sqlx | =0.9.0, `runtime-tokio`, `postgres`, `uuid`; no defaults, no TLS, no macros, no sqlite/mysql | Spec-mandated DB toolkit (09 §11). Postgres over a Unix socket. ≥ 0.8.1 for RUSTSEC-2024-0363. |
 | tokio | =1.48.0, `sync` (dev: `rt`, `macros`) | Async runtime required by sqlx `runtime-tokio`; `RwLock`/`Mutex` for the in-RAM published set and the memory store. |
 | uuid | =1.18.1, no defaults | Bind 128-bit random ids to `uuid` columns (sqlx `uuid` feature). No generation features: ids come from getrandom. |
-| sha2 | =0.11.0 | `header_sha256`, `del_hash`, chain hash, migration digests. Same version as candor-core. |
+| sha2 | =0.11.0 | `group_sha256`, `del_hash`, chain hash, migration digests. Same version as candor-core. |
 | subtle | =2.6.1 | Constant-time comparison of chain hashes and signed entries. |
 | zeroize | =1.8.2 | Zeroizing buffers for dummy bodies. |
 | getrandom | =0.4.3 | OS CSPRNG (the same pin as candor-core, whose `rand` module is crate-private), with the same all-zero health check. |
 | proptest (dev) | =1.11.0 | Property tests. |
 
-**Blocked: needs a lead decision.** `cargo deny check bans` fails because sqlx-core/sqlx-postgres 0.9.0 depend on `sha2 0.10.9` (SCRAM/MD5 password auth code, unused with peer auth but compiled), and `deny.toml` sets `deny-multiple-versions` for `sha2`. This needs a version-pinned `skip` for `sha2@0.10.9` (with an expiry, as with ADR-051's sha3), or an upstream sqlx move to sha2 0.11. `cargo deny` advisories, licenses and sources pass. sqlx-core also depends on `log`/`tracing` unconditionally. Statement logging is disabled on every connection. The intake processes must not install a `log` logger or a `tracing` subscriber (consistent with the candor-log-only rule).
+**Resolved by ADR-052(7)** (interim pinned skip for `sha2@0.10.9`, expiring 2026-12-30; deny.toml is the lead's). Background: `cargo deny check bans` failed because sqlx-core/sqlx-postgres 0.9.0 depend on `sha2 0.10.9` (SCRAM/MD5 password auth code, unused with peer auth but compiled), and `deny.toml` sets `deny-multiple-versions` for `sha2`. This needs a version-pinned `skip` for `sha2@0.10.9` (with an expiry, as with ADR-051's sha3), or an upstream sqlx move to sha2 0.11. `cargo deny` advisories, licenses and sources pass. sqlx-core also depends on `log`/`tracing` unconditionally. Statement logging is disabled on every connection. The intake processes must not install a `log` logger or a `tracing` subscriber (consistent with the candor-log-only rule).
 
 ## Test mapping
 
 | Spec ID | Tests |
 |---|---|
 | BE-014, RL-02..RL-04, API-047, BE-062 | `conf_claim_ack`, `conf_claim_limits` (both impls) |
-| ADR-034, BE-056 (no pending account; atomic) | `conf_accounts` |
+| ADR-052(2), BE-056, DB-033 (accounts separate; inactive purge) | `conf_accounts` |
 | Input bounds (hostile input) | `conf_envelope_validation`, `conf_reply_rules`, `deaddrop::oversize_body_rejected` |
-| BE-063, API-037, API-040, SA-19/SA-20 | `conf_dead_drop`, `deaddrop::page_shape`, `set_version_changes_per_build`, proptests |
+| BE-063, API-037, API-040, SA-19/SA-20 | `conf_dead_drop`, `deaddrop::page_shape_from_config`, `builder_places_each_entry_once`, `set_version_changes_per_build`, proptests |
 | ADR-047(9), KEY-077, RL-11, BE-074, API-054 | `conf_deletion_list`, `conf_backup_restore`, `deletion::tests`, `deletion::props` (arbitrary lists, any bit flip) |
 | BE-060, RVW-A-04, RL-06 (rollback) | `conf_kd_snapshots`, `validate::rollback_matrix`, `pg_durability_and_guards` (DB trigger) |
 | ADR-052(1)/(2) (groups; accounts separate) | `conf_envelope_validation`, `conf_claim_ack`, `conf_accounts`, `pg_schema_lint_live` |
@@ -204,33 +204,38 @@ Checked as an attacker (ASVS 5.0 L3 mindset, BUILD-BRIEF "Security and OPSEC bar
   - The store reads no clock; `source_lint` forbids it.
   - Commit timestamps are unavailable (`track_commit_timestamp = off`, tested).
   - IDs are 128-bit CSPRNG values.
-  - Claim order is random.
+  - Claim order is `(release_day, random ref)`; `release_day` never leaves the intake.
+  - Source actions never write account rows; the import-slot rewrite gives every source-linkable row one `xmin` (live test); quota is RAM-only; counters are written only at the slot.
+  - Envelopes carry no account reference (ADR-052(2)).
+  - No expected outcome raises a server error, so nothing about a source action reaches the PostgreSQL log (live test with captured log and a positive control).
+  - Dead-drop diffs reveal only K added / K expired per slot.
   - `set_version` is random.
   - No per-mailbox access state exists.
   - Debug output of every source-linked type is redacted.
   - Errors carry only static strings. PostgreSQL error details, which can echo `locator_hash` values, are discarded.
 - **Logging.**
   - sqlx statement logging is disabled on every connection (tested by source lint).
-  - The test cluster uses `log_parameter_max_length*=0`, `log_min_error_statement=panic` and `log_statement=none`.
+  - The test cluster uses `log_min_messages=panic`, `log_parameter_max_length*=0`, `log_min_error_statement=panic` and `log_statement=none`; the log goes to a 0600 file only so a test can read it.
   - No `print`, `log` or `tracing` in `src/`.
 - **SQL injection.** All SQL is static; no dynamic SQL is possible without `AssertSqlSafe`, which is banned.
 - **Least privilege.**
-  - The app role is non-owner, NOBYPASSRLS and non-superuser; this is verified at `open`.
-  - The app role has no TRUNCATE or DDL.
-  - On `deletion_list` the app role has only a column-level UPDATE (`relayed`).
+  - The app and maintenance roles are non-owner, NOBYPASSRLS, non-superuser, not members of an owning role or of each other; RLS forced and guard triggers enabled; all verified at `open`.
+  - The app role has no TRUNCATE or DDL, no DELETE on `deletion_list`, and column-level UPDATE on `intake_meta` without the identity columns.
+  - Only the maintenance role flags and prunes deletion-list entries (acknowledged only, never the head; tested including the two-statement bypass).
   - The backup role is read-only on exactly three tables.
-  - RLS is FORCEd.
-  - DB triggers enforce monotonic counters and an append-only deletion list even against a compromised app role (tested).
+  - DB triggers enforce monotonic counters, immutable identity and the acknowledged-seq bound.
+  - Session limits are re-asserted per connection.
 - **Network.** Unix socket only: no TLS feature is compiled and there is no TCP in tests (`listen_addresses = ''`, peer auth with an ident map, no host lines).
 - **Fail closed.**
-  - Restore-pending persists across restarts.
-  - Forged, forked or gapped deletion lists are rejected, and the store keeps refusing service.
+  - Restore-pending persists across restarts and is entered at every PostgreSQL process start.
+  - Forged, forked, gapped, truncated, unanchored or empty-when-expected deletion lists are rejected, and the rejection persists restore-pending.
+  - Every source operation refuses while restore-pending.
   - Schema drift refuses `open`.
   - CSPRNG failure is an error.
   - Unknown enum text from the DB is an `Integrity` error.
   - Oversized inputs are rejected before any DB work.
 - **Input handling.**
-  - Every external input has an explicit maximum: header, manifest, parts, part size, reply size, reply count per push, snapshot body and signatures, pushed list length, deletion page size, claim limits.
+  - Every external input has an explicit maximum: group shape (exactly 3 objects, fixed slot-block length), part size, reply size, reply count per push, publication backlog, published pages (typed `Capacity`, fallible allocation, streamed build), snapshot body and signatures, pushed list length, deletion page size, claim limits, active accounts per slot.
   - Day values are bounded before date arithmetic.
   - There is no recursion.
   - No `unwrap`, `expect` or indexing on untrusted data (clippy deny set clean).
@@ -238,9 +243,36 @@ Checked as an attacker (ASVS 5.0 L3 mindset, BUILD-BRIEF "Security and OPSEC bar
 - **Secrets.** The only secret in reach is K31, inside candor-core's zeroizing `SigningKey` (redacted Debug), used through `DeletionSigner`. The KDF salt is public.
 - **Residual risks.**
   1. The mailbox-entry restore gap.
-  2. `RandomDummyReplies` dummies are size-identical but lack CoreHeader magic, so an observer can count real replies in the 30-day window. Production should pass a `DummyReplies` that seals real REPLY-format objects to a random key (C-08 daemon).
-  3. PostgreSQL row versions and WAL segments may keep deleted ciphertext and commit records until vacuum and recycle (09 §13). Autovacuum is aggressive on intake tables.
-  4. Lookup timing for unknown and known `lookup_tag` is the caller's job (BE-010 floor).
-  5. The published set is held in RAM (≈ 4.5 MB per page).
-  6. The sha2 duplicate needs a deny.toml decision.
-  7. Query macros with an offline cache are deferred (decision 6).
+  2. `RandomDummyReplies` (tests, `MemoryStore::new`) lacks CoreHeader magic; the PostgreSQL store requires an explicit `DummyReplies`, and production must pass real-format sealed dummies (C-08 daemon), else an observer can tell dummies from real replies by structure.
+  3. Between two slot rewrites, rows written since the last slot (new accounts, envelopes, deletion entries) carry their own `xid`, so a live-DB observer sees their order within that interval (≤ one slot spacing), e.g. an account creation adjacent to an envelope commit (diluted by chaff accounts, ADR-052(2)). The rewrite also keeps rows roughly in their physical (`ctid`) order; a periodic owner-run `VACUUM (FULL)`/`CLUSTER` in a maintenance window would erase that (deploy option). Dead tuples and WAL keep old versions until vacuum/recycle (09 §13). Tables with BEFORE UPDATE triggers keep a lock-only `xmax` equal to the rewrite's own `xid` (no extra information; asserted).
+  4. A compromised application role can still clear `restore_pending` (the database cannot verify K31 signatures without an extension or a definer function, both excluded by 09 §10); the grants and trigger only stop identity and monotonic-value tampering.
+  5. A real reply deleted by its source (or by account deletion) disappears from the published set at the next rebuild while dummies never leave early, so an observer learns that an entry was real and was deleted at that slot (AUD-RM2-STO-14; 08 SA-19 requires removal). The removal is shown only at slot granularity (BE-063).
+  6. After a restart, or if a concurrent purge removed rows during a rebuild, missing positions are filled with ephemeral dummies (regenerated at the next rebuild); their number depends only on deletions, not on reply volume.
+  7. PostgreSQL cumulative statistics accumulate between daily resets and are written at shutdown (AUD-RM2-STO-11); reset needs the provisioning grant.
+  8. Lookup timing for unknown and known `lookup_tag` is the caller's job (BE-010 floor).
+  9. Query macros with an offline cache are deferred (decision 6).
+
+## Fixes for AUD-RM2-STO
+
+Every fix has a regression test; "fails on old code" notes how the test catches the pre-fix behaviour.
+
+| Finding | Change | Test(s) |
+|---|---|---|
+| STO-01 (High) xmin/ctid activity leak | Quota removed from the DB (`quota_bucket`, `quota_consume`, `quota_reset` gone; RAM in C-06/C-07). No per-action account write: `commit_envelope` has no account link at all (ADR-052(2)), `apply_replies` no longer touches the account. `uniform_rewrite(slot, counters, active_accounts)` folds activity and rewrites every row of every source-linkable table in one transaction; `counter_add` removed (counters only flushed at slots). `directory_snapshot.applied_day` = month (decision 24). | `pg_uniform_rewrite_xmin` (mixed workload, then one distinct `xmin` over 8 tables, no foreign `xmax`; account `xmin`/`ctid` unchanged by a commit — old code rewrote the account per commit and had no rewrite op), `conf_activity_fold`, `conf_counters`, `conf_accounts` |
+| STO-02 (High) ERROR lines with timestamps | `INSERT … ON CONFLICT DO NOTHING` + row counts for init, accounts, envelopes, parts, replies, deletion entries, snapshots, restore; `update_account` uses `NOT EXISTS`; counter overflow via `ON CONFLICT … WHERE` (no numeric error); all bounds checked in Rust first. Deploy settings listed above. | `pg_no_server_errors_on_expected_paths` (whole conformance suite in databases logging at `warning`, zero ERROR/WARNING/FATAL lines, plus a positive control proving capture — old code logged `unique_violation` for every duplicate), `pg_settings` (`log_min_messages = panic`) |
+| STO-03 (Medium) deletion list bypass | App role: no DELETE, `relayed` only as an unchanged rewrite. Maintenance role only flips acknowledged entries and deletes relayed non-head entries (trigger on `current_user`, `deletion_acked_seq`, `max(seq)`). | `pg_durability_and_guards` (two-statement bypass and every variant refused for the app role; head and unacknowledged entries refused for the maintenance role — old code accepted the bypass), `pg_roles_and_grants`, `conf_deletion_list` |
+| STO-04 (Medium) gapped/truncated/empty push | `merge_pushed` rules of decision 16 with explicit `core_head`; failures persist restore-pending. | `validate::merge_rules`, `conf_backup_restore` (forged, wrong key, gap, truncated, empty; bad push to a serving store re-enters pending — old code returned `Ok` and served) |
+| STO-05 (Medium) failover fails open | PG `open` enters restore-pending on every initialised store; `mark_restore_pending()` for the runbook. | `pg_durability_and_guards` (reopen → not serving until a push ending at the head), `conf_restore_pending_gate` |
+| STO-06 (Medium) dead-drop diffing | Persistent generations of exactly K entries per slot, dummies stored and expired like real entries, never regenerated, back-fill, padding pool (decision 8); explicit `DummyReplies` for PG. | `conf_dead_drop` (each rebuild: exactly K added and K expired with 0/3/7/0/2 real replies; repeat slot adds nothing; missed slot adds 2K — old code regenerated every dummy), `deaddrop::generation_plan`, `plan_bounded` |
+| STO-07 (Medium) memory | Page count fixed by `DeadDropConfig` (≤ 128 pages, validated), fallible reservation, streamed build, typed `Capacity`; publication backlog bounded by `max_pending`; no count-driven power-of-two growth. | `deaddrop::capacity_bounds`, `conf_reply_backlog` (old code accepted every push and grew the page count) |
+| STO-08 (Low) role/startup hardening | Session limits as connection options; `temp_file_limit`; open refuses owner-role or other-intake-role membership, unforced RLS, disabled guard triggers; column-level `intake_meta` UPDATE; tenant/salt/schema hash immutable. | `pg_refuses_privileged_role` (member of migrator, disabled trigger), `pg_roles_and_grants` (`temp_file_limit`, identity columns) |
+| STO-09 (Low) deletions while pending | All source operations return `RestorePending`. | `conf_restore_pending_gate` |
+| STO-10 (Low) mark beyond head | `after > head` → `InvalidInput`, nothing recorded; acknowledgement is a monotonic, trigger-bounded `deletion_acked_seq`; only the maintenance role flags. | `conf_deletion_list` (`u64::MAX` and `head + 1` refused; prune of unacknowledged entries is 0) |
+| STO-11 (Low) pg_stat | `PgIntakeMaintenance::reset_statistics()` (daily); grant at provisioning; residual documented. Revoking catalog views per role was not done: it needs superuser in the migration and does not cover the `pg_stat_get_*` functions (risky, little gain). | `pg_statistics_reset` |
+| STO-12 (Low) quadratic merge | Signatures verified before the lock; `BTreeMap`/`HashSet` lookups; `MAX_PUSHED_DELETION_LIST` = 200,000. | `validate::merge_rules`, `conf_backup_restore` |
+| STO-13 (Low) pg-test.sh | `PGUSER_OS` and port validated; existing root/human accounts refused; a created user is removed on exit; `umask 077`; log to a 0600 file. | `shellcheck -S style` clean; exercised by every PG run |
+| STO-14 (Info) deleted replies until rebuild | Documented residual 5 (slot-granular removal, required by SA-19). | — |
+| STO-15 (Info) salt ignored on restore | `Conflict("kdf salt differs")`. | `conf_backup_restore` |
+| STO-16 (Info) claim starvation | `ORDER BY release_day, envelope_ref` (both impls). | `conf_claim_fairness` |
+| STO-17 (Info) supply chain | No dependency change; sha2 skip decided by ADR-052(7). | — |
+

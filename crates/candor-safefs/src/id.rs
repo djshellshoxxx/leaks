@@ -121,7 +121,7 @@ impl fmt::Display for ObjectId {
 /// bits. A *keyed* hash is mandatory: an unkeyed content hash in a blob name
 /// would let anyone holding a document confirm it was stored (FILE-005,
 /// THR-015 confirmation attack). Zeroized on drop; never printed.
-#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct ContentKey([u8; 32]);
 
 impl ContentKey {

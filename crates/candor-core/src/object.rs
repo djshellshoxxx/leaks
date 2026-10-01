@@ -7,12 +7,11 @@
 
 use crate::error::{Error, Result};
 use crate::header::{CoreHeader, HEADER_LEN, HEADER_MAC_LEN, ObjectType, object_hash};
-use crate::kdf::derive_payload_key;
 use crate::kem::KemPublicKey;
 use crate::rand::{OsRandom, RandomSource};
 use crate::secret::ContentKey;
-use crate::slots::{RecipientListEntry, RecipientSlotBlock, SlotBinding, SlotContext};
-use crate::stream::{self, StreamDecryptor};
+use crate::slots::{RecipientList, RecipientListEntry, RecipientSlotBlock, SlotBinding, SlotContext};
+use crate::stream::{self, StreamDecryptor, StreamEncryptor};
 use crate::suite::Suite;
 use zeroize::Zeroizing;
 
@@ -51,8 +50,10 @@ pub struct PayloadContext<'a> {
     pub recipient_list: &'a [RecipientListEntry],
 }
 
-/// A sealed object.
-#[derive(Debug, Clone)]
+/// A sealed object: public data only (AUD-RM1-CORE-01). The Recipient List entries,
+/// which are CK-equivalent, are returned separately ([`SealSecrets`]) and are never
+/// part of this value.
+#[derive(Clone)]
 pub struct SealedObject {
     /// Header.
     pub header: CoreHeader,
@@ -62,28 +63,76 @@ pub struct SealedObject {
     pub object_hash: [u8; 32],
     /// The slot block (intake-sealed objects only); stored alongside the blob.
     pub slot_block: Option<RecipientSlotBlock>,
-    /// Recipient List entries that were handed to the payload builder.
-    pub recipient_list: Vec<RecipientListEntry>,
     /// Blob bytes: `CoreHeader ‖ header_mac ‖ Payload`.
     pub bytes: Vec<u8>,
 }
 
+impl core::fmt::Debug for SealedObject {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // AUD-RM1-CORE-11: type and sizes only (no ids, hashes or ciphertext).
+        f.debug_struct("SealedObject")
+            .field("object_type", &self.header.object_type)
+            .field("len", &self.bytes.len())
+            .field("has_slot_block", &self.slot_block.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+/// The secrets produced by [`seal`]: the fresh CK and the Recipient List entries
+/// (empty for non-intake objects). Not `Clone`; zeroized on drop; redacted `Debug`.
+pub struct SealSecrets {
+    ck: ContentKey,
+    recipient_list: RecipientList,
+}
+
+impl core::fmt::Debug for SealSecrets {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("SealSecrets(<redacted>)")
+    }
+}
+
+impl SealSecrets {
+    /// The content key (for wrap stanzas).
+    #[must_use]
+    pub fn ck(&self) -> &ContentKey {
+        &self.ck
+    }
+
+    /// The Recipient List entries (for embedding in another object's encrypted
+    /// Recipient List, e.g. the IDENTITY entries inside a SUBMISSION).
+    #[must_use]
+    pub fn recipient_list(&self) -> &RecipientList {
+        &self.recipient_list
+    }
+
+    /// Split into CK and entries.
+    #[must_use]
+    pub fn into_parts(self) -> (ContentKey, RecipientList) {
+        (self.ck, self.recipient_list)
+    }
+}
+
 /// Seal with a fresh random CK. `build` returns the padded plaintext (exactly
-/// `padded_len` bytes) once the header and Recipient List are known. Returns the CK
-/// (for stanzas) and the object.
-pub fn seal<F, P>(req: &SealRequest<'_>, build: F) -> Result<(ContentKey, SealedObject)>
+/// `padded_len` bytes) once the header and Recipient List are known. Returns the
+/// secrets (CK for stanzas, Recipient List entries) and the public object.
+pub fn seal<F, P>(req: &SealRequest<'_>, build: F) -> Result<(SealSecrets, SealedObject)>
 where
     F: FnOnce(&PayloadContext<'_>) -> Result<P>,
     P: AsRef<[u8]>,
 {
     let mut rng = OsRandom;
     let ck = ContentKey::generate_with(&mut rng)?;
-    let obj = seal_with_ck_rng(&mut rng, &ck, req, build)?;
-    Ok((ck, obj))
+    let (recipient_list, obj) = seal_with_ck_rng(&mut rng, &ck, req, build)?;
+    Ok((SealSecrets { ck, recipient_list }, obj))
 }
 
-/// Seal with a caller-supplied CK (e.g. chaff CK derived per §12.7).
-pub fn seal_with_ck<F, P>(ck: &ContentKey, req: &SealRequest<'_>, build: F) -> Result<SealedObject>
+/// Seal with a caller-supplied CK (e.g. chaff CK derived per §12.7). Returns the
+/// Recipient List entries (secret, see [`RecipientListEntry`]) and the object.
+pub fn seal_with_ck<F, P>(
+    ck: &ContentKey,
+    req: &SealRequest<'_>,
+    build: F,
+) -> Result<(RecipientList, SealedObject)>
 where
     F: FnOnce(&PayloadContext<'_>) -> Result<P>,
     P: AsRef<[u8]>,
@@ -103,7 +152,34 @@ pub fn seal_bytes(
             "intake objects must embed the Recipient List",
         ));
     }
-    seal(req, |_| Ok(padded_plaintext))
+    let (secrets, obj) = seal(req, |_| Ok(padded_plaintext))?;
+    let (ck, _empty) = secrets.into_parts();
+    Ok((ck, obj))
+}
+
+/// AUD-RM1-CORE-09(b): the slot context must match the object type
+/// (IDENTITY ⇔ custodian) and the header fields it duplicates.
+fn check_context(req: &SealRequest<'_>, ctx: &SlotContext) -> Result<()> {
+    let ok = match ctx {
+        SlotContext::Custodian { tenant_id } => {
+            req.object_type == ObjectType::Identity && *tenant_id == req.tenant_id
+        }
+        SlotContext::MemberEpoch {
+            tenant_id,
+            channel_id,
+            epoch_id,
+        } => {
+            req.object_type != ObjectType::Identity
+                && *tenant_id == req.tenant_id
+                && *channel_id == req.channel_id
+                && *epoch_id == req.epoch_id
+        }
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(Error::Malformed("slot context does not match the header"))
+    }
 }
 
 pub(crate) fn seal_with_ck_rng<F, P>(
@@ -111,7 +187,7 @@ pub(crate) fn seal_with_ck_rng<F, P>(
     ck: &ContentKey,
     req: &SealRequest<'_>,
     build: F,
-) -> Result<SealedObject>
+) -> Result<(RecipientList, SealedObject)>
 where
     F: FnOnce(&PayloadContext<'_>) -> Result<P>,
     P: AsRef<[u8]>,
@@ -119,10 +195,12 @@ where
     req.suite.require_supported()?;
     let mut object_id = [0u8; 16];
     rng.fill(&mut object_id)?;
-    let mut payload_nonce = [0u8; 16];
-    rng.fill(&mut payload_nonce)?;
+    // AUD-RM1-CORE-04: the payload nonce is drawn inside the STREAM constructor.
+    let (encryptor, payload_nonce) =
+        StreamEncryptor::for_payload_with(rng, req.suite, ck, req.padded_len)?;
     let (slot_block, recipient_list) = match (req.object_type.is_intake_sealed(), &req.recipients) {
         (true, Some((ctx, pks))) => {
+            check_context(req, ctx)?;
             let b = SlotBinding {
                 suite: req.suite,
                 object_id,
@@ -132,7 +210,7 @@ where
             let (blk, list) = RecipientSlotBlock::build_with(rng, ck, &b, pks)?;
             (Some(blk), list)
         }
-        (false, None) => (None, Vec::new()),
+        (false, None) => (None, RecipientList::default()),
         _ => {
             return Err(Error::Malformed(
                 "recipients required exactly for intake-sealed objects",
@@ -157,15 +235,14 @@ where
     let padded = build(&PayloadContext {
         header: &header,
         header_bytes: &header_bytes,
-        recipient_list: &recipient_list,
+        recipient_list: recipient_list.as_slice(),
     })?;
     let padded = padded.as_ref();
     if u64::try_from(padded.len()).ok() != Some(req.padded_len) {
         return Err(Error::Length);
     }
     let header_mac = header.header_mac(ck)?;
-    let k_pay = derive_payload_key(req.suite, ck, &payload_nonce)?;
-    let payload = stream::encrypt(k_pay, padded)?;
+    let payload = encryptor.encrypt_all(padded)?;
     let mut bytes = Vec::with_capacity(
         HEADER_LEN
             .saturating_add(HEADER_MAC_LEN)
@@ -174,18 +251,19 @@ where
     bytes.extend_from_slice(&header_bytes);
     bytes.extend_from_slice(&header_mac);
     bytes.extend_from_slice(&payload);
-    Ok(SealedObject {
-        object_hash: object_hash(&header_bytes, &header_mac),
-        header,
-        header_mac,
-        slot_block,
+    Ok((
         recipient_list,
-        bytes,
-    })
+        SealedObject {
+            object_hash: object_hash(&header_bytes, &header_mac),
+            header,
+            header_mac,
+            slot_block,
+            bytes,
+        },
+    ))
 }
 
 /// A structurally validated (not yet authenticated) sealed object.
-#[derive(Debug)]
 pub struct ParsedObject<'a> {
     /// Header (validated, unauthenticated until `header_mac` is checked).
     pub header: CoreHeader,
@@ -211,6 +289,17 @@ pub fn parse(bytes: &[u8]) -> Result<ParsedObject<'_>> {
     })
 }
 
+impl core::fmt::Debug for ParsedObject<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // AUD-RM1-CORE-11: type and lengths only, never the payload or ids.
+        f.debug_struct("ParsedObject")
+            .field("object_type", &self.header.object_type)
+            .field("padded_plaintext_len", &self.header.padded_plaintext_len)
+            .field("payload_len", &self.payload.len())
+            .finish_non_exhaustive()
+    }
+}
+
 impl ParsedObject<'_> {
     /// `object_hash` (the value stanzas bind to).
     #[must_use]
@@ -227,6 +316,26 @@ impl ParsedObject<'_> {
             payload_nonce: self.header.payload_nonce,
             context,
         }
+    }
+
+    /// AUD-RM1-CORE-09(c): the slot binding derived from the header itself, so callers
+    /// cannot pass a context that disagrees with it. IDENTITY → custodian context
+    /// (tenant); other intake-sealed types → member-epoch context (tenant, channel,
+    /// epoch). Fails for types without slots.
+    pub fn slot_binding_from_header(&self) -> Result<SlotBinding> {
+        let h = &self.header;
+        let context = match h.object_type {
+            ObjectType::Identity => SlotContext::Custodian {
+                tenant_id: h.tenant_id,
+            },
+            t if t.is_intake_sealed() => SlotContext::MemberEpoch {
+                tenant_id: h.tenant_id,
+                channel_id: h.channel_id,
+                epoch_id: h.epoch_id,
+            },
+            _ => return Err(Error::Malformed("object type has no recipient slots")),
+        };
+        Ok(self.slot_binding(context))
     }
 
     /// Check that a slot block is the one committed in the header.
@@ -247,18 +356,44 @@ impl ParsedObject<'_> {
 
     /// Verify the header MAC, then decrypt the whole payload (buffered: nothing is
     /// returned unless every chunk including the final one verifies).
+    ///
+    /// The whole plaintext is held in memory (up to the largest file bucket, about
+    /// 16 GiB); use [`ParsedObject::open_bounded`] or [`ParsedObject::open_stream`]
+    /// where that is not acceptable (AUD-RM1-CORE-13).
     pub fn open(&self, ck: &ContentKey) -> Result<Zeroizing<Vec<u8>>> {
         self.verify(ck)?;
-        let k = derive_payload_key(self.header.suite, ck, &self.header.payload_nonce)?;
-        stream::decrypt(k, self.header.padded_plaintext_len, self.payload)
+        let d = StreamDecryptor::for_payload(
+            self.header.suite,
+            ck,
+            &self.header.payload_nonce,
+            self.header.padded_plaintext_len,
+        )?;
+        stream::decrypt_with(d, self.payload)
+    }
+
+    /// [`ParsedObject::open`], refusing (before any decryption or allocation) objects
+    /// whose padded plaintext is larger than `max_plaintext_len` bytes.
+    pub fn open_bounded(
+        &self,
+        ck: &ContentKey,
+        max_plaintext_len: u64,
+    ) -> Result<Zeroizing<Vec<u8>>> {
+        if self.header.padded_plaintext_len > max_plaintext_len {
+            return Err(Error::TooLarge);
+        }
+        self.open(ck)
     }
 
     /// Verify the header MAC, then return a chunk decryptor and the payload bytes.
     pub fn open_stream(&self, ck: &ContentKey) -> Result<(StreamDecryptor, &[u8])> {
         self.verify(ck)?;
-        let k = derive_payload_key(self.header.suite, ck, &self.header.payload_nonce)?;
         Ok((
-            StreamDecryptor::new(k, self.header.padded_plaintext_len),
+            StreamDecryptor::for_payload(
+                self.header.suite,
+                ck,
+                &self.header.payload_nonce,
+                self.header.padded_plaintext_len,
+            )?,
             self.payload,
         ))
     }
@@ -298,14 +433,17 @@ mod tests {
             padded_len: pt.len() as u64,
         };
         let mut seen = Vec::new();
-        let obj = seal_with_ck_rng(&mut rng, &ck, &req, |pc| {
-            seen = pc.recipient_list.to_vec();
+        let (list, obj) = seal_with_ck_rng(&mut rng, &ck, &req, |pc| {
+            seen = pc.recipient_list.iter().map(|e| e.to_bytes()).collect();
             assert_eq!(pc.header.padded_plaintext_len, pt.len() as u64);
             Ok(pt.clone())
         })
         .unwrap();
-        assert_eq!(seen, obj.recipient_list);
         assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0], list.as_slice()[0].to_bytes());
+        // AUD-RM1-CORE-01: the public object carries no entry and prints nothing secret.
+        let dbg = format!("{obj:?}");
+        assert!(dbg.starts_with("SealedObject") && !dbg.contains("enc_rand"));
         let p = parse(&obj.bytes).unwrap();
         assert_eq!(p.object_hash(), obj.object_hash);
         let blk = obj.slot_block.as_ref().unwrap();
@@ -313,7 +451,7 @@ mod tests {
         let (ck2, pos) = blk
             .trial_open(&m.private, &p.slot_binding(ctx.clone()))
             .unwrap();
-        assert_eq!(usize::from(obj.recipient_list[0].slot_index), pos);
+        assert_eq!(usize::from(list.as_slice()[0].slot_index()), pos);
         let dir = |kid: &[u8; 32]| {
             (crate::hash::key_id(
                 Suite::CandorStd1,
@@ -322,9 +460,40 @@ mod tests {
             ) == *kid)
                 .then(|| m.public.clone())
         };
-        blk.verify_slot_block(&ck2, &p.slot_binding(ctx), &obj.recipient_list, dir)
+        blk.verify_slot_block(&ck2, &p.slot_binding(ctx.clone()), list.as_slice(), &dir)
             .unwrap();
+        // AUD-RM1-CORE-09(c): the header-derived binding equals the expected one.
+        assert_eq!(p.slot_binding_from_header().unwrap(), p.slot_binding(ctx.clone()));
+        let pd = format!("{p:?}");
+        assert!(pd.starts_with("ParsedObject") && !pd.contains("payload:"));
+        assert_eq!(
+            p.open_bounded(&ck2, pt.len() as u64 - 1).err(),
+            Some(Error::TooLarge)
+        );
         assert_eq!(p.open(&ck2).unwrap().as_slice(), pt.as_slice());
+        assert_eq!(
+            p.open_bounded(&ck2, pt.len() as u64).unwrap().as_slice(),
+            pt.as_slice()
+        );
+
+        // AUD-RM1-CORE-09(b): a slot context that disagrees with the header or the
+        // object type is refused at sealing.
+        let wrong_epoch = SlotContext::MemberEpoch {
+            tenant_id: [1; 16],
+            channel_id: [2; 16],
+            epoch_id: 4,
+        };
+        let pks = [m.public.clone()];
+        let bad = SealRequest {
+            recipients: Some((wrong_epoch, &pks)),
+            ..req
+        };
+        assert!(seal_with_ck_rng(&mut rng, &ck, &bad, |_| Ok(pt.clone())).is_err());
+        let custodian = SealRequest {
+            recipients: Some((SlotContext::Custodian { tenant_id: [1; 16] }, &pks)),
+            ..req
+        };
+        assert!(seal_with_ck_rng(&mut rng, &ck, &custodian, |_| Ok(pt.clone())).is_err());
 
         // Salamander / wrong key: header commitment rejects before payload decryption.
         let other = ContentKey::from_bytes([0xEE; 32]);

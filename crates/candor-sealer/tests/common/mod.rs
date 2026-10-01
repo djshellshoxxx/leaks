@@ -201,7 +201,9 @@ pub fn trust() -> DirectoryTrust {
 
 /// Leaves of the test directory log (deterministic).
 pub fn log_leaves(n: u64) -> Vec<[u8; 32]> {
-    (0..n).map(|i| merkle::leaf_hash(&i.to_be_bytes())).collect()
+    (0..n)
+        .map(|i| merkle::leaf_hash(&i.to_be_bytes()))
+        .collect()
 }
 
 /// Sign `view`'s checkpoint with the LOG_KEY and attach the consistency proof

@@ -445,12 +445,8 @@ impl Sealer {
         persist: impl FnOnce(&HighWaterMark) -> bool,
     ) -> Result<(), SnapshotError> {
         let mut h = lock(&self.st.hwm);
-        let verified = VerifiedSnapshot::verify(
-            bundle,
-            &self.st.cfg.directory_trust,
-            self.st.cfg.suite,
-            &h,
-        )?;
+        let verified =
+            VerifiedSnapshot::verify(bundle, &self.st.cfg.directory_trust, self.st.cfg.suite, &h)?;
         if verified.base() != *h {
             return Err(SnapshotError::Stale);
         }
@@ -1383,8 +1379,8 @@ impl Sealer {
         let disposition = KemPublicKey::from_bytes(snap.suite, &snap.disposition_pk)
             .map_err(|_| ErrorCode::Unavailable)?;
         let chaff = &self.st.cfg.chaff;
-        let followup =
-            rand::bernoulli_permille(chaff.followup_share_permille).map_err(|_| ErrorCode::Internal)?;
+        let followup = rand::bernoulli_permille(chaff.followup_share_permille)
+            .map_err(|_| ErrorCode::Internal)?;
         let delay = if rand::bernoulli_permille(chaff.delayed_share_permille)
             .map_err(|_| ErrorCode::Internal)?
         {
@@ -1793,7 +1789,14 @@ fn seal_blocking(mut g: OwnedMutexGuard<Session>, st: &State, job: SealJob) -> (
     // failed envelope commit is indistinguishable from a chaff dummy account.
     let committed = match account {
         Some(a) => match st.sink.upsert_account(a) {
-            Ok(()) => commit_group(&ctx, st.sink.as_ref(), group, sel.epoch_id, job.today, job.release_offset_days),
+            Ok(()) => commit_group(
+                &ctx,
+                st.sink.as_ref(),
+                group,
+                sel.epoch_id,
+                job.today,
+                job.release_offset_days,
+            ),
             Err(_) => {
                 seal::remove_staged(&ctx, &group.bundle);
                 Err(ErrorCode::Internal)
@@ -1882,7 +1885,9 @@ fn rotate_blocking(
         let group = match seal::seal_source_message(&ctx, &job.sel, &sm, &[], &sess.k36) {
             Ok(o) => o,
             Err(e) => {
-                groups.iter().for_each(|g: &EnvelopeGroup| seal::remove_staged(&ctx, &g.bundle));
+                groups
+                    .iter()
+                    .for_each(|g: &EnvelopeGroup| seal::remove_staged(&ctx, &g.bundle));
                 return core_err(e);
             }
         };
@@ -1896,7 +1901,9 @@ fn rotate_blocking(
             Ok(d) => groups.push(group.into_group(report.channel_id, d)),
             Err(e) => {
                 group.remove_staged(&ctx);
-                groups.iter().for_each(|g| seal::remove_staged(&ctx, &g.bundle));
+                groups
+                    .iter()
+                    .for_each(|g| seal::remove_staged(&ctx, &g.bundle));
                 return core_err(e);
             }
         }
@@ -1905,7 +1912,9 @@ fn rotate_blocking(
     let ct = match prefs_ct(st, &new_keys, &new_prefs) {
         Ok(c) => c,
         Err(e) => {
-            groups.iter().for_each(|g| seal::remove_staged(&ctx, &g.bundle));
+            groups
+                .iter()
+                .for_each(|g| seal::remove_staged(&ctx, &g.bundle));
             return core_err(e);
         }
     };
@@ -1923,7 +1932,16 @@ fn rotate_blocking(
     // update fails the source keeps a working old passphrase and can retry.
     let mut groups = groups.into_iter();
     while let Some(group) = groups.next() {
-        if commit_group(&ctx, st.sink.as_ref(), group, job.sel.epoch_id, job.today, 0).is_err() {
+        if commit_group(
+            &ctx,
+            st.sink.as_ref(),
+            group,
+            job.sel.epoch_id,
+            job.today,
+            0,
+        )
+        .is_err()
+        {
             groups.for_each(|g| seal::remove_staged(&ctx, &g.bundle));
             return err(ErrorCode::Internal);
         }

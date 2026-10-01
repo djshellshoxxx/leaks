@@ -6,6 +6,10 @@ use crate::error::{Error, Result};
 use crate::secret::AeadKey;
 use chacha20poly1305::aead::{Aead, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, XChaCha20Poly1305};
+
+// AUD-RM1-CORE-07: keys are passed to the cipher by reference (`new_from_slice`), so no
+// temporary key array is created on the stack; the cipher's key schedule is zeroized
+// on drop by the `chacha20poly1305` `zeroize` feature.
 use zeroize::Zeroizing;
 
 pub(crate) fn chacha_seal(
@@ -14,7 +18,8 @@ pub(crate) fn chacha_seal(
     aad: &[u8],
     pt: &[u8],
 ) -> Result<Vec<u8>> {
-    let c = ChaCha20Poly1305::new(&(*key.expose()).into());
+    let c =
+        <ChaCha20Poly1305 as KeyInit>::new_from_slice(key.expose()).map_err(|_| Error::Internal)?;
     c.encrypt(&(*nonce).into(), Payload { msg: pt, aad })
         .map_err(|_| Error::Internal)
 }
@@ -25,7 +30,8 @@ pub(crate) fn chacha_open(
     aad: &[u8],
     ct: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>> {
-    let c = ChaCha20Poly1305::new(&(*key.expose()).into());
+    let c =
+        <ChaCha20Poly1305 as KeyInit>::new_from_slice(key.expose()).map_err(|_| Error::Internal)?;
     c.decrypt(&(*nonce).into(), Payload { msg: ct, aad })
         .map(Zeroizing::new)
         .map_err(|_| Error::Authentication)
@@ -37,7 +43,8 @@ pub(crate) fn xchacha_seal(
     aad: &[u8],
     pt: &[u8],
 ) -> Result<Vec<u8>> {
-    let c = XChaCha20Poly1305::new(&(*key.expose()).into());
+    let c = <XChaCha20Poly1305 as KeyInit>::new_from_slice(key.expose())
+        .map_err(|_| Error::Internal)?;
     c.encrypt(&(*nonce).into(), Payload { msg: pt, aad })
         .map_err(|_| Error::Internal)
 }
@@ -48,7 +55,8 @@ pub(crate) fn xchacha_open(
     aad: &[u8],
     ct: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>> {
-    let c = XChaCha20Poly1305::new(&(*key.expose()).into());
+    let c = <XChaCha20Poly1305 as KeyInit>::new_from_slice(key.expose())
+        .map_err(|_| Error::Internal)?;
     c.decrypt(&(*nonce).into(), Payload { msg: ct, aad })
         .map(Zeroizing::new)
         .map_err(|_| Error::Authentication)

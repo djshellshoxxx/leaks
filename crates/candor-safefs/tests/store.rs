@@ -308,3 +308,39 @@ mod props {
         }
     }
 }
+
+// AUD-RM1-SFS-03 regression: an abandoned write leaves the root directory
+// times at their slot value, not at the real time of the abort.
+#[test]
+fn dropped_pending_object_restores_root_times() {
+    let e = env();
+    let r = e.root(RootPolicy::Staging);
+    r.put_random(b"x", slot()).unwrap();
+    let before = std::fs::metadata(&e.root_path).unwrap();
+    assert_eq!(before.mtime() as u64, SLOT);
+    std::thread::sleep(Duration::from_millis(20));
+    {
+        let mut w = r.create_random().unwrap();
+        w.write_all(b"partial plaintext").unwrap();
+        // dropped without commit
+    }
+    let after = std::fs::metadata(&e.root_path).unwrap();
+    assert_eq!(after.mtime() as u64, SLOT);
+    assert_eq!(after.mtime_nsec(), before.mtime_nsec());
+    assert_eq!(r.purge_incomplete(slot()).unwrap(), 0);
+}
+
+// AUD-RM1-SFS-04: Debug of readers/writers shows no path, size or fd.
+#[test]
+fn debug_output_has_no_path_or_size() {
+    let e = env();
+    let r = e.root(RootPolicy::BlobStore);
+    let id = r.put_random(&[1u8; 4321], slot()).unwrap();
+    let rd = r.open_read(&id).unwrap();
+    let d = format!("{rd:?}");
+    assert!(!d.contains("4321") && !d.contains('/') && !d.contains("path"), "{d}");
+    let mut w = r.create_random().unwrap();
+    w.write_all(&[0u8; 4321]).unwrap();
+    let d = format!("{w:?}");
+    assert!(!d.contains("4321"), "{d}");
+}

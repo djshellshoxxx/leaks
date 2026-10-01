@@ -221,6 +221,18 @@ impl SafeRoot {
 
     fn pending(&self, naming: Naming) -> Result<PendingObject<'_>, SafeFsError> {
         let tmp_name = format!("{TMP_PREFIX}{}", ObjectId::random()?.to_name());
+        let root_times = fstat(&self.dir).ok().map(|st| {
+            (
+                rustix::fs::Timespec {
+                    tv_sec: st.st_atime,
+                    tv_nsec: st.st_atime_nsec as _,
+                },
+                rustix::fs::Timespec {
+                    tv_sec: st.st_mtime,
+                    tv_nsec: st.st_mtime_nsec as _,
+                },
+            )
+        });
         let mut opts = OpenOptions::new();
         opts.write(true)
             .create_new(true)
@@ -234,6 +246,8 @@ impl SafeRoot {
             tmp_name,
             naming,
             written: 0,
+            poisoned: false,
+            root_times,
         };
         if let Some(f) = pending.file.as_ref() {
             check_plain_file(&fstat(f)?, self.uid, self.dev)?;
@@ -410,12 +424,20 @@ pub struct PendingObject<'a> {
     tmp_name: String,
     naming: Naming,
     written: u64,
+    /// A write failed part-way: the content on disk no longer matches the
+    /// hash/length state, so the object can never be committed
+    /// (AUD-RM1-SFS-07).
+    poisoned: bool,
+    /// Root directory times before the temp file was created, restored if
+    /// the object is abandoned (AUD-RM1-SFS-03).
+    root_times: Option<(rustix::fs::Timespec, rustix::fs::Timespec)>,
 }
 
 impl fmt::Debug for PendingObject<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // No size, path or descriptor (AUD-RM1-SFS-04).
         f.debug_struct("PendingObject")
-            .field("written", &self.written)
+            .field("poisoned", &self.poisoned)
             .finish_non_exhaustive()
     }
 }
@@ -428,11 +450,17 @@ impl Write for PendingObject<'_> {
             .checked_add(n)
             .filter(|t| *t <= self.root.max_object_bytes)
             .ok_or_else(|| io::Error::from(SafeFsError::TooLarge))?;
+        if self.poisoned {
+            return Err(io::Error::from(io::ErrorKind::BrokenPipe));
+        }
         let f = self
             .file
             .as_mut()
             .ok_or_else(|| io::Error::from(io::ErrorKind::BrokenPipe))?;
-        f.write_all(buf)?;
+        if let Err(e) = f.write_all(buf) {
+            self.poisoned = true;
+            return Err(e);
+        }
         if let Naming::Keyed(h) = &mut self.naming {
             h.update(buf);
         }
@@ -459,6 +487,9 @@ impl PendingObject<'_> {
     /// fallback `linkat`+`unlinkat`), normalize directory times to `slot`
     /// and fsync the directories.
     pub fn commit(mut self, slot: SlotTime) -> Result<ObjectId, SafeFsError> {
+        if self.poisoned {
+            return Err(SafeFsError::Io(io::ErrorKind::BrokenPipe));
+        }
         let file = self
             .file
             .take()
@@ -501,9 +532,40 @@ impl Drop for PendingObject<'_> {
         self.file = None;
         if !self.tmp_name.is_empty() {
             // Best effort: purge_incomplete() handles crashes.
-            let _ = self.root.dir.remove_file(&self.tmp_name);
+            if self.root.dir.remove_file(&self.tmp_name).is_ok()
+                && let Some((atime, mtime)) = self.root_times
+            {
+                // Creating and removing the temp file moved the root's
+                // mtime to the real abort time; put back the (slot-
+                // normalized) times it had before (AUD-RM1-SFS-03).
+                let _ = restore_dir_times(&self.root.dir, atime, mtime);
+            }
         }
     }
+}
+
+fn restore_dir_times(
+    dir: &Dir,
+    atime: rustix::fs::Timespec,
+    mtime: rustix::fs::Timespec,
+) -> Result<(), SafeFsError> {
+    use rustix::fs::{Mode, OFlags, Timestamps};
+    let fd = rustix::fs::openat(
+        dir,
+        ".",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )
+    .map_err(|e| SafeFsError::from(io::Error::from(e)))?;
+    rustix::fs::futimens(
+        &fd,
+        &Timestamps {
+            last_access: atime,
+            last_modification: mtime,
+        },
+    )
+    .map_err(|e| SafeFsError::from(io::Error::from(e)))?;
+    rustix::fs::fsync(&fd).map_err(|e| SafeFsError::from(io::Error::from(e)))
 }
 
 fn rename_noreplace(from: &Dir, old: &str, to: &Dir, new: &str) -> io::Result<()> {
@@ -522,10 +584,17 @@ fn rename_noreplace(from: &Dir, old: &str, to: &Dir, new: &str) -> io::Result<()
 }
 
 /// A read handle on a committed object (verified plain regular file).
-#[derive(Debug)]
 pub struct ObjectReader {
     file: File,
     len: u64,
+}
+
+impl fmt::Debug for ObjectReader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // `File`'s Debug prints the storage path (via /proc/self/fd) and the
+        // length is a size (P-07): neither is shown (AUD-RM1-SFS-04).
+        f.debug_struct("ObjectReader").finish_non_exhaustive()
+    }
 }
 
 impl ObjectReader {
@@ -549,5 +618,34 @@ impl Read for ObjectReader {
 impl Seek for ObjectReader {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         self.file.seek(pos)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    // AUD-RM1-SFS-07 regression: after a failed write the object is
+    // poisoned; further writes and commit fail (it used to commit content
+    // that did not match its keyed id).
+    #[test]
+    fn failed_write_poisons_pending_object() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let root = SafeRoot::open(dir.path(), RootPolicy::Staging).unwrap();
+        let key = ContentKey::from_bytes([3; 32]);
+        let mut w = root.create_content_addressed(&key).unwrap();
+        w.write_all(b"good").unwrap();
+        // Swap in a read-only descriptor so the next write fails (EBADF).
+        w.file = Some(File::open("/dev/null").unwrap());
+        assert!(w.write_all(b"lost").is_err());
+        assert!(w.poisoned);
+        w.file = None;
+        assert!(w.write_all(b"more").is_err());
+        let slot = SlotTime::from_unix_secs(1_800_000_000 - 1_800_000_000 % 900).unwrap();
+        assert!(w.commit(slot).is_err());
+        assert!(root.list().unwrap().is_empty());
     }
 }

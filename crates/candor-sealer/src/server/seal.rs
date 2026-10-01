@@ -21,10 +21,10 @@ use crate::proto::cbor::Value;
 use crate::proto::{Mode, PendingReply, SecretText};
 use candor_core::header::{CoreHeader, HEADER_LEN, HEADER_MAC_LEN, ObjectType, object_hash};
 use candor_core::kdf::{ct_eq, derive_payload_key, derive_stage_part_key};
-use candor_core::secret::AeadKey;
 use candor_core::kem::{self, KemPublicKey};
 use candor_core::object::{self, SealRequest, SealedObject};
 use candor_core::passphrase::SourceKeys;
+use candor_core::secret::AeadKey;
 use candor_core::secret::{ContentKey, Secret32};
 use candor_core::sig::{SigningKey, verify_strict};
 use candor_core::slots::{RecipientListEntry, RecipientSlotBlock, SlotBinding, SlotContext};
@@ -106,7 +106,9 @@ fn payload_encryptor(
 
 /// Start a staging file under a caller-known id, so a failed `commit` (which
 /// may fail after the rename) can still be cleaned up (AUD-RM2-SEA-13).
-pub(crate) fn stage_create(staging: &'static SafeRoot) -> Result<(ObjectId, PendingObject<'static>), Error> {
+pub(crate) fn stage_create(
+    staging: &'static SafeRoot,
+) -> Result<(ObjectId, PendingObject<'static>), Error> {
     let id = ObjectId::random().map_err(io_err)?;
     let w = staging.create_new(&id).map_err(io_err)?;
     Ok((id, w))

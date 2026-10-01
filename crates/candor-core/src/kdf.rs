@@ -3,7 +3,7 @@
 
 use crate::error::{Error, Result};
 use crate::labels;
-use crate::secret::{AeadKey, CaseKey, ContentKey, ErasureKey, MacKey, Secret32};
+use crate::secret::{AeadKey, CaseKey, ContentKey, ErasureKey, MacKey, Secret32, SessionKey};
 use crate::suite::Suite;
 use hkdf::Hkdf;
 use hmac::{Hmac, KeyInit, Mac};
@@ -22,9 +22,11 @@ pub(crate) fn hkdf(ikm: &[u8], salt: &[u8], info: &[&[u8]], out: &mut [u8]) -> R
 
 /// HKDF-Extract only, returning the PRK.
 pub(crate) fn hkdf_extract(salt: &[u8], ikm: &[u8]) -> Secret32 {
-    let (prk, _) = Hkdf::<Sha256>::extract(Some(salt), ikm);
+    let (mut prk, _) = Hkdf::<Sha256>::extract(Some(salt), ikm);
     let mut arr = [0u8; 32];
     arr.copy_from_slice(prk.as_slice());
+    // AUD-RM1-CORE-07: neither the returned PRK array nor our copy outlives this call.
+    prk.as_mut_slice().zeroize();
     let out = Secret32::from_bytes(arr);
     arr.zeroize();
     out
@@ -71,7 +73,11 @@ pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// `K_pay = HKDF(IKM=CK, salt=payload_nonce, info="candor/v1/payload" ‖ suite)` (§13.3).
-pub fn derive_payload_key(
+///
+/// Crate-internal (AUD-RM1-CORE-04): STREAM keys are derived only inside
+/// `stream::StreamEncryptor::for_payload` (fresh internal `payload_nonce`) and the
+/// decrypt-side constructors, so no caller can pick the nonce of an encryption key.
+pub(crate) fn derive_payload_key(
     suite: Suite,
     ck: &ContentKey,
     payload_nonce: &[u8; 16],
@@ -136,7 +142,9 @@ pub fn derive_coi_excl_key(case_key: &CaseKey, case_id: &[u8; 16]) -> Result<Mac
 }
 
 /// Tier W staged part STREAM key: `HKDF(K36, salt=part_id, info="candor/v1/stage/part")` (§9.13).
-pub fn derive_stage_part_key(k36: &Secret32, part_id: &[u8; 16]) -> Result<AeadKey> {
+///
+/// Crate-internal (AUD-RM1-CORE-04): see `stream::StreamEncryptor::for_staged_part`.
+pub(crate) fn derive_stage_part_key(k36: &SessionKey, part_id: &[u8; 16]) -> Result<AeadKey> {
     derive_into!(AeadKey, k36.expose(), part_id, &[labels::STAGE_PART])
 }
 

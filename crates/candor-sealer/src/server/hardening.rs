@@ -57,8 +57,7 @@ pub fn self_check() -> Result<HardeningReport, HardeningError> {
     if !r.landlock_enforced {
         return Err(HardeningError::Landlock);
     }
-    if dumpable_behavior().map_err(|_| HardeningError::Dumpable)? != DumpableBehavior::NotDumpable
-    {
+    if dumpable_behavior().map_err(|_| HardeningError::Dumpable)? != DumpableBehavior::NotDumpable {
         return Err(HardeningError::Dumpable);
     }
     let core = getrlimit(Resource::Core);
@@ -86,9 +85,7 @@ impl InsecureDevMode {
     /// Emit the typed `sys.health` event (service `upload`, status `DEGRADED`,
     /// check `READINESS`; candor-log has no sealer service code yet, see
     /// SPEC-NOTES) and return the token only if the event was accepted.
-    pub fn acknowledge<S, C>(
-        log: &mut candor_log::AuditLog<S, C>,
-    ) -> Result<Self, HardeningError>
+    pub fn acknowledge<S, C>(log: &mut candor_log::AuditLog<S, C>) -> Result<Self, HardeningError>
     where
         S: candor_log::chain::CheckpointSigner,
         C: candor_log::chain::AuditClock,

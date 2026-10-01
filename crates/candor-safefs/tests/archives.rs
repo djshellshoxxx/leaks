@@ -636,3 +636,71 @@ mod props {
         }
     }
 }
+
+// AUD-RM1-SFS-06 regression: the extension-header cap is archive-wide (it
+// used to reset at every real entry), and a second local pax header for the
+// same entry is refused.
+#[test]
+fn tar_extension_header_cap_is_archive_wide() {
+    let e = env();
+    let root = e.root(RootPolicy::Scratch);
+    let comment = "16 comment=abcd\n"; // one valid 16-byte pax record
+    let mut t = TarBuf::new();
+    for i in 0..2 {
+        // 12 global headers per entry: 24 in total > 3 * 2 + 16 = 22.
+        for _ in 0..12 {
+            t.entry(b"GlobalHead", b'g', comment.as_bytes());
+        }
+        t.entry(format!("f{i}").as_bytes(), b'0', b"x");
+    }
+    let mut o = opts();
+    o.limits.max_entries = 2;
+    assert!(matches!(
+        extract_tar(Cursor::new(t.finish()), &root, &o),
+        Err(ArchiveError::LimitHit(LimitKind::Entries))
+    ));
+    assert!(root.list().unwrap().is_empty());
+    let mut t = TarBuf::new();
+    t.pax(&[("comment", "a")])
+        .pax(&[("comment", "b")])
+        .entry(b"f", b'0', b"abc");
+    assert!(matches!(
+        extract_tar(Cursor::new(t.finish()), &root, &opts()),
+        Err(ArchiveError::Malformed(_))
+    ));
+}
+
+// AUD-RM1-SFS-04: Debug output of reports carries no sizes.
+#[test]
+fn report_debug_has_no_sizes() {
+    let e = env();
+    let root = e.root(RootPolicy::Scratch);
+    let mut t = TarBuf::new();
+    t.entry(b"f", b'0', &[7u8; 12345]);
+    let r = extract_tar(Cursor::new(t.finish()), &root, &opts()).unwrap();
+    assert_eq!(r.total_bytes, 12345);
+    let d = format!("{r:?}");
+    assert!(!d.contains("12345") && !d.contains("size") && !d.contains("total_bytes"), "{d}");
+}
+
+// AUD-RM1-SFS-09: local headers must agree with the central directory on
+// method, encryption flag, CRC and sizes.
+#[test]
+fn zip_local_central_field_mismatch_rejected() {
+    let e = env();
+    let root = e.root(RootPolicy::Scratch);
+    let good = zip(&[z(b"a.txt", b"hello")]);
+    assert!(extract_zip(Cursor::new(good.clone()), &root, &opts()).is_ok());
+    for (off, val) in [(8usize, 8u8), (6, 1), (14, 0xAA), (22, 0x77)] {
+        let mut bad = good.clone();
+        bad[off] ^= val;
+        let root = e.root(RootPolicy::Scratch);
+        assert!(
+            matches!(
+                extract_zip(Cursor::new(bad), &root, &opts()),
+                Err(ArchiveError::Malformed(_))
+            ),
+            "offset {off}"
+        );
+    }
+}

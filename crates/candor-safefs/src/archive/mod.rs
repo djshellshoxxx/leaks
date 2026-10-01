@@ -161,6 +161,11 @@ pub enum ArchiveError {
     Unsupported(&'static str),
     /// Storage error.
     Store(SafeFsError),
+    /// The archive failed and removing the members already stored failed
+    /// too (AUD-RM1-SFS-05): the listed objects are still in the root. The
+    /// caller must remove them (retry [`crate::SafeRoot::remove`]) or
+    /// destroy the scratch root; nothing may treat them as extracted.
+    RollbackIncomplete(Vec<ObjectId>),
 }
 
 impl fmt::Display for ArchiveError {
@@ -172,6 +177,13 @@ impl fmt::Display for ArchiveError {
             Self::Malformed(r) => write!(f, "malformed archive: {r}"),
             Self::Unsupported(r) => write!(f, "unsupported archive construct: {r}"),
             Self::Store(e) => write!(f, "store error: {e}"),
+            Self::RollbackIncomplete(ids) => {
+                write!(
+                    f,
+                    "archive rollback incomplete: {} member(s) left",
+                    ids.len()
+                )
+            }
         }
     }
 }
@@ -218,8 +230,9 @@ pub enum RejectReason {
     UnsupportedEntryType,
 }
 
-/// A member stored in the root.
-#[derive(Debug, Clone)]
+/// A member stored in the root. `Debug` omits the size (P-07,
+/// AUD-RM1-SFS-04).
+#[derive(Clone)]
 pub struct ExtractedMember {
     /// Position in the archive (0-based entry index).
     pub index: u64,
@@ -245,8 +258,20 @@ pub struct RejectedMember {
     pub reason: RejectReason,
 }
 
-/// Result of a successful extraction.
-#[derive(Debug, Clone, Default)]
+impl fmt::Debug for ExtractedMember {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ExtractedMember")
+            .field("index", &self.index)
+            .field("id", &self.id)
+            .field("display_name", &self.display_name)
+            .field("nested_archive", &self.nested_archive)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Result of a successful extraction. `Debug` omits sizes (P-07,
+/// AUD-RM1-SFS-04).
+#[derive(Clone, Default)]
 pub struct ExtractionReport {
     /// Extracted members.
     pub members: Vec<ExtractedMember>,
@@ -254,6 +279,15 @@ pub struct ExtractionReport {
     pub rejected: Vec<RejectedMember>,
     /// Total uncompressed bytes stored.
     pub total_bytes: u64,
+}
+
+impl fmt::Debug for ExtractionReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ExtractionReport")
+            .field("members", &self.members)
+            .field("rejected", &self.rejected)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Validates a member name and returns its duplicate-detection key
@@ -436,10 +470,23 @@ impl<'a> Session<'a> {
         match res {
             Ok(()) => Ok(self.report),
             Err(e) => {
-                for m in &self.report.members {
-                    let _ = self.root.remove(&m.id, self.opts.slot);
+                let left: Vec<ObjectId> = self
+                    .report
+                    .members
+                    .iter()
+                    .filter(|m| {
+                        !matches!(
+                            self.root.remove(&m.id, self.opts.slot),
+                            Ok(()) | Err(SafeFsError::NotFound)
+                        )
+                    })
+                    .map(|m| m.id)
+                    .collect();
+                if left.is_empty() {
+                    Err(e)
+                } else {
+                    Err(ArchiveError::RollbackIncomplete(left))
                 }
-                Err(e)
             }
         }
     }
@@ -481,6 +528,33 @@ mod tests {
             check_member_path("e\u{301}".as_bytes(), &l),
             check_member_path("\u{e9}".as_bytes(), &l)
         );
+    }
+
+    // AUD-RM1-SFS-05 regression: a rollback that cannot remove a stored
+    // member reports the leftover ids instead of the bare archive error.
+    #[test]
+    fn incomplete_rollback_is_reported() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let root = SafeRoot::open(dir.path(), crate::RootPolicy::Scratch).unwrap();
+        let slot = SlotTime::from_unix_secs(1_800_000_000 - 1_800_000_000 % 900).unwrap();
+        let opts = ExtractOptions::new(slot);
+        let mut s = Session::new(&root, &opts).unwrap();
+        // A "member" whose entry cannot be unlinked (a directory).
+        let stuck = ObjectId::random().unwrap();
+        std::fs::create_dir(dir.path().join(stuck.to_name())).unwrap();
+        s.report.members.push(ExtractedMember {
+            index: 0,
+            id: stuck,
+            display_name: DisplayName::unnamed(),
+            size: 1,
+            nested_archive: false,
+        });
+        match s.finish(Err(ArchiveError::Malformed("x"))) {
+            Err(ArchiveError::RollbackIncomplete(ids)) => assert_eq!(ids, vec![stuck]),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

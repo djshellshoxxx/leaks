@@ -225,15 +225,24 @@ async fn snapshot_rollback_fork_signature_and_invariants_rejected() {
     resize(&mut next, f.snapshot.tree_size + 7);
     let mut b = signed_bundle(next.clone(), cur.tree_size);
     b.consistency_proof[0][0] ^= 1;
-    assert_eq!(f.sealer.install_snapshot(b, |_| true), Err(SnapshotError::Fork));
+    assert_eq!(
+        f.sealer.install_snapshot(b, |_| true),
+        Err(SnapshotError::Fork)
+    );
     // Bad LOG_KEY signature.
     let mut b = signed_bundle(next.clone(), cur.tree_size);
     b.checkpoint.log_sig[0] ^= 1;
-    assert_eq!(f.sealer.install_snapshot(b, |_| true), Err(SnapshotError::Signature));
+    assert_eq!(
+        f.sealer.install_snapshot(b, |_| true),
+        Err(SnapshotError::Signature)
+    );
     // View not bound to the checkpoint.
     let mut b = signed_bundle(next.clone(), cur.tree_size);
     b.view.issued_hour += 1;
-    assert_eq!(f.sealer.install_snapshot(b, |_| true), Err(SnapshotError::Invalid));
+    assert_eq!(
+        f.sealer.install_snapshot(b, |_| true),
+        Err(SnapshotError::Invalid)
+    );
     // Two COI policies with the same effective day: invalid.
     let mut bad = next.clone();
     let p = bad.channels[0].coi_policies[0].clone();
@@ -242,17 +251,22 @@ async fn snapshot_rollback_fork_signature_and_invariants_rejected() {
     // More than 16 Triage Set persons: invalid.
     let mut bad = next.clone();
     for i in 0..16u8 {
-        bad.channels[0].members.push(candor_sealer::server::directory::RosterMember {
-            user_id: [100 + i; 16],
-            role_label: 70,
-            read_intake: true,
-            effective_day: 0,
-        });
+        bad.channels[0]
+            .members
+            .push(candor_sealer::server::directory::RosterMember {
+                user_id: [100 + i; 16],
+                role_label: 70,
+                read_intake: true,
+                effective_day: 0,
+            });
     }
     assert_eq!(f.install(bad), Err(SnapshotError::Invalid));
     // Persist failure: nothing installed, mark unchanged.
     let b = signed_bundle(next.clone(), cur.tree_size);
-    assert_eq!(f.sealer.install_snapshot(b, |_| false), Err(SnapshotError::Persist));
+    assert_eq!(
+        f.sealer.install_snapshot(b, |_| false),
+        Err(SnapshotError::Persist)
+    );
     assert_eq!(f.sealer.high_water_mark(), cur);
     // Nothing above changed the mark; a valid extension is accepted and the
     // mark persisted before use.
@@ -282,8 +296,14 @@ async fn witness_cosignature_policy_enforced() {
     let w_ext = SigningKey::from_seed(&[0x72; 32]);
     let trust = DirectoryTrust {
         witnesses: vec![
-            WitnessKey { pk: w_int.verifying_key_bytes(), external: false },
-            WitnessKey { pk: w_ext.verifying_key_bytes(), external: true },
+            WitnessKey {
+                pk: w_int.verifying_key_bytes(),
+                external: false,
+            },
+            WitnessKey {
+                pk: w_ext.verifying_key_bytes(),
+                external: true,
+            },
         ],
         min_cosignatures: 2,
         min_external: 1,
@@ -322,8 +342,14 @@ async fn witness_cosignature_policy_enforced() {
     // Two internal-only witnesses do not satisfy w_external = 1.
     let t2 = DirectoryTrust {
         witnesses: vec![
-            WitnessKey { pk: w_int.verifying_key_bytes(), external: false },
-            WitnessKey { pk: w_ext.verifying_key_bytes(), external: false },
+            WitnessKey {
+                pk: w_int.verifying_key_bytes(),
+                external: false,
+            },
+            WitnessKey {
+                pk: w_ext.verifying_key_bytes(),
+                external: false,
+            },
         ],
         ..trust.clone()
     };
@@ -347,12 +373,14 @@ async fn coi_excluded_person_listed_under_two_labels_gets_no_slot() {
     snap.snapshot_version = 2;
     let n = snap.tree_size + 1;
     resize(&mut snap, n);
-    snap.channels[0].members.push(candor_sealer::server::directory::RosterMember {
-        user_id: f.members[1].user_id,
-        role_label: 9,
-        read_intake: true,
-        effective_day: TODAY - 30,
-    });
+    snap.channels[0]
+        .members
+        .push(candor_sealer::server::directory::RosterMember {
+            user_id: f.members[1].user_id,
+            role_label: 9,
+            read_intake: true,
+            effective_day: TODAY - 30,
+        });
     f.install(snap).unwrap();
     let s = sess(1);
     let coi = Coi {
