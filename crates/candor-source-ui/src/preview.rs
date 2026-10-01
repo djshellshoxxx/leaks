@@ -288,11 +288,16 @@ fn add_errors(vm: &mut ViewModel, screen: Screen) {
             vec![fe("passphrase", "sui-login-err-auth")]
         }
         Screen::Conversation => vec![fe("text", "sui-conv-err-empty")],
-        Screen::Review => vec![fe("what", "sui-review-err-missing")],
         _ => Vec::new(),
     };
     if errs.is_empty() {
-        vm.ctx.page_error = Some(Msg::new("sui-error-not-sent"));
+        // Screens without fields on the page report a page-level error (on S08 the missing
+        // answers are reached with the Edit buttons).
+        vm.ctx.page_error = Some(Msg::new(if screen == Screen::Review {
+            "sui-review-err-missing"
+        } else {
+            "sui-error-not-sent"
+        }));
     }
     vm.ctx.errors = errs;
     vm.ctx.text_kept = true;

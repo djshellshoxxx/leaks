@@ -19,10 +19,10 @@
 
 use crate::bytes::Reader;
 use crate::error::{Error, Result};
-use crate::hash::sha256;
+use crate::hash::{KeyKind, key_id, sha256};
 use crate::kdf::{ct_eq, hkdf};
 use crate::kem::{
-    ENCAP_RANDOMNESS_LEN, KemKeyPair, KemPrivateKey, KemPublicKey, open_base, seal_base_with,
+    ENCAP_RANDOMNESS_LEN, KemKeyPair, KemPrivateKey, KemPublicKey, open_base,
     seal_base_with_randomness,
 };
 use crate::labels;
@@ -131,11 +131,72 @@ impl Slot {
     }
 }
 
-/// Result of slot verification.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SlotVerification {
-    /// Positions of non-dummy (real) slots.
-    pub real_positions: Vec<usize>,
+/// Length of a serialized [`RecipientListEntry`]: `u8 slot_index ‖ key_id (32) ‖ enc_rand (64)`.
+pub const RECIPIENT_ENTRY_LEN: usize = 1 + 32 + ENCAP_RANDOMNESS_LEN;
+
+/// One Recipient List entry (ADR-050(3)): the slot position, the recipient key id and
+/// the 64-byte X-Wing encapsulation randomness used for that slot. Carried only inside
+/// the AEAD-protected payload; `enc_rand` gives a CK holder nothing beyond CK.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RecipientListEntry {
+    /// Slot position (0..15).
+    pub slot_index: u8,
+    /// `key_id` of the recipient public key (§13.2; kind MEK or custodian).
+    pub key_id: [u8; 32],
+    /// Encapsulation randomness drawn from the CSPRNG at sealing.
+    pub enc_rand: [u8; ENCAP_RANDOMNESS_LEN],
+}
+
+impl Drop for RecipientListEntry {
+    fn drop(&mut self) {
+        self.enc_rand.zeroize();
+    }
+}
+
+impl core::fmt::Debug for RecipientListEntry {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("RecipientListEntry")
+            .field("slot_index", &self.slot_index)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RecipientListEntry {
+    /// Serialize: `u8 slot_index ‖ key_id ‖ enc_rand` (97 bytes).
+    #[must_use]
+    pub fn to_bytes(&self) -> [u8; RECIPIENT_ENTRY_LEN] {
+        let mut out = [0u8; RECIPIENT_ENTRY_LEN];
+        let (a, rest) = out.split_at_mut(1);
+        let (b, c) = rest.split_at_mut(32);
+        a.copy_from_slice(&[self.slot_index]);
+        b.copy_from_slice(&self.key_id);
+        c.copy_from_slice(&self.enc_rand);
+        out
+    }
+
+    /// Parse exactly 97 bytes; `slot_index` must be < 16.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let mut r = Reader::new(bytes);
+        let slot_index = r.u8()?;
+        if usize::from(slot_index) >= SLOT_COUNT {
+            return Err(Error::Malformed("slot_index"));
+        }
+        let key_id = r.array()?;
+        let enc_rand = r.array()?;
+        r.finish()?;
+        Ok(Self {
+            slot_index,
+            key_id,
+            enc_rand,
+        })
+    }
+}
+
+fn kind_for(ctx: &SlotContext) -> KeyKind {
+    match ctx {
+        SlotContext::MemberEpoch { .. } => KeyKind::Mek,
+        SlotContext::Custodian { .. } => KeyKind::Custodian,
+    }
 }
 
 /// A RecipientSlotBlock.
@@ -177,12 +238,14 @@ pub(crate) fn dummy_slot(ck: &ContentKey, b: &SlotBinding, i: u8) -> Result<Slot
 
 impl RecipientSlotBlock {
     /// Build a block: one real slot per recipient public key, the rest verifiable
-    /// dummies, real slots at uniformly random positions (CRYPTO-058).
+    /// dummies, real slots at uniformly random positions (CRYPTO-058). Returns the
+    /// block and the Recipient List entries (ADR-050(3)), in recipient order, to embed
+    /// in the signed, AEAD-protected Recipient List.
     pub fn build(
         ck: &ContentKey,
         binding: &SlotBinding,
         recipients: &[KemPublicKey],
-    ) -> Result<Self> {
+    ) -> Result<(Self, Vec<RecipientListEntry>)> {
         Self::build_with(&mut OsRandom, ck, binding, recipients)
     }
 
@@ -191,7 +254,7 @@ impl RecipientSlotBlock {
         ck: &ContentKey,
         b: &SlotBinding,
         recipients: &[KemPublicKey],
-    ) -> Result<Self> {
+    ) -> Result<(Self, Vec<RecipientListEntry>)> {
         b.suite.require_supported()?;
         if recipients.len() > SLOT_COUNT {
             return Err(Error::TooManyRecipients);
@@ -200,21 +263,43 @@ impl RecipientSlotBlock {
         let perm = permutation(rng, SLOT_COUNT)?;
         let info = b.context.info(b.suite);
         let aad = slot_aad(&b.object_id, &b.payload_nonce);
+        let kind = kind_for(&b.context);
         let mut slots = Vec::with_capacity(SLOT_COUNT);
+        let mut entries: Vec<(usize, RecipientListEntry)> = Vec::with_capacity(recipients.len());
         for (pos, who) in perm.iter().enumerate() {
+            let pos_u8 = u8::try_from(pos).map_err(|_| Error::Internal)?;
             let slot = match recipients.get(*who) {
                 Some(pk) => {
-                    let (enc, ct) = seal_base_with(rng, pk, &info, &aad, ck.expose())?;
+                    // ADR-050(3): CSPRNG-drawn encapsulation randomness, disclosed to
+                    // recipients inside the Recipient List.
+                    let mut enc_rand = [0u8; ENCAP_RANDOMNESS_LEN];
+                    rng.fill(&mut enc_rand)?;
+                    let sealed = seal_base_with_randomness(pk, &info, &aad, ck.expose(), enc_rand);
+                    entries.push((
+                        *who,
+                        RecipientListEntry {
+                            slot_index: pos_u8,
+                            key_id: key_id(b.suite, kind, &pk.to_bytes()),
+                            enc_rand,
+                        },
+                    ));
+                    enc_rand.zeroize();
+                    let (enc, ct) = sealed?;
                     Slot::from_parts(enc, ct)?
                 }
-                None => dummy_slot(ck, b, u8::try_from(pos).map_err(|_| Error::Internal)?)?,
+                None => dummy_slot(ck, b, pos_u8)?,
             };
             slots.push(slot);
         }
-        Ok(Self {
-            suite: b.suite,
-            slots,
-        })
+        entries.sort_by_key(|(who, _)| *who);
+        let list = entries.into_iter().map(|(_, e)| e).collect();
+        Ok((
+            Self {
+                suite: b.suite,
+                slots,
+            },
+            list,
+        ))
     }
 
     /// Suite.
@@ -288,36 +373,65 @@ impl RecipientSlotBlock {
         found.ok_or(Error::Authentication)
     }
 
-    /// Verify that every slot is either the verifiable dummy for its position or one
-    /// of exactly `recipient_count` non-dummy slots (count from the signed Recipient
-    /// List, §13.2, THR-046). Also requires `own_position` (the slot this Desk opened)
-    /// to be a non-dummy slot when given.
-    pub fn verify(
+    /// Full recipient-set verification (ADR-050(3), THR-046): re-derive **all 16**
+    /// slots — listed slots by re-encapsulating CK to the listed key (resolved from the
+    /// Key Directory by `resolve_pk`) with the entry's `enc_rand`, every other slot as
+    /// the dummy for its position — and require byte equality for every slot.
+    ///
+    /// Fails with [`Error::SlotVerification`] on any mismatch, a duplicate or
+    /// out-of-range `slot_index`, an unresolvable key id, or a resolved key whose
+    /// `key_id` differs. Detects extra hidden recipients and listed recipients swapped
+    /// for another key. All 16 slots are always re-derived and compared.
+    pub fn verify_slot_block<F>(
         &self,
         ck: &ContentKey,
         b: &SlotBinding,
-        recipient_count: usize,
-        own_position: Option<usize>,
-    ) -> Result<SlotVerification> {
-        if b.suite != self.suite || self.slots.len() != SLOT_COUNT {
+        list: &[RecipientListEntry],
+        resolve_pk: F,
+    ) -> Result<()>
+    where
+        F: Fn(&[u8; 32]) -> Option<KemPublicKey>,
+    {
+        if b.suite != self.suite || self.slots.len() != SLOT_COUNT || list.len() > SLOT_COUNT {
             return Err(Error::SlotVerification);
         }
-        let mut real_positions = Vec::new();
-        for (pos, s) in self.slots.iter().enumerate() {
-            let d = dummy_slot(ck, b, u8::try_from(pos).map_err(|_| Error::Internal)?)?;
-            if !s.ct_eq(&d) {
-                real_positions.push(pos);
+        let mut by_pos: [Option<&RecipientListEntry>; SLOT_COUNT] = [None; SLOT_COUNT];
+        for e in list {
+            let cell = by_pos
+                .get_mut(usize::from(e.slot_index))
+                .ok_or(Error::SlotVerification)?;
+            if cell.is_some() {
+                return Err(Error::SlotVerification);
             }
+            *cell = Some(e);
         }
-        if real_positions.len() != recipient_count {
-            return Err(Error::SlotVerification);
+        let info = b.context.info(b.suite);
+        let aad = slot_aad(&b.object_id, &b.payload_nonce);
+        let kind = kind_for(&b.context);
+        let mut ok = true;
+        for (pos, (s, entry)) in self.slots.iter().zip(by_pos.iter()).enumerate() {
+            let expected = match entry {
+                Some(e) => match resolve_pk(&e.key_id) {
+                    Some(pk) if key_id(b.suite, kind, &pk.to_bytes()) == e.key_id => {
+                        let (enc, ct) =
+                            seal_base_with_randomness(&pk, &info, &aad, ck.expose(), e.enc_rand)?;
+                        Some(Slot::from_parts(enc, ct)?)
+                    }
+                    _ => None,
+                },
+                None => Some(dummy_slot(
+                    ck,
+                    b,
+                    u8::try_from(pos).map_err(|_| Error::Internal)?,
+                )?),
+            };
+            ok &= expected.as_ref().is_some_and(|x| s.ct_eq(x));
         }
-        if let Some(p) = own_position
-            && !real_positions.contains(&p)
-        {
-            return Err(Error::SlotVerification);
+        if ok {
+            Ok(())
+        } else {
+            Err(Error::SlotVerification)
         }
-        Ok(SlotVerification { real_positions })
     }
 }
 

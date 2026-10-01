@@ -636,11 +636,11 @@ impl<'a> PageView<'a> {
                 s
             }
             Block::Dynamic(k) => {
-                let text = self.dynamic(k);
-                if text.is_empty() {
+                let html = self.dynamic(k);
+                if html.is_empty() {
                     String::new()
                 } else {
-                    format!("<p>{}</p>", escape_marked(&text))
+                    format!("<p>{html}</p>")
                 }
             }
             Block::Jurisdiction(which) => {
@@ -658,38 +658,42 @@ impl<'a> PageView<'a> {
     }
 
     /// Dynamic card paragraphs, filled from signed configuration (05 GC-01 placeholders).
+    /// Returns escaped HTML.
     fn dynamic(&self, key: &str) -> String {
         let d = &self.vm.deployment;
+        let text = |v: &str| Arg::Text(v.to_owned());
         match key {
-            "sops-limits-n1" | "sops-timing-h1" => self.t1(key, "profile", self.profile()),
+            "sops-limits-n1" | "sops-timing-h1" => {
+                self.marked(key, &[("profile", text(self.profile()))])
+            }
             "sops-limits-n4" => {
                 let Some(ch) = self.vm.status.channels.first() else {
                     return String::new();
                 };
-                let mut s = self.t2(
+                let mut s = self.marked(
                     key,
-                    "triage",
-                    self.join(&ch.triage),
-                    "others",
-                    self.join(&ch.others),
+                    &[
+                        ("triage", Arg::Text(self.join(&ch.triage))),
+                        ("others", Arg::Text(self.join(&ch.others))),
+                    ],
                 );
                 for extra in self.config_statements() {
                     s.push(' ');
-                    s.push_str(&extra);
+                    s.push_str(&escape(&extra));
                 }
                 s
             }
-            "sops-passphrase-n1" => self.t1(key, "n", self.words()),
-            "sops-return-n1" => self.t1(key, "days", d.ack_days),
-            "sops-censorship-n2" => self.t1(key, "info", d.info_site_address.as_str()),
-            "sops-tier-n2" => self.t2(
+            "sops-passphrase-n1" => self.marked(key, &[("n", Arg::Num(self.words()))]),
+            "sops-return-n1" => self.marked(key, &[("days", Arg::Num(u64::from(d.ack_days)))]),
+            "sops-censorship-n2" => self.marked(key, &[("info", text(&d.info_site_address))]),
+            "sops-tier-n2" => self.marked(
                 key,
-                "address",
-                d.project_onion_address.as_str(),
-                "org",
-                self.org(),
+                &[
+                    ("address", text(&d.project_onion_address)),
+                    ("org", text(self.org())),
+                ],
             ),
-            _ => self.t(key),
+            _ => self.tm(key),
         }
     }
 

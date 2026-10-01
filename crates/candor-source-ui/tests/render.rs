@@ -130,10 +130,14 @@ fn no_script_handlers_external_urls_or_inline_styles() {
         assert_eq!(lower.matches("<style").count(), 1, "{id}: one <style> only");
         assert!(!attr_on(&lower), "{id}: on*= attribute");
         assert!(!lower.contains(" style="), "{id}: style attribute");
-        assert!(!lower.contains(" capture"), "{id}: capture attribute");
         let html = Html::parse_document(&b);
         for el in html.select(&sel("*")) {
             for (name, value) in el.value().attrs() {
+                assert!(
+                    !matches!(name, "capture" | "style" | "download" | "ping" | "srcset")
+                        && !name.starts_with("on"),
+                    "{id}: attribute {name}"
+                );
                 if matches!(name, "href" | "src" | "action" | "formaction") {
                     let ok = value.starts_with('/') && !value.starts_with("//")
                         || value.starts_with('#')
@@ -499,9 +503,14 @@ fn passphrase_display() {
             Some("cobalt ripple anthem gravel sonnet mosaic tundra whistle ember lantern")
         );
         assert!(h.select(&sel("details ol li")).any(|li| text_of(li) == "c o b a l t"));
-        let lower = b.to_ascii_lowercase();
-        for bad in ["download", "print", "qr", "mailto:", "clipboard"] {
-            assert!(!lower.contains(bad), "{bad}");
+        // No download, print, QR, email or scripted copy affordances (SOPS-022).
+        for el in h.select(&sel("main a, main button")) {
+            let t = text_of(el).to_lowercase();
+            for bad in ["download", "print", "qr", "email", "copy to clipboard"] {
+                assert!(!t.contains(bad), "{bad}: {t}");
+            }
+            assert!(el.value().attr("download").is_none());
+            assert!(!el.value().attr("href").unwrap_or("").starts_with("mailto:"));
         }
         // Passphrase never in the title (08 SW-08).
         let title = text_of(h.select(&sel("title")).next().unwrap());
@@ -804,7 +813,7 @@ fn invalid_ids_rejected() {
 fn identity_confirmation_equal_buttons() {
     let (_, b) = render_ok(Screen::IdentityConfirm, Locale::En, Mode::Anonymous, false);
     let h = Html::parse_document(&b);
-    let btns: Vec<_> = h.select(&sel("main form button")).collect();
+    let btns: Vec<_> = h.select(&sel("main .pair button")).collect();
     assert_eq!(btns.len(), 2);
     assert_eq!(btns[0].value().attr("class"), btns[1].value().attr("class"));
     assert_eq!(text_of(btns[0]), "No, stay anonymous");
