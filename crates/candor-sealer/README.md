@@ -66,7 +66,7 @@ rt.block_on(async {
 
 The integrator supplies four things:
 - `Clock` (16 §14.3): the independent day clock, built from the Tor consensus and Roughtime.
-- `EnvelopeSink`: the store client. `commit_envelope_group` (no account reference) hands the sealed bundle (`Blob::Staged`, a sealed memfd) to the store with `handover::hand_over` over `istore.sock` (`SCM_RIGHTS`, deploy D-33) and returns only after the store's commit acknowledgement; `upsert_account` is called from the shuffled account batches (`flush_accounts`, every `account_flush_interval`; ADR-052(2), SEA-21).
+- `EnvelopeSink`: the store client. `commit_envelope_group` (no account reference) hands the sealed bundle (`Blob::Staged`, a sealed memfd) to the store with `handover::StoreConnection::hand_over` over `istore.sock` (closed on any error or timeout) (`SCM_RIGHTS`, deploy D-33) and returns only after the store's commit acknowledgement; `upsert_account` is called from the shuffled account batches (`flush_accounts`, every `account_flush_interval`; ADR-052(2), SEA-21).
 - `SnapshotBundle`s (the signed checkpoint, the consistency proof from the high-water mark and **every** SignedKDEntry of the log), refreshed hourly; the pinned `DirectoryTrust` (K01, epoch origin, cosignature floors) in the config. The sealer verifies every entry itself (`kd`, AUD-RM2-SEA-19).
 - K35, loaded from a systemd credential.
 

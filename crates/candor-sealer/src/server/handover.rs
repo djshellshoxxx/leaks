@@ -197,7 +197,7 @@ pub fn encode_header(b: &StagedBundle) -> [u8; MSG_LEN] {
 }
 
 /// Send the hand-over message with the bundle's descriptor over `sock`.
-pub fn send(sock: impl AsFd, b: &StagedBundle) -> Result<(), SinkError> {
+pub(crate) fn send(sock: impl AsFd, b: &StagedBundle) -> Result<(), SinkError> {
     let msg = encode_header(b);
     let fds = [b.as_fd()];
     let mut space = [MaybeUninit::<u8>::uninit(); rustix::cmsg_space!(ScmRights(1))];
@@ -219,15 +219,14 @@ pub fn send(sock: impl AsFd, b: &StagedBundle) -> Result<(), SinkError> {
 /// `fsync`); a hung store fails the commit instead of pinning a thread.
 pub const ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// Wait for the store's acknowledgement, at most [`ACK_TIMEOUT`]. `Ok` only
-/// for [`ACK_COMMITTED`]; a refusal, a timeout, EOF, a longer message or any
-/// descriptor sent back is an error (received descriptors are closed).
-pub fn await_ack(sock: impl AsFd) -> Result<(), SinkError> {
-    await_ack_within(sock, ACK_TIMEOUT)
-}
-
-/// [`await_ack`] with an explicit bound (`SO_RCVTIMEO` on the socket).
-pub fn await_ack_within(sock: impl AsFd, timeout: std::time::Duration) -> Result<(), SinkError> {
+/// Wait for the store's acknowledgement, at most `timeout` (`SO_RCVTIMEO`).
+/// `Ok` only for [`ACK_COMMITTED`]; a refusal, a timeout, EOF, a longer
+/// message or any descriptor sent back is an error (received descriptors are
+/// closed).
+pub(crate) fn await_ack_within(
+    sock: impl AsFd,
+    timeout: std::time::Duration,
+) -> Result<(), SinkError> {
     if timeout.is_zero() {
         return Err(SinkError);
     }
@@ -269,9 +268,56 @@ pub fn await_ack_within(sock: impl AsFd, timeout: std::time::Duration) -> Result
     }
 }
 
-/// [`send`] then [`await_ack`]: returns `Ok` only once the store has durably
-/// committed the envelope referencing its copy of the bundle.
-pub fn hand_over(sock: impl AsFd, b: &StagedBundle) -> Result<(), SinkError> {
-    send(&sock, b)?;
-    await_ack(&sock)
+/// The sealer's connection to `istore.sock` for bundle hand-overs. Any error
+/// or timeout **closes** the socket, so a late acknowledgement of a failed
+/// hand-over can never be read as the acknowledgement of the next bundle
+/// (round-4 note; the hash echo comes with C-5). After a failure the
+/// integrator reconnects and builds a new `StoreConnection`.
+pub struct StoreConnection {
+    sock: Option<OwnedFd>,
+    ack_timeout: std::time::Duration,
+}
+
+impl core::fmt::Debug for StoreConnection {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("StoreConnection")
+            .field("open", &self.sock.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl StoreConnection {
+    /// Wrap a connected `istore.sock` descriptor.
+    #[must_use]
+    pub fn new(sock: OwnedFd) -> Self {
+        Self::with_ack_timeout(sock, ACK_TIMEOUT)
+    }
+
+    /// As [`StoreConnection::new`] with another acknowledgement bound.
+    #[must_use]
+    pub fn with_ack_timeout(sock: OwnedFd, ack_timeout: std::time::Duration) -> Self {
+        Self {
+            sock: Some(sock),
+            ack_timeout,
+        }
+    }
+
+    /// The connection is usable (no failure so far).
+    #[must_use]
+    pub fn is_open(&self) -> bool {
+        self.sock.is_some()
+    }
+
+    /// Hand `b` over and wait for the commit acknowledgement. On any error
+    /// the socket is closed and every later call fails.
+    pub fn hand_over(&mut self, b: &StagedBundle) -> Result<(), SinkError> {
+        let Some(sock) = self.sock.as_ref() else {
+            return Err(SinkError);
+        };
+        let r = send(sock, b).and_then(|()| await_ack_within(sock, self.ack_timeout));
+        if r.is_err() {
+            self.sock = None;
+        }
+        r
+    }
 }

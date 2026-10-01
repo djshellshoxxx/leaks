@@ -19,7 +19,9 @@ use std::io::{IoSlice, IoSliceMut};
 use std::mem::MaybeUninit;
 use std::os::fd::{AsFd, OwnedFd};
 
-use candor_sealer::server::handover::{self, ACK_COMMITTED, ACK_REFUSED, MSG_LEN, VERSION};
+use candor_sealer::server::handover::{
+    ACK_COMMITTED, ACK_REFUSED, MSG_LEN, StoreConnection, VERSION,
+};
 use candor_sealer::server::sink::{SinkError, StagedBundle};
 use candor_sealer::server::{ChaffConfig, Limits};
 use common::*;
@@ -140,7 +142,9 @@ async fn bundle_is_handed_over_as_a_sealed_descriptor() {
         reply(&store_end, &[ACK_COMMITTED], None);
         buf
     });
-    handover::hand_over(&sealer_end, &b).unwrap();
+    let mut conn = StoreConnection::new(sealer_end);
+    conn.hand_over(&b).unwrap();
+    assert!(conn.is_open());
     let bytes = store.join().unwrap();
     assert_eq!(bytes, b.read_to_vec().unwrap());
     // The bundle starts with a CoreHeader of an ATTACHMENT_BUNDLE.
@@ -156,7 +160,10 @@ async fn hand_over_fails_closed_without_a_commit_ack() {
         let _ = receive(&st);
         reply(&st, &[ACK_REFUSED], None);
     });
-    assert_eq!(handover::hand_over(&s, &b), Err(SinkError));
+    let mut conn = StoreConnection::new(s);
+    assert_eq!(conn.hand_over(&b), Err(SinkError));
+    assert!(!conn.is_open(), "closed after a failure");
+    assert_eq!(conn.hand_over(&b), Err(SinkError));
     t.join().unwrap();
     // An unknown byte, or more than one byte.
     for answer in [&[0x02u8][..], &[ACK_COMMITTED, 0][..]] {
@@ -166,7 +173,7 @@ async fn hand_over_fails_closed_without_a_commit_ack() {
             let _ = receive(&st);
             reply(&st, &a, None);
         });
-        assert_eq!(handover::hand_over(&s, &b), Err(SinkError));
+        assert_eq!(StoreConnection::new(s).hand_over(&b), Err(SinkError));
         t.join().unwrap();
     }
     // A descriptor sent back with the ack is refused (and closed).
@@ -175,7 +182,7 @@ async fn hand_over_fails_closed_without_a_commit_ack() {
         let (_, _, fds) = receive(&st);
         reply(&st, &[ACK_COMMITTED], fds.first());
     });
-    assert_eq!(handover::hand_over(&s, &b), Err(SinkError));
+    assert_eq!(StoreConnection::new(s).hand_over(&b), Err(SinkError));
     t.join().unwrap();
     // The store goes away without answering.
     let (s, st) = pair();
@@ -183,26 +190,27 @@ async fn hand_over_fails_closed_without_a_commit_ack() {
         let _ = receive(&st);
         drop(st);
     });
-    assert_eq!(handover::hand_over(&s, &b), Err(SinkError));
+    assert_eq!(StoreConnection::new(s).hand_over(&b), Err(SinkError));
     t.join().unwrap();
-    // A store that never answers: bounded wait, then failure.
+    // A store that answers too late: bounded wait, failure, socket closed —
+    // the late ack can never be credited to the next bundle.
     let (s, st) = pair();
     let t = std::thread::spawn(move || {
-        let r = receive(&st);
-        std::thread::sleep(std::time::Duration::from_millis(600));
-        drop(r);
-        drop(st);
+        let _ = receive(&st);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        // The late ack goes nowhere: the sealer side is closed.
+        let late = rustix::net::send(&st, &[ACK_COMMITTED], SendFlags::NOSIGNAL);
+        assert!(late.is_err(), "late ack must not reach an open socket");
     });
-    handover::send(&s, &b).unwrap();
+    let mut conn = StoreConnection::with_ack_timeout(s, std::time::Duration::from_millis(200));
     let start = std::time::Instant::now();
-    assert_eq!(
-        handover::await_ack_within(&s, std::time::Duration::from_millis(200)),
-        Err(SinkError)
-    );
-    assert!(start.elapsed() < std::time::Duration::from_millis(550));
+    assert_eq!(conn.hand_over(&b), Err(SinkError));
+    assert!(start.elapsed() < std::time::Duration::from_millis(450));
+    assert!(!conn.is_open());
+    assert_eq!(conn.hand_over(&b), Err(SinkError));
     t.join().unwrap();
     // Peer already closed: the send itself fails (no SIGPIPE).
     let (s, st) = pair();
     drop(st);
-    assert_eq!(handover::send(&s, &b), Err(SinkError));
+    assert_eq!(StoreConnection::new(s).hand_over(&b), Err(SinkError));
 }

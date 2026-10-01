@@ -24,7 +24,7 @@ pub enum Blob {
     Inline(Vec<u8>),
     /// The sealed ATTACHMENT_BUNDLE as an immutable anonymous file (sealed
     /// `memfd`, deploy D-33 / AUD-RM2-SEA-16). A store-backed sink passes its
-    /// descriptor to the store with [`crate::server::handover::hand_over`]
+    /// descriptor to the store with [`crate::server::handover::StoreConnection::hand_over`]
     /// (`SCM_RIGHTS`, never a path) and returns `Ok` only after the store's
     /// commit acknowledgement. Dropping it frees it; nothing has to be deleted.
     Staged(StagedBundle),
@@ -161,4 +161,12 @@ pub trait EnvelopeSink: Send + Sync {
 
     /// Create or replace an account (separate store operation, ADR-052(2)).
     fn upsert_account(&self, op: AccountUpsert) -> Result<(), SinkError>;
+
+    /// Whether the store is reachable right now (e.g. its connection is open,
+    /// [`crate::server::handover::StoreConnection::is_open`]). Checked before a
+    /// seal consumes the staged parts: when `false`, the seal fails with the
+    /// uniform `INTERNAL` and the draft keeps its attachments. Default `true`.
+    fn is_available(&self) -> bool {
+        true
+    }
 }

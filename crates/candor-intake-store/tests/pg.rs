@@ -1844,6 +1844,18 @@ async fn pg_vacuum_full_erases_old_images() {
 
     let before = s.export_backup().await.unwrap();
     let mailbox = s.mailbox_list(a).await.unwrap();
+    let activity: Vec<(
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> = sqlx::query_as(
+        "SELECT usename::text, state, backend_xmin::text, backend_xid::text FROM pg_stat_activity \
+         WHERE datname = current_database() AND pid <> pg_backend_pid()",
+    )
+    .fetch_all(&mut c)
+    .await
+    .unwrap();
     vacuum_full_daily(&vac(&b, &db)).await.unwrap();
     let after_rels = intake_relations(&mut c).await;
     assert_eq!(after_rels.len(), rels.len());
@@ -1867,7 +1879,10 @@ async fn pg_vacuum_full_erases_old_images() {
         hx += x;
         hc += k;
     }
-    assert_eq!(hx, 0, "old tuple headers survive VACUUM FULL: {residue:?}");
+    assert_eq!(
+        hx, 0,
+        "old tuple headers survive VACUUM FULL: {residue:?} slot {slot} activity {activity:?}"
+    );
     assert_eq!(hc, 0, "old chunk ids survive VACUUM FULL: {residue:?}");
     // Content and the single slot xmin are unchanged.
     assert_eq!(s.export_backup().await.unwrap(), before);

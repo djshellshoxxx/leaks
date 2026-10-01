@@ -95,6 +95,21 @@ pub struct Limits {
     /// upload needs about twice its size (part + bundle), so the largest
     /// accepted file is about half of this.
     pub memory_budget_bytes: u64,
+    /// Fixed upload quota each draft reserves from the budget when it starts
+    /// its first attachment (AUD-RM2-SEA-29). At most `memory_budget_bytes /
+    /// per_session_upload_bytes` drafts upload at once; beyond that the first
+    /// `PART_BEGIN` gets the session-level `BUSY` (capacity-revealing by
+    /// design, ADR-038). Within its own quota a draft never gets `BUSY`, only
+    /// `LIMIT` when its own attachments would exceed the quota. A part needs
+    /// about twice its size (staged part + bundle), so the largest single
+    /// attachment is about half the quota. Default 768 MiB: 5 concurrent
+    /// uploading drafts within the default budget, files up to ~380 MiB —
+    /// below the 4 GiB maximum of ADR-046(4), which needs a deployment with a
+    /// larger `MemoryMax`, budget and quota (fewer concurrent uploaders).
+    pub per_session_upload_bytes: u64,
+    /// A part that receives no bytes for this long is aborted; a draft left
+    /// without attachments releases its quota (SEA-29). Default 120 s.
+    pub part_stall_timeout: Duration,
     /// Confirmation attempts before the draft is zeroized (07 §5.2: 5).
     pub max_confirm_failures: u8,
     /// Passphrase (re)generations per session (SW-25: 5).
@@ -124,6 +139,8 @@ impl Default for Limits {
             max_bundle_bytes: 4 << 30,
             max_parts: 20,
             memory_budget_bytes: 3_840 << 20,
+            per_session_upload_bytes: 768 << 20,
+            part_stall_timeout: Duration::from_secs(120),
             max_confirm_failures: 5,
             max_phrase_generations: 5,
             max_connections: 128,
@@ -466,6 +483,9 @@ impl Sealer {
             || cfg.limits.argon_permits == 0
             || cfg.limits.max_connections == 0
             || cfg.limits.memory_budget_bytes == 0
+            || cfg.limits.per_session_upload_bytes == 0
+            || cfg.limits.per_session_upload_bytes > cfg.limits.memory_budget_bytes
+            || cfg.limits.part_stall_timeout.is_zero()
             || cfg.directory_trust.tenant_id != cfg.tenant_id
             || cfg.directory_trust.org_root_pk == [0u8; 32]
             || cfg.directory_trust.min_external > cfg.directory_trust.min_cosignatures
@@ -607,6 +627,24 @@ impl Sealer {
             dead.iter().filter_map(|h| t.remove(h)).collect()
         };
         drop(gone);
+        // SEA-29: abort parts that received no bytes for the stall timeout and
+        // free the quota of drafts left without attachments. Sessions busy
+        // with a request are skipped (they are not stalled).
+        let live: Vec<Arc<tokio::sync::Mutex<Session>>> = lock(&self.st.sessions)
+            .values()
+            .map(|e| e.sess.clone())
+            .collect();
+        for s in live {
+            if let Ok(mut g) = s.try_lock() {
+                let stalled = g.upload.as_ref().is_some_and(|u| {
+                    now.saturating_duration_since(u.last_progress) >= lim.part_stall_timeout
+                });
+                if stalled {
+                    g.upload = None;
+                    g.release_quota_if_idle();
+                }
+            }
+        }
     }
 
     /// Handle one request.
@@ -808,6 +846,7 @@ impl Sealer {
         // The source has now seen the draft as it is (SEA-26: attachments
         // dropped by a failed seal are no longer listed).
         g.parts_lost = false;
+        g.release_quota_if_idle();
         Response::Draft(Box::new(DraftView {
             mode: g.draft.mode.unwrap_or(Mode::Anonymous),
             message: g.draft.message.clone(),
@@ -1100,18 +1139,26 @@ impl Sealer {
             Ok(b) => b,
             Err(_) => return err(ErrorCode::Limit),
         };
-        // SEA-26: reserve what this session's attachments can occupy at once
-        // (every part's ciphertext plus the bundle for the declared total)
-        // against the sealer-wide budget; refuse with the uniform BUSY.
+        // SEA-29: a draft's first attachment admits it with a fixed quota
+        // from the sealer-wide budget (session-level BUSY when none is free);
+        // afterwards only the draft's own quota matters: what its attachments
+        // can occupy at once (every part's ciphertext plus the bundle for the
+        // declared total) must fit, else LIMIT. Other sessions can never make
+        // this draft's uploads BUSY.
+        let quota = lim.per_session_upload_bytes;
         let Some(need) = attachment_need(&g.parts, padded_len, staged.saturating_add(declared_len))
         else {
             return err(ErrorCode::Limit);
         };
-        let grant = g
-            .mem
-            .get_or_insert_with(|| budget::Grant::new(&self.st.mem));
-        if !grant.grow_to(need) {
-            return err(ErrorCode::Busy);
+        if need > quota {
+            return err(ErrorCode::Limit);
+        }
+        if g.mem.is_none() {
+            let mut grant = budget::Grant::new(&self.st.mem);
+            if !grant.grow_to(quota) {
+                return err(ErrorCode::Busy);
+            }
+            g.mem = Some(grant);
         }
         g.parts_lost = false;
         let fresh_part = match candor_core::stream::PartId::generate() {
@@ -1134,6 +1181,7 @@ impl Sealer {
             declared_len,
             padded_len,
             received: 0,
+            last_progress: Instant::now(),
             sink: seal::StreamSink::new(enc, pending, padded_len),
             hasher: EvidenceHasher::new(),
             name: display_name,
@@ -1169,10 +1217,12 @@ impl Sealer {
         };
         if g.upload.as_ref().is_some_and(|u| u.part_id == part) {
             g.upload = None;
+            g.release_quota_if_idle();
             return Response::Empty;
         }
         let before = g.parts.len();
         g.parts.retain(|p| p.part_id != part);
+        g.release_quota_if_idle();
         if g.parts.len() == before {
             err(ErrorCode::BadState)
         } else {
@@ -1815,14 +1865,17 @@ fn part_chunk_blocking(
     if !within {
         // Over the declared bound: abort the part (temp file removed on drop).
         g.upload = None;
+        g.release_quota_if_idle();
         return err(ErrorCode::Limit);
     }
     up.hasher.update(&data.0);
     if up.sink.push(&data.0).is_err() {
         g.upload = None;
+        g.release_quota_if_idle();
         return err(ErrorCode::Internal);
     }
     up.received = up.received.saturating_add(n);
+    up.last_progress = Instant::now();
     if !last {
         return Response::Empty;
     }
@@ -2111,6 +2164,15 @@ fn seal_blocking(mut g: OwnedMutexGuard<Session>, st: &State, job: SealJob) -> (
     // removed as soon as it is written, so the parts leave the session now;
     // if this seal then fails, the attachments are gone and the session must
     // re-show its draft before sealing again (`parts_lost`).
+    // Info (round 4): a store known to be down fails the seal with the
+    // uniform INTERNAL before any part is consumed, so the draft keeps them.
+    if !st.sink.is_available() {
+        if job.initial {
+            sess.prefs = None;
+            sess.keys = None;
+        }
+        return (err(ErrorCode::Internal), false);
+    }
     let parts = core::mem::take(&mut sess.parts);
     sess.parts_lost = !parts.is_empty();
     let (group, account) = if job.initial {

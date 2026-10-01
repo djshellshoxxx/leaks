@@ -91,6 +91,8 @@ pub(crate) struct Upload {
     pub declared_len: u64,
     pub padded_len: u64,
     pub received: u64,
+    /// Last time bytes arrived (stall timeout, SEA-29).
+    pub last_progress: tokio::time::Instant,
     pub sink: StreamSink<PendingObject<'static>>,
     pub hasher: EvidenceHasher,
     pub name: SecretText,
@@ -157,5 +159,12 @@ impl Session {
         self.upload = None;
         self.mem = None;
         self.parts_lost = false;
+    }
+
+    /// Release the draft's upload quota when it holds no attachment (SEA-29).
+    pub(crate) fn release_quota_if_idle(&mut self) {
+        if self.parts.is_empty() && self.upload.is_none() {
+            self.mem = None;
+        }
     }
 }
