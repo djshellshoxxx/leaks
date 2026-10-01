@@ -221,6 +221,15 @@ memcase "MemoryMax infinity"                        "MemoryMax|memory_budget" "$
 memcase "hardened: budget > its MemoryMax - 1024"   memory_budget       "$HD" 's|^MemoryMax=10752M$|&\nEnvironment=CANDOR_SEALER_MEMORY_BUDGET_MIB=9800|' --profile ce-hardened
 memcase "hardened: staging smaller than budget"     staging_vs_budget   "$HD" 's|^MemoryMax=10752M$|&\nEnvironment=CANDOR_SEALER_MEMORY_BUDGET_MIB=8500|' --profile ce-hardened
 memcase "hardened: budget 8000 within its limits"   OK                  "$HD" 's|^MemoryMax=10752M$|&\nEnvironment=CANDOR_SEALER_MEMORY_BUDGET_MIB=8000|' --profile ce-hardened
+memcase "upload slots missing"                      upload_slots        "$SU" '/^Environment=CANDOR_SEALER_UPLOAD_SLOTS=/d'
+memcase "upload slots 15 (< 16)"                    upload_slots        "$SU" 's|^Environment=CANDOR_SEALER_UPLOAD_SLOTS=64$|Environment=CANDOR_SEALER_UPLOAD_SLOTS=15|'
+memcase "upload slots 4097 (> 4096)"                upload_slots        "$SU" 's|^Environment=CANDOR_SEALER_UPLOAD_SLOTS=64$|Environment=CANDOR_SEALER_UPLOAD_SLOTS=4097|'
+memcase "upload slots not an integer"               upload_slots        "$SU" 's|^Environment=CANDOR_SEALER_UPLOAD_SLOTS=64$|Environment=CANDOR_SEALER_UPLOAD_SLOTS=64k|'
+memcase "upload slots 4096 accepted"                OK                  "$SU" 's|^Environment=CANDOR_SEALER_UPLOAD_SLOTS=64$|Environment=CANDOR_SEALER_UPLOAD_SLOTS=4096|'
+memcase "per-draft quota missing"                   session_upload      "$SU" '/^Environment=CANDOR_SEALER_SESSION_UPLOAD_MIB=/d'
+memcase "per-draft quota > half the budget"         session_upload      "$SU" 's|^Environment=CANDOR_SEALER_SESSION_UPLOAD_MIB=768$|Environment=CANDOR_SEALER_SESSION_UPLOAD_MIB=1921|'
+memcase "per-draft quota = half the budget accepted" OK                 "$SU" 's|^Environment=CANDOR_SEALER_SESSION_UPLOAD_MIB=768$|Environment=CANDOR_SEALER_SESSION_UPLOAD_MIB=1920|'
+memcase "hardened: quota over half its own budget"  session_upload      "$HD" 's|^MemoryMax=10752M$|&\nEnvironment=CANDOR_SEALER_MEMORY_BUDGET_MIB=2000|' --profile ce-hardened
 memcase "ce-single: budget 4200 over its staging"   staging_vs_budget   "$SU" 's|^Environment=CANDOR_SEALER_MEMORY_BUDGET_MIB=3840$|Environment=CANDOR_SEALER_MEMORY_BUDGET_MIB=4200|' --profile ce-single
 mutate "staging may swap"              systemd/run-candor-staging.mount 's|,noswap,|,|'
 # journald / DNS (NET-008, LOG-007, 17 §4.5/§5.5)

@@ -85,7 +85,7 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd -P)
 BASE="$SCRIPT_DIR/config-check.baseline"
 MANIFEST="$SCRIPT_DIR/config-check.manifest"
 # sha256 of config-check.manifest (release-pinned; update together with the manifest).
-MANIFEST_SHA256=1cb8ec3109a789e1c01f2012dbb74dc6c5cc10834d29a61e4177f164a24926d5
+MANIFEST_SHA256=91b73d36d2e4a6e259c670cac7ccf90c7ce3283325ea74ee776847868be12ba6
 SECTIONS="tor nft pg units journald kernel dns apparmor host"
 MODE=static
 DIR="$SCRIPT_DIR/../intake"
@@ -904,7 +904,11 @@ check_units() {
 # CANDOR_SEALER_MEMORY_BUDGET_MIB must exist and satisfy
 #   (a) budget <= MemoryMax - 1024 MiB (base working set + slack outside the budget);
 #   (b) staging tmpfs size= >= budget (staged parts are budget-counted, so the budget and not
-#       ENOSPC refuses an upload).
+#       ENOSPC refuses an upload);
+#   CANDOR_SEALER_SESSION_UPLOAD_MIB present and <= budget / 2 (the shared pool);
+#   CANDOR_SEALER_UPLOAD_SLOTS present, an integer in 16..4096.
+# Environment= is evaluated with systemd semantics: last assignment per variable wins, an
+# empty assignment clears all.
 # Unparseable values (infinity, %, missing size=) fail.
 check_sealer_memory() { # eff-sealer eff-mount
   local res
@@ -916,20 +920,31 @@ check_sealer_memory() { # eff-sealer eff-mount
       if (u == "G") return n * 1073741824; if (u == "T") return n * 1099511627776
       return n + 0 }
     function last(v,   a, k) { k=split(v, a, / ;; /); return a[k] }
+    function num(k) { return ((k in env) && env[k] ~ /^[1-9][0-9]*$/ && length(env[k]) <= 7) ? env[k] + 0 : -1 }
     FNR==NR { if ($1=="Service" && $2=="MemoryMax") mm=last(substr($0, length($1 $2)+3))
-              if ($1=="Service" && $2=="Environment") env=last(substr($0, length($1 $2)+3)); next }
+              if ($1=="Service" && $2=="Environment") { v=substr($0, length($1 $2)+3); if (v == "") delete env
+                k=split(v, a, / ;; /); for (i=1; i<=k; i++) { if (a[i] == "") { delete env; continue }
+                  e=index(a[i], "="); if (e > 0) env[substr(a[i], 1, e-1)]=substr(a[i], e+1) } }
+              next }
     $1=="Mount" && $2=="Options" { o=last(substr($0, length($1 $2)+3)); k=split(o, a, ","); for (i=1; i<=k; i++) if (a[i] ~ /^size=/) sz=substr(a[i], 6) }
     END {
-      if (env !~ /^CANDOR_SEALER_MEMORY_BUDGET_MIB=[1-9][0-9]{0,6}$/) { print "FAIL\tunit.candor-sealer.memory_budget\tCANDOR_SEALER_MEMORY_BUDGET_MIB missing or invalid"; b=-1 }
-      else b=substr(env, 33) * 1048576
-      m=bytes(mm); s=bytes(sz)
-      if (b >= 0) {
+      mib=1048576; b=num("CANDOR_SEALER_MEMORY_BUDGET_MIB")
+      if (b < 0) print "FAIL\tunit.candor-sealer.memory_budget\tCANDOR_SEALER_MEMORY_BUDGET_MIB missing or invalid"
+      else {
+        m=bytes(mm); s=bytes(sz)
         if (m < 0) print "FAIL\tunit.candor-sealer.memory_budget\tMemoryMax missing or not an absolute size"
-        else if (b > m - 1073741824) printf "FAIL\tunit.candor-sealer.memory_budget\tbudget %d MiB > MemoryMax %d MiB - 1024 MiB\n", b/1048576, m/1048576
-        else printf "OK\tunit.candor-sealer.memory_budget\tbudget %d MiB <= MemoryMax %d MiB - 1024 MiB\n", b/1048576, m/1048576
+        else if (b * mib > m - 1024 * mib) printf "FAIL\tunit.candor-sealer.memory_budget\tbudget %d MiB > MemoryMax %d MiB - 1024 MiB\n", b, m / mib
+        else printf "OK\tunit.candor-sealer.memory_budget\tbudget %d MiB <= MemoryMax %d MiB - 1024 MiB\n", b, m / mib
         if (s < 0) print "FAIL\tunit.candor-sealer.staging_vs_budget\tstaging tmpfs size= missing or not an absolute size"
-        else if (s < b) printf "FAIL\tunit.candor-sealer.staging_vs_budget\tstaging tmpfs %d MiB < budget %d MiB (ENOSPC before the budget)\n", s/1048576, b/1048576
-        else printf "OK\tunit.candor-sealer.staging_vs_budget\tstaging tmpfs %d MiB >= budget %d MiB\n", s/1048576, b/1048576 } }' "$1" "$2" 2>/dev/null)
+        else if (s < b * mib) printf "FAIL\tunit.candor-sealer.staging_vs_budget\tstaging tmpfs %d MiB < budget %d MiB (ENOSPC before the budget)\n", s / mib, b
+        else printf "OK\tunit.candor-sealer.staging_vs_budget\tstaging tmpfs %d MiB >= budget %d MiB\n", s / mib, b }
+      q=num("CANDOR_SEALER_SESSION_UPLOAD_MIB")
+      if (q < 0) print "FAIL\tunit.candor-sealer.session_upload\tCANDOR_SEALER_SESSION_UPLOAD_MIB missing or invalid"
+      else if (b < 0 || 2 * q > b) printf "FAIL\tunit.candor-sealer.session_upload\tper-draft quota %d MiB > half the budget\n", q
+      else printf "OK\tunit.candor-sealer.session_upload\tper-draft quota %d MiB <= budget %d MiB / 2\n", q, b
+      n=num("CANDOR_SEALER_UPLOAD_SLOTS")
+      if (n < 16 || n > 4096) print "FAIL\tunit.candor-sealer.upload_slots\tCANDOR_SEALER_UPLOAD_SLOTS missing or not an integer in 16..4096"
+      else printf "OK\tunit.candor-sealer.upload_slots\t%d upload slots (16..4096)\n", n }' "$1" "$2" 2>/dev/null)
   if [ -z "$res" ]; then fail unit.candor-sealer.memory_budget "effective sealer/staging units not available"; return; fi
   report_lines <<< "$res"
 }

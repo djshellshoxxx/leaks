@@ -95,17 +95,23 @@ pub struct Limits {
     /// upload needs about twice its size (part + bundle), so the largest
     /// accepted file is about half of this.
     pub memory_budget_bytes: u64,
-    /// Fixed upload quota each draft reserves from the budget when it starts
-    /// its first attachment (AUD-RM2-SEA-29). At most `memory_budget_bytes /
-    /// per_session_upload_bytes` drafts upload at once; beyond that the first
-    /// `PART_BEGIN` gets the session-level `BUSY` (capacity-revealing by
-    /// design, ADR-038). Within its own quota a draft never gets `BUSY`, only
-    /// `LIMIT` when its own attachments would exceed the quota. A part needs
-    /// about twice its size (staged part + bundle), so the largest single
-    /// attachment is about half the quota. Default 768 MiB: 5 concurrent
-    /// uploading drafts within the default budget, files up to ~380 MiB —
-    /// below the 4 GiB maximum of ADR-046(4), which needs a deployment with a
-    /// larger `MemoryMax`, budget and quota (fewer concurrent uploaders).
+    /// Share of `memory_budget_bytes` that is guaranteed to admitted drafts,
+    /// in permille (AUD-RM2-SEA-31); the rest is the shared pool. Default 500.
+    pub guaranteed_permille: u16,
+    /// Admission slots (`CANDOR_SEALER_UPLOAD_SLOTS`, default 64; at least 10×
+    /// the design peak of concurrent uploading drafts). A draft's first
+    /// `PART_BEGIN` takes a slot and its guaranteed slice
+    /// (guaranteed half / slots ≈ 30 MiB at the defaults); the session-level
+    /// `BUSY` (ADR-038) happens only when every slot is taken. Within its
+    /// slice a draft only ever gets `LIMIT`.
+    pub upload_slots: u32,
+    /// Per-draft cap on shared-pool use (`CANDOR_SEALER_SESSION_UPLOAD_MIB`,
+    /// default 768 MiB). Attachments that do not fit in the slice reserve the
+    /// excess from the shared pool, first come first served; an exhausted pool
+    /// gives the uniform `BUSY`, above the cap `LIMIT`. A part needs about
+    /// twice its size (staged part + bundle), so the largest attachment is
+    /// about half of slice + cap (~400 MiB at the defaults), below the 4 GiB
+    /// of ADR-046(4), which needs a larger `MemoryMax`, budget and cap.
     pub per_session_upload_bytes: u64,
     /// A part that receives no bytes for this long is aborted; a draft left
     /// without attachments releases its quota (SEA-29). Default 120 s.
@@ -139,6 +145,8 @@ impl Default for Limits {
             max_bundle_bytes: 4 << 30,
             max_parts: 20,
             memory_budget_bytes: 3_840 << 20,
+            guaranteed_permille: 500,
+            upload_slots: 64,
             per_session_upload_bytes: 768 << 20,
             part_stall_timeout: Duration::from_secs(120),
             max_confirm_failures: 5,
@@ -198,6 +206,23 @@ impl Default for ChaffConfig {
 pub const MEMORY_BUDGET_ENV: &str = "CANDOR_SEALER_MEMORY_BUDGET_MIB";
 /// Environment variable with the per-session upload quota in MiB (SEA-29).
 pub const SESSION_UPLOAD_ENV: &str = "CANDOR_SEALER_SESSION_UPLOAD_MIB";
+/// Environment variable with the number of upload admission slots (SEA-31).
+pub const UPLOAD_SLOTS_ENV: &str = "CANDOR_SEALER_UPLOAD_SLOTS";
+/// Largest accepted slot count.
+pub const MAX_UPLOAD_SLOTS: u32 = 4_096;
+
+/// Strictly parse `CANDOR_SEALER_UPLOAD_SLOTS` (decimal, digits only,
+/// 1 ..= [`MAX_UPLOAD_SLOTS`]); any problem is [`StartError::Config`].
+pub fn parse_upload_slots(v: &str) -> Result<u32, StartError> {
+    if v.is_empty() || v.len() > 4 || !v.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(StartError::Config);
+    }
+    match v.parse::<u32>() {
+        Ok(n) if (1..=MAX_UPLOAD_SLOTS).contains(&n) => Ok(n),
+        _ => Err(StartError::Config),
+    }
+}
+
 /// Largest accepted value of either variable: 256 GiB.
 pub const MAX_MEMORY_MIB: u64 = 262_144;
 
@@ -331,8 +356,11 @@ pub(crate) struct State {
     chaff_counter: Mutex<u64>,
     chaff_cancels: Mutex<HashMap<[u8; 16], u32>>,
     accounts: Mutex<AccountQueue>,
-    /// Attachment memory admission (SEA-26).
-    mem: Arc<budget::Budget>,
+    /// Attachment memory (SEA-26/31): guaranteed slices of admitted drafts
+    /// and the shared pool.
+    slots: Arc<budget::Budget>,
+    shared: Arc<budget::Budget>,
+    slice: u64,
     /// Serialises flushes (a batch completes before the next starts).
     flush_lock: Mutex<()>,
     accept_errors: Arc<AtomicU64>,
@@ -512,6 +540,9 @@ impl Sealer {
             cfg.limits.memory_budget_bytes = b;
             cfg.limits.per_session_upload_bytes = q;
         }
+        if let Ok(v) = std::env::var(UPLOAD_SLOTS_ENV) {
+            cfg.limits.upload_slots = parse_upload_slots(&v)?;
+        }
         Wordlist::eff_large().map_err(|_| StartError::Wordlist)?;
         cfg.suite
             .require_supported()
@@ -528,7 +559,11 @@ impl Sealer {
             || cfg.limits.max_connections == 0
             || cfg.limits.memory_budget_bytes == 0
             || cfg.limits.per_session_upload_bytes == 0
-            || cfg.limits.per_session_upload_bytes > cfg.limits.memory_budget_bytes
+            || cfg.limits.guaranteed_permille == 0
+            || cfg.limits.guaranteed_permille > 1000
+            || cfg.limits.upload_slots == 0
+            || cfg.limits.upload_slots > MAX_UPLOAD_SLOTS
+            || pools(&cfg.limits).is_none_or(|p| p.slice < (1 << 20))
             || cfg.limits.part_stall_timeout.is_zero()
             || cfg.directory_trust.tenant_id != cfg.tenant_id
             || cfg.directory_trust.org_root_pk == [0u8; 32]
@@ -550,7 +585,12 @@ impl Sealer {
         // DEP-29: bundles need MFD_NOEXEC_SEAL; refuse to start without it.
         handover::check_memfd_support().map_err(|_| StartError::Memfd)?;
         let chaff_seed = random_secret32().map_err(|_| StartError::Rng)?;
-        let mem = budget::Budget::new(cfg.limits.memory_budget_bytes);
+        let p = pools(&cfg.limits).ok_or(StartError::Config)?;
+        let (slots, shared, slice) = (
+            budget::Budget::new(p.guaranteed),
+            budget::Budget::new(p.shared),
+            p.slice,
+        );
         let argon = ArgonGate {
             sem: Arc::new(Semaphore::new(cfg.limits.argon_permits)),
             waiting: std::sync::atomic::AtomicUsize::new(0),
@@ -572,7 +612,9 @@ impl Sealer {
                 chaff_counter: Mutex::new(0),
                 chaff_cancels: Mutex::new(HashMap::new()),
                 accounts: Mutex::new(AccountQueue::default()),
-                mem,
+                slots,
+                shared,
+                slice,
                 flush_lock: Mutex::new(()),
                 accept_errors: Arc::new(AtomicU64::new(0)),
             }),
@@ -685,7 +727,7 @@ impl Sealer {
                 });
                 if stalled {
                     g.upload = None;
-                    g.release_quota_if_idle();
+                    rebalance(&mut g, self.st.slice);
                 }
             }
         }
@@ -890,7 +932,7 @@ impl Sealer {
         // The source has now seen the draft as it is (SEA-26: attachments
         // dropped by a failed seal are no longer listed).
         g.parts_lost = false;
-        g.release_quota_if_idle();
+        rebalance(&mut g, self.st.slice);
         Response::Draft(Box::new(DraftView {
             mode: g.draft.mode.unwrap_or(Mode::Anonymous),
             message: g.draft.message.clone(),
@@ -1183,26 +1225,37 @@ impl Sealer {
             Ok(b) => b,
             Err(_) => return err(ErrorCode::Limit),
         };
-        // SEA-29: a draft's first attachment admits it with a fixed quota
-        // from the sealer-wide budget (session-level BUSY when none is free);
-        // afterwards only the draft's own quota matters: what its attachments
-        // can occupy at once (every part's ciphertext plus the bundle for the
-        // declared total) must fit, else LIMIT. Other sessions can never make
-        // this draft's uploads BUSY.
-        let quota = lim.per_session_upload_bytes;
-        let Some(need) = attachment_need(&g.parts, padded_len, staged.saturating_add(declared_len))
-        else {
+        // SEA-31: what the draft's attachments can occupy at once (every
+        // part's ciphertext plus the bundle for the declared total) is covered
+        // by its guaranteed slice, then by the shared pool (capped per draft).
+        // A draft's first attachment takes an admission slot (session-level
+        // BUSY only when every slot is taken). Within the slice only LIMIT;
+        // beyond it the shared pool may answer the uniform BUSY.
+        let slice = self.st.slice;
+        let Some(need) = draft_need(
+            &g.parts,
+            Some((padded_len, staged.saturating_add(declared_len))),
+        ) else {
             return err(ErrorCode::Limit);
         };
-        if need > quota {
+        if need > slice.saturating_add(lim.per_session_upload_bytes) {
             return err(ErrorCode::Limit);
         }
-        if g.mem.is_none() {
-            let mut grant = budget::Grant::new(&self.st.mem);
-            if !grant.grow_to(quota) {
+        if g.slot.is_none() {
+            let mut grant = budget::Grant::new(&self.st.slots);
+            if !grant.grow_to(slice) {
                 return err(ErrorCode::Busy);
             }
-            g.mem = Some(grant);
+            g.slot = Some(grant);
+        }
+        let extra = need.saturating_sub(slice);
+        if extra > 0 {
+            let shared = g
+                .shared
+                .get_or_insert_with(|| budget::Grant::new(&self.st.shared));
+            if !shared.grow_to(extra) {
+                return err(ErrorCode::Busy);
+            }
         }
         g.parts_lost = false;
         let fresh_part = match candor_core::stream::PartId::generate() {
@@ -1261,12 +1314,12 @@ impl Sealer {
         };
         if g.upload.as_ref().is_some_and(|u| u.part_id == part) {
             g.upload = None;
-            g.release_quota_if_idle();
+            rebalance(&mut g, self.st.slice);
             return Response::Empty;
         }
         let before = g.parts.len();
         g.parts.retain(|p| p.part_id != part);
-        g.release_quota_if_idle();
+        rebalance(&mut g, self.st.slice);
         if g.parts.len() == before {
             err(ErrorCode::BadState)
         } else {
@@ -1760,7 +1813,7 @@ impl Sealer {
     /// Attachment memory reserved now (SEA-26; health reporting and tests).
     #[must_use]
     pub fn memory_reserved(&self) -> u64 {
-        self.st.mem.used()
+        self.st.slots.used().saturating_add(self.st.shared.used())
     }
 
     /// Number of queued account operations.
@@ -1909,13 +1962,13 @@ fn part_chunk_blocking(
     if !within {
         // Over the declared bound: abort the part (temp file removed on drop).
         g.upload = None;
-        g.release_quota_if_idle();
+        rebalance(&mut g, st.slice);
         return err(ErrorCode::Limit);
     }
     up.hasher.update(&data.0);
     if up.sink.push(&data.0).is_err() {
         g.upload = None;
-        g.release_quota_if_idle();
+        rebalance(&mut g, st.slice);
         return err(ErrorCode::Internal);
     }
     up.received = up.received.saturating_add(n);
@@ -2020,6 +2073,60 @@ fn requeue(st: &State, mut ops: Vec<AccountUpsert>) {
     let mut q = lock(&st.accounts);
     ops.append(&mut q.pending);
     q.pending = ops;
+}
+
+/// Memory pools derived from the limits (SEA-31).
+struct Pools {
+    guaranteed: u64,
+    shared: u64,
+    slice: u64,
+}
+
+fn pools(l: &Limits) -> Option<Pools> {
+    let guaranteed = l
+        .memory_budget_bytes
+        .checked_mul(u64::from(l.guaranteed_permille))?
+        .checked_div(1000)?;
+    let slice = guaranteed.checked_div(u64::from(l.upload_slots))?;
+    Some(Pools {
+        guaranteed: slice.checked_mul(u64::from(l.upload_slots))?,
+        shared: l.memory_budget_bytes.checked_sub(guaranteed)?,
+        slice,
+    })
+}
+
+/// After a part ended (dropped, aborted, idle): release the draft's slot and
+/// pool reservation when it holds no attachment, else shrink its shared-pool
+/// reservation to what its remaining attachments need beyond the slice.
+fn rebalance(g: &mut Session, slice: u64) {
+    if g.parts.is_empty() && g.upload.is_none() {
+        g.slot = None;
+        g.shared = None;
+        return;
+    }
+    let extra = g.upload.as_ref().map(|u| {
+        let staged = g
+            .parts
+            .iter()
+            .fold(0u64, |a, p| a.saturating_add(p.real_len));
+        (u.padded_len, staged.saturating_add(u.declared_len))
+    });
+    let need = draft_need(&g.parts, extra).unwrap_or(u64::MAX);
+    if let Some(sh) = g.shared.as_mut() {
+        sh.shrink_to(need.saturating_sub(slice));
+    }
+}
+
+/// [`attachment_need`] with an optional part being started or uploaded.
+fn draft_need(parts: &[StagedPart], extra: Option<(u64, u64)>) -> Option<u64> {
+    match extra {
+        Some((padded, total)) => attachment_need(parts, padded, total),
+        None => {
+            let total = parts.iter().fold(0u64, |a, p| a.saturating_add(p.real_len));
+            let last = parts.last()?;
+            attachment_need(parts.split_last()?.1, last.padded_len, total)
+        }
+    }
 }
 
 /// Upper bound on the bytes a session's attachments occupy at once: the
@@ -2505,6 +2612,14 @@ mod tests {
                 Err(StartError::Config),
                 "{b:?} {q:?}"
             );
+        }
+        assert_eq!(parse_upload_slots("64"), Ok(64));
+        assert_eq!(parse_upload_slots("1"), Ok(1));
+        assert_eq!(parse_upload_slots("4096"), Ok(4096));
+        for v in [
+            "", "0", "4097", "10000", "-1", "+64", " 64", "64 ", "6e1", "0x40", "sixty",
+        ] {
+            assert_eq!(parse_upload_slots(v), Err(StartError::Config), "{v:?}");
         }
     }
 

@@ -81,6 +81,16 @@ impl Grant {
     }
 }
 
+impl Grant {
+    /// Lower the reservation to `total` bytes (never grows).
+    pub(crate) fn shrink_to(&mut self, total: u64) {
+        if let Some(delta) = self.held.checked_sub(total) {
+            self.budget.sub(delta);
+            self.held = total;
+        }
+    }
+}
+
 impl Drop for Grant {
     fn drop(&mut self) {
         self.budget.sub(self.held);

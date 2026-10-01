@@ -116,8 +116,11 @@ pub(crate) struct Session {
     pub prefs: Option<Prefs>,
     /// `(mailbox_id, reply_seq)` already rendered (replay detection).
     pub seen_replies: Vec<([u8; 32], u64)>,
-    /// Attachment memory reservation (SEA-26), released with the draft.
-    pub mem: Option<super::budget::Grant>,
+    /// Admission slot with the guaranteed slice (SEA-31), released with the
+    /// draft or when it holds no attachment.
+    pub slot: Option<super::budget::Grant>,
+    /// Shared-pool reservation beyond the slice (SEA-31).
+    pub shared: Option<super::budget::Grant>,
     /// A failed seal consumed the staged parts; `SEAL_FINISH` is refused until
     /// the draft is shown again (`DRAFT_GET`), a part is started or the draft
     /// is aborted.
@@ -139,7 +142,8 @@ impl Session {
             keys: None,
             prefs: None,
             seen_replies: Vec::new(),
-            mem: None,
+            slot: None,
+            shared: None,
             parts_lost: false,
         }
     }
@@ -157,14 +161,8 @@ impl Session {
         self.draft = Draft::default();
         self.parts.clear();
         self.upload = None;
-        self.mem = None;
+        self.slot = None;
+        self.shared = None;
         self.parts_lost = false;
-    }
-
-    /// Release the draft's upload quota when it holds no attachment (SEA-29).
-    pub(crate) fn release_quota_if_idle(&mut self) {
-        if self.parts.is_empty() && self.upload.is_none() {
-            self.mem = None;
-        }
     }
 }

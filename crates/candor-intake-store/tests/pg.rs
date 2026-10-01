@@ -1685,27 +1685,77 @@ async fn intake_relations(c: &mut PgConnection) -> Vec<(String, i64)> {
     .collect()
 }
 
-/// `(page, offset, pattern, 32 bytes around)` of every hit (diagnostics).
-fn hit_offsets(
-    pages: &[Vec<u8>],
-    a: &HashSet<[u8; 8]>,
-    b: &HashSet<[u8; 8]>,
-    c: &HashSet<[u8; 8]>,
-) -> Vec<(usize, usize, String)> {
-    let mut v = Vec::new();
-    for (pi, p) in pages.iter().enumerate() {
-        for (o, w) in p.windows(8).enumerate() {
-            let w = <[u8; 8]>::try_from(w).unwrap();
-            for (n, set) in [("xmin", a), ("ptr", b), ("seq", c)] {
-                if set.contains(&w) {
-                    let lo = o.saturating_sub(12);
-                    let hi = (o + 20).min(p.len());
-                    v.push((pi, o, format!("{n} {:02x?}", &p[lo..hi])));
+/// Structural residue scan of every page of `rels` (see
+/// `pg_vacuum_full_erases_old_images`).
+async fn structural_residue(
+    c: &mut PgConnection,
+    rels: &[(String, i64)],
+    old_xmins: &HashSet<u32>,
+    old_ids: &HashSet<u32>,
+    ptr_pats: &HashSet<[u8; 8]>,
+) -> Vec<String> {
+    let mut residue: Vec<String> = Vec::new();
+    for (rel, _) in rels {
+        let kind: String =
+            sqlx::query("SELECT relkind::text FROM pg_class WHERE oid = $1::regclass")
+                .bind(rel)
+                .fetch_one(&mut *c)
+                .await
+                .unwrap()
+                .get(0);
+        let toast = rel.starts_with("pg_toast.");
+        for (pno, page) in raw_pages(c, rel).await.iter().enumerate() {
+            let u16at = |o: usize| usize::from(u16::from_le_bytes([page[o], page[o + 1]]));
+            let u32at = |o: usize| u32::from_le_bytes(page[o..o + 4].try_into().unwrap());
+            let (lower, special) = (u16at(12), u16at(16));
+            let mut covered = vec![false; page.len()];
+            covered[..lower].iter_mut().for_each(|b| *b = true);
+            covered[special..].iter_mut().for_each(|b| *b = true);
+            for lp in (24..lower).step_by(4) {
+                let w = u32at(lp);
+                let (off, flags, len) = ((w & 0x7fff) as usize, (w >> 15) & 3, (w >> 17) as usize);
+                if flags != 1 {
+                    continue; // LP_UNUSED / LP_REDIRECT / LP_DEAD: no storage
                 }
+                covered[off..off + len].iter_mut().for_each(|b| *b = true);
+                let item = &page[off..off + len];
+                if kind == "i" {
+                    // TOAST index key: IndexTupleData (8 bytes), chunk_id.
+                    if toast && len >= 12 {
+                        let id = u32::from_le_bytes(item[8..12].try_into().unwrap());
+                        if old_ids.contains(&id) {
+                            residue.push(format!("{rel} p{pno}: index key with old chunk id"));
+                        }
+                    }
+                    continue;
+                }
+                let xmin = u32::from_le_bytes(item[..4].try_into().unwrap());
+                if old_xmins.contains(&xmin) {
+                    residue.push(format!("{rel} p{pno}: live tuple with old xmin {xmin}"));
+                }
+                let hoff = usize::from(item[22]);
+                if toast {
+                    let id = u32::from_le_bytes(item[hoff..hoff + 4].try_into().unwrap());
+                    if old_ids.contains(&id) {
+                        residue.push(format!("{rel} p{pno}: TOAST chunk with old chunk id"));
+                    }
+                } else if count_hits(&[item[hoff..].to_vec()], ptr_pats) > 0 {
+                    residue.push(format!("{rel} p{pno}: TOAST pointer to an old value"));
+                }
+            }
+            let stray = page
+                .iter()
+                .zip(&covered)
+                .filter(|(b, c)| !**c && **b != 0)
+                .count();
+            if stray > 0 {
+                residue.push(format!(
+                    "{rel} p{pno}: {stray} non-zero bytes outside live items"
+                ));
             }
         }
     }
-    v
+    residue
 }
 
 fn count_hits(pages: &[Vec<u8>], pats: &HashSet<[u8; 8]>) -> usize {
@@ -1842,53 +1892,37 @@ async fn pg_vacuum_full_erases_old_images() {
     );
     assert!(hc > 0, "control: no old chunk id found after plain VACUUM");
 
+    let old_ids: HashSet<u32> = old_chunks.iter().map(|(id, _)| *id).collect();
+    // Positive control for the structural scan too.
+    assert!(
+        !structural_residue(&mut c, &rels, &old_xmins, &old_ids, &ptr_pats)
+            .await
+            .is_empty(),
+        "control: structural scan finds the plain-VACUUM residue"
+    );
     let before = s.export_backup().await.unwrap();
     let mailbox = s.mailbox_list(a).await.unwrap();
-    let activity: Vec<(
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    )> = sqlx::query_as(
-        "SELECT usename::text, state, backend_xmin::text, backend_xid::text FROM pg_stat_activity \
-         WHERE datname = current_database() AND pid <> pg_backend_pid()",
-    )
-    .fetch_all(&mut c)
-    .await
-    .unwrap();
-    let items_q = "SELECT (lp::text || ' ' || coalesce(t_xmin::text,'-') || ' ' || coalesce(t_xmax::text,'-') || ' ' || coalesce(t_infomask::text,'-') || ' ' || coalesce(t_infomask2::text,'-') || ' ' || coalesce(t_ctid::text,'-') || ' ' || lp_flags::text) FROM heap_page_items(get_raw_page('candor.deletion_list', 0))";
-    let dl_before: Vec<String> = sqlx::query_scalar(items_q).fetch_all(&mut c).await.unwrap();
-    let rows_before: Vec<String> = sqlx::query_scalar("SELECT xmin::text || '/' || xmax::text || '/' || seq::text || '/' || relayed::text FROM candor.deletion_list").fetch_all(&mut c).await.unwrap();
     vacuum_full_daily(&vac(&b, &db)).await.unwrap();
-    let dl_after: Vec<String> = sqlx::query_scalar(items_q).fetch_all(&mut c).await.unwrap();
-    let activity = (activity, dl_before, rows_before, dl_after);
     let after_rels = intake_relations(&mut c).await;
     assert_eq!(after_rels.len(), rels.len());
     for ((r0, f0), (r1, f1)) in rels.iter().zip(&after_rels) {
         assert_eq!(r0, r1);
         assert_ne!(f0, f1, "{r0}: not rewritten");
     }
-    let (mut hx, mut hc) = (0usize, 0usize);
-    let mut residue = Vec::new();
-    for (rel, _) in &after_rels {
-        let pages = raw_pages(&mut c, rel).await;
-        let (x, k) = (count_hits(&pages, &xmin_pats), chunk_hits(rel, &pages));
-        if x + k > 0 {
-            residue.push((
-                rel.clone(),
-                x,
-                k,
-                hit_offsets(&pages, &xmin_pats, &ptr_pats, &seq_pats),
-            ));
-        }
-        hx += x;
-        hc += k;
-    }
-    assert_eq!(
-        hx, 0,
-        "old tuple headers survive VACUUM FULL: {residue:?} slot {slot} activity {activity:?}"
+    // Structural check of every new file (deterministic; an unanchored
+    // 8-byte search over live tuples matched by coincidence, e.g. two
+    // signature bytes + alignment zeros + a new header's `xmin = slot`, or a
+    // new TOAST header's `xmin` equal to an old chunk OID). A residue can only
+    // be (a) bytes outside the page header, line-pointer array, live items and
+    // special space — all of which must be zero — or (b) a live item that
+    // still carries an old image: a heap/TOAST tuple with an old `xmin`, a
+    // TOAST chunk or TOAST-index key with an old chunk id, or a heap TOAST
+    // pointer `[old va_valueid][toastrelid]`.
+    let residue = structural_residue(&mut c, &after_rels, &old_xmins, &old_ids, &ptr_pats).await;
+    assert!(
+        residue.is_empty(),
+        "old images survive VACUUM FULL: {residue:?}"
     );
-    assert_eq!(hc, 0, "old chunk ids survive VACUUM FULL: {residue:?}");
     // Content and the single slot xmin are unchanged.
     assert_eq!(s.export_backup().await.unwrap(), before);
     assert_eq!(distinct_xmin(&mut c).await.1, 1);

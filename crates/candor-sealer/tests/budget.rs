@@ -30,10 +30,11 @@ async fn begin(f: &Fixture, s: SessionHandle, len: u64) -> Response {
         .await
 }
 
-fn limits(budget: u64, quota: u64) -> Limits {
+fn limits(budget: u64, cap: u64, slots: u32) -> Limits {
     Limits {
         memory_budget_bytes: budget,
-        per_session_upload_bytes: quota,
+        per_session_upload_bytes: cap,
+        upload_slots: slots,
         ..Limits::default()
     }
 }
@@ -60,131 +61,100 @@ async fn drop_part(f: &Fixture, s: SessionHandle, part: [u8; 16]) {
     ok(&f.sealer, Request::PartDrop { sess: s, part }).await;
 }
 
-/// SEA-29: drafts are admitted with a fixed quota (session-level BUSY when
-/// none is free); within its own quota a draft never gets BUSY, whatever the
-/// other sessions do — only LIMIT when its own attachments exceed the quota.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn per_session_quotas_bound_memory_and_never_depend_on_others() {
-    let (budget, quota) = (24 * MIB, 8 * MIB);
-    let f = fixture_with(no_chaff(), limits(budget, quota));
-    for i in 0..8u8 {
-        open(&f, sess(10 + i)).await;
-    }
-    // 8 sessions start an upload concurrently: exactly budget / quota = 3 are
-    // admitted, the rest get the session-level BUSY.
-    let mut tasks = Vec::new();
-    for i in 0..8u8 {
-        let s = f.sealer.clone();
-        tasks.push(tokio::spawn(async move {
-            s.handle(Request::PartBegin {
-                sess: sess(10 + i),
-                declared_len: MIB,
-                display_name: SecretText::new("f.bin"),
-                media_type: SecretText::new("application/octet-stream"),
-            })
-            .await
-        }));
-    }
-    let mut admitted = Vec::new();
-    for (i, t) in tasks.into_iter().enumerate() {
-        match t.await.unwrap() {
-            Response::Part { part } => admitted.push((10 + i as u8, part)),
-            r => assert_eq!(r, Response::error(ErrorCode::Busy)),
-        }
-        assert!(f.sealer.memory_reserved() <= budget);
-    }
-    assert_eq!(admitted.len(), 3);
-    assert_eq!(f.sealer.memory_reserved(), 3 * quota);
-    // With the budget exhausted by others, an admitted draft keeps uploading
-    // within its own quota: never BUSY.
-    let (a, part) = admitted[0];
-    drop_part(&f, sess(a), part).await;
-    for _ in 0..5 {
-        let Response::Part { part } = begin(&f, sess(a), 2 * MIB).await else {
-            panic!("own-quota upload refused")
-        };
-        drop_part(&f, sess(a), part).await;
-    }
-    // Over its own quota: LIMIT, independent of others.
-    assert_eq!(
-        begin(&f, sess(a), 6 * MIB).await,
-        Response::error(ErrorCode::Limit)
-    );
-    // An admitted draft's answers are the same with or without other drafts.
-    let (b, part_b) = admitted[1];
-    ok(&f.sealer, Request::SealAbort { sess: sess(b) }).await;
-    let _ = part_b;
-    assert_eq!(
-        begin(&f, sess(a), 6 * MIB).await,
-        Response::error(ErrorCode::Limit)
-    );
-    // The freed quota admits a waiting draft.
-    let waiting = (10..18u8)
-        .find(|i| !admitted.iter().any(|(x, _)| x == i))
-        .unwrap();
-    assert!(matches!(
-        begin(&f, sess(waiting), MIB).await,
-        Response::Part { .. }
-    ));
-    assert!(f.sealer.memory_reserved() <= budget);
-    // Dropping the draft's only part releases its quota.
-    let before = f.sealer.memory_reserved();
-    let (c, part_c) = admitted[2];
-    drop_part(&f, sess(c), part_c).await;
-    assert_eq!(f.sealer.memory_reserved(), before - quota);
-    for i in 0..8u8 {
-        ok(&f.sealer, Request::Zeroize { sess: sess(10 + i) }).await;
-    }
-    assert_eq!(f.sealer.memory_reserved(), 0);
+async fn one_byte_part(f: &Fixture, s: SessionHandle) {
+    let Response::Part { part } = begin(f, s, 1).await else {
+        panic!("admission refused")
+    };
+    ok(
+        &f.sealer,
+        Request::PartChunk {
+            sess: s,
+            part,
+            data: SecretBytes::from_slice(&[1]),
+            last: true,
+        },
+    )
+    .await;
 }
 
-/// SEA-29: two stalled uploads do not block a third source for long: a part
-/// with no bytes for 120 s is aborted and its draft's quota released.
+/// SEA-31 PoC: holders of 1-byte parts, kept alive with TOUCH, take only
+/// their own slots (64 by default) and do not block admission.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tiny_part_holders_do_not_block_admission() {
+    let f = fixture_with(no_chaff(), Limits::default());
+    for i in 0..10u8 {
+        open(&f, sess(10 + i)).await;
+        one_byte_part(&f, sess(10 + i)).await;
+        ok(&f.sealer, Request::Touch { sess: sess(10 + i) }).await;
+    }
+    open(&f, sess(99)).await;
+    assert!(matches!(
+        begin(&f, sess(99), 1_000_000).await,
+        Response::Part { .. }
+    ));
+    assert!(f.sealer.memory_reserved() <= Limits::default().memory_budget_bytes);
+}
+
+/// SEA-31: within its guaranteed slice a draft never gets BUSY, even with
+/// every slot taken and the shared pool exhausted; beyond the slice the
+/// shared pool answers BUSY when exhausted and recovers once the holder's
+/// idle part is aborted (120 s).
 #[tokio::test(start_paused = true)]
-async fn stalled_sessions_do_not_block_a_third() {
-    let quota = 8 * MIB;
-    let f = fixture_with(no_chaff(), limits(2 * quota, quota));
+async fn slices_never_busy_and_the_shared_pool_recovers() {
+    // 16 MiB: 8 MiB guaranteed for 2 slots (4 MiB slices), 8 MiB shared.
+    let f = fixture_with(no_chaff(), limits(16 * MIB, 8 * MIB, 2));
     for i in 1..=3u8 {
         open(&f, sess(i)).await;
     }
-    for i in 1..=2u8 {
-        assert!(matches!(
-            begin(&f, sess(i), MIB).await,
-            Response::Part { .. }
-        ));
-    }
-    assert_eq!(
-        begin(&f, sess(3), MIB).await,
-        Response::error(ErrorCode::Busy)
-    );
-    // Neither admitted source sends a byte.
-    tokio::time::advance(std::time::Duration::from_secs(119)).await;
-    f.sealer.reap_expired();
-    assert_eq!(
-        begin(&f, sess(3), MIB).await,
-        Response::error(ErrorCode::Busy)
-    );
-    tokio::time::advance(std::time::Duration::from_secs(2)).await;
-    f.sealer.reap_expired();
-    // Both stalled parts are aborted (no bytes for 120 s) and their quotas
-    // released: the third source is admitted.
-    assert_eq!(f.sealer.memory_reserved(), 0);
+    // A: small part in its slice. B: a large part, mostly from the pool.
+    one_byte_part(&f, sess(1)).await;
     assert!(matches!(
-        begin(&f, sess(3), MIB).await,
+        begin(&f, sess(2), 5 * MIB).await,
         Response::Part { .. }
     ));
+    // Both slots taken: admission BUSY for C.
     assert_eq!(
-        read_all_files(&f.staging_path).len(),
-        1,
-        "only the new upload's file; the stalled parts left nothing"
+        begin(&f, sess(3), 1).await,
+        Response::error(ErrorCode::Busy)
     );
+    // A keeps uploading within its slice: never BUSY.
+    for _ in 0..5 {
+        let Response::Part { part } = begin(&f, sess(1), MIB).await else {
+            panic!("within-slice upload refused")
+        };
+        drop_part(&f, sess(1), part).await;
+    }
+    // Beyond its slice, A needs the shared pool, which B holds: BUSY.
+    assert_eq!(
+        begin(&f, sess(1), 3 * MIB).await,
+        Response::error(ErrorCode::Busy)
+    );
+    // Above slice + per-draft cap: LIMIT, whatever the pool holds.
+    assert_eq!(
+        begin(&f, sess(1), 7 * MIB).await,
+        Response::error(ErrorCode::Limit)
+    );
+    assert!(f.sealer.memory_reserved() <= 16 * MIB);
+    // B's part receives nothing; after 120 s it is aborted, its slot and pool
+    // reservation are released, and both A and C proceed.
+    tokio::time::advance(std::time::Duration::from_secs(121)).await;
+    f.sealer.reap_expired();
+    assert!(matches!(
+        begin(&f, sess(1), 3 * MIB).await,
+        Response::Part { .. }
+    ));
+    assert!(matches!(begin(&f, sess(3), 1).await, Response::Part { .. }));
+    for i in 1..=3u8 {
+        ok(&f.sealer, Request::Zeroize { sess: sess(i) }).await;
+    }
+    assert_eq!(f.sealer.memory_reserved(), 0);
 }
 
 /// Sealing within the budget succeeds (never refused for memory), frees the
 /// staged part, and releases the reservation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sealing_frees_parts_and_releases_the_reservation() {
-    let f = fixture_with(no_chaff(), limits(4 * MIB, 4 * MIB));
+    let f = fixture_with(no_chaff(), limits(64 * MIB, 8 * MIB, 4));
     let s = sess(1);
     confirmed(&f, s, None).await;
     let Response::Part { part } = begin(&f, s, 300_000).await else {
@@ -223,7 +193,7 @@ async fn sealing_frees_parts_and_releases_the_reservation() {
 /// INTERNAL before any part is consumed; the draft keeps its attachment.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn known_store_outage_keeps_the_attachments() {
-    let f = fixture_with(no_chaff(), limits(4 * MIB, 4 * MIB));
+    let f = fixture_with(no_chaff(), limits(64 * MIB, 8 * MIB, 4));
     let s = sess(1);
     confirmed(&f, s, None).await;
     let Response::Part { part } = begin(&f, s, 1_000).await else {
