@@ -648,6 +648,18 @@ mod tests {
     use crate::kem::KemKeyPair;
     use crate::rand::TestRng;
 
+    /// CRYPTO-057 / AUD-RM1-CORE-11: contexts print only their variant name.
+    #[test]
+    fn context_debug_is_redacted() {
+        let c = HpkeWrapContext::Reply {
+            tenant_id: [0xAB; 16],
+            channel_id: [0xCD; 16],
+            mailbox_id: [0xEF; 32],
+        };
+        let s = format!("{c:?}");
+        assert_eq!(s, "HpkeWrapContext::Reply(<redacted>)");
+    }
+
     const T: [u8; 16] = [1; 16];
     const C: [u8; 16] = [2; 16];
 

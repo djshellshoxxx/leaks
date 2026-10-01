@@ -225,16 +225,19 @@ impl Wordlist {
     ///
     /// AUD-RM1-CORE-08: constant time in the passphrase content. Every token is
     /// compared with every word on fixed-width slots with `subtle`, without early
-    /// exit; only the number of tokens (a length property) affects the running time.
+    /// exit. Only the number of tokens (a length property, not which words were typed)
+    /// affects the running time: a wrong token count is rejected before the scan,
+    /// which also bounds the work to `word_count × N` comparisons.
     #[must_use]
     pub fn check(&self, passphrase: &str) -> bool {
         let Ok(n) = normalize(passphrase) else {
             return false;
         };
+        if n.split(' ').count() != self.word_count {
+            return false;
+        }
         let mut all = Choice::from(1u8);
-        let mut count: u64 = 0;
         for tok in n.split(' ') {
-            count = count.saturating_add(1);
             let slot = word_slot(tok.as_bytes());
             let mut found = Choice::from(0u8);
             for w in &self.slots {
@@ -242,8 +245,7 @@ impl Wordlist {
             }
             all &= found;
         }
-        let expected = u64::try_from(self.word_count).unwrap_or(u64::MAX);
-        bool::from(all & count.ct_eq(&expected))
+        bool::from(all)
     }
 }
 

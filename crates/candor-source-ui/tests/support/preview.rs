@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Sample view models for previews (`examples/render_all.rs`) and tests. All data is fictional;
 //! the sample passphrase is a fixed, public test value and must never be used as a credential.
+//!
+//! Dev-only: this file is included with `#[path]` by the integration tests and the example and is
+//! never part of the library, so no build of the server (including `--all-features`) contains it
+//! (AUD-RM1-SUI-09/-13).
 
 use zeroize::Zeroizing;
 
-use crate::model::*;
-use crate::{Locale, Route, Screen};
+use candor_source_ui::*;
 
 fn day(y: u16, m: u8, d: u8) -> Day {
     Day::new(y, m, d).unwrap_or(Day::EPOCH)

@@ -19,893 +19,1227 @@ url = "https://raw.githubusercontent.com/zcash/rust-ecosystem/main/supply-chain/
 [policy.candor-core]
 criteria = "safe-to-deploy"
 
-[policy.candor-core.dependency-criteria]
-argon2 = ["safe-to-deploy", "candor-crypto-reviewed"]
-blake3 = ["safe-to-deploy", "candor-crypto-reviewed"]
-chacha20poly1305 = ["safe-to-deploy", "candor-crypto-reviewed"]
-ed25519-dalek = ["safe-to-deploy", "candor-crypto-reviewed"]
-getrandom = ["safe-to-deploy", "candor-crypto-reviewed"]
-hkdf = ["safe-to-deploy", "candor-crypto-reviewed"]
-hmac = ["safe-to-deploy", "candor-crypto-reviewed"]
-hpke = ["safe-to-deploy", "candor-crypto-reviewed"]
-rand_chacha = ["safe-to-deploy", "candor-crypto-reviewed"]
-sha2 = ["safe-to-deploy", "candor-crypto-reviewed"]
-subtle = ["safe-to-deploy", "candor-crypto-reviewed"]
-zeroize = ["safe-to-deploy", "candor-crypto-reviewed"]
-
 [policy.candor-intake-store]
 criteria = "safe-to-deploy"
-
-[policy.candor-intake-store.dependency-criteria]
-getrandom = ["safe-to-deploy", "candor-crypto-reviewed"]
-sha2 = ["safe-to-deploy", "candor-crypto-reviewed"]
-subtle = ["safe-to-deploy", "candor-crypto-reviewed"]
-zeroize = ["safe-to-deploy", "candor-crypto-reviewed"]
 
 [policy.candor-log]
 criteria = "safe-to-deploy"
 
-[policy.candor-log.dependency-criteria]
-ed25519-dalek = ["safe-to-deploy", "candor-crypto-reviewed"]
-hmac = ["safe-to-deploy", "candor-crypto-reviewed"]
-sha2 = ["safe-to-deploy", "candor-crypto-reviewed"]
-zeroize = ["safe-to-deploy", "candor-crypto-reviewed"]
-
 [policy.candor-safefs]
 criteria = "safe-to-deploy"
-
-[policy.candor-safefs.dependency-criteria]
-blake3 = ["safe-to-deploy", "candor-crypto-reviewed"]
-getrandom = ["safe-to-deploy", "candor-crypto-reviewed"]
-zeroize = ["safe-to-deploy", "candor-crypto-reviewed"]
 
 [policy.candor-sealer]
 criteria = "safe-to-deploy"
 
-[policy.candor-sealer.dependency-criteria]
-hkdf = ["safe-to-deploy", "candor-crypto-reviewed"]
-sha2 = ["safe-to-deploy", "candor-crypto-reviewed"]
-subtle = ["safe-to-deploy", "candor-crypto-reviewed"]
-zeroize = ["safe-to-deploy", "candor-crypto-reviewed"]
-
 [policy.candor-source-ui]
 criteria = "safe-to-deploy"
-
-[policy.candor-source-ui.dependency-criteria]
-sha2 = ["safe-to-deploy", "candor-crypto-reviewed"]
-zeroize = ["safe-to-deploy", "candor-crypto-reviewed"]
 
 [[exemptions.aead]]
 version = "0.6.1"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.argon2]]
 version = "0.6.0"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
-
-[[exemptions.arrayref]]
-version = "0.3.9"
-criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.arrayvec]]
 version = "0.7.8"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.askama]]
 version = "0.16.1"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.askama_derive]]
 version = "0.16.1"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.askama_macros]]
 version = "0.16.1"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.askama_parser]]
 version = "0.16.1"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.atoi]]
+version = "2.0.0"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.autocfg]]
 version = "1.5.1"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.base64ct]]
 version = "1.8.3"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.bitflags]]
 version = "2.13.2"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.blake2]]
 version = "0.11.0"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.blake3]]
 version = "1.8.2"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.block-buffer]]
+version = "0.9.0"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.block-buffer]]
 version = "0.12.1"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.bytes]]
+version = "1.12.1"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.cap-fs-ext]]
 version = "3.2.0"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.cap-primitives]]
 version = "3.4.6"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.cap-std]]
 version = "3.2.0"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.cc]]
 version = "1.5.1"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.cfg-if]]
 version = "1.0.5"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.chacha20]]
 version = "0.10.2"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.chacha20poly1305]]
 version = "0.11.0"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.cipher]]
 version = "0.5.2"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.cmov]]
 version = "0.5.4"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
-[[exemptions.constant_time_eq]]
-version = "0.3.1"
+[[exemptions.cpufeatures]]
+version = "0.2.17"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.cpufeatures]]
 version = "0.3.1"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.crc]]
+version = "3.4.0"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.crc-catalog]]
+version = "2.5.0"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.crc32fast]]
 version = "1.5.2"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.crossbeam-queue]]
+version = "0.3.14"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.crossbeam-utils]]
+version = "0.8.23"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.crypto-common]]
 version = "0.2.2"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.cssparser-macros]]
 version = "0.7.1"
 criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.ctutils]]
 version = "0.4.2"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.curve25519-dalek]]
 version = "5.0.0"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.curve25519-dalek-derive]]
 version = "0.1.1"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.derive_more]]
 version = "2.1.1"
 criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.derive_more-impl]]
 version = "2.1.1"
 criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.digest]]
+version = "0.10.7"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.digest]]
 version = "0.11.3"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.displaydoc]]
 version = "0.2.7"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.dotenvy]]
+version = "0.15.7"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.dtoa]]
 version = "1.0.11"
 criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.dtoa-short]]
 version = "0.3.5"
 criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.ed25519]]
 version = "3.0.0"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.ed25519-dalek]]
 version = "3.0.0"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.ego-tree]]
 version = "0.11.0"
 criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.either]]
+version = "1.18.0"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.enumflags2]]
+version = "0.7.12"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.enumflags2_derive]]
+version = "0.7.12"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.etcetera]]
+version = "0.11.0"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.event-listener]]
+version = "5.4.2"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.fastrand]]
 version = "2.5.0"
 criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.fiat-crypto]]
 version = "0.3.0"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.filetime]]
 version = "0.2.29"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.find-msvc-tools]]
 version = "0.1.14"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.flume]]
+version = "0.12.0"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.fs-set-times]]
 version = "0.20.3"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.futures-channel]]
+version = "0.3.34"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.futures-core]]
+version = "0.3.34"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.futures-executor]]
+version = "0.3.34"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.futures-intrusive]]
+version = "0.5.0"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.futures-io]]
+version = "0.3.34"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.futures-sink]]
+version = "0.3.34"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.futures-task]]
+version = "0.3.34"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.futures-util]]
+version = "0.3.34"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.generic-array]]
+version = "0.14.5"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.getrandom]]
 version = "0.3.4"
 criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.getrandom]]
 version = "0.4.3"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.glob]]
 version = "0.3.4"
 criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.hashbrown]]
 version = "0.14.2"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.hashlink]]
+version = "0.11.1"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.hkdf]]
 version = "0.13.0"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.hmac]]
 version = "0.13.0"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.hpke]]
 version = "0.14.1"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.html5ever]]
 version = "0.39.0"
 criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.hybrid-array]]
 version = "0.4.15"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.icu_collections]]
+version = "2.3.0"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.icu_locale_core]]
+version = "2.3.0"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.icu_normalizer]]
+version = "2.3.0"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.icu_normalizer_data]]
+version = "2.3.0"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.icu_properties]]
+version = "2.3.0"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.icu_properties_data]]
+version = "2.3.0"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.icu_provider]]
+version = "2.3.1"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.idna]]
+version = "0.4.0"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.idna_adapter]]
+version = "1.2.2"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.indexmap]]
 version = "2.14.2"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.inout]]
 version = "0.2.2"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.io-extras]]
 version = "0.18.4"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.io-lifetimes]]
 version = "2.0.4"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.ipnet]]
 version = "2.12.2"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.itoa]]
 version = "1.0.18"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.js-sys]]
+version = "0.3.106"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.keccak]]
 version = "0.2.2"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.kem]]
 version = "0.3.0"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.landlock]]
+version = "0.4.7"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.libc]]
 version = "0.2.189"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.libsqlite3-sys]]
+version = "0.37.0"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.libz-rs-sys]]
 version = "0.5.5"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.linux-raw-sys]]
 version = "0.11.0"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.litemap]]
+version = "0.8.3"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.lock_api]]
 version = "0.4.14"
-criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.log]]
 version = "0.4.34"
-criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.markup5ever]]
 version = "0.39.0"
 criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.maybe-owned]]
 version = "0.3.4"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.md-5]]
+version = "0.11.0"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.memchr]]
 version = "2.8.3"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.mio]]
+version = "1.2.3"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.ml-kem]]
 version = "0.3.2"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.module-lattice]]
 version = "0.2.3"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.new_debug_unreachable]]
 version = "1.0.6"
 criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
-
-[[exemptions.num-traits]]
-version = "0.2.19"
-criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.once_cell]]
 version = "1.21.4"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.parking_lot]]
 version = "0.12.5"
-criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.parking_lot_core]]
 version = "0.9.12"
-criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.password-hash]]
 version = "0.6.1"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.phc]]
 version = "0.6.1"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.phf]]
 version = "0.8.0"
 criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.phf_codegen]]
 version = "0.13.1"
 criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.phf_generator]]
 version = "0.8.0"
 criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.phf_macros]]
 version = "0.13.1"
 criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.phf_shared]]
 version = "0.8.0"
 criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.pin-project-lite]]
+version = "0.2.17"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.pkg-config]]
+version = "0.3.34"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.poly1305]]
 version = "0.9.1"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.potential_utf]]
+version = "0.1.6"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.ppv-lite86]]
 version = "0.2.21"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.proc-macro2]]
 version = "1.0.107"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.proptest]]
 version = "1.11.0"
 criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
-
-[[exemptions.quote]]
-version = "1.0.47"
-criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.r-efi]]
 version = "5.2.0"
 criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.r-efi]]
 version = "6.0.0"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.rand]]
 version = "0.9.5"
 criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.rand]]
+version = "0.10.3"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.rand_chacha]]
 version = "0.9.0"
 criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.rand_chacha]]
 version = "0.10.0"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.rand_core]]
 version = "0.9.5"
 criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.rand_core]]
 version = "0.10.1"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.redox_syscall]]
 version = "0.5.18"
-criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.regex-syntax]]
 version = "0.8.11"
 criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.rustc-hash]]
 version = "2.1.3"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
-
-[[exemptions.rustc_version]]
-version = "0.4.1"
-criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.rustix]]
 version = "1.1.2"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.rustversion]]
+version = "1.0.23"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.scopeguard]]
+version = "1.1.0"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.scraper]]
 version = "0.27.0"
 criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.selectors]]
 version = "0.38.0"
 criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.self_cell]]
 version = "1.3.0"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
-
-[[exemptions.semver]]
-version = "1.0.28"
-criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.serde]]
 version = "1.0.226"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.serde_core]]
 version = "1.0.226"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.serde_derive]]
 version = "1.0.226"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.serde_json]]
 version = "1.0.149"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.servo_arc]]
 version = "0.4.3"
 criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.sha1]]
+version = "0.11.0"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.sha2]]
+version = "0.10.9"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.sha2]]
 version = "0.11.0"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.sha3]]
 version = "0.11.0"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.sha3]]
 version = "0.12.0"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.shake]]
 version = "0.1.0"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
-
-[[exemptions.shlex]]
-version = "2.0.1"
-criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.signature]]
 version = "3.0.0"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.simd-adler32]]
 version = "0.3.10"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.siphasher]]
 version = "1.0.4"
 criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.slab]]
+version = "0.4.12"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.smallvec]]
 version = "1.16.2"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.socket2]]
+version = "0.6.5"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.spin]]
+version = "0.9.9"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.sponge-cursor]]
 version = "0.1.0"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.sqlx]]
+version = "0.9.0"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.sqlx-core]]
+version = "0.9.0"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.sqlx-macros]]
+version = "0.9.0"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.sqlx-macros-core]]
+version = "0.9.0"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.sqlx-mysql]]
+version = "0.9.0"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.sqlx-postgres]]
+version = "0.9.0"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.sqlx-sqlite]]
+version = "0.9.0"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.stable_deref_trait]]
 version = "1.2.1"
-criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.string_cache]]
 version = "0.9.0"
 criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.string_cache_codegen]]
 version = "0.6.1"
 criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.stringprep]]
+version = "0.1.5"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.subtle]]
 version = "2.6.1"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.syn]]
 version = "2.0.119"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.syn]]
 version = "3.0.6"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.synstructure]]
+version = "0.14.0"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.tar]]
 version = "0.4.45"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (dev/build tooling); expires 2027-03-30 (28 §5.2: <= 180 days). Stale: lockfile has 0.4.46, remove with cargo vet prune at integration"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.target-triple]]
 version = "1.0.1"
 criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.tendril]]
 version = "0.5.1"
 criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.thiserror]]
 version = "2.0.21"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.thiserror-impl]]
 version = "2.0.21"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.tinystr]]
 version = "0.8.4"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.tinyvec]]
 version = "1.13.3"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.tokio]]
+version = "1.48.0"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.tokio-macros]]
+version = "2.6.1"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.tokio-stream]]
+version = "0.1.19"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.toml]]
 version = "1.1.6+spec-1.1.0"
 criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.toml_parser]]
 version = "1.1.3+spec-1.1.0"
 criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.toml_writer]]
 version = "1.1.2+spec-1.1.0"
 criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.tracing]]
+version = "0.1.44"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.tracing-attributes]]
+version = "0.1.31"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.tracing-core]]
+version = "0.1.36"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.trybuild]]
 version = "1.0.116"
 criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.turboshake]]
 version = "0.7.1"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.type-map]]
 version = "0.4.0"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.typenum]]
 version = "1.20.1"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.unicode-ident]]
 version = "1.0.26"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.unicode-properties]]
+version = "0.1.4"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.universal-hash]]
 version = "0.6.1"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.url]]
+version = "2.5.8"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.uuid]]
+version = "1.18.1"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.version_check]]
+version = "0.9.5"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.wasi]]
+version = "0.11.0+wasi-snapshot-preview1"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.wasm-bindgen]]
+version = "0.2.129"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.wasm-bindgen-macro]]
+version = "0.2.129"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.wasm-bindgen-macro-support]]
+version = "0.2.129"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.wasm-bindgen-shared]]
+version = "0.2.129"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.web_atoms]]
 version = "0.2.6"
 criteria = "safe-to-run"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.whoami]]
+version = "2.1.3"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.windows-sys]]
 version = "0.59.0"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.windows-sys]]
 version = "0.61.2"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.windows-targets]]
 version = "0.52.6"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.windows_aarch64_gnullvm]]
 version = "0.52.6"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.windows_aarch64_msvc]]
 version = "0.52.6"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.windows_i686_gnu]]
 version = "0.52.6"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.windows_i686_gnullvm]]
 version = "0.52.6"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.windows_i686_msvc]]
 version = "0.52.6"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.windows_x86_64_gnu]]
 version = "0.52.6"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.windows_x86_64_gnullvm]]
 version = "0.52.6"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.windows_x86_64_msvc]]
 version = "0.52.6"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.winnow]]
 version = "1.0.4"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.winx]]
 version = "0.36.4"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.writeable]]
+version = "0.6.4"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.x-wing]]
 version = "0.1.0"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.x25519-dalek]]
 version = "3.0.0"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.yoke]]
+version = "0.8.3"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.yoke-derive]]
+version = "0.8.4"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.zerocopy]]
 version = "0.8.59"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.zerocopy-derive]]
 version = "0.8.59"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.zerofrom]]
 version = "0.1.8"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
-[[exemptions.zeroize]]
-version = "1.8.2"
+[[exemptions.zerofrom-derive]]
+version = "0.1.8"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.zeroize_derive]]
 version = "1.5.0"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption (safe-to-deploy only; candor-crypto-reviewed is never granted by exemption, AUD-RM0-INF-05); expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.zerotrie]]
+version = "0.2.5"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.zerovec]]
 version = "0.11.8"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.zerovec-derive]]
+version = "0.11.6"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.zip]]
 version = "4.6.1"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.zlib-rs]]
 version = "0.5.5"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.zmij]]
 version = "1.0.23"
 criteria = "safe-to-deploy"
-notes = "RM-0 baseline exemption; expires 2027-03-30 (28 §5.2: <= 180 days)"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2)"

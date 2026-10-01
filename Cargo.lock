@@ -307,9 +307,9 @@ version = "0.1.0"
 dependencies = [
  "askama",
  "base64",
- "candor-source-ui",
  "fluent-bundle",
  "fluent-syntax",
+ "hmac",
  "proptest",
  "scraper",
  "sha2 0.11.0",

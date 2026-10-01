@@ -6,8 +6,12 @@
 use std::fs; // safefs-lint: allow(dev-only preview example writing to target/, never shipped)
 use std::path::PathBuf;
 
-use candor_source_ui::preview::sample_view_model;
 use candor_source_ui::{Locale, Mode, Screen, render};
+
+#[path = "../tests/support/preview.rs"]
+#[allow(dead_code)]
+mod preview;
+use preview::sample_view_model;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let target = std::env::var_os("CARGO_TARGET_DIR")

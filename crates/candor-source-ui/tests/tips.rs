@@ -10,7 +10,11 @@
     clippy::cast_precision_loss
 )]
 
-use candor_source_ui::preview::sample_view_model;
+#[path = "support/preview.rs"]
+#[allow(dead_code)]
+mod preview;
+
+use preview::sample_view_model;
 use candor_source_ui::*;
 use scraper::{ElementRef, Html, Selector};
 

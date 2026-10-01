@@ -14,7 +14,8 @@
 #
 # Gate mapping: fmt/clippy -> SG-03 (clippy deny set, ST-007); test -> SG-06/SG-08
 # (as suites land); test-nonroot -> same suite as a fresh no-sudo account (ST-086);
-# deny/vet -> SG-05 (ST-010/ST-011); docs-lint -> SG-25 (ST-167);
+# deny/vet -> SG-05 (ST-010/ST-011; PR vet policy = safe-to-deploy only, ADR-052(8):
+# candor-crypto-reviewed is enforced by release-gate.yml / scripts/vet-release.sh); docs-lint -> SG-25 (ST-167);
 # reproducibility -> SG-13 smoke (single-host build-twice; the 2-builder comparison is
 # the release pipeline's job); sbom -> SG-14 (CycloneDX; signing happens at release);
 # workflow-lint -> ST-133 (+ CODEOWNERS resolution, gate self-tests); dco -> OSG-003;
@@ -191,7 +192,9 @@ jobs:
       - run: cargo deny --locked check advisories bans licenses sources
 
   cargo-vet:
-    name: cargo-vet
+    # PR stage of ADR-052(8): committed policy requires safe-to-deploy only. The
+    # crypto-reviewed release gate runs in release-gate.yml (tags/dispatch), never here.
+    name: cargo-vet (PR policy, safe-to-deploy)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -207,7 +210,7 @@ jobs:
         with:
           crate: cargo-vet
           version: 0.10.2
-      - name: Vet policy lint (no crypto-reviewed exemptions, expiries, policies, import approvals)
+      - name: Vet policy lint (staging, no crypto-reviewed exemptions, expiries, crypto-set coverage, import approvals)
         run: python3 scripts/check-vet-policy.py
       - run: cargo vet --locked
 

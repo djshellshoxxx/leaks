@@ -17,8 +17,6 @@ mod locale;
 mod model;
 mod page;
 mod paging;
-#[cfg(feature = "preview")]
-pub mod preview;
 mod routes;
 mod screens;
 mod tips;

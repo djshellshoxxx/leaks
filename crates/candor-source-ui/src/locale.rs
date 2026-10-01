@@ -88,16 +88,10 @@ impl Locale {
 
     /// Parses a path prefix against the production allow-list (exact match only). Pseudo-locale
     /// tags are rejected, so a routing layer cannot resolve them by accident
-    /// (AUD-RM1-SUI-04); CI and preview tooling use [`Locale::from_tag_including_pseudo`].
+    /// (AUD-RM1-SUI-04). CI and preview tooling use the `Locale` variants directly; there is
+    /// no tag parser for pseudo-locales in the library (AUD-RM1-SUI-13).
     pub fn from_tag(tag: &str) -> Option<Locale> {
         Locale::PRODUCTION.into_iter().find(|l| l.tag() == tag)
-    }
-
-    /// Like [`Locale::from_tag`] but also accepts pseudo-locales. Only for CI and preview
-    /// builds (cargo feature `preview`); never for production routing.
-    #[cfg(feature = "preview")]
-    pub fn from_tag_including_pseudo(tag: &str) -> Option<Locale> {
-        Locale::ALL.into_iter().find(|l| l.tag() == tag)
     }
 
     /// Pseudo-locales are for CI and preview only; they must not be enabled in production

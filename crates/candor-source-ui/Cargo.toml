@@ -16,15 +16,12 @@ unic-langid = { version = "=0.9.6", default-features = false }
 sha2 = { version = "=0.11.0", default-features = false }
 base64 = { version = "=0.22.1", default-features = false, features = ["alloc"] }
 zeroize = { version = "=1.8.2", default-features = false, features = ["alloc"] }
+hmac = { version = "=0.13.0", default-features = false }
 
-[features]
-# Sample view models (`preview` module) and pseudo-locale tag parsing, for tests, CI and the
-# `render_all` example only. Never enable in the C-06 production build (AUD-RM1-SUI-04/-09).
-preview = []
+# No cargo features: sample view models live in `tests/support/preview.rs` (dev-only), so an
+# `--all-features` build of the server contains no preview code (AUD-RM1-SUI-13).
 
 [dev-dependencies]
-# Self dev-dependency: turns on `preview` for tests and examples only.
-candor-source-ui = { path = ".", version = "=0.1.0", features = ["preview"] }
 scraper = { version = "=0.27.0", default-features = false, features = ["errors"] }
 proptest = { version = "=1.11.0", default-features = false, features = ["std"] }
 

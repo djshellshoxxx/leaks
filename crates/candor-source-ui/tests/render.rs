@@ -11,9 +11,13 @@
     clippy::arithmetic_side_effects
 )]
 
+#[path = "support/preview.rs"]
+#[allow(dead_code)]
+mod preview;
+
 use std::collections::HashSet;
 
-use candor_source_ui::preview::{all_cases, sample_view_model};
+use preview::{all_cases, sample_view_model};
 use candor_source_ui::*;
 use scraper::{ElementRef, Html, Selector};
 
@@ -936,7 +940,7 @@ fn security_critical_strings_flagged() {
 #[test]
 fn locale_allow_list() {
     for l in Locale::ALL {
-        assert_eq!(Locale::from_tag_including_pseudo(l.tag()), Some(l));
+        assert_eq!(Locale::ALL.iter().filter(|x| x.tag() == l.tag()).count(), 1);
         // AUD-RM1-SUI-04: production routing never resolves a pseudo-locale.
         let prod = Locale::from_tag(l.tag());
         assert_eq!(prod.is_some(), !l.is_pseudo(), "{}", l.tag());

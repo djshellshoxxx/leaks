@@ -245,6 +245,17 @@ mod tests {
     use crate::rand::TestRng;
     use crate::secret::CaseKey;
 
+    /// CRYPTO-057 / AUD-RM1-CORE-11: AAD contexts print only their variant name.
+    #[test]
+    fn aad_debug_is_redacted() {
+        let a = RecordAad::SourcePrefs {
+            tenant_id: [0xAB; 16],
+            lookup_tag: [0xEF; 32],
+            prefs_version: 7,
+        };
+        assert_eq!(format!("{a:?}"), "RecordAad::SourcePrefs(<redacted>)");
+    }
+
     fn aad(row_version: u64) -> RecordAad {
         RecordAad::Case {
             tenant_id: [1; 16],

@@ -15,9 +15,13 @@
     clippy::arithmetic_side_effects
 )]
 
+#[path = "support/preview.rs"]
+#[allow(dead_code)]
+mod preview;
+
 use std::collections::HashSet;
 
-use candor_source_ui::preview::sample_view_model;
+use preview::sample_view_model;
 use candor_source_ui::*;
 use scraper::{Html, Selector};
 
