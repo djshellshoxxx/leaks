@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+# cargo-fuzz layout (29 §4: ST-048 fuzz_safefs_names, ST-049 fuzz_archive). Run with:
+#   cargo +nightly fuzz run <target>   (from crates/candor-safefs)
+# Own workspace so the main workspace never builds libFuzzer (same as candor-core/fuzz;
+# the root `members = ["crates/*"]` glob does not reach this nested directory).
+# The archive targets write only below a private 0700 temp root that is
+# re-created and removed for every input; no network, no fixed paths.
+[package]
+name = "candor-safefs-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.10"
+candor-safefs = { path = ".." }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "fuzz_safefs_names"
+path = "fuzz_targets/fuzz_safefs_names.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_archive_zip"
+path = "fuzz_targets/fuzz_archive_zip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_archive_tar"
+path = "fuzz_targets/fuzz_archive_tar.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_archive_tar_gz"
+path = "fuzz_targets/fuzz_archive_tar_gz.rs"
+test = false
+doc = false
+bench = false
