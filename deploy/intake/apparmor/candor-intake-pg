@@ -6,10 +6,34 @@
 # directory, its Unix socket directory and POSIX shared memory. Denied: exec (no
 # archive_command, no COPY PROGRAM), IP networking, capabilities, every other Candor path.
 abi <abi/3.0>,
-include <tunables/global>
+# Self-contained (AUD-RM2-DEP-23): no include of distribution abstractions or tunables (their
+# drop-in directories could widen this profile). The two variables are defined here (values of
+# Debian's tunables/proc and tunables/kernelvars); the runtime rules are inlined below.
+@{PROC}=/proc/
+@{pid}={[1-9],[1-9][0-9],[1-9][0-9][0-9],[1-9][0-9][0-9][0-9],[1-9][0-9][0-9][0-9][0-9],[1-9][0-9][0-9][0-9][0-9][0-9],[1-4][0-9][0-9][0-9][0-9][0-9][0-9]}
 
 profile candor-intake-pg /usr/lib/postgresql/16/bin/postgres flags=(attach_disconnected) {
-  include <abstractions/base>
+  # ---- runtime, inlined and minimised from abstractions/base (AUD-RM2-DEP-23): dynamic loader
+  # and shared libraries (read/map, no write, no exec of anything else), /dev/null for the
+  # inherited stdio, /dev/urandom, the own memory map (glibc/Rust main-thread stack guard) and
+  # signals between the process's own threads/processes. Not inlined: locale, X11, home
+  # directories, ld.so.preload, journal sockets, ptrace, the other base rules.
+  /etc/ld.so.cache r,
+  /usr/lib/*-linux-gnu*/**.so* mr,
+  /dev/null rw,
+  /dev/urandom r,
+  @{PROC}/@{pid}/maps r,
+  signal (send, receive) peer=@{profile_name},
+  # Unix-socket rules abstractions/base granted (kept so behaviour is unchanged).
+  unix (create, getattr, getopt, setopt, shutdown),
+  unix (receive) peer=(label=unconfined),
+  unix peer=(label=@{profile_name}),
+  # Peer authentication resolves the client uid to a name (getpwuid via nsswitch files).
+  /etc/nsswitch.conf r,
+  /etc/passwd r,
+  # Server locale (lc_* from initdb) and encoding conversion modules.
+  /usr/lib/locale/** r,
+  /usr/lib/*-linux-gnu*/gconv/gconv-modules* r,
 
   /usr/lib/postgresql/16/bin/postgres mr,
   /usr/lib/postgresql/16/lib/** mr,
@@ -44,7 +68,7 @@ profile candor-intake-pg /usr/lib/postgresql/16/bin/postgres flags=(attach_disco
   /sys/fs/cgroup/**/memory.max r,
   /sys/devices/system/cpu/** r,
 
-  # ---- explicit denials (win over any allow, incl. abstractions; denials are audited) ----
+  # ---- explicit denials (win over any allow; denials are audited) ----
   deny capability,
   deny ptrace,
   deny mount,

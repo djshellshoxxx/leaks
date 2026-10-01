@@ -22,6 +22,11 @@ libfuzzer-sys = "=0.4.10"
 candor-log = { path = ".." }
 ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["fast", "zeroize"] }
 zeroize = { version = "=1.8.2", default-features = false, features = ["alloc"] }
+# Harness-only: mint deterministic identifier tokens (AUD-RM1-LOG-17 made
+# identifiers random-only; the harness re-implements the documented token MAC
+# under its own test key so fixtures and seeds are reproducible).
+hmac = { version = "=0.13.0", default-features = false }
+sha2 = { version = "=0.11.0", default-features = false }
 
 [workspace]
 members = ["."]

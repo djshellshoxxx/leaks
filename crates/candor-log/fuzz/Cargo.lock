@@ -22,10 +22,12 @@ name = "candor-log"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
+ "getrandom",
  "hmac",
  "serde",
  "serde_json",
  "sha2",
+ "subtle",
  "zeroize",
 ]
 
@@ -35,7 +37,9 @@ version = "0.0.0"
 dependencies = [
  "candor-log",
  "ed25519-dalek",
+ "hmac",
  "libfuzzer-sys",
+ "sha2",
  "zeroize",
 ]
 

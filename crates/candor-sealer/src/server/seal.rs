@@ -16,6 +16,7 @@ use super::inner::{
 };
 use super::select::Selection;
 use super::session::StagedPart;
+use super::handover::BundleWriter;
 use super::sink::{Blob, EnvelopeGroup, EnvelopeObject};
 use crate::proto::cbor::Value;
 use crate::proto::{Mode, PendingReply, SecretText};
@@ -41,8 +42,6 @@ pub(crate) struct SealCtx<'a> {
     pub tenant_id: [u8; 16],
     pub sealer_key: &'a SigningKey,
     pub staging: &'static SafeRoot,
-    /// Day-start time stamped on staging files (no sub-day time, ADR-010).
-    pub slot: SlotTime,
     pub custodian_pk: KemPublicKey,
     pub disposition_pk: KemPublicKey,
 }
@@ -293,7 +292,7 @@ pub(crate) fn seal_bundle(
     };
     let header_bytes = header.encode()?;
     let mac = header.header_mac(&ck)?;
-    let (staged_id, mut w) = stage_create(ctx.staging)?;
+    let mut w = BundleWriter::new().map_err(io_err)?;
     w.write_all(&header_bytes).map_err(io_err)?;
     w.write_all(&mac).map_err(io_err)?;
     let mut sink = StreamSink::new(enc, w, padded);
@@ -327,16 +326,19 @@ pub(crate) fn seal_bundle(
         offset = offset.checked_add(p.real_len).ok_or(Error::Internal)?;
     }
     let w = sink.finish()?;
-    let id = stage_commit(ctx.staging, w, &staged_id, ctx.slot)?;
+    let staged = w.finish().map_err(io_err)?;
     let len = stream::ciphertext_len(padded)?
         .checked_add((HEADER_LEN + HEADER_MAC_LEN) as u64)
         .ok_or(Error::Internal)?;
+    if staged.len() != len {
+        return Err(Error::Internal);
+    }
     Ok(BundleOut {
         object: EnvelopeObject {
             object_type: ObjectType::AttachmentBundle,
             object_hash: object_hash(&header_bytes, &mac),
             slot_block: block.encode(),
-            blob: Blob::Staged { id, len },
+            blob: Blob::Staged(staged),
         },
         entries,
         manifest,
@@ -388,11 +390,6 @@ pub(crate) struct SealedGroup {
 }
 
 impl SealedGroup {
-    /// Delete the staged bundle (the group will not be handed to the sink).
-    pub(crate) fn remove_staged(&self, ctx: &SealCtx<'_>) {
-        remove_staged(ctx, &self.bundle);
-    }
-
     pub(crate) fn into_group(self, channel_id: [u8; 16], disposition_ct: Vec<u8>) -> EnvelopeGroup {
         EnvelopeGroup {
             channel_id,
@@ -578,18 +575,9 @@ pub(crate) fn seal_initial(
         };
         Ok((group, sub_hash))
     })();
-    if result.is_err() {
-        remove_staged(ctx, &bundle.object);
-    }
     result
 }
 
-/// Delete a staged object that will not be handed to the sink.
-pub(crate) fn remove_staged(ctx: &SealCtx<'_>, o: &EnvelopeObject) {
-    if let Blob::Staged { id, .. } = &o.blob {
-        let _ = ctx.staging.remove(id, ctx.slot);
-    }
-}
 
 /// A follow-up or key-rotation SOURCE_MESSAGE (§13.4 v1.1) and optional bundle.
 pub(crate) struct SourceMessageInput<'a> {
@@ -718,9 +706,6 @@ pub(crate) fn seal_source_message(
             identity: envelope_object(&identity, Blob::Inline(identity.bytes.clone()))?,
         })
     })();
-    if result.is_err() {
-        remove_staged(ctx, &bundle.object);
-    }
     result
 }
 
@@ -871,28 +856,22 @@ pub(crate) fn build_chaff(
         0,
         inner::max_bucket(ObjectType::Identity)?,
     )?;
-    let (staged_id, mut w) = stage_create(ctx.staging)?;
+    let mut w = BundleWriter::new().map_err(io_err)?;
     w.write_all(&bundle.bytes).map_err(io_err)?;
-    let id = stage_commit(ctx.staging, w, &staged_id, ctx.slot)?;
-    let len = u64::try_from(bundle.bytes.len()).map_err(|_| Error::Internal)?;
+    let staged = w.finish().map_err(io_err)?;
     let group = SealedGroup {
         main: envelope_object(&main, Blob::Inline(main.bytes.clone()))?,
-        bundle: envelope_object(&bundle, Blob::Staged { id, len })?,
+        bundle: envelope_object(&bundle, Blob::Staged(staged))?,
         identity: envelope_object(&identity, Blob::Inline(identity.bytes.clone()))?,
     };
-    match disposition_ct(
+    let d = disposition_ct(
         ctx.suite,
         &ctx.tenant_id,
         &ctx.disposition_pk,
         &group.main.object_hash,
         true,
-    ) {
-        Ok(d) => Ok(group.into_group(channel_id, d)),
-        Err(e) => {
-            group.remove_staged(ctx);
-            Err(e)
-        }
-    }
+    )?;
+    Ok(group.into_group(channel_id, d))
 }
 
 /// Re-wrap one pending reply's stanza (1) from the old to the new source key

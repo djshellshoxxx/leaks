@@ -188,6 +188,42 @@ const fn message_ok(m: &str) -> bool {
     true
 }
 
+/// Maximum length of a `module_path!()` accepted in a record.
+const MAX_DIAG_MODULE_BYTES: usize = 200;
+
+/// A Rust module path: `ident(::ident)*`, ASCII, bounded (AUD-RM1-LOG-23:
+/// a hand-written `Site` cannot smuggle text through `MODULE`).
+const fn module_ok(m: &str) -> bool {
+    let b = m.as_bytes();
+    if b.is_empty() || b.len() > MAX_DIAG_MODULE_BYTES {
+        return false;
+    }
+    let mut i = 0;
+    let mut seg_start = true;
+    while i < b.len() {
+        #[allow(clippy::indexing_slicing)] // `i < b.len()` by the loop condition
+        let c = b[i];
+        if c == b':' {
+            // exactly "::" between two non-empty segments
+            #[allow(clippy::indexing_slicing)]
+            let next_is_colon = i.saturating_add(1) < b.len() && b[i.saturating_add(1)] == b':';
+            if seg_start || !next_is_colon {
+                return false;
+            }
+            i = i.saturating_add(2);
+            seg_start = true;
+            continue;
+        }
+        let ok = c.is_ascii_alphanumeric() || c == b'_';
+        if !ok || (seg_start && c.is_ascii_digit()) {
+            return false;
+        }
+        seg_start = false;
+        i = i.saturating_add(1);
+    }
+    !seg_start
+}
+
 /// Macro support. Not an API: everything a caller can reach here takes its
 /// message, module and line from the associated **constants** of a
 /// [`__private::Site`] type, so no runtime string (e.g. a leaked
@@ -208,6 +244,8 @@ pub mod __private {
         const MODULE: &'static str;
         /// `line!()` of the call site.
         const LINE: u32;
+        /// `cfg!(debug_assertions)` of the calling crate (release ceiling).
+        const DEBUG_ASSERTIONS: bool;
     }
 
     /// Whether `level` is compiled in.
@@ -229,8 +267,18 @@ pub mod __private {
                 super::message_ok(S::MESSAGE),
                 "diag!: message must be 1..=120 bytes of printable ASCII"
             );
+            assert!(
+                super::module_ok(S::MODULE),
+                "diag!: MODULE must be a module path"
+            );
         }
-        if !super::message_ok(S::MESSAGE) || codes.len() > MAX_DIAG_CODES {
+        if !super::message_ok(S::MESSAGE)
+            || !super::module_ok(S::MODULE)
+            || codes.len() > MAX_DIAG_CODES
+            // The release ceiling is enforced here too, not only in the
+            // macro (AUD-RM1-LOG-23).
+            || !super::enabled(S::LEVEL, S::DEBUG_ASSERTIONS)
+        {
             return;
         }
         if let Some(s) = SINK.get() {
@@ -267,6 +315,7 @@ macro_rules! diag {
             const MESSAGE: &'static str = $msg;
             const MODULE: &'static str = ::core::module_path!();
             const LINE: u32 = ::core::line!();
+            const DEBUG_ASSERTIONS: bool = ::core::cfg!(debug_assertions);
         }
         const _: () = ::core::assert!(
             $crate::diag::__private::message_ok(
@@ -281,7 +330,7 @@ macro_rules! diag {
         );
         if $crate::diag::__private::enabled(
             <__CandorDiagSite as $crate::diag::__private::Site>::LEVEL,
-            ::core::cfg!(debug_assertions),
+            <__CandorDiagSite as $crate::diag::__private::Site>::DEBUG_ASSERTIONS,
         ) {
             $crate::diag::__private::emit::<__CandorDiagSite>(
                 &[ $( $crate::diag::DiagCode::diag_code(&$code) ),* ],
@@ -348,6 +397,28 @@ mod tests {
         assert!(!message_ok("\u{202e}rtl"));
         assert!(message_ok(&"x".repeat(MAX_DIAG_MSG_BYTES)));
         assert!(!message_ok(&"x".repeat(MAX_DIAG_MSG_BYTES + 1)));
+    }
+
+    // AUD-RM1-LOG-23: MODULE must be a module path.
+    #[test]
+    fn module_check() {
+        assert!(module_ok("candor_log"));
+        assert!(module_ok("candor_log::diag::tests"));
+        assert!(module_ok(module_path!()));
+        for bad in [
+            "",
+            "::a",
+            "a::",
+            "a:b",
+            "a:::b",
+            "1a",
+            "a::1b",
+            "peer 203.0.113.7",
+            "a-b",
+        ] {
+            assert!(!module_ok(bad), "{bad:?}");
+        }
+        assert!(!module_ok(&"a".repeat(MAX_DIAG_MODULE_BYTES + 1)));
     }
 
     #[test]

@@ -11,6 +11,7 @@
 
 pub mod clock;
 pub mod directory;
+pub mod handover;
 pub mod hardening;
 pub mod kd;
 pub mod merkle;
@@ -141,6 +142,15 @@ pub struct ChaffConfig {
     pub delayed_share_permille: u16,
     /// Bundle-size distribution.
     pub buckets: ChaffBuckets,
+    /// Account writes (real and dummy) are batched and flushed at this fixed
+    /// interval, independent of envelope commits (AUD-RM2-SEA-21). 1 min ..=
+    /// 1 h; default 15 min.
+    pub account_flush_interval: Duration,
+    /// Share of chaff events that also rotate a dummy account (a synthetic
+    /// passphrase rotation), in permille, so dummy accounts have the same
+    /// lifecycle as real ones (SEA-21). Set by policy to the published share
+    /// of real rotations; provisional default 50.
+    pub dummy_rotation_permille: u16,
 }
 
 impl Default for ChaffConfig {
@@ -151,8 +161,24 @@ impl Default for ChaffConfig {
             followup_share_permille: 300,
             delayed_share_permille: 500,
             buckets: ChaffBuckets::default(),
+            account_flush_interval: Duration::from_secs(15 * 60),
+            dummy_rotation_permille: 50,
         }
     }
+}
+
+/// Queued account writes are bounded; above this, new submissions get `BUSY`
+/// until the store accepts a flush.
+pub const MAX_QUEUED_ACCOUNTS: usize = 4096;
+/// Dummy accounts remembered for synthetic rotations.
+const MAX_DUMMY_TAGS: usize = 1024;
+
+/// Account writes waiting for the next batch (AUD-RM2-SEA-21).
+#[derive(Default)]
+struct AccountQueue {
+    pending: Vec<AccountUpsert>,
+    /// Current lookup tags of dummy accounts (synthetic rotations pick one).
+    dummies: std::collections::VecDeque<[u8; 32]>,
 }
 
 /// Sealer configuration. Secrets are not part of it: K35 is passed separately
@@ -239,6 +265,9 @@ pub(crate) struct State {
     chaff_seed: Secret32,
     chaff_counter: Mutex<u64>,
     chaff_cancels: Mutex<HashMap<[u8; 16], u32>>,
+    accounts: Mutex<AccountQueue>,
+    /// Serialises flushes (a batch completes before the next starts).
+    flush_lock: Mutex<()>,
     accept_errors: Arc<AtomicU64>,
 }
 
@@ -414,6 +443,9 @@ impl Sealer {
             || cfg.chaff.mean_interval > Duration::from_secs(2 * 60 * 60)
             || cfg.chaff.followup_share_permille > 1000
             || cfg.chaff.delayed_share_permille > 1000
+            || cfg.chaff.dummy_rotation_permille > 1000
+            || cfg.chaff.account_flush_interval < Duration::from_secs(60)
+            || cfg.chaff.account_flush_interval > Duration::from_secs(60 * 60)
             || cfg.limits.argon_permits == 0
             || cfg.limits.max_connections == 0
             || cfg.directory_trust.tenant_id != cfg.tenant_id
@@ -454,6 +486,8 @@ impl Sealer {
                 chaff_seed,
                 chaff_counter: Mutex::new(0),
                 chaff_cancels: Mutex::new(HashMap::new()),
+                accounts: Mutex::new(AccountQueue::default()),
+                flush_lock: Mutex::new(()),
                 accept_errors: Arc::new(AtomicU64::new(0)),
             }),
         })
@@ -1129,13 +1163,12 @@ impl Sealer {
         (
             Arc<VerifiedSnapshot>,
             u32,
-            SlotTime,
             KemPublicKey,
             KemPublicKey,
         ),
         Response,
     > {
-        let (today, slot) = self.slot_today()?;
+        let (today, _) = self.slot_today()?;
         let snap = self.snapshot().ok_or_else(|| err(ErrorCode::Unavailable))?;
         let alt = snap
             .channel(channel_id)
@@ -1151,7 +1184,7 @@ impl Sealer {
             .map_err(|_| unavailable.clone())?;
         let disposition = KemPublicKey::from_bytes(snap.suite, &snap.disposition_pk)
             .map_err(|_| unavailable.clone())?;
-        Ok((snap, today, slot, custodian, disposition))
+        Ok((snap, today, custodian, disposition))
     }
 
     async fn seal_finish(&self, sess: SessionHandle, delayed: bool) -> Response {
@@ -1184,7 +1217,7 @@ impl Sealer {
         let Some(channel_id) = g.channel_id else {
             return err(ErrorCode::BadState);
         };
-        let (snap, today, slot, custodian, disposition) = match self.seal_preconditions(&channel_id)
+        let (snap, today, custodian, disposition) = match self.seal_preconditions(&channel_id)
         {
             Ok(v) => v,
             Err(e) => return e,
@@ -1242,7 +1275,6 @@ impl Sealer {
             snap,
             sel,
             today,
-            slot,
             custodian,
             disposition,
             release_offset_days,
@@ -1278,7 +1310,7 @@ impl Sealer {
         let Some(report) = g.prefs.as_ref().and_then(|p| p.reports.first()).cloned() else {
             return err(ErrorCode::BadState);
         };
-        let (snap, today, slot, custodian, disposition) =
+        let (snap, today, custodian, disposition) =
             match self.seal_preconditions(&report.channel_id) {
                 Ok(v) => v,
                 Err(e) => return e,
@@ -1311,7 +1343,6 @@ impl Sealer {
             snap,
             sel,
             today,
-            slot,
             custodian,
             disposition,
             release_offset_days: 0,
@@ -1438,7 +1469,7 @@ impl Sealer {
     /// account and every chaff group draws a delivery delay like real ones
     /// (ADR-052(2)).
     pub async fn chaff_event(&self, channel_id: [u8; 16]) -> Result<(), ErrorCode> {
-        let (today, slot) = self.slot_today().map_err(|_| ErrorCode::Unavailable)?;
+        let (today, _) = self.slot_today().map_err(|_| ErrorCode::Unavailable)?;
         let snap = self.snapshot().ok_or(ErrorCode::Unavailable)?;
         let enabled = snap.channel(&channel_id).is_some_and(|c| c.enabled);
         if !enabled || snap.suite != self.st.cfg.suite || !snap.is_fresh(today) {
@@ -1466,7 +1497,6 @@ impl Sealer {
                 tenant_id: st.cfg.tenant_id,
                 sealer_key: &st.sealer_key,
                 staging: st.staging,
-                slot,
                 custodian_pk: custodian,
                 disposition_pk: disposition,
             };
@@ -1488,22 +1518,67 @@ impl Sealer {
                 )
                 .map_err(|_| ErrorCode::Internal)?
             };
-            if let Some(a) = account
-                && st.sink.upsert_account(a).is_err()
-            {
-                seal::remove_staged(&ctx, &group.bundle);
-                return Err(ErrorCode::Internal);
+            // Same order and the same queue as a real initial submission:
+            // the envelope now, the (dummy) account in the next shuffled batch.
+            if account.is_some() && !queue_has_room(&st) {
+                return Err(ErrorCode::Busy);
             }
-            commit_group(&ctx, st.sink.as_ref(), group, epoch, today, delay)
+            commit_group(st.sink.as_ref(), group, epoch, today, delay)?;
+            if let Some(a) = account {
+                let tag = a.account.lookup_tag;
+                enqueue_account(&st, a);
+                remember_dummy(&st, tag);
+            }
+            // Synthetic lifecycle: some chaff events also rotate a dummy.
+            if rand::bernoulli_permille(st.cfg.chaff.dummy_rotation_permille)
+                .map_err(|_| ErrorCode::Internal)?
+            {
+                rotate_dummy(&st).map_err(|_| ErrorCode::Internal)?;
+            }
+            Ok(())
         })
         .await;
         r.unwrap_or(Err(ErrorCode::Internal))
     }
 
-    /// Spawn the session reaper and (if enabled) the chaff scheduler. Must be
-    /// called inside a tokio runtime.
+    /// Write all queued account operations (real and dummy) to the store as one
+    /// shuffled batch (AUD-RM2-SEA-21). Called at the fixed
+    /// `account_flush_interval` by [`Sealer::spawn_background`]; the integrator
+    /// also calls it at shutdown. Blocking. On a store error the unwritten
+    /// operations stay queued (in order) for the next flush.
+    pub fn flush_accounts(&self) -> Result<usize, sink::SinkError> {
+        let _serial = lock(&self.st.flush_lock);
+        let batch = core::mem::take(&mut lock(&self.st.accounts).pending);
+        let batch = match shuffle_batch(batch.clone()) {
+            Ok(b) => b,
+            Err(_) => {
+                requeue(&self.st, batch);
+                return Err(sink::SinkError);
+            }
+        };
+        let total = batch.len();
+        let mut it = batch.into_iter();
+        while let Some(a) = it.next() {
+            if self.st.sink.upsert_account(a.clone()).is_err() {
+                let mut rest = vec![a];
+                rest.extend(it);
+                requeue(&self.st, rest);
+                return Err(sink::SinkError);
+            }
+        }
+        Ok(total)
+    }
+
+    /// Number of queued account operations.
+    #[must_use]
+    pub fn queued_accounts(&self) -> usize {
+        lock(&self.st.accounts).pending.len()
+    }
+
+    /// Spawn the session reaper, the account batch writer and (if enabled) the
+    /// chaff scheduler. Must be called inside a tokio runtime.
     pub fn spawn_background(&self) -> Vec<tokio::task::JoinHandle<()>> {
-        let mut v = Vec::with_capacity(2);
+        let mut v = Vec::with_capacity(3);
         let me = self.clone();
         v.push(tokio::spawn(async move {
             let mut iv = tokio::time::interval(Duration::from_secs(10));
@@ -1512,6 +1587,16 @@ impl Sealer {
                 // Unlinks happen off the async workers (AUD-RM2-SEA-13).
                 let m = me.clone();
                 let _ = blocking(move || m.reap_expired()).await;
+            }
+        }));
+        let me = self.clone();
+        v.push(tokio::spawn(async move {
+            let every = me.st.cfg.chaff.account_flush_interval;
+            let mut iv = tokio::time::interval_at(Instant::now() + every, every);
+            loop {
+                iv.tick().await;
+                let m = me.clone();
+                let _ = blocking(move || m.flush_accounts()).await;
             }
         }));
         if self.st.cfg.chaff.enabled {
@@ -1678,7 +1763,6 @@ struct SealJob {
     snap: Arc<VerifiedSnapshot>,
     sel: Selection,
     today: u32,
-    slot: SlotTime,
     custodian: KemPublicKey,
     disposition: KemPublicKey,
     release_offset_days: u8,
@@ -1691,29 +1775,102 @@ fn seal_ctx<'a>(st: &'a State, job: &SealJob) -> seal::SealCtx<'a> {
         tenant_id: st.cfg.tenant_id,
         sealer_key: &st.sealer_key,
         staging: st.staging,
-        slot: job.slot,
         custodian_pk: job.custodian.clone(),
         disposition_pk: job.disposition.clone(),
     }
 }
 
-/// Hand an envelope group to the sink; on failure delete its staged bundle.
+/// Hand an envelope group to the sink. The sealed bundle is an anonymous
+/// memfd: whatever happens, it is freed when the group is dropped.
 fn commit_group(
-    ctx: &seal::SealCtx<'_>,
     sink: &dyn EnvelopeSink,
     group: EnvelopeGroup,
     epoch_id: u32,
     today: u32,
     release_offset_days: u8,
 ) -> Result<(), ErrorCode> {
-    let bundle = group.bundle.clone();
-    match sink.commit_envelope_group(group, epoch_id, today, release_offset_days) {
-        Ok(()) => Ok(()),
-        Err(_) => {
-            seal::remove_staged(ctx, &bundle);
-            Err(ErrorCode::Internal)
-        }
+    sink.commit_envelope_group(group, epoch_id, today, release_offset_days)
+        .map_err(|_| ErrorCode::Internal)
+}
+
+/// Put unwritten operations back at the front of the queue.
+fn requeue(st: &State, mut ops: Vec<AccountUpsert>) {
+    let mut q = lock(&st.accounts);
+    ops.append(&mut q.pending);
+    q.pending = ops;
+}
+
+/// Room for one more queued account write.
+fn queue_has_room(st: &State) -> bool {
+    lock(&st.accounts).pending.len() < MAX_QUEUED_ACCOUNTS
+}
+
+/// Queue an account write for the next batch. A replacement of an account
+/// whose create (or earlier replacement) is still queued is merged into that
+/// entry, so causal order survives the shuffle of the batch.
+fn enqueue_account(st: &State, a: AccountUpsert) {
+    let mut q = lock(&st.accounts);
+    if let Some(old) = a.replaces
+        && let Some(prev) = q
+            .pending
+            .iter_mut()
+            .find(|p| ct_eq(&p.account.lookup_tag, &old))
+    {
+        prev.account = a.account;
+        prev.rewrapped_replies = a.rewrapped_replies;
+        return;
     }
+    q.pending.push(a);
+}
+
+fn remember_dummy(st: &State, tag: [u8; 32]) {
+    let mut q = lock(&st.accounts);
+    if q.dummies.len() >= MAX_DUMMY_TAGS {
+        q.dummies.pop_front();
+    }
+    q.dummies.push_back(tag);
+}
+
+/// A synthetic passphrase rotation of a random dummy account (SEA-21): the
+/// same store operation as a real rotation (replace by old `lookup_tag`).
+fn rotate_dummy(st: &State) -> Result<(), candor_core::Error> {
+    let len = lock(&st.accounts).dummies.len();
+    let Ok(n) = u32::try_from(len) else {
+        return Ok(());
+    };
+    if n == 0 {
+        return Ok(());
+    }
+    let i = usize::try_from(rand::uniform_below(n)?).map_err(|_| candor_core::Error::Internal)?;
+    let mut fresh = dummy_account(st)?;
+    let new_tag = fresh.account.lookup_tag;
+    let old = {
+        let mut q = lock(&st.accounts);
+        let Some(slot) = q.dummies.get_mut(i) else {
+            return Ok(());
+        };
+        core::mem::replace(slot, new_tag)
+    };
+    fresh.replaces = Some(old);
+    enqueue_account(st, fresh);
+    Ok(())
+}
+
+/// Order a batch: creates in a uniformly random order (CSPRNG Fisher–Yates),
+/// then replacements in queue order (a replacement may target an account
+/// created earlier in the same batch).
+fn shuffle_batch(batch: Vec<AccountUpsert>) -> Result<Vec<AccountUpsert>, candor_core::Error> {
+    let (mut creates, replaces): (Vec<_>, Vec<_>) =
+        batch.into_iter().partition(|a| a.replaces.is_none());
+    let mut i = creates.len();
+    while i > 1 {
+        let n = u32::try_from(i).map_err(|_| candor_core::Error::Internal)?;
+        let j = usize::try_from(rand::uniform_below(n)?).map_err(|_| candor_core::Error::Internal)?;
+        i = i.saturating_sub(1);
+        creates.swap(i, j);
+    }
+    creates.extend(replaces);
+    Ok(creates)
 }
 
 /// A dummy account for initial-shaped chaff (ADR-052(2)): random `lookup_tag`
@@ -1813,7 +1970,6 @@ fn seal_blocking(mut g: OwnedMutexGuard<Session>, st: &State, job: SealJob) -> (
         let mailbox_id = match keys.mailbox_id(0) {
             Ok(m) => m,
             Err(e) => {
-                group.remove_staged(&ctx);
                 return (core_err(e), false);
             }
         };
@@ -1831,7 +1987,6 @@ fn seal_blocking(mut g: OwnedMutexGuard<Session>, st: &State, job: SealJob) -> (
         let ct = match prefs_ct(st, keys, &prefs) {
             Ok(c) => c,
             Err(e) => {
-                group.remove_staged(&ctx);
                 return (core_err(e), false);
             }
         };
@@ -1872,7 +2027,6 @@ fn seal_blocking(mut g: OwnedMutexGuard<Session>, st: &State, job: SealJob) -> (
     ) {
         Ok(d) => d,
         Err(e) => {
-            group.remove_staged(&ctx);
             return (core_err(e), false);
         }
     };
@@ -1880,30 +2034,23 @@ fn seal_blocking(mut g: OwnedMutexGuard<Session>, st: &State, job: SealJob) -> (
     // ADR-052(2): the account is a separate store operation, written first so a
     // "received" answer implies both are durable. An account left behind by a
     // failed envelope commit is indistinguishable from a chaff dummy account.
-    let committed = match account {
-        Some(a) => match st.sink.upsert_account(a) {
-            Ok(()) => commit_group(
-                &ctx,
-                st.sink.as_ref(),
-                group,
-                sel.epoch_id,
-                job.today,
-                job.release_offset_days,
-            ),
-            Err(_) => {
-                seal::remove_staged(&ctx, &group.bundle);
-                Err(ErrorCode::Internal)
-            }
-        },
-        None => commit_group(
-            &ctx,
-            st.sink.as_ref(),
-            group,
-            sel.epoch_id,
-            job.today,
-            job.release_offset_days,
-        ),
-    };
+    // AUD-RM2-SEA-21: the envelope is committed now; the account goes into the
+    // next shuffled batch with dummy accounts, written at a fixed interval, so
+    // the store sees no account write next to this envelope.
+    if account.is_some() && !queue_has_room(st) {
+        if job.initial {
+            sess.prefs = None;
+            sess.keys = None;
+        }
+        return (err(ErrorCode::Busy), false);
+    }
+    let committed = commit_group(
+        st.sink.as_ref(),
+        group,
+        sel.epoch_id,
+        job.today,
+        job.release_offset_days,
+    );
     if let Err(code) = committed {
         if job.initial {
             // Not committed: the source must restart (§11.1).
@@ -1911,6 +2058,9 @@ fn seal_blocking(mut g: OwnedMutexGuard<Session>, st: &State, job: SealJob) -> (
             sess.keys = None;
         }
         return (err(code), false);
+    }
+    if let Some(a) = account {
+        enqueue_account(st, a);
     }
     // Committed and fsynced: zeroize K36, the draft and staged parts (§9.13).
     // On CSPRNG failure the draft is still dropped and the whole session is
@@ -1971,9 +2121,6 @@ fn rotate_blocking(
         let group = match seal::seal_source_message(&ctx, &job.sel, &sm, &[], &sess.k36) {
             Ok(o) => o,
             Err(e) => {
-                groups
-                    .iter()
-                    .for_each(|g: &EnvelopeGroup| seal::remove_staged(&ctx, &g.bundle));
                 return core_err(e);
             }
         };
@@ -1986,10 +2133,6 @@ fn rotate_blocking(
         ) {
             Ok(d) => groups.push(group.into_group(report.channel_id, d)),
             Err(e) => {
-                group.remove_staged(&ctx);
-                groups
-                    .iter()
-                    .for_each(|g| seal::remove_staged(&ctx, &g.bundle));
                 return core_err(e);
             }
         }
@@ -1998,9 +2141,6 @@ fn rotate_blocking(
     let ct = match prefs_ct(st, &new_keys, &new_prefs) {
         Ok(c) => c,
         Err(e) => {
-            groups
-                .iter()
-                .for_each(|g| seal::remove_staged(&ctx, &g.bundle));
             return core_err(e);
         }
     };
@@ -2014,13 +2154,15 @@ fn rotate_blocking(
         },
         rewrapped_replies: rewrapped,
     };
-    // KEY_ROTATION groups first, then the account (ADR-052(2)): if the account
-    // update fails the source keeps a working old passphrase and can retry.
+    // KEY_ROTATION groups first, then the account (ADR-052(2)). The account
+    // replacement is queued for the next batch (SEA-21); until it is written
+    // the old passphrase keeps working.
+    if !queue_has_room(st) {
+        return err(ErrorCode::Busy);
+    }
     let mut groups = groups.into_iter();
     while let Some(group) = groups.next() {
-        if commit_group(
-            &ctx,
-            st.sink.as_ref(),
+        if commit_group(st.sink.as_ref(),
             group,
             job.sel.epoch_id,
             job.today,
@@ -2028,13 +2170,12 @@ fn rotate_blocking(
         )
         .is_err()
         {
-            groups.for_each(|g| seal::remove_staged(&ctx, &g.bundle));
             return err(ErrorCode::Internal);
         }
     }
-    if st.sink.upsert_account(upsert).is_err() {
-        return err(ErrorCode::Internal);
-    }
+    // Queued like every account write (SEA-21); coalesced with a not yet
+    // flushed create of the same account.
+    enqueue_account(st, upsert);
     let lookup_tag = new_keys.lookup_tag();
     // The old keys and the new passphrase are zeroized here.
     sess.keys = Some(new_keys);

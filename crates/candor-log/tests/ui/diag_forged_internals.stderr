@@ -1,3 +1,11 @@
+error[E0046]: not all trait items implemented, missing: `DEBUG_ASSERTIONS`
+ --> tests/ui/diag_forged_internals.rs:6:1
+  |
+6 | impl __private::Site for Leak {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `DEBUG_ASSERTIONS` in implementation
+  |
+  = help: implement the missing item: `const DEBUG_ASSERTIONS: bool = false;`
+
 error[E0599]: no associated item named `Code` found for struct `DiagCodeValue` in the current scope
   --> tests/ui/diag_forged_internals.rs:14:29
    |

@@ -7,10 +7,24 @@
 # inherited IPC (SEQPACKET) and relay (TCP 7443, bound by PID 1) listeners.
 # Denied: exec, capabilities, IPv6/netlink/packet, any tor/sealer/web state.
 abi <abi/3.0>,
-include <tunables/global>
+# Self-contained (AUD-RM2-DEP-23): no include of distribution abstractions or tunables (their
+# drop-in directories could widen this profile). The two variables are defined here (values of
+# Debian's tunables/proc and tunables/kernelvars); the runtime rules are inlined below.
+@{PROC}=/proc/
+@{pid}={[1-9],[1-9][0-9],[1-9][0-9][0-9],[1-9][0-9][0-9][0-9],[1-9][0-9][0-9][0-9][0-9],[1-9][0-9][0-9][0-9][0-9][0-9],[1-4][0-9][0-9][0-9][0-9][0-9][0-9]}
 
 profile candor-intake-store /usr/lib/candor/intake-store/candor-intake-store {
-  include <abstractions/base>
+  # ---- runtime, inlined and minimised from abstractions/base (AUD-RM2-DEP-23): dynamic loader
+  # and shared libraries (read/map, no write, no exec of anything else), /dev/null for the
+  # inherited stdio, /dev/urandom, the own memory map (glibc/Rust main-thread stack guard) and
+  # signals between the process's own threads/processes. Not inlined: locale, X11, home
+  # directories, ld.so.preload, journal sockets, ptrace, the other base rules.
+  /etc/ld.so.cache r,
+  /usr/lib/*-linux-gnu*/**.so* mr,
+  /dev/null rw,
+  /dev/urandom r,
+  @{PROC}/@{pid}/maps r,
+  signal (send, receive) peer=@{profile_name},
 
   /usr/lib/candor/intake-store/candor-intake-store mr,
   /run/candor/config/ r,
@@ -46,7 +60,7 @@ profile candor-intake-store /usr/lib/candor/intake-store/candor-intake-store {
   # Signals from systemd only.
   signal (receive) peer=unconfined,
 
-  # ---- explicit denials (win over any allow, incl. abstractions; denials are audited) ----
+  # ---- explicit denials (win over any allow; denials are audited) ----
   deny capability,
   deny ptrace,
   deny mount,

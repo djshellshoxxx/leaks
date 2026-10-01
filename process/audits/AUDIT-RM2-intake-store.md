@@ -501,3 +501,99 @@ Gate: **FAIL (conditional)** 2026-10-01 fc64069. No Critical or High is open. §
 ## Lead dispositions (2026-10-01)
 - **AUD-RM2-STO-14 — ACCEPTED (lead).** Deleted replies remain in the published fetch-all set until the next import-slot rebuild (≤ 6 h). This is intended: removing them immediately would reveal deletion timing (BE-063). Recorded as residual in the crate SPEC-NOTES. Review again at RM-6.
 - **AUD-RM2-STO-08, STO-11, STO-23, STO-24, STO-25 — NOT accepted; to be fixed** (round-4 fixer): role hardening + live RLS/trigger checks at `open()` + `temp_file_limit` (08); `track_counts = off` and `autovacuum = off` on the intake cluster with slot-scheduled VACUUM, stats not persisted (11, deploy-owned settings); daily `VACUUM FULL` of source-linkable tables in a fixed maintenance window, measured with the TOAST/xmin probe (23); separate maintenance login from schema owner and date/epoch-bound signed deletion heads with monotonic counter (24); startup validation of dummy bucket weights against the canonical reply-size distribution, fail closed (25).
+
+---
+
+## Re-test (round 4)
+
+| Item | Value |
+|---|---|
+| Re-tested commit | `422fbbbfeea657e8bba9cc7004cb6667acaf0ddb` (crate diff vs fc64069: 18 files, +2,122 / −230, including the new `src/staged.rs` and `tests/staged.rs`; new deps `candor-safefs` (path) and `rustix =1.1.2` (`std, fs, net`), dev `tempfile =3.23.0`) |
+| New code reviewed | Per-connection stored and effective settings check (`open_pool`, `after_connect`); policy-set and owner-membership refusal; maintenance as database owner (`SQL_VACUUM_ROLE_CHECK`, `vacuum_after_rewrite`, `vacuum_full_daily` + `CHECKPOINT`, `pg_checkpoint` grant); per-table `autovacuum_enabled = false`, no ANALYZE; signed heads with `day` + `counter` (Rust + trigger); `dummy_bucket_weights` probability vector validation; `staged.rs` (SCM_RIGHTS receive, copy, ack). Cross-checked `deploy/intake/postgresql/pg_hba.conf` / `pg_ident.conf` for the maintenance login |
+
+### Evidence runs (round 4)
+
+| Run | Result |
+|---|---|
+| `pg-test.sh`, profile `intake` (`track_counts = off`, `autovacuum = off`) | 32 + 18 + 34 + 6 + 3 (staged) pass, including `conf_head_replay_after_restore`, `pg_role_defaults_and_live_guards`, `pg_vacuum_login_identity`, `pg_vacuum_full_erases_old_images`, `staged_bundle_hostile_variants_refused`, `staged_surplus_descriptors_closed` |
+| `pg-test.sh`, profile `stock` | same counts, all pass |
+| **Raw-page probe** (my round-3 PoC on the real store code; now also scanning indexes, TOAST indexes and old TOAST `chunk_id` refs `[chunk_id][seq 0]`) | After the slot VACUUM (maintenance role): 143 old-xmin headers + 16 old chunk_id refs still present (expected; positive control). **After `vacuum_full_daily`: 0 hits in all 87 pages** of every intake table, TOAST table and index |
+| Maintenance (database-owner) role abuse probe | see STO-26. Refused: `session_replication_role`, event triggers, `NO FORCE RLS`, `DISABLE TRIGGER` (not table owner). **Allowed:** `CREATE SCHEMA`, `CREATE TABLE public.*`, `GRANT TEMP … TO PUBLIC`, `ALTER DATABASE SET work_mem / search_path / row_security`, `ALTER DATABASE … CONNECTION LIMIT 0`, and `DROP DATABASE <intake db>` from another database (test cluster) |
+| Head replay | builder's `conf_head_replay_after_restore` (both stores) plus a read of `merge_pushed`/ack rules: stale counter, same counter with different content, earlier day, and day outside today ± 1 all refused |
+| clippy deny set; shellcheck; cargo-deny (all four checks ok); cargo-audit | clean |
+
+### Per-finding status (all IDs)
+
+| ID | Status | Note |
+|---|---|---|
+| STO-01, 02, 03, 04, 05, 07, 09, 10, 12, 13, 15, 16, 17, 18, 19, 20, 21, 22 | Fixed (unchanged since earlier rounds; the suite still passes) | — |
+| STO-06 | Fixed; residual = STO-25 (now validated) | — |
+| STO-08 | **Fixed** | Every new connection checks the role's stored defaults and the effective session values, and refuses deviations (probe in `pg_role_defaults_and_live_guards`: self-set `statement_timeout = 0`, `search_path`, `synchronous_commit = off` → refused). `ALTER ROLE` between connections is caught on the next connect (fail closed, DoS only). Settings outside the checked set (e.g. `work_mem`) can only be set by an already compromised role and cause DoS at most (Info). Residual 4 (app can clear `restore_pending`) still needs lead acceptance |
+| STO-11 | **Fixed** | `track_counts = off` and `autovacuum = off` in the profile; per-table autovacuum off (incl. TOAST); VACUUM only at fixed slot/maintenance times; no ANALYZE (so no `pg_statistic` copies). Residual: anti-wraparound VACUUM can still be forced by PostgreSQL (its timing depends on xid consumption, i.e. aggregate volume; Info) |
+| STO-14 | Accepted residual — **lead to record** | unchanged |
+| STO-23 | **Fixed** | Raw-page probe: zero pre-rewrite images after the daily VACUUM FULL. Residual: the unlinked old relation files' blocks stay in filesystem free space on the LUKS volume until reused (same class as the WAL residual, 09 §13; Info) |
+| STO-24 | **(a) Fixed** (VACUUM by `candor_intake_maint`, not the schema owner; the new privilege it holds → STO-26). **(b) Fixed with narrow residual** | (b) Signed `day` + monotonic `counter`; RL-12 requires `today − 1 ≤ day ≤ today + 1`. A compromised relay replaying an attestation from the last ~1 day that is still newer than the restored head would lose at most ~1 day of deletions on a restored node (Low residual; lead to record) |
+| STO-25 | **Fixed** | Finite probability vector, floor 0.005 per bucket, Σ = 1 ± 1e-6, validated at startup and at each draw (fail closed) |
+
+### New findings (round 4)
+
+#### AUD-RM2-STO-26 — Database ownership gives the maintenance login destructive and denial-of-service powers beyond VACUUM
+- Severity: Low. The production `pg_hba.conf` limits `candor_intake_maint` to `/^candor_intake_` databases via the `candor-imaint` peer map, so a single-tenant cluster cannot `DROP` its only intake DB (a DB cannot be dropped while connected to it). Remaining reach: DoS, and on multi-tenant clusters cross-tenant drop.
+- Location: `migrations/0001_intake_schema.sql` (`ALTER DATABASE … OWNER TO candor_intake_maint`, `GRANT pg_checkpoint`); design note in SPEC-NOTES (lead-approved)
+- Category: B9.3 least privilege (+ CWE-250, CWE-269)
+- Description: probe as `candor_intake_maint`. Allowed:
+  - `CREATE SCHEMA`, and objects in `public` (it is `pg_database_owner`);
+  - `GRANT TEMP ON DATABASE … TO PUBLIC`;
+  - `ALTER DATABASE … SET work_mem/search_path/row_security`. These are caught by the app's connect-time check, which fails closed, so a compromise here is a DoS lever;
+  - `ALTER DATABASE … CONNECTION LIMIT 0`, which locks out every non-superuser, including the store;
+  - from a second database it may connect to, `DROP DATABASE` of an intake DB with no open connections. That destroys pending, not-yet-relayed source submissions.
+
+  On an EE cluster with several `candor_intake_<t>` databases (all owned by the same cluster-wide role, all allowed by the hba regex), a compromised maintenance unit of one tenant can drop or lock another tenant's intake DB when it is idle (for example, during a restart). Not possible: disabling RLS or triggers, event triggers, `session_replication_role`, reading source tables.
+- Exploit scenario: code execution as `candor-imaint` (a daily/slot job) → lock out or destroy intake databases. Availability and integrity of unrelayed submissions; no confidentiality impact.
+- Fix recommendation:
+  - pin the hba line to the exact tenant database (`local candor_intake_<t> candor_intake_maint …`);
+  - use one maintenance role per tenant DB;
+  - `REVOKE CONNECT ON DATABASE postgres, template1 FROM PUBLIC` in provisioning;
+  - have the store's open check alert on `datconnlimit <> -1` and on database-level settings;
+  - record the residual (DB owner can `DROP`/lock) in SPEC-NOTES/18.
+
+  When the platform moves to PG 17, replace ownership with `GRANT pg_maintain`.
+- Status: Open (non-blocking)
+
+#### AUD-RM2-STO-27 — Staged-bundle receive: no peer-credential check, unbounded blocking on a hostile descriptor, and ack not bound to the commit
+- Severity: Low
+- Location: `crates/candor-intake-store/src/staged.rs` (`receive_staged_bundle`, `receive_message`, `acknowledge_committed`)
+- Category: B8.1, B8.3, B7.1 (+ CWE-287, CWE-400)
+- Description: the hardening already present covers truncation flags, exact message length, version, exactly one descriptor (surplus closed, `CMSG_CLOEXEC`), `S_IFREG` only (FIFO, socket, device and directory refused; O_PATH or write-only fds fail at `pread`), size equality, shrink/grow detection, a hash over the copied bytes, and the bound to `min(max_len, 16 GiB)`. Gaps:
+  - (1) no `SO_PEERCRED` check in this API: it trusts that the caller verified the peer is `candor-sealer` (the doc does not state that duty);
+  - (2) a regular file on a FUSE/NFS/slow mount passed by the peer can block `pread` indefinitely. The calls are blocking with no deadline, so a store worker thread hangs;
+  - (3) `acknowledge_committed` ignores its `blob` and `EnvelopeRef` arguments (`let _ = …`). `EnvelopeRef` is constructible, so the "ack only after commit" ordering is a convention, not enforced;
+  - (4) a crash between `pending.commit` (blob renamed into the store) and the envelope commit leaves an orphan ciphertext blob; nothing garbage-collects it.
+- Exploit scenario: a confused or compromised local peer on `istore.sock` (needs the socket's filesystem permissions) fills the blob store, or wedges workers with a FUSE-backed fd. A daemon bug could ack before commit, so the sealer deletes a staged file whose envelope never committed (lost submission).
+- Fix recommendation: verify `SO_PEERCRED` uid/gid inside `receive_staged_bundle` (pass the expected uid). Require `fstatfs` `f_type == TMPFS_MAGIC` (the sealer's staging root) or a sealed memfd (`F_GET_SEALS` ⊇ `F_SEAL_WRITE | F_SEAL_SHRINK | F_SEAL_GROW`), which also makes the copy race-free. Set `SO_RCVTIMEO` and run the copy with a deadline. Have `commit_envelope` return a non-constructible commit token, or check in `acknowledge_committed` that an envelope references `blob.blob_id`. Add a startup GC of unreferenced blobs. Re-test in the C-08 daemon audit.
+- Status: Open (non-blocking)
+
+### Round-4 summary
+
+| Severity | Open | IDs |
+|---|---|---|
+| Critical | 0 | — |
+| High | 0 | — |
+| Medium | 0 | — |
+| Low | 2 | STO-26, STO-27 (tracked) |
+| Info / accepted residuals | — | Lead to record: STO-08 residual 4, STO-14, STO-24(b) ~1-day window, STO-23 filesystem free-space residual, STO-11 anti-wraparound timing |
+
+All §C tools ran clean on 422fbbb (clippy deny set, cargo-deny all four checks, cargo-audit, shellcheck; PG suites in both profiles). Every attacker goal is refuted or linked to a finding.
+
+Gate: **PASS** 2026-10-01 422fbbb, **conditional** on the lead auditor recording the listed residual acceptances (§F.2/§F.3). The two Lows are tracked and do not block. Any later change to the in-scope files voids this PASS (§G).
+
+## Lead dispositions after round 4 (2026-10-01)
+- **STO-26 (Low) — closed by deployment rule:** every intake store runs in its own dedicated PostgreSQL cluster (one cluster per tenant intake; never shared across tenants or with Z-CORE). Recorded as ADR-054(1). Within a dedicated cluster the maintenance role's database-owner powers are bounded by `pg_hba` (single peer line) and the connection-time settings check (STO-08).
+- **STO-27 (Low) — scheduled for RM-2 wave 2 integration:** the staged-bundle receiver adds SO_PEERCRED (sealer UID only), a per-receive deadline and size/type checks, an acknowledgement bound to the committed transaction id, and orphan-blob cleanup at each slot. Re-audited with the C-06 web service.
+- **Accepted residuals (lead):**
+  1. The app role can clear `restore_pending` — accepted: an attacker holding the app role already controls the live intake (full intake compromise is covered by ADR-035 detection, not by this flag).
+  2. STO-14 (deleted replies stay published ≤ 6 h) — accepted earlier.
+  3. Deletion-head replay window ≈ 1 day — accepted: bounded by the signed day+counter; residual exposure is serving already-deleted ciphertext for ≤ 1 day after an old-backup restore.
+  4. Old relation files in filesystem free space after VACUUM FULL — accepted with the mitigations of full-disk encryption (17) and SSD discard/TRIM enabled on the intake volume.
+  5. Anti-wraparound VACUUM timing — accepted: wraparound vacuums are triggered by transaction counts, not source actions; monitored by the health agent.
+- **Gate: PASS (candor-intake-store), subject to STO-27 at wave-2 integration.**

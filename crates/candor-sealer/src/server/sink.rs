@@ -14,21 +14,20 @@
 //! no sub-day time value and no peer information is ever passed.
 
 use candor_core::header::ObjectType;
-use candor_safefs::ObjectId;
+
+pub use super::handover::StagedBundle;
 
 /// Where an object's bytes are.
 #[derive(Clone, PartialEq, Eq)]
 pub enum Blob {
     /// In memory (SUBMISSION, IDENTITY, SOURCE_MESSAGE: ≤ 64 KiB).
     Inline(Vec<u8>),
-    /// A ciphertext file in the tmpfs staging root (ATTACHMENT_BUNDLE). On `Ok`
-    /// the sink owns it (moves or deletes it); on `Err` the sealer deletes it.
-    Staged {
-        /// Staging object id.
-        id: ObjectId,
-        /// Exact length.
-        len: u64,
-    },
+    /// The sealed ATTACHMENT_BUNDLE as an immutable anonymous file (sealed
+    /// `memfd`, deploy D-33 / AUD-RM2-SEA-16). A store-backed sink passes its
+    /// descriptor to the store with [`crate::server::handover::hand_over`]
+    /// (`SCM_RIGHTS`, never a path) and returns `Ok` only after the store's
+    /// commit acknowledgement. Dropping it frees it; nothing has to be deleted.
+    Staged(StagedBundle),
 }
 
 impl core::fmt::Debug for Blob {
@@ -143,12 +142,11 @@ impl std::error::Error for SinkError {}
 /// blocking thread; they return only after the data is durable (`fsync`,
 /// ADR-046(1)), so the source is told "received" only then.
 ///
-/// Operation sequences are identical for real and chaff traffic:
-/// * initial Tier W submission / initial-shaped chaff: `upsert_account`
-///   (new; a dummy account for chaff), then `commit_envelope_group`;
-/// * follow-up / follow-up-shaped chaff: `commit_envelope_group` only;
-/// * passphrase rotation: `commit_envelope_group` (KEY_ROTATION), then
-///   `upsert_account` (replace).
+/// Envelope groups are committed as they are sealed. Account writes are
+/// **not** issued next to them: they are queued in RAM and written in shuffled
+/// batches at fixed intervals, together with chaff dummy accounts and dummy
+/// rotations (AUD-RM2-SEA-21), so insertion order or transaction adjacency in
+/// the store cannot link an account to its initial envelope.
 pub trait EnvelopeSink: Send + Sync {
     /// `COMMIT_ENVELOPE` for one envelope group (real or chaff; the store cannot
     /// and must not distinguish them). No account reference (ADR-052(2)).
