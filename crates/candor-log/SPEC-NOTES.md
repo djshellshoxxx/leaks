@@ -151,11 +151,64 @@ Sources: `DECISIONS.md` ADR-016, ADR-037(3), ADR-038, ADR-046(5)/(11);
 
 ## Not implemented (out of this crate's scope)
 
-`audit/schema.yaml` registry + build-script generation and its CI drift check
-(LOG-014; the `catalog!` macro is the current single source), `diag!`
-macro, Desk-signed events (AUD-013), TPM/HSM signers, witness service,
+Build-script generation of the enum *from* `audit/schema.yaml` (the
+registry and its drift test exist, see "Schema registry and `diag!`"); the
+global `tracing` subscriber that drops non-`candor-audit` events (no
+`tracing` dependency here); Desk-signed events (AUD-013), TPM/HSM signers, witness service,
 small-program yearly coarsening (GOV-013; the registry is keyed by month),
 DB storage/grants (AUD-005 SQL side), anomaly detection (AUD-008).
+
+## Schema registry and `diag!` (loose-ends pass)
+
+**Implementation decision: schema registry (LOG-014).** `audit/schema.yaml`
+lists every catalog event (type, class, stream, `ts` policy) and its
+allow-listed fields with their Rust type and closed code set. It is rendered
+deterministically by `schema::registry_yaml()` from `event::SCHEMA` (emitted
+by the `catalog!` macro; codes via a hidden `AuditField::schema_codes()`
+default overridden by `code_enum!` and `Option<T>`). `tests/schema_registry.rs`
+fails on *any* byte difference in either direction and writes the expected
+file to `$CARGO_TARGET_TMPDIR` for review; it also forbids COI codes
+(LOG-020) and free-text/metadata field types (LOG-001). 20 §7 asks for a
+build script that generates the enum from the YAML; this pass keeps the
+`catalog!` macro as the generator and makes the registry an exact,
+CI-enforced mirror. Drift protection is equivalent (neither can change
+without the other in the same PR, so the `audit-schema` label/CODEOWNERS
+rule on `audit/schema.yaml` gates every field change) while avoiding a
+YAML parser in the build. Swapping the direction later is mechanical.
+
+**Implementation decision: `diag!` (20 §7).** `diag!(Level, "literal", codes...)`:
+the message must be a string literal of 1..=120 bytes of printable ASCII
+(const-checked: no interpolation, no control characters, no log injection);
+at most 4 codes, each a closed code enum or `Code<S>` (sealed `DiagCode`
+trait; `String`, numbers, ids, paths are compile errors, `tests/ui/diag_*`).
+Records carry no timestamp or runtime data, only the static call site.
+Levels: `Error`, `Warn`, `Info`, `Trace` (named `Trace` so it never shadows
+`fmt::Debug` in rustc diagnostics). With `debug_assertions` off in the
+calling crate, `Info`/`Trace` are compiled out (the 20 §7
+`release_max_level_warn` ceiling applied to `diag!` too: safest reading).
+Delivery: one process-wide `DiagSink` set once (`set_sink`); without a sink
+records are dropped; nothing writes to stdout/stderr/disk. `DiagRing` is a
+bounded (≤ 4096 records) in-memory ring for the Z-RCP buffer. Z-INTAKE
+callers must still not use `diag!` per request (20 §6.2); this is a usage
+rule, not enforceable in the macro.
+
+Tests: `diag::tests::*` (message check, release ceiling, bounds, ring),
+`tests/diag.rs` (sink delivery, codes, compile-out; also run with
+`--release`), `tests/ui/diag_*` (compile-fail), `tests/schema_registry.rs`
+(LOG-014 drift, LOG-020, LOG-001; verified to fail on an injected `COI`).
+
+### Security self-review (this pass)
+
+Checked as an attacker: `diag!` cannot carry runtime text (literal-only,
+const-validated ASCII, sealed code trait) so no filenames/IP/UA/bodies or
+secrets can reach it; no timestamps (no source-time leak); bounded memory
+(fixed-size record, clamped ring, poisoned mutex recovered without panic);
+the sink is set-once, so a later component cannot redirect diagnostics.
+The registry renderer only escapes compile-time constants; the drift test
+writes only under cargo's test tmpdir. No new dependencies. Residual risk:
+a static message could still be written to *describe* a sensitive fact
+(e.g. "user exists"); review of `diag!` call sites remains necessary; the
+module path/line in a record reveals code location only.
 
 ## Dependencies
 
