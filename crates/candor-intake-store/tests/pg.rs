@@ -1743,14 +1743,25 @@ async fn structural_residue(
                     residue.push(format!("{rel} p{pno}: TOAST pointer to an old value"));
                 }
             }
-            let stray = page
+            // nbtree build (`_bt_slideleft` on the rightmost page) shifts the
+            // line-pointer array left over the removed high-key slot and
+            // leaves a copy of the last line pointer just past `pd_lower`:
+            // an offset/length of a live item, no data. Exactly that copy
+            // is accepted; any other byte must be zero.
+            if kind == "i" && lower >= 28 && page[lower..lower + 4] == page[lower - 4..lower] {
+                covered[lower..lower + 4].iter_mut().for_each(|b| *b = true);
+            }
+            let stray: Vec<(usize, u8)> = page
                 .iter()
                 .zip(&covered)
-                .filter(|(b, c)| !**c && **b != 0)
-                .count();
-            if stray > 0 {
+                .enumerate()
+                .filter(|(_, (b, c))| !**c && **b != 0)
+                .map(|(o, (b, _))| (o, *b))
+                .collect();
+            if !stray.is_empty() {
                 residue.push(format!(
-                    "{rel} p{pno}: {stray} non-zero bytes outside live items"
+                    "{rel} p{pno}: non-zero bytes outside live items at {:?}",
+                    stray.iter().take(16).map(|(o, _)| o).collect::<Vec<_>>()
                 ));
             }
         }
