@@ -20,6 +20,9 @@ use crate::types::{
     SourceAccount, StoredReply, TenantId, VerifiedSnapshot,
 };
 
+/// `(version, body, signatures)` of the installed Key Directory snapshot.
+pub type InstalledSnapshot = (u64, Vec<u8>, Vec<u8>);
+
 /// Intake Store operations. Both [`crate::MemoryStore`] and
 /// [`crate::PgIntakeStore`] pass the same conformance suite.
 pub trait IntakeStore: Send + Sync {
@@ -212,7 +215,7 @@ pub trait IntakeStore: Send + Sync {
     /// The currently installed snapshot (version, body, signatures).
     fn current_directory_snapshot(
         &self,
-    ) -> impl Future<Output = Result<Option<(u64, Vec<u8>, Vec<u8>)>>> + Send;
+    ) -> impl Future<Output = Result<Option<InstalledSnapshot>>> + Send;
 
     // ----- monthly counters (ADR-046(5)) -----
 

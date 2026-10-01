@@ -21,7 +21,6 @@ pub(crate) enum SelectError {
 /// One recipient MEK.
 #[derive(Debug, Clone)]
 pub(crate) struct Recipient {
-    pub user_id: [u8; 16],
     pub pk: KemPublicKey,
     pub key_id: [u8; 32],
 }
@@ -56,7 +55,7 @@ pub(crate) struct Choice<'a> {
     pub original_eligible: Option<&'a [[u8; 16]]>,
 }
 
-fn active_coi<'c>(ch: &'c ChannelView, today: u32) -> Option<&'c super::directory::CoiPolicy> {
+fn active_coi(ch: &ChannelView, today: u32) -> Option<&super::directory::CoiPolicy> {
     ch.coi_policies
         .iter()
         .filter(|p| p.effective_day <= today)
@@ -106,7 +105,11 @@ pub(crate) fn select(
     let mut eligible: Vec<[u8; 16]> = triage
         .iter()
         .filter(|m| !excluded.contains(&m.role_label))
-        .filter(|m| choice.original_eligible.is_none_or(|o| o.contains(&m.user_id)))
+        .filter(|m| {
+            choice
+                .original_eligible
+                .is_none_or(|o| o.contains(&m.user_id))
+        })
         .map(|m| m.user_id)
         .collect();
     eligible.sort_unstable();
@@ -134,11 +137,7 @@ pub(crate) fn select(
         match pk {
             Some(pk) => {
                 let key_id = key_id(snap.suite, KeyKind::Mek, &pk.to_bytes());
-                recipients.push(Recipient {
-                    user_id: *uid,
-                    pk,
-                    key_id,
-                });
+                recipients.push(Recipient { pk, key_id });
             }
             None => skipped = skipped.saturating_add(1),
         }

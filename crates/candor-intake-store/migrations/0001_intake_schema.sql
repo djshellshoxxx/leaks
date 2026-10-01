@@ -37,6 +37,8 @@ DO $db$
 BEGIN
   EXECUTE pg_catalog.format('REVOKE ALL ON DATABASE %I FROM PUBLIC', pg_catalog.current_database());
   EXECUTE pg_catalog.format('GRANT CONNECT ON DATABASE %I TO candor_istore, candor_intake_backup', pg_catalog.current_database());
+  -- The migrator creates the schema (in production it owns the database).
+  EXECUTE pg_catalog.format('GRANT CREATE ON DATABASE %I TO candor_intake_migrator', pg_catalog.current_database());
 END
 $db$;
 

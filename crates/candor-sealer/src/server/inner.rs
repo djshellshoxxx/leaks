@@ -73,7 +73,10 @@ impl RecipientListCbor<'_> {
             (4, Value::bytes(&self.coi_policy_entry_hash)),
             (
                 5,
-                Value::A(vec![Value::U(self.tree_size), Value::bytes(&self.root_hash)]),
+                Value::A(vec![
+                    Value::U(self.tree_size),
+                    Value::bytes(&self.root_hash),
+                ]),
             ),
         ];
         if let Some(b) = self.bundle_entries {
@@ -218,7 +221,12 @@ pub(crate) fn encode_prefs(p: &Prefs) -> Result<Zeroizing<Vec<u8>>, Error> {
                 (2, Value::bytes(&r.mailbox_id)),
                 (
                     3,
-                    Value::A(r.original_eligible.iter().map(|u| Value::bytes(u)).collect()),
+                    Value::A(
+                        r.original_eligible
+                            .iter()
+                            .map(|u| Value::bytes(u))
+                            .collect(),
+                    ),
                 ),
                 (4, Value::U(r.roster_version)),
                 (1000, Value::bytes(&r.channel_id)),
@@ -305,10 +313,15 @@ pub(crate) const REPLY_FORMAT: u64 = 1;
 /// Parse a verified REPLY padded plaintext strictly (length prefix, canonical
 /// CBOR, zero padding).
 pub(crate) fn decode_reply(padded: &[u8]) -> Result<ReplyInner, CborError> {
-    let (len, rest) = padded.split_first_chunk::<4>().ok_or(CborError::Truncated)?;
+    let (len, rest) = padded
+        .split_first_chunk::<4>()
+        .ok_or(CborError::Truncated)?;
     let len = usize::try_from(u32::from_be_bytes(*len)).map_err(|_| CborError::Limit)?;
     let cbor = rest.get(..len).ok_or(CborError::Truncated)?;
-    if rest.get(len..).is_none_or(|pad| pad.iter().any(|b| *b != 0)) {
+    if rest
+        .get(len..)
+        .is_none_or(|pad| pad.iter().any(|b| *b != 0))
+    {
         return Err(CborError::Trailing);
     }
     let mut d = Dec::new(cbor);

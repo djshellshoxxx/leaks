@@ -26,9 +26,7 @@ use candor_core::object::{self, SealRequest, SealedObject};
 use candor_core::passphrase::SourceKeys;
 use candor_core::secret::{ContentKey, Secret32};
 use candor_core::sig::{SigningKey, verify_strict};
-use candor_core::slots::{
-    RecipientListEntry, RecipientSlotBlock, SlotBinding, SlotContext,
-};
+use candor_core::slots::{RecipientListEntry, RecipientSlotBlock, SlotBinding, SlotContext};
 use candor_core::stanza::{HpkeWrapContext, WrapStanza};
 use candor_core::stream::{self, CHUNK_SIZE, StreamDecryptor, StreamEncryptor};
 use candor_core::{Error, Suite, fill_random, labels, padding};
@@ -107,7 +105,11 @@ impl<W: Write> StreamSink<W> {
     /// Append plaintext. Fails if it would exceed the declared total.
     pub(crate) fn push(&mut self, mut data: &[u8]) -> Result<(), Error> {
         let len = u64::try_from(data.len()).map_err(|_| Error::TooLarge)?;
-        if self.accepted().checked_add(len).is_none_or(|t| t > self.total) {
+        if self
+            .accepted()
+            .checked_add(len)
+            .is_none_or(|t| t > self.total)
+        {
             return Err(Error::TooLarge);
         }
         while !data.is_empty() {
@@ -359,7 +361,10 @@ struct SubmissionParts<'a> {
     identity_entries: &'a [RecipientListEntry],
 }
 
-fn submission_entries(p: &SubmissionParts<'_>, entries: &[RecipientListEntry]) -> Vec<(u64, Value)> {
+fn submission_entries(
+    p: &SubmissionParts<'_>,
+    entries: &[RecipientListEntry],
+) -> Vec<(u64, Value)> {
     let list = RecipientListCbor {
         epoch_id: p.sel.epoch_id,
         entries,
@@ -382,7 +387,10 @@ fn submission_entries(p: &SubmissionParts<'_>, entries: &[RecipientListEntry]) -
         (6, Value::bytes(&p.sel.roster_entry_hash)),
         (
             7,
-            Value::A(vec![Value::U(p.sel.tree_size), Value::bytes(&p.sel.root_hash)]),
+            Value::A(vec![
+                Value::U(p.sel.tree_size),
+                Value::bytes(&p.sel.root_hash),
+            ]),
         ),
         (8, Value::U(inner::TIER_W)),
         (9, Value::U(p.draft.mode as u64)),
@@ -394,7 +402,9 @@ fn submission_entries(p: &SubmissionParts<'_>, entries: &[RecipientListEntry]) -
                 p.draft
                     .fields
                     .iter()
-                    .map(|(id, t)| Value::A(vec![Value::U(u64::from(*id)), Value::text(t.expose())]))
+                    .map(|(id, t)| {
+                        Value::A(vec![Value::U(u64::from(*id)), Value::text(t.expose())])
+                    })
                     .collect(),
             ),
         ),
@@ -404,7 +414,10 @@ fn submission_entries(p: &SubmissionParts<'_>, entries: &[RecipientListEntry]) -
             Value::A(concerns.iter().map(|l| Value::U(u64::from(*l))).collect()),
         ),
         (16, list.value()),
-        (18, inner::manifest_value(&p.bundle.manifest, p.bundle.total_len)),
+        (
+            18,
+            inner::manifest_value(&p.bundle.manifest, p.bundle.total_len),
+        ),
     ];
     if let Some(first) = p.draft.categories.first() {
         m.push((17, Value::U(u64::from(*first))));
@@ -412,7 +425,13 @@ fn submission_entries(p: &SubmissionParts<'_>, entries: &[RecipientListEntry]) -
     if p.draft.categories.len() > 1 {
         m.push((
             1000,
-            Value::A(p.draft.categories.iter().map(|c| Value::U(u64::from(*c))).collect()),
+            Value::A(
+                p.draft
+                    .categories
+                    .iter()
+                    .map(|c| Value::U(u64::from(*c)))
+                    .collect(),
+            ),
         ));
     }
     m
@@ -636,10 +655,8 @@ pub(crate) fn seal_source_message(
         }
         Ok(objects)
     })();
-    if result.is_err() {
-        if let Some(b) = &bundle {
-            remove_staged(ctx, &b.object);
-        }
+    if let (Err(_), Some(b)) = (&result, &bundle) {
+        remove_staged(ctx, &b.object);
     }
     result
 }
@@ -658,7 +675,9 @@ pub struct ChaffBuckets {
 
 impl Default for ChaffBuckets {
     fn default() -> Self {
-        let b: Vec<u64> = padding::file_buckets().take_while(|b| *b <= 8 << 20).collect();
+        let b: Vec<u64> = padding::file_buckets()
+            .take_while(|b| *b <= 8 << 20)
+            .collect();
         let weights = [600u32, 120, 80, 60, 40, 30, 25, 20, 15, 10];
         Self {
             submission: vec![(4096, 500), (8192, 250), (12288, 150), (16384, 100)],
@@ -735,15 +754,39 @@ pub(crate) fn build_chaff(
     if followup {
         let len = super::rand::weighted(&buckets.source_message)?;
         let ck = next_ck()?;
-        let o = chaff_object(ctx, &ck, ObjectType::SourceMessage, channel_id, member, epoch_id, len)?;
+        let o = chaff_object(
+            ctx,
+            &ck,
+            ObjectType::SourceMessage,
+            channel_id,
+            member,
+            epoch_id,
+            len,
+        )?;
         objects.push(envelope_object(&o, Blob::Inline(o.bytes.clone()))?);
     } else {
         let sub_len = super::rand::weighted(&buckets.submission)?;
         let bundle_len = super::rand::weighted(&buckets.bundle)?;
         let ck = next_ck()?;
-        let sub = chaff_object(ctx, &ck, ObjectType::Submission, channel_id, member.clone(), epoch_id, sub_len)?;
+        let sub = chaff_object(
+            ctx,
+            &ck,
+            ObjectType::Submission,
+            channel_id,
+            member.clone(),
+            epoch_id,
+            sub_len,
+        )?;
         let ck = next_ck()?;
-        let bundle = chaff_object(ctx, &ck, ObjectType::AttachmentBundle, channel_id, member, epoch_id, bundle_len)?;
+        let bundle = chaff_object(
+            ctx,
+            &ck,
+            ObjectType::AttachmentBundle,
+            channel_id,
+            member,
+            epoch_id,
+            bundle_len,
+        )?;
         let ck = next_ck()?;
         let identity = chaff_object(
             ctx,
@@ -763,18 +806,25 @@ pub(crate) fn build_chaff(
         let len = u64::try_from(bundle.bytes.len()).map_err(|_| Error::Internal)?;
         objects.push(envelope_object(&sub, Blob::Inline(sub.bytes.clone()))?);
         objects.push(envelope_object(&bundle, Blob::Staged { id, len })?);
-        objects.push(envelope_object(&identity, Blob::Inline(identity.bytes.clone()))?);
+        objects.push(envelope_object(
+            &identity,
+            Blob::Inline(identity.bytes.clone()),
+        )?);
     }
-    let first = objects.first().map(|o| o.object_hash).ok_or(Error::Internal)?;
-    let disposition_ct = match disposition_ct(ctx.suite, &ctx.tenant_id, &ctx.disposition_pk, &first, true) {
-        Ok(d) => d,
-        Err(e) => {
-            for o in &objects {
-                remove_staged(ctx, o);
+    let first = objects
+        .first()
+        .map(|o| o.object_hash)
+        .ok_or(Error::Internal)?;
+    let disposition_ct =
+        match disposition_ct(ctx.suite, &ctx.tenant_id, &ctx.disposition_pk, &first, true) {
+            Ok(d) => d,
+            Err(e) => {
+                for o in &objects {
+                    remove_staged(ctx, o);
+                }
+                return Err(e);
             }
-            return Err(e);
-        }
-    };
+        };
     Ok(CommitRequest {
         channel_id,
         objects,
@@ -802,7 +852,8 @@ pub(crate) fn rewrap_reply(
             mailbox_id: rep.mailbox_id,
         };
         if let Ok(ck) = stanza.open_hpke_ck(old.kem_private_key(), &wctx, &r.object_hash) {
-            let fresh = WrapStanza::seal_hpke_ck(suite, new_pk, [0u8; 32], r.object_hash, &wctx, &ck)?;
+            let fresh =
+                WrapStanza::seal_hpke_ck(suite, new_pk, [0u8; 32], r.object_hash, &wctx, &ck)?;
             return fresh.encode();
         }
     }

@@ -103,7 +103,11 @@ pub(crate) fn random16() -> Result<[u8; 16], Error> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
     use super::*;
 
     #[test]
@@ -121,7 +125,10 @@ mod tests {
     #[test]
     fn exponential_mean_is_plausible() {
         let n = 20_000;
-        let mean: f64 = (0..n).map(|_| exponential_secs(100.0).unwrap()).sum::<f64>() / n as f64;
+        let mean: f64 = (0..n)
+            .map(|_| exponential_secs(100.0).unwrap())
+            .sum::<f64>()
+            / n as f64;
         assert!((90.0..110.0).contains(&mean), "{mean}");
     }
 

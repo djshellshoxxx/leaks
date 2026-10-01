@@ -25,6 +25,7 @@ server = [
     "dep:sha2",
     "dep:subtle",
     "dep:unicode-normalization",
+    "dep:landlock",
 ]
 
 # Every dependency is justified in SPEC-NOTES.md ("Dependencies").
@@ -38,6 +39,7 @@ hkdf = { version = "=0.13.0", default-features = false, optional = true }
 sha2 = { version = "=0.11.0", default-features = false, optional = true }
 subtle = { version = "=2.6.1", default-features = false, optional = true }
 unicode-normalization = { version = "=0.1.24", default-features = false, features = ["std"], optional = true }
+landlock = { version = "=0.4.7", default-features = false, optional = true }
 
 [dev-dependencies]
 tokio = { version = "=1.48.0", default-features = false, features = ["rt", "rt-multi-thread", "net", "sync", "time", "io-util", "macros", "test-util"] }

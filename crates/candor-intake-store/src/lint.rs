@@ -140,14 +140,13 @@ pub fn l2_violation(name: &str) -> bool {
 #[must_use]
 pub fn l11_violation(table: &str, column: &str) -> bool {
     let c = column.to_ascii_lowercase();
-    let banned = c == "tier"
+    c == "tier"
         || (c == "kind" && table != "deletion_list")
         || c == "fetched"
+        || c.starts_with("fetched_")
         || c == "read"
-        || c.starts_with("last_") && c != "last_batch_no"
+        || (c.starts_with("last_") && !(table == "intake_meta" && c == "last_batch_no"))
         || c.ends_with("_history")
-        || c.contains("ip_") && false;
-    banned
 }
 
 /// L12: anonymous recipients on envelope tables.
@@ -274,11 +273,7 @@ pub fn check_sql(sql: &str) -> Vec<String> {
     for line in lower.lines() {
         let l = line.trim();
         if let Some(rest) = l.strip_prefix("create table candor.") {
-            let name = rest
-                .split(|c: char| c == ' ' || c == '(')
-                .next()
-                .unwrap_or("")
-                .to_string();
+            let name = rest.split([' ', '(']).next().unwrap_or("").to_string();
             cur = Some((name, Vec::new()));
             continue;
         }

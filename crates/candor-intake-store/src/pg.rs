@@ -383,14 +383,14 @@ impl PgIntakeStore {
         };
         // If initialised, the recorded schema hash must match (BE-050).
         let mut tx = store.begin_raw().await?;
-        if let Some(r) = sqlx::query(SQL_META_HASH)
+        let recorded = sqlx::query(SQL_META_HASH)
             .fetch_optional(&mut *tx)
             .await
-            .map_err(db)?
+            .map_err(db)?;
+        if let Some(r) = recorded
+            && get_arr::<32>(&r, 0)? != schema_hash()
         {
-            if get_arr::<32>(&r, 0)? != schema_hash() {
-                return Err(StoreError::Integrity("schema hash mismatch"));
-            }
+            return Err(StoreError::Integrity("schema hash mismatch"));
         }
         tx.rollback().await.map_err(db)?;
         Ok(store)
@@ -1348,7 +1348,7 @@ impl IntakeStore for PgIntakeStore {
         Ok(InstallOutcome::Installed)
     }
 
-    async fn current_directory_snapshot(&self) -> Result<Option<(u64, Vec<u8>, Vec<u8>)>> {
+    async fn current_directory_snapshot(&self) -> Result<Option<crate::store::InstalledSnapshot>> {
         let (mut tx, _) = self.begin(false).await?;
         let r = sqlx::query(SQL_SNAP_CURRENT)
             .fetch_optional(&mut *tx)

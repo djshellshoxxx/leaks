@@ -152,12 +152,12 @@ pub(crate) fn snapshot(
     if snap.tree_size < hwm.tree_size {
         return Err(StoreError::Rollback("tree size below high-water mark"));
     }
-    if let Some(d) = hwm.checkpoint_day {
-        if snap.checkpoint_day < d {
-            return Err(StoreError::Rollback(
-                "checkpoint older than high-water mark",
-            ));
-        }
+    if let Some(d) = hwm.checkpoint_day
+        && snap.checkpoint_day < d
+    {
+        return Err(StoreError::Rollback(
+            "checkpoint older than high-water mark",
+        ));
     }
     if snap.version < hwm.directory_version {
         return Err(StoreError::Rollback("version below current"));

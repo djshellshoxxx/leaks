@@ -628,7 +628,7 @@ mod tests {
         let mut m = d.map(4).unwrap();
         d.req(&mut m, 1).unwrap();
         d.uint().unwrap();
-        assert!(!d.key(&mut m, 0).is_err() && d.key(&mut m, 2).unwrap());
+        assert!(d.key(&mut m, 0).is_ok() && d.key(&mut m, 2).unwrap());
         d.uint().unwrap();
         d.end_map(m).unwrap();
         d.finish().unwrap();

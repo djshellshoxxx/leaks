@@ -542,8 +542,8 @@ pub enum Response {
     },
     /// `{}`.
     Empty,
-    /// Draft view.
-    Draft(DraftView),
+    /// Draft view (boxed: it is the largest variant).
+    Draft(Box<DraftView>),
     /// `{1: [word…], 2: [p_a, p_b, p_c]}`: the passphrase (as list indices) and the
     /// confirmation positions.
     Words {
@@ -1308,14 +1308,14 @@ pub fn decode_response(expected: Op, bytes: &[u8]) -> Result<(u32, Response), Pr
                         size_bucket: d.uint()?,
                     });
                 }
-                Response::Draft(DraftView {
+                Response::Draft(Box::new(DraftView {
                     mode,
                     message,
                     fields,
                     identity,
                     coi,
                     parts,
-                })
+                }))
             }
             Op::GenAccount | Op::RotatePassphrase => {
                 d.req(m, 1)?;

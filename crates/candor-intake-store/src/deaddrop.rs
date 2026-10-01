@@ -98,11 +98,19 @@ fn uniform_below(n: usize) -> Result<usize> {
     if n64 == 0 {
         return Err(StoreError::InvalidInput("empty range"));
     }
-    let zone = u64::MAX - (u64::MAX % n64);
+    let rem = u64::MAX
+        .checked_rem(n64)
+        .ok_or(StoreError::InvalidInput("range"))?;
+    let zone = u64::MAX
+        .checked_sub(rem)
+        .ok_or(StoreError::InvalidInput("range"))?;
     loop {
         let x = random_u64()?;
         if x < zone {
-            return usize::try_from(x % n64).map_err(|_| StoreError::InvalidInput("range"));
+            let v = x
+                .checked_rem(n64)
+                .ok_or(StoreError::InvalidInput("range"))?;
+            return usize::try_from(v).map_err(|_| StoreError::InvalidInput("range"));
         }
     }
 }

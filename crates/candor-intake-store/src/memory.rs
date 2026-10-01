@@ -772,7 +772,7 @@ impl IntakeStore for MemoryStore {
         Ok(InstallOutcome::Installed)
     }
 
-    async fn current_directory_snapshot(&self) -> Result<Option<(u64, Vec<u8>, Vec<u8>)>> {
+    async fn current_directory_snapshot(&self) -> Result<Option<crate::store::InstalledSnapshot>> {
         let st = self.state.lock().await;
         let v = st.meta()?.kd.directory_version;
         Ok(st
@@ -854,10 +854,8 @@ impl IntakeStore for MemoryStore {
             return Err(StoreError::Conflict("restore target not empty"));
         }
         let prior = st.meta.clone();
-        if let Some(p) = &prior {
-            if p.tenant != b.meta.tenant_id {
-                return Err(StoreError::TenantMismatch);
-            }
+        if prior.as_ref().is_some_and(|p| p.tenant != b.meta.tenant_id) {
+            return Err(StoreError::TenantMismatch);
         }
         for a in &b.accounts {
             validate::new_account(&crate::types::NewAccount {
