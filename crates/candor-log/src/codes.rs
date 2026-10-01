@@ -21,6 +21,8 @@ macro_rules! code_enum {
         impl $name {
             /// All variants.
             pub const ALL: &'static [Self] = &[ $( Self::$v ),+ ];
+            /// All canonical code strings, in declaration order.
+            pub const CODES: &'static [&'static str] = &[ $( $s ),+ ];
             /// Canonical code string.
             pub const fn code(self) -> &'static str {
                 match self { $( Self::$v => $s ),+ }
@@ -31,6 +33,9 @@ macro_rules! code_enum {
         impl AuditField for $name {
             fn to_value(&self) -> Value {
                 Value::text(self.code())
+            }
+            fn schema_codes() -> &'static [&'static str] {
+                Self::CODES
             }
         }
         impl Sample for $name {

@@ -13,7 +13,8 @@
 #  * no github.event values are interpolated into run blocks (passed via env).
 #
 # Gate mapping: fmt/clippy -> SG-03 (clippy deny set, ST-007); test -> SG-06/SG-08
-# (as suites land); deny/vet -> SG-05 (ST-010/ST-011); docs-lint -> SG-25 (ST-167);
+# (as suites land); test-nonroot -> same suite as a fresh no-sudo account (ST-086);
+# deny/vet -> SG-05 (ST-010/ST-011); docs-lint -> SG-25 (ST-167);
 # reproducibility -> SG-13 smoke (single-host build-twice; the 2-builder comparison is
 # the release pipeline's job); sbom -> SG-14 (CycloneDX; signing happens at release);
 # workflow-lint -> ST-133; dco -> OSG-003.
@@ -92,6 +93,78 @@ jobs:
         with:
           components: rustfmt
       - run: cargo test --workspace --all-features --locked --no-fail-fast
+
+  test-nonroot:
+    # Runs the suite as a fresh unprivileged account (no sudo, no runner
+    # environment, no tokens) so owner/mode checks such as candor-safefs'
+    # foreign-owner refusal (ST-086) are exercised as they would be in
+    # production, and so test code never runs with the runner's privileges.
+    # The toolchain is installed root-owned and read-only for that account;
+    # the account owns only its own copy of the checkout and its CARGO_HOME.
+    name: test (unprivileged user)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      TEST_USER: candor-test
+      RUST_PREFIX: /opt/candor-rust
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Create unprivileged test user
+        run: |
+          set -euo pipefail
+          sudo useradd --create-home --user-group --shell /usr/sbin/nologin "$TEST_USER"
+          uid=$(id -u "$TEST_USER")
+          if [ "$uid" -eq 0 ]; then echo "test user must not be uid 0" >&2; exit 1; fi
+          # Fail closed if the account could escalate (sudo/adm/docker membership or sudoers).
+          if id -nG "$TEST_USER" | tr ' ' '\n' | grep -Eqx 'sudo|adm|admin|wheel|docker|lxd|root'; then
+            echo "test user is in a privileged group" >&2; exit 1
+          fi
+          if sudo -u "$TEST_USER" -- sudo -n true 2>/dev/null; then
+            echo "test user can sudo" >&2; exit 1
+          fi
+          sudo chmod 0700 "/home/$TEST_USER"
+      - name: Install pinned toolchain (root-owned, read-only for the test user)
+        run: |
+          set -euo pipefail
+          tc=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          if [ -z "$tc" ]; then echo "no channel in rust-toolchain.toml" >&2; exit 1; fi
+          rustup_bin=$(command -v rustup)
+          # Download as the runner user (no root for network I/O), then hand
+          # the tree to root so the test user can read but never modify it.
+          sudo install -d -m 0755 -o "$(id -u)" -g "$(id -g)" "$RUST_PREFIX"
+          install -d -m 0755 "$RUST_PREFIX/cargo/bin" "$RUST_PREFIX/rustup"
+          install -m 0755 "$rustup_bin" "$RUST_PREFIX/cargo/bin/rustup"
+          for p in cargo rustc rustdoc; do
+            ln -s rustup "$RUST_PREFIX/cargo/bin/$p"
+          done
+          # rustup verifies the upstream-signed channel manifest hashes.
+          env -i PATH=/usr/bin:/bin HOME="$HOME" \
+            RUSTUP_HOME="$RUST_PREFIX/rustup" CARGO_HOME="$RUST_PREFIX/cargo" \
+            "$RUST_PREFIX/cargo/bin/rustup" toolchain install "$tc" \
+            --profile minimal --component rustfmt,clippy --no-self-update
+          sudo chown -R root:root "$RUST_PREFIX"
+          sudo chmod -R go-w "$RUST_PREFIX"
+      - name: Copy checkout into the test user's home
+        run: |
+          set -euo pipefail
+          sudo cp -a -- "$GITHUB_WORKSPACE" "/home/$TEST_USER/src"
+          sudo rm -rf -- "/home/$TEST_USER/src/target"
+          sudo chown -R -- "$TEST_USER:$TEST_USER" "/home/$TEST_USER/src"
+      - name: cargo test --workspace as the unprivileged user
+        run: |
+          set -euo pipefail
+          sudo -u "$TEST_USER" -- env -i \
+            -C "/home/$TEST_USER/src" \
+            HOME="/home/$TEST_USER" \
+            PATH="$RUST_PREFIX/cargo/bin:/usr/bin:/bin" \
+            RUSTUP_HOME="$RUST_PREFIX/rustup" \
+            CARGO_HOME="/home/$TEST_USER/.cargo" \
+            CARGO_TERM_COLOR=always CARGO_INCREMENTAL=0 RUST_BACKTRACE=1 \
+            cargo test --workspace --all-features --locked --no-fail-fast
 
   cargo-deny:
     name: cargo-deny (advisories, bans, licenses, sources)

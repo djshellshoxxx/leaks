@@ -74,6 +74,22 @@ macro_rules! catalog {
             $( $(#[$m])* #[allow(missing_docs)] $v { $( $f: $t ),* } ),*
         }
 
+        /// Machine-readable schema of every catalog type, in declaration
+        /// order; rendered to and checked against `audit/schema.yaml`
+        /// (LOG-014, see [`crate::schema`]).
+        pub const SCHEMA: &[crate::schema::EventSchema] = &[ $(
+            crate::schema::EventSchema {
+                name: $name,
+                class: EventClass::$class,
+                time_policy: TimePolicy::$tp,
+                fields: &[ $( crate::schema::FieldSchema {
+                    name: stringify!($f),
+                    rust_type: stringify!($t),
+                    codes: <$t as AuditField>::schema_codes,
+                } ),* ],
+            }
+        ),* ];
+
         /// `(type name, class)` for every catalog type, in declaration order.
         pub const CATALOG: &[(&str, EventClass)] = &[ $( ($name, EventClass::$class) ),* ];
 

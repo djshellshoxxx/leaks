@@ -23,6 +23,15 @@ pub trait AuditField: sealed::Sealed {
     fn payload_value(&self) -> Option<Value> {
         Some(self.to_value())
     }
+    /// Closed code set of this field type, for the schema registry
+    /// (`audit/schema.yaml`, LOG-014); empty for non-enumerated types.
+    #[doc(hidden)]
+    fn schema_codes() -> &'static [&'static str]
+    where
+        Self: Sized,
+    {
+        &[]
+    }
 }
 
 /// Deterministic sample values for catalog-wide tests (not for production use).
@@ -107,6 +116,9 @@ impl<T: AuditField> AuditField for Option<T> {
     }
     fn payload_value(&self) -> Option<Value> {
         self.as_ref().map(AuditField::to_value)
+    }
+    fn schema_codes() -> &'static [&'static str] {
+        T::schema_codes()
     }
 }
 
