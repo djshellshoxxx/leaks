@@ -127,6 +127,22 @@ impl KemKeyPair {
     }
 }
 
+/// X-Wing KAT helper for the start-up self-test: keypair from the 32-byte `seed`,
+/// encapsulation with the 64-byte `eseed`, decapsulation; returns
+/// `SHA-256(pk ‖ ct ‖ ss)` after checking both shared secrets agree.
+pub(crate) fn xwing_kat_digest(seed: &[u8; 32], eseed: [u8; ENCAP_RANDOMNESS_LEN]) -> Result<[u8; 32]> {
+    let sk = KemPrivateKey::from_bytes(Suite::CandorStd1, seed)?;
+    let pk = sk.public_key();
+    let mut rng = ExactBytesRng::new(eseed);
+    let (ss, enc) = XWing::encap_with_rng(&pk.0, None, &mut rng).map_err(|_| Error::Internal)?;
+    rng.check()?;
+    let ss2 = XWing::decap(&sk.0, None, &enc).map_err(|_| Error::Internal)?;
+    if !crate::kdf::ct_eq(ss.0.as_slice(), ss2.0.as_slice()) {
+        return Err(Error::Internal);
+    }
+    Ok(crate::hash::sha256(&[&pk.to_bytes(), enc.to_bytes().as_slice(), ss.0.as_slice()]))
+}
+
 /// HPKE SealBase with caller-supplied encapsulation randomness. Returns `(enc, ct)`.
 ///
 /// Crate-internal: the derandomized path is exposed only through the dummy-slot

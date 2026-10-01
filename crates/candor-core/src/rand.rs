@@ -41,13 +41,18 @@ pub(crate) fn uniform_below(rng: &mut dyn RandomSource, n: u32) -> Result<u32> {
         return Err(Error::Internal);
     }
     // limit = largest multiple of n that fits in 2^32; accept x < limit.
-    let limit: u64 = (1u64 << 32) / u64::from(n) * u64::from(n);
+    let n64 = u64::from(n);
+    let limit: u64 = (1u64 << 32)
+        .checked_div(n64)
+        .and_then(|q| q.checked_mul(n64))
+        .ok_or(Error::Internal)?;
     loop {
         let mut b = [0u8; 4];
         rng.fill(&mut b)?;
         let x = u64::from(u32::from_be_bytes(b));
         if x < limit {
-            return u32::try_from(x % u64::from(n)).map_err(|_| Error::Internal);
+            let r = x.checked_rem(n64).ok_or(Error::Internal)?;
+            return u32::try_from(r).map_err(|_| Error::Internal);
         }
     }
 }
@@ -57,7 +62,7 @@ pub(crate) fn permutation(rng: &mut dyn RandomSource, n: usize) -> Result<Vec<us
     let mut v: Vec<usize> = (0..n).collect();
     let mut i = n;
     while i > 1 {
-        i -= 1;
+        i = i.checked_sub(1).ok_or(Error::Internal)?;
         let bound = u32::try_from(i.checked_add(1).ok_or(Error::Internal)?).map_err(|_| Error::Internal)?;
         let j = usize::try_from(uniform_below(rng, bound)?).map_err(|_| Error::Internal)?;
         v.swap(i, j);

@@ -58,7 +58,9 @@ impl<R: Read> Read for CapOut<R> {
             return Err(io::Error::other("limit"));
         }
         let n = self.inner.read(buf)?;
-        self.produced = self.produced.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+        self.produced = self
+            .produced
+            .saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
         let mut hit = None;
         if self.produced > self.cap {
             hit = Some(LimitKind::TotalSize);
@@ -79,7 +81,11 @@ impl<R: Read> Read for CapOut<R> {
 fn stream_cap(s: &Session<'_>) -> u64 {
     let l = s.limits();
     l.max_total_uncompressed
-        .saturating_add(l.max_entries.saturating_add(16).saturating_mul(PER_ENTRY_OVERHEAD))
+        .saturating_add(
+            l.max_entries
+                .saturating_add(16)
+                .saturating_mul(PER_ENTRY_OVERHEAD),
+        )
         .saturating_add(2 * MAX_PAX_BYTES)
 }
 
@@ -92,7 +98,13 @@ pub fn extract_tar<R: Read>(
     let mut s = Session::new(root, opts)?;
     let meter = Rc::new(Meter::default());
     let cap = stream_cap(&s);
-    let src = CapOut { inner: reader, meter: Rc::clone(&meter), produced: 0, cap, ratio: None };
+    let src = CapOut {
+        inner: reader,
+        meter: Rc::clone(&meter),
+        produced: 0,
+        cap,
+        ratio: None,
+    };
     let res = run_tar(src, &mut s, &meter);
     s.finish(res)
 }
@@ -108,8 +120,17 @@ pub fn extract_tar_gz<R: Read>(
     let meter = Rc::new(Meter::default());
     let cap = stream_cap(&s);
     let ratio = Some(s.limits().max_ratio);
-    let gz = MultiGzDecoder::new(CountIn { inner: reader, meter: Rc::clone(&meter) });
-    let src = CapOut { inner: gz, meter: Rc::clone(&meter), produced: 0, cap, ratio };
+    let gz = MultiGzDecoder::new(CountIn {
+        inner: reader,
+        meter: Rc::clone(&meter),
+    });
+    let src = CapOut {
+        inner: gz,
+        meter: Rc::clone(&meter),
+        produced: 0,
+        cap,
+        ratio,
+    };
     let res = run_tar(src, &mut s, &meter);
     s.finish(res)
 }
@@ -125,7 +146,10 @@ pub fn extract_gzip<R: Read>(
     let mut s = Session::new(root, opts)?;
     let meter = Rc::new(Meter::default());
     let l = *s.limits();
-    let gz = MultiGzDecoder::new(CountIn { inner: reader, meter: Rc::clone(&meter) });
+    let gz = MultiGzDecoder::new(CountIn {
+        inner: reader,
+        meter: Rc::clone(&meter),
+    });
     let mut src = CapOut {
         inner: gz,
         meter: Rc::clone(&meter),
@@ -188,8 +212,13 @@ fn parse_pax(data: &[u8]) -> Result<PaxRecords<'_>, ArchiveError> {
     let mut out = Vec::new();
     let mut rest = data;
     while !rest.is_empty() {
-        let sp = rest.iter().position(|&b| b == b' ').ok_or(ArchiveError::Malformed("pax header"))?;
-        let len_txt = rest.get(..sp).ok_or(ArchiveError::Malformed("pax header"))?;
+        let sp = rest
+            .iter()
+            .position(|&b| b == b' ')
+            .ok_or(ArchiveError::Malformed("pax header"))?;
+        let len_txt = rest
+            .get(..sp)
+            .ok_or(ArchiveError::Malformed("pax header"))?;
         if len_txt.is_empty() || len_txt.len() > 10 || !len_txt.iter().all(u8::is_ascii_digit) {
             return Err(bad);
         }
@@ -197,18 +226,29 @@ fn parse_pax(data: &[u8]) -> Result<PaxRecords<'_>, ArchiveError> {
             .ok()
             .and_then(|t| t.parse().ok())
             .ok_or(ArchiveError::Malformed("pax header"))?;
-        let rec = rest.get(..len).ok_or(ArchiveError::Malformed("pax header"))?;
+        let rec = rest
+            .get(..len)
+            .ok_or(ArchiveError::Malformed("pax header"))?;
         if rec.last() != Some(&b'\n') {
             return Err(bad);
         }
         let body = rec
             .get(sp.saturating_add(1)..len.saturating_sub(1))
             .ok_or(ArchiveError::Malformed("pax header"))?;
-        let eq = body.iter().position(|&b| b == b'=').ok_or(ArchiveError::Malformed("pax header"))?;
-        let key = body.get(..eq).ok_or(ArchiveError::Malformed("pax header"))?;
-        let val = body.get(eq.saturating_add(1)..).ok_or(ArchiveError::Malformed("pax header"))?;
+        let eq = body
+            .iter()
+            .position(|&b| b == b'=')
+            .ok_or(ArchiveError::Malformed("pax header"))?;
+        let key = body
+            .get(..eq)
+            .ok_or(ArchiveError::Malformed("pax header"))?;
+        let val = body
+            .get(eq.saturating_add(1)..)
+            .ok_or(ArchiveError::Malformed("pax header"))?;
         out.push((key, val));
-        rest = rest.get(len..).ok_or(ArchiveError::Malformed("pax header"))?;
+        rest = rest
+            .get(len..)
+            .ok_or(ArchiveError::Malformed("pax header"))?;
     }
     Ok(out)
 }
@@ -216,7 +256,9 @@ fn parse_pax(data: &[u8]) -> Result<PaxRecords<'_>, ArchiveError> {
 fn run_tar_inner<R: Read>(ar: &mut Archive<R>, s: &mut Session<'_>) -> Result<(), ArchiveError> {
     let l = *s.limits();
     let max_ext_headers = l.max_entries.saturating_mul(3).saturating_add(16);
-    let max_name = u64::try_from(l.max_path_bytes).unwrap_or(u64::MAX).saturating_add(1);
+    let max_name = u64::try_from(l.max_path_bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
     let mut pending = Pending::default();
     let mut idx: u64 = 0;
     let entries = ar
@@ -226,10 +268,17 @@ fn run_tar_inner<R: Read>(ar: &mut Archive<R>, s: &mut Session<'_>) -> Result<()
     for ent in entries {
         let mut ent = ent.map_err(|_| ArchiveError::Malformed("tar structure"))?;
         let et = ent.header().entry_type();
-        let size = ent.header().entry_size().map_err(|_| ArchiveError::Malformed("tar size"))?;
+        let size = ent
+            .header()
+            .entry_size()
+            .map_err(|_| ArchiveError::Malformed("tar size"))?;
 
         // Extension headers apply to the next entry.
-        if et.is_gnu_longname() || et.is_gnu_longlink() || et.is_pax_local_extensions() || et.is_pax_global_extensions() {
+        if et.is_gnu_longname()
+            || et.is_gnu_longlink()
+            || et.is_pax_local_extensions()
+            || et.is_pax_global_extensions()
+        {
             pending.ext_headers = pending.ext_headers.saturating_add(1);
             if pending.ext_headers > max_ext_headers {
                 return Err(ArchiveError::LimitHit(LimitKind::Entries));
@@ -298,7 +347,9 @@ fn run_tar_inner<R: Read>(ar: &mut Archive<R>, s: &mut Session<'_>) -> Result<()
             EntryType::Directory => continue,
             EntryType::Symlink => Some(RejectReason::Symlink),
             EntryType::Link => Some(RejectReason::Hardlink),
-            EntryType::Char | EntryType::Block | EntryType::Fifo => Some(RejectReason::DeviceOrSpecial),
+            EntryType::Char | EntryType::Block | EntryType::Fifo => {
+                Some(RejectReason::DeviceOrSpecial)
+            }
             EntryType::GNUSparse => Some(RejectReason::Sparse),
             _ => Some(RejectReason::UnsupportedEntryType),
         };
@@ -327,15 +378,24 @@ mod tests {
 
     #[test]
     fn pax_parser() {
-        let ok = b"20 path=a/b/c.txt\n\n11 x=yz\n";
-        // first record length 20 covers "20 path=a/b/c.txt\n\n"? build properly:
-        let rec1 = b"17 path=a/b/c.tx\n";
-        assert_eq!(rec1.len(), 17);
-        let v = parse_pax(rec1).ok().unwrap_or_default();
+        let rec = b"17 path=a/b/c.tx\n";
+        assert_eq!(rec.len(), 17);
+        let v = parse_pax(rec).ok().unwrap_or_default();
         assert_eq!(v, vec![(&b"path"[..], &b"a/b/c.tx"[..])]);
-        assert!(parse_pax(ok).is_err());
-        for bad in [&b"x path=a\n"[..], b"99 path=a\n", b"5 a\n", b"0 \n", b"9 path=ab"] {
-            assert!(parse_pax(bad).is_err());
+        let two = b"17 path=a/b/c.tx\n8 k=vvv\n";
+        assert_eq!(parse_pax(two).map(|v| v.len()).ok(), Some(2));
+        // Wrong lengths, missing newline/equals, non-digits, zero length.
+        for bad in [
+            &b"20 path=a/b/c.txt\n\n"[..],
+            b"x path=a\n",
+            b"99 path=a\n",
+            b"5 a\n",
+            b"0 \n",
+            b"9 path=ab",
+            b"8 kvvvv\n",
+            b"-1 k=v\n",
+        ] {
+            assert!(parse_pax(bad).is_err(), "{bad:?}");
         }
     }
 }

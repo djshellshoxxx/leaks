@@ -50,9 +50,9 @@ pub fn file_buckets() -> impl Iterator<Item = u64> {
 pub fn is_legal_bucket(t: ObjectType, len: u64) -> bool {
     match t {
         ObjectType::Submission | ObjectType::SourceMessage | ObjectType::Reply => {
-            len != 0 && len % MESSAGE_BUCKET_UNIT == 0 && len <= MESSAGE_MAX
+            len != 0 && len.is_multiple_of(MESSAGE_BUCKET_UNIT) && len <= MESSAGE_MAX
         }
-        ObjectType::Identity => len != 0 && len % MESSAGE_BUCKET_UNIT == 0 && len <= IDENTITY_MAX,
+        ObjectType::Identity => len != 0 && len.is_multiple_of(MESSAGE_BUCKET_UNIT) && len <= IDENTITY_MAX,
         ObjectType::AttachmentBundle
         | ObjectType::CaseAttachment
         | ObjectType::CaseDocument

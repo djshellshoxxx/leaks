@@ -1,0 +1,47 @@
+{% extends "layout.html" %}
+{#- S03 Anonymity Status (11 §7 S03). No verification affordances in Tier W (SUI-066). -#}
+{% block main %}
+<h1>{{ p.t("sui-status-h1") }}</h1>
+{% include "js_warning.html" %}
+<dl>
+<dt>{{ p.t("sui-status-connection") }}</dt>
+<dd>{{ p.t("sui-status-connection-dd") }}</dd>
+<dt>{{ p.t("sui-status-address") }}</dt>
+<dd><span class="vh" lang="en" dir="ltr">{{ p.vm.deployment.onion_address }}</span><code class="onion" lang="en" dir="ltr" aria-hidden="true">{% for g in p.onion_groups() %}<span>{{ g }}</span>{% endfor %}</code>
+<br>{{ p.t2("sui-status-address-dd", "info", p.vm.deployment.info_site_address.as_str(), "org", p.org()) }}</dd>
+<dt>{{ p.t("sui-status-browser") }}</dt>
+<dd><span class="js-off">{{ p.t("sui-status-js-off") }}</span><span class="js-on">{{ p.t("sui-status-js-on") }}</span><span class="js-unknown">{{ p.t("sui-js-check") }}</span></dd>
+<dt>{{ p.t("sui-status-mode") }}</dt>
+<dd>{% match p.mode() %}{% when Mode::Anonymous %}{{ p.t("sui-status-mode-anonymous") }}{% when Mode::Identified %}{{ p.t("sui-status-mode-identified") }}{% when Mode::Clearnet %}{{ p.t("sui-status-mode-clearnet") }}{% else %}{{ p.t1("sui-status-mode-confidential", "custodian", p.custodian()) }}{% endmatch %}</dd>
+<dt id="protection">{{ p.t("sui-status-protection") }}</dt>
+<dd><p>{{ p.t("sui-status-protection-dd") }}</p><p class="honesty">{{ p.t("sui-tier-w-honesty") }}</p>
+<details><summary>{{ p.t("sui-high-summary") }}</summary><p>{{ p.t("sui-status-pq") }}</p></details></dd>
+<dt>{{ p.t("sui-status-replies") }}</dt>
+<dd>{{ p.t("sui-status-replies-dd") }}</dd>
+<dt>{{ p.t("sui-status-first") }}</dt>
+<dd>{% if p.vm.status.channels.is_empty() %}{{ p.t("sui-none") }}{% else %}<ul>{% for ch in p.vm.status.channels %}<li>{{ p.t2("sui-status-first-channel", "channel", ch.channel.as_str(), "roles", p.join(ch.triage)) }}</li>{% endfor %}</ul>{% endif %} {{ p.t("sui-as-listed") }}</dd>
+<dt>{{ p.t("sui-status-later") }}</dt>
+<dd>{% for ch in p.vm.status.channels %}<p>{{ p.t1("sui-status-later-dd", "roles", p.join(ch.others)) }}</p>{% endfor %}</dd>
+<dt>{{ p.t("sui-status-kept") }}</dt>
+<dd>{{ p.t("sui-status-kept-dd") }}</dd>
+<dt id="changes">{{ p.t("sui-status-changes") }}</dt>
+<dd>{% if p.vm.ctx.banners.roster_changes.is_empty() %}{{ p.t("sui-none") }}{% else %}<ul>{% for r in p.vm.ctx.banners.roster_changes %}<li>{{ p.t2("sui-status-change-item", "channel", r.channel.as_str(), "date", r.effective.to_string()) }}</li>{% endfor %}</ul> {{ p.t("sui-as-listed") }}{% endif %}</dd>
+<dt id="operator">{{ p.t("sui-status-operator") }}</dt>
+<dd><p>{% match p.vm.ctx.banners.operator_statement %}{% when OperatorStatement::Current with { issued } %}{{ issued.to_string() }}{% when OperatorStatement::Stale with { last } %}{{ last.to_string() }}{% when OperatorStatement::Missing %}{{ p.t("sui-wb-operator-none") }}{% endmatch %} {{ p.t("sui-as-reported") }}</p>
+{%- if let Some(inc) = p.vm.ctx.banners.incident %}
+<p class="ut" dir="auto">{{ inc.text }}</p>
+{%- endif %}
+<p>{{ p.t("sui-status-operator-signal") }}</p></dd>
+{%- if let Some(l) = p.vm.deployment.reduced_sod_oversight %}
+<dt>{{ p.t("sui-status-sod") }}</dt>
+<dd>{{ p.t1("sui-status-sod-dd", "label", l.as_str()) }}</dd>
+{%- endif %}
+<dt>{{ p.t("sui-status-backup") }}</dt>
+<dd>{{ p.escrow_statement() }}</dd>
+<dt>{{ p.t("sui-status-what") }}</dt>
+<dd>{{ p.tm1("sops-limits-n1", "profile", p.profile())|safe }} {{ p.tm("sops-limits-n2")|safe }}{% for s in p.config_statements() %} {{ s }}{% endfor %}</dd>
+<dt>{{ p.t("sui-status-checking") }}</dt>
+<dd><p>{{ p.t("sui-status-noverify") }}</p><p>{{ p.t1("sui-status-app", "address", p.vm.deployment.project_onion_address.as_str()) }}</p><p>{{ p.t("sui-status-app-settings") }}</p></dd>
+</dl>
+<div class="actions"><a class="btn btn-primary" href="{{ p.href(Route::New) }}">{{ p.t("sui-btn-continue") }}</a></div>
+{% endblock %}

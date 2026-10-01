@@ -1,13 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Test helpers: hand-built hostile archives (no extraction library is used
 //! to build them, so the fixtures can violate every rule).
-#![allow(dead_code, clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::arithmetic_side_effects, clippy::panic)]
+#![allow(
+    dead_code,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+    clippy::panic
+)]
 
 use candor_safefs::{RootPolicy, SafeRoot, SlotTime};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-pub const SLOT: u64 = 1_790_000_100 - (1_790_000_100 % 900);
+/// A 15-minute-aligned slot (2026-09-21T13:35:00Z).
+pub const SLOT: u64 = 1_790_000_100;
 
 pub fn slot() -> SlotTime {
     SlotTime::from_unix_secs(SLOT).unwrap()
@@ -27,7 +35,11 @@ pub fn env() -> Env {
     let outside = base.join("outside");
     std::fs::create_dir(&outside).unwrap();
     mkdir_0700(&root_path);
-    Env { tmp, root_path, outside }
+    Env {
+        tmp,
+        root_path,
+        outside,
+    }
 }
 
 pub fn mkdir_0700(p: &Path) {
@@ -42,7 +54,11 @@ impl Env {
     /// Every file anywhere under the temp base except inside the root.
     pub fn files_outside_root(&self) -> Vec<PathBuf> {
         let mut out = Vec::new();
-        walk(&std::fs::canonicalize(self.tmp.path()).unwrap(), &self.root_path, &mut out);
+        walk(
+            &std::fs::canonicalize(self.tmp.path()).unwrap(),
+            &self.root_path,
+            &mut out,
+        );
         out
     }
 }
@@ -87,7 +103,14 @@ pub struct Cd {
     pub unix_mode: Option<u32>,
 }
 
-pub fn local_header(name: &[u8], method: u16, flags: u16, crc: u32, csize: u32, usize: u32) -> Vec<u8> {
+pub fn local_header(
+    name: &[u8],
+    method: u16,
+    flags: u16,
+    crc: u32,
+    csize: u32,
+    usize: u32,
+) -> Vec<u8> {
     let mut v = Vec::new();
     v.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
     v.extend_from_slice(&20u16.to_le_bytes());
@@ -154,18 +177,36 @@ pub struct Z<'a> {
 }
 
 pub fn z<'a>(name: &'a [u8], data: &'a [u8]) -> Z<'a> {
-    Z { name, data, unix_mode: None, deflate: false, flags: 0, method_override: None }
+    Z {
+        name,
+        data,
+        unix_mode: None,
+        deflate: false,
+        flags: 0,
+        method_override: None,
+    }
 }
 
 pub fn zip(entries: &[Z<'_>]) -> Vec<u8> {
     let mut body = Vec::new();
     let mut cds = Vec::new();
     for e in entries {
-        let (method, payload) = if e.deflate { (8u16, deflate(e.data)) } else { (0u16, e.data.to_vec()) };
+        let (method, payload) = if e.deflate {
+            (8u16, deflate(e.data))
+        } else {
+            (0u16, e.data.to_vec())
+        };
         let method = e.method_override.unwrap_or(method);
         let c = crc(e.data);
         let offset = body.len() as u32;
-        body.extend(local_header(e.name, method, e.flags, c, payload.len() as u32, e.data.len() as u32));
+        body.extend(local_header(
+            e.name,
+            method,
+            e.flags,
+            c,
+            payload.len() as u32,
+            e.data.len() as u32,
+        ));
         body.extend_from_slice(&payload);
         cds.push(Cd {
             name: e.name.to_vec(),
@@ -212,7 +253,8 @@ impl TarBuf {
         self.entry_link(name, typeflag, data, b"")
     }
     pub fn entry_link(&mut self, name: &[u8], typeflag: u8, data: &[u8], link: &[u8]) -> &mut Self {
-        self.0.extend_from_slice(&tar_header(name, data.len() as u64, typeflag, link));
+        self.0
+            .extend_from_slice(&tar_header(name, data.len() as u64, typeflag, link));
         self.0.extend_from_slice(data);
         let pad = (512 - data.len() % 512) % 512;
         self.0.extend(std::iter::repeat_n(0u8, pad));

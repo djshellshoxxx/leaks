@@ -80,11 +80,9 @@ impl MemoryStore {
                     r.event().case_ref() == Some(case)
                         && !matches!(r.event(), AuditEvent::CaseDisposed { .. })
                 });
-                if hit {
-                    if let Some(r) = e.record.take() {
-                        e.chain = r.to_redacted();
-                        n = n.saturating_add(1);
-                    }
+                if let Some(r) = e.record.take_if(|_| hit) {
+                    e.chain = r.to_redacted();
+                    n = n.saturating_add(1);
                 }
             }
         }

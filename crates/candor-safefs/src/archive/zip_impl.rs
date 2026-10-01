@@ -8,6 +8,7 @@ use std::io::{Read, Seek, SeekFrom};
 use zip::{CompressionMethod, ZipArchive};
 
 const LOCAL_SIG: u32 = 0x0403_4b50;
+const CENTRAL_SIG: u32 = 0x0201_4b50;
 const LOCAL_FIXED: u64 = 30;
 const S_IFMT: u32 = 0o170_000;
 const S_IFREG: u32 = 0o100_000;
@@ -27,6 +28,41 @@ struct Info {
 
 fn malformed<E>(_: E) -> ArchiveError {
     ArchiveError::Malformed("zip structure")
+}
+
+/// Counts consecutive central-directory file headers starting at `start`.
+fn count_central_records<R: Read + Seek>(
+    reader: &mut R,
+    start: u64,
+    max_entries: u64,
+) -> Result<u64, ArchiveError> {
+    reader.seek(SeekFrom::Start(start)).map_err(malformed)?;
+    let mut count: u64 = 0;
+    let mut fixed = [0u8; 46];
+    loop {
+        let mut sig = [0u8; 4];
+        if reader.read_exact(&mut sig).is_err() {
+            break;
+        }
+        if u32::from_le_bytes(sig) != CENTRAL_SIG {
+            break;
+        }
+        if let Some(rest) = fixed.get_mut(4..) {
+            reader.read_exact(rest).map_err(malformed)?;
+        }
+        count = count.saturating_add(1);
+        if count > max_entries {
+            return Err(ArchiveError::LimitHit(LimitKind::Entries));
+        }
+        let n = u16::from_le_bytes([fixed[28], fixed[29]]);
+        let m = u16::from_le_bytes([fixed[30], fixed[31]]);
+        let k = u16::from_le_bytes([fixed[32], fixed[33]]);
+        let skip = i64::from(n)
+            .saturating_add(i64::from(m))
+            .saturating_add(i64::from(k));
+        reader.seek(SeekFrom::Current(skip)).map_err(malformed)?;
+    }
+    Ok(count)
 }
 
 /// Extracts a ZIP archive into `root` (FILE-019, ST-081).
@@ -53,11 +89,28 @@ fn run<R: Read + Seek>(reader: &mut R, s: &mut Session<'_>) -> Result<(), Archiv
 
     // Pass 1: central directory scan (no member data read).
     let infos = {
-        let mut za = ZipArchive::new(&mut *reader).map_err(malformed)?;
+        let za = ZipArchive::new(&mut *reader).map_err(malformed)?;
         let n = za.len();
         if u64::try_from(n).unwrap_or(u64::MAX) > l.max_entries {
             return Err(ArchiveError::LimitHit(LimitKind::Entries));
         }
+        if za.offset() != 0 {
+            // Prepended data (SFX / polyglot): Stage 0 handles polyglots;
+            // the extractor refuses rather than guess offsets.
+            return Err(ArchiveError::Unsupported("data before first zip header"));
+        }
+        let cd_start = za.central_directory_start();
+        drop(za);
+        // The zip crate keys entries by name, silently collapsing duplicate
+        // central-directory names (a parser differential). Count the
+        // central-directory records ourselves and require agreement.
+        let walked = count_central_records(reader, cd_start, l.max_entries)?;
+        if walked != u64::try_from(n).unwrap_or(u64::MAX) {
+            return Err(ArchiveError::Malformed(
+                "duplicate or hidden central directory entries",
+            ));
+        }
+        let mut za = ZipArchive::new(&mut *reader).map_err(malformed)?;
         let mut v = Vec::with_capacity(n);
         for i in 0..n {
             let f = za.by_index_raw(i).map_err(malformed)?;
@@ -99,15 +152,18 @@ fn run<R: Read + Seek>(reader: &mut R, s: &mut Session<'_>) -> Result<(), Archiv
     ranges.sort_unstable();
     for w in ranges.windows(2) {
         if let [a, b] = w
-            && b.0 < a.1 {
-                return Err(ArchiveError::OverlappingEntries);
-            }
+            && b.0 < a.1
+        {
+            return Err(ArchiveError::OverlappingEntries);
+        }
     }
 
     // Pass 3: local header must agree with the central directory (name and
     // data offset), defeating parser-differential name smuggling.
     for inf in &infos {
-        reader.seek(SeekFrom::Start(inf.header_start)).map_err(malformed)?;
+        reader
+            .seek(SeekFrom::Start(inf.header_start))
+            .map_err(malformed)?;
         let mut fixed = [0u8; 30];
         reader.read_exact(&mut fixed).map_err(malformed)?;
         let sig = u32::from_le_bytes([fixed[0], fixed[1], fixed[2], fixed[3]]);
@@ -171,7 +227,10 @@ fn run<R: Read + Seek>(reader: &mut R, s: &mut Session<'_>) -> Result<(), Archiv
             s.reject(idx, &inf.name, RejectReason::Encrypted);
             continue;
         }
-        if !matches!(inf.method, CompressionMethod::Stored | CompressionMethod::Deflated) {
+        if !matches!(
+            inf.method,
+            CompressionMethod::Stored | CompressionMethod::Deflated
+        ) {
             s.reject(idx, &inf.name, RejectReason::UnsupportedCompression);
             continue;
         }

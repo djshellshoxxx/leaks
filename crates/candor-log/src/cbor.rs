@@ -153,12 +153,8 @@ fn encode_into(out: &mut Vec<u8>, v: &Value, depth: usize) -> Result<(), CborErr
                 enc.push((kb, vb));
             }
             enc.sort_by(|a, b| a.0.cmp(&b.0));
-            for w in enc.windows(2) {
-                if let [a, b] = w {
-                    if a.0 == b.0 {
-                        return Err(CborError::DuplicateKey);
-                    }
-                }
+            if enc.windows(2).any(|w| matches!(w, [a, b] if a.0 == b.0)) {
+                return Err(CborError::DuplicateKey);
             }
             write_head(out, 5, len_u64(enc.len()));
             for (kb, vb) in enc {

@@ -1,0 +1,36 @@
+{% extends "layout.html" %}
+{#- S01 Landing (11 §7 S01). -#}
+{% block main %}
+<h1>{{ p.t1("sui-landing-h1", "org", p.org()) }}</h1>
+{%- if !p.vm.landing.purpose.is_empty() %}
+<p dir="auto">{{ p.vm.landing.purpose }}</p>
+{%- endif %}
+<div class="box">
+<h2>{{ p.t("sui-landing-before") }}</h2>
+<ul>
+<li>{{ p.t("sui-landing-b1") }}</li>
+<li>{{ p.t("sui-landing-b2") }}</li>
+<li>{{ p.t("sui-landing-b3") }}</li>
+<li class="honesty">{{ p.t("sui-tier-w-honesty") }}</li>
+</ul>
+</div>
+{% include "js_warning.html" %}
+<div class="actions pair">
+<a class="btn btn-primary" href="{{ p.href(Route::Safety) }}">{{ p.t("sui-landing-start") }}</a>
+<a class="btn btn-primary" href="{{ p.href(Route::Login) }}">{{ p.t("sui-landing-return") }}</a>
+</div>
+<ul>
+<li><a href="{{ p.href(Route::Safety) }}">{{ p.t("sui-landing-guide") }}</a></li>
+<li><a href="{{ p.href(Route::Status) }}">{{ p.t("sui-landing-protect") }}</a></li>
+</ul>
+{%- if let Some(r) = p.vm.deployment.recovery %}
+<p class="note">{{ p.t2("sui-landing-recovery", "holders", r.holders.as_str(), "k", r.k) }}</p>
+{%- endif %}
+{%- if p.vm.deployment.reduced_sod_oversight.is_some() %}
+<p class="note">{{ p.t("sui-landing-reduced-sod") }}</p>
+{%- endif %}
+{%- if let Some(alt) = p.vm.deployment.alternative_label %}
+<p>{{ p.t1("sui-landing-alternative", "alt", alt.as_str()) }}</p>
+{%- endif %}
+<p>{{ p.t("sops-legal-n1") }}{% if let Some(j) = p.vm.deployment.jurisdiction_rights_text %} <span dir="auto">{{ j }}</span>{% endif %} {{ p.t("sops-legal-n2") }}</p>
+{% endblock %}

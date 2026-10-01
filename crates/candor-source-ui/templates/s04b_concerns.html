@@ -1,0 +1,31 @@
+{% extends "layout.html" %}
+{#- S04b "Is your report about any of these people?" (ADR-030, ADR-037). None ticked by default. -#}
+{% block main %}
+<h1>{{ p.t("sui-concerns-h1") }}</h1>
+{% include "errors.html" %}
+<p>{{ p.t1("sui-concerns-first", "roles", p.join(p.vm.concerns.triage)) }} {{ p.t("sui-as-listed") }}</p>
+{%- if p.vm.concerns.load_failed %}
+<p class="warn">{{ p.t("sui-concerns-err-load") }}</p>
+<div class="actions"><a class="btn" href="{{ p.href(Route::New) }}">{{ p.t("sui-btn-back") }}</a></div>
+{%- else %}
+<form method="post" action="{{ p.href(Route::Concerns) }}">
+{% include "ft.html" %}
+<fieldset aria-describedby="h-coi-1 h-coi-2">
+<legend>{{ p.t("sui-concerns-h1") }}</legend>
+<p class="hint" id="h-coi-1">{{ p.t("sui-concerns-explain") }}</p>
+<p class="hint" id="h-coi-2">{{ p.t("sui-concerns-who-sees") }}</p>
+<p class="note">{{ p.t("sui-concerns-team-hint") }}</p>
+{%- for r in p.vm.concerns.roles %}
+<div class="choice"><input type="checkbox" name="coi_label" value="{{ loop.index0 }}" id="{% if loop.first %}f-coi_label{% else %}f-coi_label-{{ loop.index0 }}{% endif %}"{% if p.vm.concerns.ticked.contains(&(loop.index0 as u16)) %} checked{% endif %}>
+<label for="{% if loop.first %}f-coi_label{% else %}f-coi_label-{{ loop.index0 }}{% endif %}"><bdi>{{ r }}</bdi></label></div>
+{%- endfor %}
+<p>{{ p.t("sui-as-listed") }}</p>
+</fieldset>
+<p>{{ p.t("sui-concerns-auto") }}</p>
+<div class="actions">
+<a class="btn" href="{{ p.href(Route::New) }}">{{ p.t("sui-btn-back") }}</a>
+<button class="btn-primary" type="submit">{{ p.t("sui-btn-continue") }}</button>
+</div>
+</form>
+{%- endif %}
+{% endblock %}

@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Store confinement tests (BE-009, DB-028, ST-080, ST-086; CVE-2026-54706,
 //! CVE-2025-24888, TOB-SDW-012).
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic, clippy::arithmetic_side_effects)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::arithmetic_side_effects
+)]
 
 mod common;
 use candor_safefs::{ContentKey, ObjectId, RootPolicy, SafeFsError, SafeRoot, SlotTime};
@@ -29,7 +35,10 @@ fn roundtrip_mode_layout_and_slot_times() {
     let smd = std::fs::metadata(shard_path(&e, &id)).unwrap();
     assert_eq!(smd.mode() & 0o777, 0o700);
     assert_eq!(smd.mtime() as u64, SLOT);
-    assert_eq!(std::fs::metadata(&e.root_path).unwrap().mtime() as u64, SLOT);
+    assert_eq!(
+        std::fs::metadata(&e.root_path).unwrap().mtime() as u64,
+        SLOT
+    );
     let mut v = Vec::new();
     r.open_read(&id).unwrap().read_to_end(&mut v).unwrap();
     assert_eq!(v, b"ciphertext");
@@ -105,7 +114,9 @@ fn uncommitted_write_leaves_nothing_and_purge() {
 #[test]
 fn size_limit() {
     let e = env();
-    let r = SafeRoot::open(&e.root_path, RootPolicy::BlobStore).unwrap().with_max_object_bytes(4);
+    let r = SafeRoot::open(&e.root_path, RootPolicy::BlobStore)
+        .unwrap()
+        .with_max_object_bytes(4);
     let mut w = r.create_random().unwrap();
     assert!(w.write_all(b"12345").is_err());
 }
@@ -120,7 +131,10 @@ fn root_policy_checks() {
     // Symlink as the root itself.
     let link = base.join("link-root");
     symlink(&e.root_path, &link).unwrap();
-    assert!(matches!(SafeRoot::open(&link, RootPolicy::BlobStore), Err(SafeFsError::RootPolicy(_))));
+    assert!(matches!(
+        SafeRoot::open(&link, RootPolicy::BlobStore),
+        Err(SafeFsError::RootPolicy(_))
+    ));
     // Symlinked ancestor component.
     let real_parent = base.join("realparent");
     std::fs::create_dir(&real_parent).unwrap();
@@ -134,7 +148,10 @@ fn root_policy_checks() {
     ));
     // Group/world-accessible root.
     std::fs::set_permissions(&e.root_path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    assert!(matches!(SafeRoot::open(&e.root_path, RootPolicy::BlobStore), Err(SafeFsError::RootPolicy(_))));
+    assert!(matches!(
+        SafeRoot::open(&e.root_path, RootPolicy::BlobStore),
+        Err(SafeFsError::RootPolicy(_))
+    ));
     // A file is not a root.
     std::fs::write(base.join("f"), b"").unwrap();
     assert!(SafeRoot::open(&base.join("f"), RootPolicy::BlobStore).is_err());
@@ -150,11 +167,20 @@ fn symlinked_shard_dir_is_refused() {
     symlink(&e.outside, shard_path(&e, &id)).unwrap();
     let mut w = r.create_new(&id).unwrap();
     w.write_all(b"secret").unwrap();
-    assert!(matches!(w.commit(slot()), Err(SafeFsError::UnsafeObject(_))));
-    assert!(matches!(r.open_read(&id), Err(SafeFsError::UnsafeObject(_))));
+    assert!(matches!(
+        w.commit(slot()),
+        Err(SafeFsError::UnsafeObject(_))
+    ));
+    assert!(matches!(
+        r.open_read(&id),
+        Err(SafeFsError::UnsafeObject(_))
+    ));
     assert_eq!(std::fs::read_dir(&e.outside).unwrap().count(), 0);
     // Temp file cleaned up after the failed commit.
-    let names: Vec<_> = std::fs::read_dir(&e.root_path).unwrap().map(|d| d.unwrap().file_name()).collect();
+    let names: Vec<_> = std::fs::read_dir(&e.root_path)
+        .unwrap()
+        .map(|d| d.unwrap().file_name())
+        .collect();
     assert_eq!(names.len(), 1, "{names:?}");
 }
 
@@ -167,7 +193,10 @@ fn shard_dir_with_wrong_mode_is_refused() {
     std::fs::set_permissions(shard_path(&e, &id), std::fs::Permissions::from_mode(0o777)).unwrap();
     let mut w = r.create_new(&id).unwrap();
     w.write_all(b"x").unwrap();
-    assert!(matches!(w.commit(slot()), Err(SafeFsError::UnsafeObject(_))));
+    assert!(matches!(
+        w.commit(slot()),
+        Err(SafeFsError::UnsafeObject(_))
+    ));
 }
 
 #[test]
@@ -180,7 +209,10 @@ fn symlinked_object_is_refused_and_remove_only_unlinks() {
     std::fs::write(&secret, b"top secret").unwrap();
     std::fs::remove_file(&p).unwrap();
     symlink(&secret, &p).unwrap();
-    assert!(matches!(r.open_read(&id), Err(SafeFsError::UnsafeObject(_))));
+    assert!(matches!(
+        r.open_read(&id),
+        Err(SafeFsError::UnsafeObject(_))
+    ));
     r.remove(&id, slot()).unwrap();
     assert_eq!(std::fs::read(&secret).unwrap(), b"top secret");
 }
@@ -192,7 +224,10 @@ fn hardlinked_object_is_refused() {
     let id = r.put_random(b"x", slot()).unwrap();
     let p = shard_path(&e, &id).join(id.to_name());
     std::fs::hard_link(&p, e.outside.join("alias")).unwrap();
-    assert!(matches!(r.open_read(&id), Err(SafeFsError::UnsafeObject(_))));
+    assert!(matches!(
+        r.open_read(&id),
+        Err(SafeFsError::UnsafeObject(_))
+    ));
 }
 
 #[test]
@@ -202,7 +237,7 @@ fn fifo_and_dir_objects_are_refused_without_blocking() {
     let id = ObjectId::random().unwrap();
     rustix::fs::mknodat(
         rustix::fs::CWD,
-        &e.root_path.join(id.to_name()),
+        e.root_path.join(id.to_name()),
         rustix::fs::FileType::Fifo,
         rustix::fs::Mode::from_raw_mode(0o600),
         0,
@@ -212,9 +247,15 @@ fn fifo_and_dir_objects_are_refused_without_blocking() {
     let path = e.root_path.clone();
     std::thread::spawn(move || {
         let r = SafeRoot::open(&path, RootPolicy::Staging).unwrap();
-        let _ = tx.send(matches!(r.open_read(&id), Err(SafeFsError::UnsafeObject(_))));
+        let _ = tx.send(matches!(
+            r.open_read(&id),
+            Err(SafeFsError::UnsafeObject(_))
+        ));
     });
-    assert!(rx.recv_timeout(Duration::from_secs(10)).unwrap(), "FIFO not refused");
+    assert!(
+        rx.recv_timeout(Duration::from_secs(10)).unwrap(),
+        "FIFO not refused"
+    );
     let id2 = ObjectId::random().unwrap();
     std::fs::create_dir(e.root_path.join(id2.to_name())).unwrap();
     assert!(r.open_read(&id2).is_err());
@@ -225,8 +266,15 @@ fn group_readable_object_is_refused() {
     let e = env();
     let r = e.root(RootPolicy::Staging);
     let id = r.put_random(b"x", slot()).unwrap();
-    std::fs::set_permissions(e.root_path.join(id.to_name()), std::fs::Permissions::from_mode(0o644)).unwrap();
-    assert!(matches!(r.open_read(&id), Err(SafeFsError::UnsafeObject(_))));
+    std::fs::set_permissions(
+        e.root_path.join(id.to_name()),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    assert!(matches!(
+        r.open_read(&id),
+        Err(SafeFsError::UnsafeObject(_))
+    ));
 }
 
 #[test]

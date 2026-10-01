@@ -51,6 +51,9 @@ mod tests {
     fn rejects_unaligned() {
         assert!(SlotTime::from_unix_secs(1_700_000_001).is_err());
         assert!(SlotTime::from_unix_secs(1_699_999_200).is_ok());
-        assert_eq!(SlotTime::utc_day_start(86_400 * 3 + 5).unix_secs(), 86_400 * 3);
+        assert_eq!(
+            SlotTime::utc_day_start(86_400 * 3 + 5).unix_secs(),
+            86_400 * 3
+        );
     }
 }

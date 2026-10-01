@@ -36,7 +36,7 @@ pub(crate) fn unhex(s: &str) -> Option<Vec<u8>> {
         }
     }
     let b = s.as_bytes();
-    if b.len() % 2 != 0 {
+    if !b.len().is_multiple_of(2) {
         return None;
     }
     let mut out = Vec::with_capacity(b.len() / 2);
@@ -191,11 +191,11 @@ pub struct UtcMillis(pub u64);
 impl UtcMillis {
     /// Truncate to the second.
     pub const fn to_second(self) -> Self {
-        Self(self.0 - self.0 % MS_PER_SECOND)
+        Self(self.0.saturating_sub(self.0 % MS_PER_SECOND))
     }
     /// Truncate to the hour.
     pub const fn to_hour(self) -> Self {
-        Self(self.0 - self.0 % MS_PER_HOUR)
+        Self(self.0.saturating_sub(self.0 % MS_PER_HOUR))
     }
     /// UTC day.
     pub fn day(self) -> DayStamp {

@@ -407,7 +407,8 @@ mod tests {
             let len = (k * CHUNK_SIZE + extra).saturating_sub(1);
             let pt: Vec<u8> = (0..len).map(|i| (i * 31) as u8).collect();
             let ct = encrypt(key(), &pt).unwrap();
-            prop_assert_eq!(decrypt(key(), len as u64, &ct).unwrap().as_slice(), pt.as_slice());
+            let back = decrypt(key(), len as u64, &ct).unwrap();
+            prop_assert_eq!(back.as_slice(), pt.as_slice());
             let mut bad = ct.clone();
             let b = bit % (bad.len() * 8);
             bad[b / 8] ^= 1 << (b % 8);

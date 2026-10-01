@@ -1,0 +1,40 @@
+{% extends "layout.html" %}
+{#- S02 Safety Check: essentials (05 §7.1), self-selection (05 §4.2), cards A–J (05 §6). -#}
+{% block main %}
+<h1>{{ p.t("sui-safety-h1") }}</h1>
+<h2>{{ p.t("sui-safety-essentials") }}</h2>
+<ul>
+<li>{{ p.t("sops-essential-1") }}</li>
+<li>{{ p.t("sops-essential-2") }}</li>
+<li>{{ p.t("sops-essential-3") }}</li>
+<li>{{ p.t("sops-essential-4") }}</li>
+<li>{{ p.t("sops-essential-5") }}</li>
+<li>{{ p.t("sops-essential-6") }}</li>
+<li>{{ p.t("sops-essential-7") }}</li>
+<li>{{ p.t1("sops-essential-8", "n", p.words()) }}</li>
+</ul>
+<div class="box">
+<h2>{{ p.t("sops-selfselect-title") }}</h2>
+<p>{{ p.tm("sops-track")|safe }}</p>
+<p>{{ p.tm("sops-selfselect-intro")|safe }}</p>
+<ul>
+<li>{{ p.t("sops-selfselect-1") }}</li>
+<li>{{ p.t("sops-selfselect-2") }}</li>
+<li>{{ p.t("sops-selfselect-3") }}</li>
+<li>{{ p.t("sops-selfselect-4") }}</li>
+<li>{{ p.t("sops-selfselect-5") }}</li>
+<li>{{ p.t("sops-selfselect-6") }}</li>
+</ul>
+</div>
+<h2>{{ p.t("sui-safety-cards") }}</h2>
+{%- for g in p.groups() %}
+<h2>{{ p.t(g.title) }}</h2>
+{%- for c in g.cards %}
+{% include "card.html" %}
+{%- endfor %}
+{%- endfor %}
+<div class="actions">
+<a class="btn btn-primary" href="{{ p.href(Route::Status) }}">{{ p.t("sui-btn-continue") }}</a>
+<form method="post" action="{{ p.href(Route::Leave) }}">{% include "ft.html" %}<button type="submit">{{ p.t("sui-safety-leave") }}</button></form>
+</div>
+{% endblock %}

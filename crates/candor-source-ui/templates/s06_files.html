@@ -1,0 +1,48 @@
+{% extends "layout.html" %}
+{#- S06 Attach Evidence. One file per request (08 SW-06); no accept/capture (SUI-025);
+    plain names ON by default (ADP-12). -#}
+{% block main %}
+<h1>{{ p.t("sui-files-h1") }}</h1>
+{% include "errors.html" %}
+<p>{{ p.t("sui-files-describe") }}</p>
+<p>{{ p.t2("sui-files-limits", "max_files", p.vm.files.max_files, "max_file", p.size(p.vm.files.max_file_bytes)) }}</p>
+<p>{{ p.t("sui-files-time") }}</p>
+<p class="honesty">{{ p.t("sui-files-size-visible") }}</p>
+<form method="post" action="{{ p.href(Route::Files) }}" enctype="multipart/form-data">
+{% include "ft.html" %}
+<div class="field">
+{%- let fid = "file" %}
+<label for="f-file">{{ p.t("sui-files-input") }}</label>
+<p class="hint" id="h-file">{{ p.t("sui-files-one") }}</p>
+{% include "field_error.html" %}
+<input type="file" id="f-file" name="file" aria-describedby="{{ p.describedby(fid, true) }}"{% if p.has_field_error(fid) %} aria-invalid="true"{% endif %}>
+</div>
+<div class="choice"><input type="checkbox" id="f-neutral_names" name="neutral_names" value="1"{% if p.vm.files.neutral_names %} checked{% endif %}><label for="f-neutral_names">{{ p.t("sui-files-neutral") }}</label></div>
+<div class="actions"><button type="submit" name="action" value="upload">{{ p.t("sui-files-upload") }}</button></div>
+</form>
+{%- if p.vm.files.files.is_empty() %}
+<p>{{ p.t("sui-files-none") }}</p>
+{%- else %}
+<form method="post" action="{{ p.href(Route::Files) }}" id="desc-form">{% include "ft.html" %}<input type="hidden" name="nav" value="continue"></form>
+<table>
+<caption>{{ p.t("sui-files-caption") }}</caption>
+<thead><tr><th scope="col">{{ p.t("sui-files-col-name") }}</th><th scope="col">{{ p.t("sui-files-col-size") }}</th><th scope="col">{{ p.t("sui-files-col-describe") }}</th><th scope="col">{{ p.t("sui-files-col-remove") }}</th></tr></thead>
+<tbody>
+{%- for f in p.vm.files.files %}
+<tr><td><bdi class="mono">{{ f.name }}</bdi></td><td>{{ p.file_size(f) }}</td>
+<td><label class="vh" for="f-desc_{{ loop.index0 }}">{{ p.t1("sui-files-describe-label", "name", f.name.as_str()) }}</label><input type="text" id="f-desc_{{ loop.index0 }}" name="desc_{{ loop.index0 }}" form="desc-form" maxlength="500" dir="auto" value="{{ f.description }}"></td>
+<td><form method="post" action="{{ p.href(Route::Files) }}">{% include "ft.html" %}<input type="hidden" name="action" value="remove"><input type="hidden" name="part_index" value="{{ loop.index0 }}"><button type="submit">{{ p.t1("sui-files-remove", "name", f.name.as_str()) }}</button></form></td></tr>
+{%- endfor %}
+</tbody>
+</table>
+{%- endif %}
+<p class="note">{{ p.t("sui-draft-limits") }}</p>
+<div class="actions">
+<a class="btn" href="{{ p.href(Route::Questionnaire) }}">{{ p.t("sui-btn-back") }}</a>
+{%- if p.vm.files.files.is_empty() %}
+<a class="btn btn-primary" href="{{ p.href(Route::Review) }}">{{ p.t("sui-btn-continue") }}</a>
+{%- else %}
+<button type="submit" form="desc-form" class="btn-primary">{{ p.t("sui-btn-continue") }}</button>
+{%- endif %}
+</div>
+{% endblock %}

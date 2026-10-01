@@ -1,0 +1,54 @@
+{% extends "layout.html" %}
+{#- S04 Create Report: channel + mode. ANONYMOUS pre-selected (ADP-01); consequences inline (ADP-11). -#}
+{% block main %}
+<h1>{{ p.t("sui-new-h1") }}</h1>
+{% include "errors.html" %}
+{%- if p.vm.new_report.snapshot_stale %}
+<p class="warn">{{ p.t("sui-channel-stale") }}</p>
+{%- else %}
+<form method="post" action="{{ p.href(Route::New) }}">
+{% include "ft.html" %}
+{%- if p.vm.new_report.channels.len() > 1 %}
+{%- let fid = "channel_id" %}
+<fieldset{% if p.has_field_error(fid) %} aria-describedby="e-{{ fid }}"{% endif %}>
+<legend>{{ p.t("sui-new-channel-legend") }}</legend>
+{% include "field_error.html" %}
+{%- for c in p.vm.new_report.channels %}
+<div class="choice"><input type="radio" name="channel_id" value="{{ c.id }}" id="{% if loop.first %}f-channel_id{% else %}f-channel_id-{{ loop.index0 }}{% endif %}" aria-describedby="d-channel-{{ loop.index0 }}"{% if p.channel_selected(c, loop.index0) %} checked{% endif %}{% if !c.available %} disabled{% endif %}{% if p.has_field_error(fid) %} aria-invalid="true"{% endif %}>
+<label for="{% if loop.first %}f-channel_id{% else %}f-channel_id-{{ loop.index0 }}{% endif %}"><bdi>{{ c.name }}</bdi>
+<span class="consequence" id="d-channel-{{ loop.index0 }}"><bdi>{{ c.description }}</bdi>{% if !c.languages.is_empty() %} · {{ p.t1("sui-new-channel-langs", "langs", c.languages.as_str()) }}{% endif %} · {{ p.t1("sui-new-channel-first", "roles", p.join(c.triage)) }} {{ p.t("sui-as-listed") }}{% if !c.available %} · {{ p.t("sui-new-channel-unavailable") }}{% endif %}</span></label></div>
+{%- endfor %}
+</fieldset>
+{%- if p.vm.new_report.channels.iter().any(|c| !c.available) %}
+<p>{{ p.t("sui-new-channel-independent") }}</p>
+<ul>{% for c in p.vm.new_report.channels %}{% if c.available && c.independent_route %}<li><bdi>{{ c.name }}</bdi>: <bdi>{{ c.description }}</bdi></li>{% endif %}{% endfor %}</ul>
+{%- endif %}
+{%- else %}
+{%- for c in p.vm.new_report.channels %}
+<p>{{ p.t1("sui-new-channel-first", "roles", p.join(c.triage)) }} {{ p.t("sui-as-listed") }}</p>
+{%- if !c.available %}<p class="warn">{{ p.t("sui-new-channel-unavailable") }}</p>{% endif %}
+{%- endfor %}
+{%- endif %}
+{%- let fid = "mode" %}
+{%- let sel = p.vm.new_report.selected_mode %}
+{%- let allow_conf = p.vm.new_report.channels.iter().any(|c| c.allows_confidential) %}
+{%- let allow_ident = p.vm.new_report.channels.iter().any(|c| c.allows_identified) %}
+<fieldset{% if p.has_field_error(fid) %} aria-describedby="e-{{ fid }}"{% endif %}>
+<legend>{{ p.t("sui-new-mode-legend") }}</legend>
+{% include "field_error.html" %}
+<div class="choice"><input type="radio" name="mode" value="anonymous" id="f-mode" aria-describedby="d-mode-0"{% if sel == Mode::Anonymous || !sel.is_disclosed() %} checked{% endif %}>
+<label for="f-mode">{{ p.t("sui-new-mode-anon") }}<span class="consequence" id="d-mode-0">{{ p.t("sui-new-mode-anon-consequence") }}</span></label></div>
+{%- if allow_conf %}
+<div class="choice"><input type="radio" name="mode" value="confidential" id="f-mode-1" aria-describedby="d-mode-1"{% if sel == Mode::Confidential %} checked{% endif %}>
+<label for="f-mode-1">{{ p.t("sui-new-mode-conf") }}<span class="consequence" id="d-mode-1">{{ p.t2("sui-mode-conf-consequence", "custodian", p.custodian(), "org", p.org()) }}</span></label></div>
+{%- endif %}
+{%- if allow_ident %}
+<div class="choice"><input type="radio" name="mode" value="identified" id="f-mode-2" aria-describedby="d-mode-2"{% if sel == Mode::Identified %} checked{% endif %}>
+<label for="f-mode-2">{{ p.t("sui-new-mode-ident") }}<span class="consequence" id="d-mode-2">{{ p.t("sui-new-mode-ident-consequence") }}</span></label></div>
+{%- endif %}
+</fieldset>
+<p class="note">{{ p.t("sui-draft-limits") }}</p>
+<div class="actions"><button class="btn-primary" type="submit">{{ p.t("sui-btn-continue") }}</button></div>
+</form>
+{%- endif %}
+{% endblock %}

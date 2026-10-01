@@ -214,7 +214,7 @@ pub struct CheckpointBody {
 }
 
 impl CheckpointBody {
-    fn to_value(&self) -> Value {
+    fn to_value(self) -> Value {
         let mut m = MapBuilder::new();
         m.put("v", Value::Uint(1))
             .put("kind", Value::text("checkpoint"))
@@ -234,10 +234,8 @@ impl CheckpointBody {
         if v.get("v")?.as_u64()? != 1 || v.get("kind")?.as_text()? != "checkpoint" {
             return None;
         }
-        if let Value::Map(m) = v {
-            if m.len() != 11 {
-                return None;
-            }
+        if matches!(v, Value::Map(m) if m.len() != 11) {
+            return None;
         }
         let tenant: [u8; 16] = v.get("tenant")?.as_bytes()?.try_into().ok()?;
         let stream = match v.get("stream")?.as_text()? {

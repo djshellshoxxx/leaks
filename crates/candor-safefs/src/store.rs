@@ -73,9 +73,10 @@ fn check_private_dir(st: &Stat, uid: u32, dev: Option<u64>) -> Result<(), SafeFs
         return Err(SafeFsError::UnsafeObject("directory mode not 0700"));
     }
     if let Some(d) = dev
-        && st.st_dev != d {
-            return Err(SafeFsError::UnsafeObject("cross-device"));
-        }
+        && st.st_dev != d
+    {
+        return Err(SafeFsError::UnsafeObject("cross-device"));
+    }
     Ok(())
 }
 
@@ -167,8 +168,9 @@ impl SafeRoot {
             }
         }
         let uid = euid();
-        check_private_dir(&st, uid, None)
-            .map_err(|_| SafeFsError::RootPolicy("root must be a 0700 directory owned by the service user"))?;
+        check_private_dir(&st, uid, None).map_err(|_| {
+            SafeFsError::RootPolicy("root must be a 0700 directory owned by the service user")
+        })?;
         Ok(Self {
             dir,
             policy,
@@ -330,10 +332,10 @@ impl SafeRoot {
             let name = ent.file_name();
             if let Some(n) = name.to_str()
                 && n.starts_with(TMP_PREFIX)
-                    && ObjectId::parse(n.get(TMP_PREFIX.len()..).unwrap_or("")).is_ok()
-                {
-                    names.push(n.to_owned());
-                }
+                && ObjectId::parse(n.get(TMP_PREFIX.len()..).unwrap_or("")).is_ok()
+            {
+                names.push(n.to_owned());
+            }
         }
         for n in &names {
             self.dir.remove_file(n)?;
@@ -353,7 +355,11 @@ impl SafeRoot {
                 let ent = ent?;
                 let name = ent.file_name();
                 let Some(n) = name.to_str() else { continue };
-                if n.len() != 2 || !n.bytes().all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b)) {
+                if n.len() != 2
+                    || !n
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b))
+                {
                     continue;
                 }
                 let shard = self.dir.open_dir_nofollow(n).map_err(map_nofollow_err)?;
@@ -374,9 +380,10 @@ fn collect_ids(dir: &Dir, out: &mut Vec<ObjectId>) -> Result<(), SafeFsError> {
         let name = ent.file_name();
         if let Some(n) = name.to_str()
             && n.len() == ID_LEN
-                && let Ok(id) = ObjectId::parse(n) {
-                    out.push(id);
-                }
+            && let Ok(id) = ObjectId::parse(n)
+        {
+            out.push(id);
+        }
     }
     Ok(())
 }
@@ -452,7 +459,10 @@ impl PendingObject<'_> {
     /// fallback `linkat`+`unlinkat`), normalize directory times to `slot`
     /// and fsync the directories.
     pub fn commit(mut self, slot: SlotTime) -> Result<ObjectId, SafeFsError> {
-        let file = self.file.take().ok_or(SafeFsError::Io(io::ErrorKind::BrokenPipe))?;
+        let file = self
+            .file
+            .take()
+            .ok_or(SafeFsError::Io(io::ErrorKind::BrokenPipe))?;
         set_times(&file, slot)?;
         file.sync_all()?;
         drop(file);

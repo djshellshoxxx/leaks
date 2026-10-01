@@ -148,10 +148,8 @@ fn parse(
                 .and_then(cbor::Value::as_bytes32)
                 .ok_or(err(VerifyFailureCode::EnvelopeMismatch, seq))?;
             let hash = chain_hash(head, bytes);
-            if let Some(c) = claimed_hash {
-                if c != &hash {
-                    return Err(err(VerifyFailureCode::ChainMismatch, seq));
-                }
+            if claimed_hash.is_some_and(|c| c != hash) {
+                return Err(err(VerifyFailureCode::ChainMismatch, seq));
             }
             Ok(Parsed {
                 seq,

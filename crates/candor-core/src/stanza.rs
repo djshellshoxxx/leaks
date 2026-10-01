@@ -245,7 +245,7 @@ impl WrapStanza {
         }
         let enc = r.take(enc_len)?.to_vec();
         let ct_len = usize::try_from(r.u32()?).map_err(|_| Error::Length)?;
-        if ct_len > MAX_STANZA_CT_LEN || ct_len < AEAD_TAG_LEN || ct_len != r.remaining() {
+        if !(AEAD_TAG_LEN..=MAX_STANZA_CT_LEN).contains(&ct_len) || ct_len != r.remaining() {
             return Err(Error::Malformed("ct_len"));
         }
         let ct = r.take(ct_len)?.to_vec();

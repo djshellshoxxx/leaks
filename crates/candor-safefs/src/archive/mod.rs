@@ -81,7 +81,11 @@ impl ArchiveLimits {
             && (1..=c.max_nesting_depth).contains(&self.max_nesting_depth)
             && (1..=c.max_path_bytes).contains(&self.max_path_bytes)
             && (1..=c.max_path_components).contains(&self.max_path_components);
-        if ok { Ok(()) } else { Err(ArchiveError::InvalidLimits) }
+        if ok {
+            Ok(())
+        } else {
+            Err(ArchiveError::InvalidLimits)
+        }
     }
 }
 
@@ -270,9 +274,10 @@ pub(crate) fn check_member_path(raw: &[u8], l: &ArchiveLimits) -> Result<String,
         return Err(RejectReason::AbsolutePath);
     }
     if let (Some(d), Some(b':')) = (b.first(), b.get(1))
-        && d.is_ascii_alphabetic() {
-            return Err(RejectReason::AbsolutePath);
-        }
+        && d.is_ascii_alphabetic()
+    {
+        return Err(RejectReason::AbsolutePath);
+    }
     let mut comps: Vec<&str> = Vec::new();
     for c in s.split(['/', '\\']) {
         match c {
@@ -382,7 +387,9 @@ impl<'a> Session<'a> {
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(_) => return Err(ArchiveError::Malformed("member data")),
             };
-            let chunk = buf.get(..n).ok_or(ArchiveError::Malformed("reader overrun"))?;
+            let chunk = buf
+                .get(..n)
+                .ok_or(ArchiveError::Malformed("reader overrun"))?;
             produced = produced.saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
             if produced > l.max_entry_size {
                 return Err(ArchiveError::LimitHit(LimitKind::EntrySize));
@@ -392,9 +399,10 @@ impl<'a> Session<'a> {
                 return Err(ArchiveError::LimitHit(LimitKind::TotalSize));
             }
             if let Some(c) = compressed
-                && produced > c.saturating_mul(l.max_ratio) {
-                    return Err(ArchiveError::LimitHit(LimitKind::Ratio));
-                }
+                && produced > c.saturating_mul(l.max_ratio)
+            {
+                return Err(ArchiveError::LimitHit(LimitKind::Ratio));
+            }
             extra(total)?;
             if head.len() < SNIFF_LEN {
                 let take = SNIFF_LEN.saturating_sub(head.len()).min(chunk.len());
@@ -460,8 +468,14 @@ mod tests {
             assert_eq!(check_member_path(n, &l), Err(r), "{n:?}");
         }
         assert_eq!(check_member_path(&[b'a'; 1025], &l), Err(PathTooLong));
-        assert_eq!(check_member_path("a/".repeat(33).as_bytes(), &l), Err(TooManyComponents));
-        assert_eq!(check_member_path(b"a//./b", &l).ok().as_deref(), Some("a/b"));
+        assert_eq!(
+            check_member_path("a/".repeat(33).as_bytes(), &l),
+            Err(TooManyComponents)
+        );
+        assert_eq!(
+            check_member_path(b"a//./b", &l).ok().as_deref(),
+            Some("a/b")
+        );
         // NFC: decomposed and composed forms collide.
         assert_eq!(
             check_member_path("e\u{301}".as_bytes(), &l),

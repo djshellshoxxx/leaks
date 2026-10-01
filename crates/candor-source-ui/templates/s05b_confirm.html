@@ -1,0 +1,17 @@
+{% extends "layout.html" %}
+{#- S05b page 2: explicit confirmation; two buttons of equal prominence (ADP-02, ADP-03, SUI-017). -#}
+{% block main %}
+<h1>{{ p.t("sui-id-confirm-h1") }}</h1>
+{%- if p.vm.identity.target == Mode::Identified %}
+<p>{{ p.t1("sui-id-confirm-ident", "custodian", p.custodian()) }}</p>
+{%- else %}
+<p>{{ p.t2("sui-id-confirm-conf", "custodian", p.custodian(), "org", p.org()) }}</p>
+{%- endif %}
+<form method="post" action="{{ p.href(Route::Identity) }}">
+{% include "ft.html" %}
+<div class="actions pair">
+<button type="submit" name="nav" value="decline">{{ p.t("sui-id-confirm-no") }}</button>
+<button type="submit" name="nav" value="confirm">{{ p.t("sui-id-confirm-yes") }}</button>
+</div>
+</form>
+{% endblock %}
