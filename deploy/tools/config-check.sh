@@ -77,7 +77,7 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd -P)
 BASE="$SCRIPT_DIR/config-check.baseline"
 MANIFEST="$SCRIPT_DIR/config-check.manifest"
 # sha256 of config-check.manifest (release-pinned; update together with the manifest).
-MANIFEST_SHA256=3b9001db8699b313d504761fc1dba55599cd4b913a0b41a66e62de814eecb608
+MANIFEST_SHA256=b1024079ddc100984399ee1b1cf2a3e4c729acc17ce7103142f17abe110fb6f7
 SECTIONS="tor nft pg units journald kernel dns apparmor host"
 MODE=static
 DIR="$SCRIPT_DIR/../intake"
