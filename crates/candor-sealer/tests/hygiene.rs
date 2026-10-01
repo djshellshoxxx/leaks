@@ -240,8 +240,9 @@ async fn no_plaintext_reaches_disk() {
             assert!(!contains(&o.bytes, marker.as_bytes()));
             assert!(!contains(&o.bytes, phrase.as_bytes()));
         }
-        let a = env.account.unwrap();
-        assert!(!contains(&a.prefs_ct, marker.as_bytes()));
+    }
+    for a in f.sink.accounts() {
+        assert!(!contains(&a.account.prefs_ct, marker.as_bytes()));
     }
     let hits = scan_for(f.dir.path(), phrase.as_bytes(), since, true);
     assert!(hits.is_empty(), "passphrase on disk: {hits:?}");

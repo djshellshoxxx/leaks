@@ -225,7 +225,7 @@ async fn new_account_submission(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn full_tier_w_flow() {
-    let f = fixture();
+    let mut f = fixture();
     let s = sess(1);
     let attachment: Vec<u8> = (0..300_000u32)
         .map(|i| (i % 251) as u8)
@@ -259,7 +259,12 @@ async fn full_tier_w_flow() {
     for o in &env.objects {
         assert!(!contains(&o.bytes, MARKER.as_bytes()));
     }
-    let account = env.account.clone().expect("account");
+    // ADR-052(2): the account is a separate store operation, written before the
+    // group; the group itself carries no account reference.
+    assert_eq!(f.sink.ops(), "AG");
+    let upsert = f.sink.accounts()[0].clone();
+    assert!(upsert.replaces.is_none());
+    let account = upsert.account;
 
     // Recipient side: only member 1 can open; 2 (COI policy), 3 (flagged) and 4
     // (non-triage) cannot.
@@ -445,7 +450,7 @@ async fn full_tier_w_flow() {
 
     // --- Follow-up: sealed only to the original eligible set (ADR-036(4)) ----
     // Member 5 joins the Triage Set later; it must get no slot.
-    let mut members = f.members;
+    let mut members = std::mem::take(&mut f.members);
     members.push(member(5, 5, true));
     let snap2 = snapshot_for(&members, &f.custodian, &f.disposition, 2, TODAY);
     f.install(snap2).unwrap();
@@ -471,9 +476,27 @@ async fn full_tier_w_flow() {
     .await;
     let envs = f.sink.envelopes();
     let fu = &envs[1];
-    assert_eq!(fu.objects.len(), 1);
-    assert_eq!(fu.objects[0].object_type, ObjectType::SourceMessage);
-    assert!(fu.account.is_none());
+    // ADR-052(1): SOURCE_MESSAGE + empty bundle + dummy identity (to K13).
+    let ftypes: Vec<_> = fu.objects.iter().map(|o| o.object_type).collect();
+    assert_eq!(
+        ftypes,
+        [
+            ObjectType::SourceMessage,
+            ObjectType::AttachmentBundle,
+            ObjectType::Identity
+        ]
+    );
+    assert_eq!(f.sink.ops(), "AGG", "a follow-up writes no account");
+    let (_, bpt) = open_intake(&fu.objects[1], member_ctx(0), &members[0].mek.private).unwrap();
+    assert_eq!(&bpt[..8], b"CBDL\0\0\0\0", "empty bundle");
+    let (_, ipt) = open_intake(
+        &fu.objects[2],
+        candor_core::slots::SlotContext::Custodian { tenant_id: TENANT },
+        &f.custodian.private,
+    )
+    .unwrap();
+    let (imap, _) = parse_padded(&ipt);
+    assert_eq!(imap.get(2).unwrap().t(), "");
     assert!(open_intake(&fu.objects[0], member_ctx(0), &members[4].mek.private).is_none());
     assert!(open_intake(&fu.objects[0], member_ctx(0), &members[1].mek.private).is_none());
     let (_, fpt) = open_intake(&fu.objects[0], member_ctx(0), &members[0].mek.private).unwrap();
@@ -482,6 +505,8 @@ async fn full_tier_w_flow() {
     assert_eq!(fmap.get(7).unwrap().u(), 0);
     assert_eq!(fmap.get(9).unwrap().b(), &sub.object_hash);
     assert_eq!(fmap.get(5).unwrap().t(), "more details");
+    assert_eq!(fmap.get(11).unwrap().b(), &fu.objects[1].object_hash);
+    assert_eq!(fmap.get(1000).unwrap().b(), &fu.objects[2].object_hash);
 
     // --- Rotation (ADR-046(7), 04 §11.7) --------------------------------------
     // A reply still pending for the old key, to be re-wrapped.
@@ -516,10 +541,18 @@ async fn full_tier_w_flow() {
         &f.sealer,
         Request::RotateFinish {
             sess: l,
-            replies: vec![PendingReply {
-                object_hash: pending_hash,
-                stanza: pending_stanza,
-            }],
+            // An entry that does not open (corrupt or planted by a compromised
+            // store) is skipped and cannot block rotation (AUD-RM2-SEA-14).
+            replies: vec![
+                PendingReply {
+                    object_hash: [0xbb; 32],
+                    stanza: pending_stanza.clone(),
+                },
+                PendingReply {
+                    object_hash: pending_hash,
+                    stanza: pending_stanza,
+                },
+            ],
         },
     )
     .await
@@ -527,11 +560,15 @@ async fn full_tier_w_flow() {
         panic!()
     };
     assert_ne!(new_tag, account.lookup_tag);
-    let rot = f.sink.rotations.lock().unwrap().clone();
-    let (req, kenvs) = &rot[0];
-    assert_eq!(req.old_lookup_tag, account.lookup_tag);
+    // KEY_ROTATION group first, then the account replacement (ADR-052(2)).
+    assert_eq!(f.sink.ops(), "AGGGA");
+    let req = f.sink.accounts()[1].clone();
+    let kenvs = &f.sink.envelopes()[2..];
+    assert_eq!(kenvs[0].objects.len(), 3);
+    assert_eq!(req.replaces, Some(account.lookup_tag));
     assert_eq!(req.account.lookup_tag, new_tag);
     assert_eq!(req.account.mailbox_ids, vec![mailbox]);
+    assert_eq!(req.rewrapped_replies.len(), 1);
     // The key-update follow-up carries the new keys, signed by old and new key.
     let (_, kpt) =
         open_intake(&kenvs[0].objects[0], member_ctx(0), &members[0].mek.private).unwrap();

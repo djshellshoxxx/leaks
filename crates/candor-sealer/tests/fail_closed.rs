@@ -681,3 +681,51 @@ async fn session_capacity_gives_busy() {
         .await;
     assert_eq!(r, Response::error(ErrorCode::Busy));
 }
+
+/// AUD-RM2-SEA-10: a COI_POLICY tightened after the initial report applies to
+/// follow-ups (the report's categories are kept in `prefs_ct`).
+#[tokio::test]
+async fn follow_up_reapplies_tightened_coi_policy() {
+    let f = fixture();
+    let s = sess(1);
+    let coi = Coi {
+        excluded_labels: zeroize::Zeroizing::new(vec![]),
+        categories: zeroize::Zeroizing::new(vec![CATEGORY_FRAUD]),
+    };
+    confirmed(&f, s, Some(coi)).await;
+    let seal = Request::SealFinish {
+        sess: s,
+        delayed_delivery: false,
+    };
+    assert!(matches!(f.sealer.handle(seal.clone()).await, Response::Sealed { .. }));
+    // Initial: members 1 and 3 (label 2 is excluded for the category).
+    let env = &f.sink.envelopes()[0];
+    assert!(open_intake(&env.objects[0], member_ctx(0), &f.members[2].mek.private).is_some());
+    // Tightening: the category now also excludes label 3.
+    let mut snap = f.snapshot.clone();
+    snap.snapshot_version = 2;
+    let n = snap.tree_size + 1;
+    resize(&mut snap, n);
+    snap.channels[0].coi_policies.push(candor_sealer::server::directory::CoiPolicy {
+        entry_hash: [0x67; 32],
+        effective_day: TODAY,
+        categories: vec![(CATEGORY_FRAUD, vec![2, 3])],
+    });
+    f.install(snap).unwrap();
+    ok(
+        &f.sealer,
+        Request::DraftSet(DraftSet {
+            sess: s,
+            mode: Mode::Anonymous,
+            message: SecretText::new("follow-up"),
+            fields: vec![],
+            identity: None,
+            coi: None,
+        }),
+    )
+    .await;
+    assert!(matches!(f.sealer.handle(seal).await, Response::Sealed { .. }));
+    let fu = &f.sink.envelopes()[1];
+    assert!(open_intake(&fu.objects[0], member_ctx(0), &f.members[2].mek.private).is_none());
+    assert!(open_intake(&fu.objects[0], member_ctx(0), &f.members[0].mek.private).is_some());
+}

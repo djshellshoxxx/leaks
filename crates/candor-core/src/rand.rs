@@ -35,6 +35,12 @@ pub fn fill(buf: &mut [u8]) -> Result<()> {
     Ok(())
 }
 
+/// Rejection-sampling attempts before giving up (AUD-RM1-CORE-12). For any `n`, a
+/// draw is rejected with probability < 1/2, so 128 consecutive rejections from a
+/// working RNG happen with probability < 2^-128: hitting the bound means the RNG is
+/// stuck and the call fails closed with [`Error::Rng`] instead of spinning forever.
+const MAX_REJECTIONS: u32 = 128;
+
 /// Uniform integer in `[0, n)` by rejection sampling over 32-bit draws (no modulo bias).
 pub(crate) fn uniform_below(rng: &mut dyn RandomSource, n: u32) -> Result<u32> {
     if n == 0 {
@@ -46,15 +52,17 @@ pub(crate) fn uniform_below(rng: &mut dyn RandomSource, n: u32) -> Result<u32> {
         .checked_div(n64)
         .and_then(|q| q.checked_mul(n64))
         .ok_or(Error::Internal)?;
-    loop {
+    for _ in 0..MAX_REJECTIONS {
         let mut b = [0u8; 4];
         rng.fill(&mut b)?;
         let x = u64::from(u32::from_be_bytes(b));
+        b.zeroize();
         if x < limit {
             let r = x.checked_rem(n64).ok_or(Error::Internal)?;
             return u32::try_from(r).map_err(|_| Error::Internal);
         }
     }
+    Err(Error::Rng)
 }
 
 /// Uniformly random permutation of `0..n` (Fisher–Yates with rejection sampling).
@@ -194,6 +202,21 @@ mod tests {
     fn rng_failure_propagates() {
         // ST-028: stuck RNG ⇒ fail closed.
         assert_eq!(uniform_below(&mut StuckRng, 10), Err(Error::Rng));
+    }
+
+    /// AUD-RM1-CORE-12: an RNG stuck above the rejection limit fails closed instead of
+    /// looping forever.
+    #[test]
+    fn stuck_high_rng_fails_closed() {
+        struct AllOnes;
+        impl RandomSource for AllOnes {
+            fn fill(&mut self, buf: &mut [u8]) -> Result<()> {
+                buf.fill(0xFF);
+                Ok(())
+            }
+        }
+        assert_eq!(uniform_below(&mut AllOnes, 7772), Err(Error::Rng));
+        assert_eq!(permutation(&mut AllOnes, 16).err(), Some(Error::Rng));
     }
 
     #[test]

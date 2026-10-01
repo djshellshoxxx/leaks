@@ -1,1 +1,804 @@
-# stub
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# config-check.baseline - release baseline for deploy/tools/config-check.sh (Z-INTAKE).
+# Installed next to the checker (/usr/lib/candor/tools/, root 0644). Format: '|'-separated,
+# first field = kind. Lines starting with '#' are comments.
+#
+#   unit|<unit>|<Section>|<Key>|<op>|<value>
+#       effective directive of a unit after systemd merged fragment + all drop-ins.
+#       op '=': exact; several '=' lines for one key = the exact assignment sequence, in order
+#               (a drop-in that adds, resets or overrides anything changes the sequence).
+#       op '~': ERE over the joined sequence (assignments joined with ' ;; '; an empty
+#               assignment = reset = empty element; absent key = empty string).
+#       op '*': value checked semantically by the checker (sealer SystemCallFilter: owned by
+#               the sealer hardening work, AUD-RM2-SEA-06; allow-list mode + systemd-analyze
+#               security deny-group items).
+#       Any directive not listed for a unit (any section) is a FAIL.
+#   sec|<unit>|<item>           systemd-analyze security items that may score > 0 (residuals
+#                               documented in deploy/SPEC-NOTES.md D-21/D-25); any other FAILs.
+#   nft-rule|<chain>|<json>     loaded rules of the release ruleset, in order (canonical JSON of
+#                               the rule expressions; skuid as user name, counters without values)
+#   nft-set|<name>|<json>       fixed sets (type, flags, elements)
+#   tor|<Option>|=|<value>      the complete effective non-default option set (tor
+#   tor|<Option>|int|<lo> <hi>  --dump-config short) with required values / tunable ranges
+#   tor-full|<Option>|<value>   required values in --dump-config full (defaults and
+#                               path-selection options)
+#   tor-raw|<Option>            option names allowed in the torrc text (no abbreviations)
+#   pg|<guc>|<b|s>|<value>      postgresql.conf, static (b = boolean, s = lower-case string)
+#   pgc|<guc>|<value>           effective value printed by `postgres -C <guc>` (--host)
+#   sysctl|<key>|<value>        kernel baseline (sysctl.d file, effective /proc/sys)
+#   show|<kinds>|<Property>|<value>   `systemctl show` of the loaded unit (--host, live);
+#                               kinds: comma list of all, tor, candor, pg
+#
+# Maintainers: `config-check.sh --emit-baseline --dir deploy/intake` prints the unit, nft and
+# sec lines of a tree for review; '~'/'*' entries and the other kinds are maintained by hand.
+
+# ---------------------------------------------------------------- tor (16 §7.1/§7.4, NET-002..011, LOG-005; AUD-RM2-DEP-01/04)
+tor|AvoidDiskWrites|=|1
+tor|CompiledProofOfWorkHash|=|0
+tor|ConnectionPadding|=|1
+tor|ControlPort|=|0
+tor|CookieAuthentication|=|1
+tor|DataDirectory|=|/var/lib/tor-instances/candor-intake
+tor|DirPort|=|0
+tor|DNSPort|=|0
+tor|ExitPolicy|=|reject *:*
+tor|ExitRelay|=|0
+tor|HardwareAccel|=|1
+tor|HiddenServiceDir|=|/var/lib/tor-instances/candor-intake/hs-source/
+tor|HiddenServiceVersion|=|3
+tor|HiddenServicePort|=|80 unix:/run/candor/source-web/http.sock
+tor|HiddenServiceAllowUnknownPorts|=|0
+tor|HiddenServiceDirGroupReadable|=|0
+tor|HiddenServiceNumIntroductionPoints|int|3 20
+tor|HiddenServiceMaxStreams|int|1 65535
+tor|HiddenServiceMaxStreamsCloseCircuit|=|1
+tor|HiddenServiceExportCircuitID|=|haproxy
+tor|HiddenServicePoWDefensesEnabled|=|1
+tor|HiddenServicePoWQueueRate|int|1 1000000
+tor|HiddenServicePoWQueueBurst|int|1 10000000
+tor|HiddenServiceEnableIntroDoSDefense|=|1
+tor|HiddenServiceEnableIntroDoSRatePerSec|int|1 2147483647
+tor|HiddenServiceEnableIntroDoSBurstPerSec|int|1 2147483647
+tor|HiddenServiceStatistics|=|0
+tor|HTTPTunnelPort|=|0
+tor|Log|=|warn stderr
+tor|LogTimeGranularity|=|3600000
+tor|NATDPort|=|0
+tor|ORPort|=|0
+tor|PublishServerDescriptor|=|0
+tor|Sandbox|=|1
+tor|SocksPort|=|0
+tor|TransPort|=|0
+tor|VanguardsLiteEnabled|=|1
+tor-full|RunAsDaemon|0
+tor-full|SafeLogging|1
+tor-full|DisableDebuggerAttachment|1
+tor-full|BridgeRelay|0
+tor-full|LogMessageDomains|0
+tor-full|UseEntryGuards|1
+tor-full|ReducedConnectionPadding|0
+tor-full|CircuitPadding|1
+tor-full|ReducedCircuitPadding|0
+tor-full|HiddenServiceSingleHopMode|0
+tor-full|HiddenServiceNonAnonymousMode|0
+tor-full|Sandbox|1
+tor-full|CookieAuthentication|1
+tor-full|StrictNodes|0
+tor-full|HSLayer2Nodes|
+tor-full|HSLayer3Nodes|
+tor-full|EntryNodes|
+tor-full|ExcludeNodes|
+tor-full|ExitNodes|
+tor-full|MiddleNodes|
+tor-full|UseBridges|0
+tor-full|TestingTorNetwork|0
+tor-full|DisableNetwork|0
+tor-full|ClientOnly|0
+tor-full|SocksPort|0
+tor-full|ControlPort|0
+tor-raw|AvoidDiskWrites
+tor-raw|BridgeRelay
+tor-raw|CircuitPadding
+tor-raw|CompiledProofOfWorkHash
+tor-raw|ConnectionPadding
+tor-raw|ControlPort
+tor-raw|CookieAuthentication
+tor-raw|DNSPort
+tor-raw|DataDirectory
+tor-raw|DirPort
+tor-raw|DisableDebuggerAttachment
+tor-raw|ExitPolicy
+tor-raw|ExitRelay
+tor-raw|HTTPTunnelPort
+tor-raw|HardwareAccel
+tor-raw|HiddenServiceAllowUnknownPorts
+tor-raw|HiddenServiceDir
+tor-raw|HiddenServiceDirGroupReadable
+tor-raw|HiddenServiceEnableIntroDoSBurstPerSec
+tor-raw|HiddenServiceEnableIntroDoSDefense
+tor-raw|HiddenServiceEnableIntroDoSRatePerSec
+tor-raw|HiddenServiceExportCircuitID
+tor-raw|HiddenServiceMaxStreams
+tor-raw|HiddenServiceMaxStreamsCloseCircuit
+tor-raw|HiddenServiceNonAnonymousMode
+tor-raw|HiddenServiceNumIntroductionPoints
+tor-raw|HiddenServicePoWDefensesEnabled
+tor-raw|HiddenServicePoWQueueBurst
+tor-raw|HiddenServicePoWQueueRate
+tor-raw|HiddenServicePort
+tor-raw|HiddenServiceSingleHopMode
+tor-raw|HiddenServiceStatistics
+tor-raw|HiddenServiceVersion
+tor-raw|Log
+tor-raw|LogMessageDomains
+tor-raw|LogTimeGranularity
+tor-raw|NATDPort
+tor-raw|ORPort
+tor-raw|PublishServerDescriptor
+tor-raw|ReducedCircuitPadding
+tor-raw|ReducedConnectionPadding
+tor-raw|RunAsDaemon
+tor-raw|SafeLogging
+tor-raw|Sandbox
+tor-raw|SocksPort
+tor-raw|TransPort
+tor-raw|UseEntryGuards
+tor-raw|VanguardsLiteEnabled
+# ---------------------------------------------------------------- nftables (17 §4.3/§4.3.1, 16 §14.2, NET-031/041, LOG-007; AUD-RM2-DEP-02)
+nft-rule|input|[{"match":{"op":"==","left":{"meta":{"key":"iif"}},"right":"lo"}},{"accept":null}]
+nft-rule|input|[{"match":{"op":"in","left":{"ct":{"key":"state"}},"right":"invalid"}},{"drop":null}]
+nft-rule|input|[{"match":{"op":"in","left":{"ct":{"key":"state"}},"right":["established","related"]}},{"accept":null}]
+nft-rule|input|[{"match":{"op":"==","left":{"payload":{"protocol":"icmpv6","field":"type"}},"right":{"set":["nd-router-advert","nd-redirect"]}}},{"drop":null}]
+nft-rule|input|[{"match":{"op":"==","left":{"meta":{"key":"iifname"}},"right":"relay0"}},{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"saddr"}},"right":"@core_relay"}},{"match":{"op":"==","left":{"payload":{"protocol":"tcp","field":"dport"}},"right":7443}},{"match":{"op":"in","left":{"ct":{"key":"state"}},"right":"new"}},{"accept":null}]
+nft-rule|input|[{"match":{"op":"==","left":{"meta":{"key":"iifname"}},"right":"mgmt0"}},{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"saddr"}},"right":"@admin_jump"}},{"match":{"op":"==","left":{"payload":{"protocol":"tcp","field":"dport"}},"right":22}},{"match":{"op":"in","left":{"ct":{"key":"state"}},"right":"new"}},{"accept":null}]
+nft-rule|input|[{"counter":"input_dropped"},{"drop":null}]
+nft-rule|output|[{"match":{"op":"==","left":{"meta":{"key":"oif"}},"right":"lo"}},{"accept":null}]
+nft-rule|output|[{"match":{"op":"in","left":{"ct":{"key":"state"}},"right":"invalid"}},{"drop":null}]
+nft-rule|output|[{"match":{"op":"in","left":{"ct":{"key":"state"}},"right":["established","related"]}},{"accept":null}]
+nft-rule|output|[{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"daddr"}},"right":{"prefix":{"addr":"169.254.0.0","len":16}}}},{"counter":"output_dropped"},{"drop":null}]
+nft-rule|output|[{"match":{"op":"==","left":{"payload":{"protocol":"ip6","field":"daddr"}},"right":"fd00:ec2::254"}},{"counter":"output_dropped"},{"drop":null}]
+nft-rule|output|[{"match":{"op":"==","left":{"meta":{"key":"skuid"}},"right":{"set":["_tor-candor-update","_tor-candor-intake"]}}},{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"daddr"}},"right":"@non_public4"}},{"counter":"output_dropped"},{"drop":null}]
+nft-rule|output|[{"match":{"op":"==","left":{"meta":{"key":"skuid"}},"right":{"set":["_tor-candor-update","_tor-candor-intake"]}}},{"match":{"op":"==","left":{"payload":{"protocol":"ip6","field":"daddr"}},"right":"@non_public6"}},{"counter":"output_dropped"},{"drop":null}]
+nft-rule|output|[{"match":{"op":"==","left":{"meta":{"key":"oifname"}},"right":"ext0"}},{"match":{"op":"==","left":{"meta":{"key":"skuid"}},"right":"_tor-candor-intake"}},{"match":{"op":"==","left":{"meta":{"key":"l4proto"}},"right":"tcp"}},{"match":{"op":"in","left":{"ct":{"key":"state"}},"right":"new"}},{"accept":null}]
+nft-rule|output|[{"match":{"op":"==","left":{"meta":{"key":"oifname"}},"right":"ext0"}},{"match":{"op":"==","left":{"meta":{"key":"skuid"}},"right":"_tor-candor-update"}},{"match":{"op":"==","left":{"meta":{"key":"l4proto"}},"right":"tcp"}},{"match":{"op":"in","left":{"ct":{"key":"state"}},"right":"new"}},{"accept":null}]
+nft-rule|output|[{"match":{"op":"==","left":{"meta":{"key":"oifname"}},"right":"mgmt0"}},{"match":{"op":"==","left":{"meta":{"key":"skuid"}},"right":"candor-health"}},{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"daddr"}},"right":"@mon_hosts"}},{"match":{"op":"==","left":{"payload":{"protocol":"tcp","field":"dport"}},"right":8514}},{"match":{"op":"in","left":{"ct":{"key":"state"}},"right":"new"}},{"accept":null}]
+nft-rule|output|[{"match":{"op":"==","left":{"meta":{"key":"oifname"}},"right":"mgmt0"}},{"match":{"op":"==","left":{"meta":{"key":"skuid"}},"right":"_chrony"}},{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"daddr"}},"right":"@mon_hosts"}},{"match":{"op":"==","left":{"payload":{"protocol":"udp","field":"dport"}},"right":123}},{"accept":null}]
+nft-rule|output|[{"match":{"op":"==","left":{"meta":{"key":"oifname"}},"right":"mgmt0"}},{"match":{"op":"==","left":{"meta":{"key":"skuid"}},"right":"_chrony"}},{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"daddr"}},"right":"@mon_hosts"}},{"match":{"op":"==","left":{"payload":{"protocol":"tcp","field":"dport"}},"right":4460}},{"match":{"op":"in","left":{"ct":{"key":"state"}},"right":"new"}},{"accept":null}]
+nft-rule|output|[{"counter":"output_dropped"},{"drop":null}]
+nft-rule|forward|[{"counter":"forward_dropped"},{"drop":null}]
+nft-set|non_public4|{"type":"ipv4_addr","flags":["interval"],"elem":[{"prefix":{"addr":"0.0.0.0","len":8}},{"prefix":{"addr":"10.0.0.0","len":8}},{"prefix":{"addr":"100.64.0.0","len":10}},{"prefix":{"addr":"127.0.0.0","len":8}},{"prefix":{"addr":"169.254.0.0","len":16}},{"prefix":{"addr":"172.16.0.0","len":12}},{"prefix":{"addr":"192.0.0.0","len":24}},{"prefix":{"addr":"192.0.2.0","len":24}},{"prefix":{"addr":"192.168.0.0","len":16}},{"prefix":{"addr":"198.18.0.0","len":15}},{"prefix":{"addr":"198.51.100.0","len":24}},{"prefix":{"addr":"203.0.113.0","len":24}},{"prefix":{"addr":"224.0.0.0","len":4}},{"prefix":{"addr":"240.0.0.0","len":4}}]}
+nft-set|non_public6|{"type":"ipv6_addr","flags":["interval"],"elem":["::","::1",{"prefix":{"addr":"::ffff:0.0.0.0","len":96}},{"prefix":{"addr":"64:ff9b::","len":96}},{"prefix":{"addr":"100::","len":64}},{"prefix":{"addr":"2001:db8::","len":32}},{"prefix":{"addr":"fc00::","len":7}},{"prefix":{"addr":"fe80::","len":10}},{"prefix":{"addr":"ff00::","len":8}}]}
+# ---------------------------------------------------------------- systemd units (07 §4.2, 16 §7.3, 17 §5.3, R7 SI-B-01; AUD-RM2-DEP-03)
+unit|tor@candor-intake.service|Unit|Description|=|Candor intake tor instance (C-05 source onion service)
+unit|tor@candor-intake.service|Unit|Requires|=|nftables.service
+unit|tor@candor-intake.service|Unit|Wants|=|network-online.target
+unit|tor@candor-intake.service|Unit|After|=|network-online.target nftables.service systemd-sysusers.service
+unit|tor@candor-intake.service|Unit|RequiresMountsFor|=|/var/lib/tor-instances/candor-intake
+unit|tor@candor-intake.service|Unit|StartLimitIntervalSec|=|60s
+unit|tor@candor-intake.service|Unit|StartLimitBurst|=|5
+unit|tor@candor-intake.service|Service|Type|=|notify
+unit|tor@candor-intake.service|Service|NotifyAccess|=|main
+unit|tor@candor-intake.service|Service|User|=|_tor-candor-intake
+unit|tor@candor-intake.service|Service|Group|=|_tor-candor-intake
+unit|tor@candor-intake.service|Service|AppArmorProfile|=|candor-tor-intake
+unit|tor@candor-intake.service|Service|ExecStartPre|=|/usr/bin/tor --defaults-torrc /dev/null -f /etc/tor/instances/candor-intake/torrc --verify-config --quiet
+unit|tor@candor-intake.service|Service|ExecStart|=|/usr/bin/tor --defaults-torrc /dev/null -f /etc/tor/instances/candor-intake/torrc
+unit|tor@candor-intake.service|Service|ExecReload|=|/bin/kill -HUP $MAINPID
+unit|tor@candor-intake.service|Service|KillSignal|=|SIGINT
+unit|tor@candor-intake.service|Service|TimeoutStartSec|=|300
+unit|tor@candor-intake.service|Service|TimeoutStopSec|=|60
+unit|tor@candor-intake.service|Service|Restart|=|on-failure
+unit|tor@candor-intake.service|Service|RestartSec|=|5s
+unit|tor@candor-intake.service|Service|LimitNOFILE|=|65536
+unit|tor@candor-intake.service|Service|NoNewPrivileges|=|yes
+unit|tor@candor-intake.service|Service|ProtectSystem|=|strict
+unit|tor@candor-intake.service|Service|ProtectHome|=|yes
+unit|tor@candor-intake.service|Service|PrivateTmp|=|yes
+unit|tor@candor-intake.service|Service|PrivateDevices|=|yes
+unit|tor@candor-intake.service|Service|PrivateIPC|=|yes
+unit|tor@candor-intake.service|Service|PrivateMounts|=|yes
+unit|tor@candor-intake.service|Service|ProtectKernelTunables|=|yes
+unit|tor@candor-intake.service|Service|ProtectKernelModules|=|yes
+unit|tor@candor-intake.service|Service|ProtectKernelLogs|=|yes
+unit|tor@candor-intake.service|Service|ProtectControlGroups|=|yes
+unit|tor@candor-intake.service|Service|ProtectClock|=|yes
+unit|tor@candor-intake.service|Service|ProtectHostname|=|yes
+unit|tor@candor-intake.service|Service|ProtectProc|=|invisible
+unit|tor@candor-intake.service|Service|RestrictNamespaces|=|yes
+unit|tor@candor-intake.service|Service|RestrictRealtime|=|yes
+unit|tor@candor-intake.service|Service|RestrictSUIDSGID|=|yes
+unit|tor@candor-intake.service|Service|LockPersonality|=|yes
+unit|tor@candor-intake.service|Service|MemoryDenyWriteExecute|=|yes
+unit|tor@candor-intake.service|Service|RemoveIPC|=|yes
+unit|tor@candor-intake.service|Service|UMask|=|0077
+unit|tor@candor-intake.service|Service|CapabilityBoundingSet|=|
+unit|tor@candor-intake.service|Service|AmbientCapabilities|=|
+unit|tor@candor-intake.service|Service|KeyringMode|=|private
+unit|tor@candor-intake.service|Service|DevicePolicy|=|closed
+unit|tor@candor-intake.service|Service|SystemCallArchitectures|=|native
+unit|tor@candor-intake.service|Service|SystemCallErrorNumber|=|EPERM
+unit|tor@candor-intake.service|Service|LimitCORE|=|0
+unit|tor@candor-intake.service|Service|NoExecPaths|=|/
+unit|tor@candor-intake.service|Service|ExecPaths|=|/usr
+unit|tor@candor-intake.service|Service|SystemCallFilter|=|@system-service
+unit|tor@candor-intake.service|Service|SystemCallFilter|=|~@privileged @resources @mount @debug @cpu-emulation @obsolete @raw-io @reboot @swap @module @clock @setuid @chown @keyring process_vm_readv process_vm_writev
+unit|tor@candor-intake.service|Service|SystemCallFilter|=|setrlimit seccomp
+unit|tor@candor-intake.service|Service|RestrictAddressFamilies|~|^AF_UNIX AF_INET( ;; AF_INET6)?$
+unit|tor@candor-intake.service|Service|IPAddressDeny|=|0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.0.2.0/24 192.168.0.0/16 198.18.0.0/15 198.51.100.0/24 203.0.113.0/24 224.0.0.0/4 240.0.0.0/4 ::/128 ::1/128 ::ffff:0:0/96 fc00::/7 fe80::/10 ff00::/8
+unit|tor@candor-intake.service|Service|SocketBindDeny|=|any
+unit|tor@candor-intake.service|Service|TemporaryFileSystem|=|/var:ro
+unit|tor@candor-intake.service|Service|BindPaths|=|/var/lib/tor-instances/candor-intake
+unit|tor@candor-intake.service|Service|InaccessiblePaths|=|-/var/tmp
+unit|tor@candor-intake.service|Service|InaccessiblePaths|=|-/run/candor/sealer -/run/candor/istore -/run/candor/staging -/run/candor/intake-pg -/run/candor/config -/run/candor/directory -/run/credentials/candor-intake-store.service -/run/credentials/candor-sealer.service -/etc/credstore.encrypted -/etc/candor -/boot
+unit|tor@candor-intake.service|Service|StandardInput|=|null
+unit|tor@candor-intake.service|Service|StandardOutput|=|null
+unit|tor@candor-intake.service|Service|StandardError|=|null
+unit|tor@candor-intake.service|Service|LogNamespace|=|candor-intake
+unit|tor@candor-intake.service|Service|LogLevelMax|=|emerg
+unit|tor@candor-intake.service|Service|SyslogIdentifier|=|tor-candor-intake
+unit|tor@candor-intake.service|Install|WantedBy|=|multi-user.target
+unit|candor-intake-web.service|Unit|Description|=|Candor source web (C-06, Z-INTAKE)
+unit|candor-intake-web.service|Unit|Requires|=|candor-intake-web.socket nftables.service
+unit|candor-intake-web.service|Unit|Wants|=|candor-sealer.socket candor-intake-store.socket
+unit|candor-intake-web.service|Unit|After|=|candor-intake-web.socket candor-sealer.socket candor-intake-store.socket nftables.service
+unit|candor-intake-web.service|Unit|StartLimitIntervalSec|=|60s
+unit|candor-intake-web.service|Unit|StartLimitBurst|=|5
+unit|candor-intake-web.service|Service|Type|=|exec
+unit|candor-intake-web.service|Service|ExecStart|=|/usr/lib/candor/source-web/candor-web
+unit|candor-intake-web.service|Service|User|=|candor-web
+unit|candor-intake-web.service|Service|Group|=|candor-web
+unit|candor-intake-web.service|Service|SupplementaryGroups|=|candor-istore-clients
+unit|candor-intake-web.service|Service|Restart|=|on-failure
+unit|candor-intake-web.service|Service|RestartSec|=|2s
+unit|candor-intake-web.service|Service|AppArmorProfile|=|candor-web
+unit|candor-intake-web.service|Service|MemoryMax|=|1G
+unit|candor-intake-web.service|Service|MemorySwapMax|=|0
+unit|candor-intake-web.service|Service|LimitMEMLOCK|=|1G
+unit|candor-intake-web.service|Service|TasksMax|=|256
+unit|candor-intake-web.service|Service|PrivateNetwork|=|yes
+unit|candor-intake-web.service|Service|RestrictAddressFamilies|=|AF_UNIX
+unit|candor-intake-web.service|Service|NoNewPrivileges|=|yes
+unit|candor-intake-web.service|Service|ProtectSystem|=|strict
+unit|candor-intake-web.service|Service|ProtectHome|=|yes
+unit|candor-intake-web.service|Service|PrivateTmp|=|yes
+unit|candor-intake-web.service|Service|PrivateDevices|=|yes
+unit|candor-intake-web.service|Service|PrivateIPC|=|yes
+unit|candor-intake-web.service|Service|PrivateMounts|=|yes
+unit|candor-intake-web.service|Service|ProtectKernelTunables|=|yes
+unit|candor-intake-web.service|Service|ProtectKernelModules|=|yes
+unit|candor-intake-web.service|Service|ProtectKernelLogs|=|yes
+unit|candor-intake-web.service|Service|ProtectControlGroups|=|yes
+unit|candor-intake-web.service|Service|ProtectClock|=|yes
+unit|candor-intake-web.service|Service|ProtectHostname|=|yes
+unit|candor-intake-web.service|Service|ProtectProc|=|invisible
+unit|candor-intake-web.service|Service|ProcSubset|=|pid
+unit|candor-intake-web.service|Service|RestrictNamespaces|=|yes
+unit|candor-intake-web.service|Service|RestrictRealtime|=|yes
+unit|candor-intake-web.service|Service|RestrictSUIDSGID|=|yes
+unit|candor-intake-web.service|Service|LockPersonality|=|yes
+unit|candor-intake-web.service|Service|MemoryDenyWriteExecute|=|yes
+unit|candor-intake-web.service|Service|RemoveIPC|=|yes
+unit|candor-intake-web.service|Service|UMask|=|0077
+unit|candor-intake-web.service|Service|CapabilityBoundingSet|=|
+unit|candor-intake-web.service|Service|AmbientCapabilities|=|
+unit|candor-intake-web.service|Service|KeyringMode|=|private
+unit|candor-intake-web.service|Service|DevicePolicy|=|closed
+unit|candor-intake-web.service|Service|SystemCallArchitectures|=|native
+unit|candor-intake-web.service|Service|SystemCallErrorNumber|=|EPERM
+unit|candor-intake-web.service|Service|LimitCORE|=|0
+unit|candor-intake-web.service|Service|NoExecPaths|=|/
+unit|candor-intake-web.service|Service|ExecPaths|=|/usr
+unit|candor-intake-web.service|Service|IPAddressDeny|=|any
+unit|candor-intake-web.service|Service|SocketBindDeny|=|any
+unit|candor-intake-web.service|Service|SystemCallFilter|=|@system-service
+unit|candor-intake-web.service|Service|SystemCallFilter|=|~@privileged @resources @mount @debug @cpu-emulation @obsolete @raw-io @reboot @swap @module @clock @setuid @chown @keyring process_vm_readv process_vm_writev
+unit|candor-intake-web.service|Service|SystemCallFilter|=|seccomp landlock_create_ruleset landlock_add_rule landlock_restrict_self
+unit|candor-intake-web.service|Service|TemporaryFileSystem|=|/var:ro
+unit|candor-intake-web.service|Service|InaccessiblePaths|=|-/var/tmp
+unit|candor-intake-web.service|Service|InaccessiblePaths|=|-/run/tor-instances -/run/candor/staging -/run/candor/intake-pg -/run/credentials/candor-intake-store.service -/run/credentials/candor-sealer.service -/etc/credstore.encrypted -/etc/tor -/etc/candor/intake/postgresql -/boot
+unit|candor-intake-web.service|Service|StandardInput|=|null
+unit|candor-intake-web.service|Service|StandardOutput|=|null
+unit|candor-intake-web.service|Service|StandardError|=|null
+unit|candor-intake-web.service|Service|LogNamespace|=|candor-intake
+unit|candor-intake-web.service|Service|LogLevelMax|=|emerg
+unit|candor-intake-web.service|Service|SyslogIdentifier|=|candor-web
+unit|candor-intake-web.service|Install|WantedBy|=|multi-user.target
+unit|candor-sealer.service|Unit|Description|=|Candor sealer (C-07, Z-INTAKE)
+unit|candor-sealer.service|Unit|Requires|=|candor-sealer.socket nftables.service
+unit|candor-sealer.service|Unit|Wants|=|candor-intake-store.socket
+unit|candor-sealer.service|Unit|After|=|candor-sealer.socket candor-intake-store.socket nftables.service
+unit|candor-sealer.service|Unit|StartLimitIntervalSec|=|60s
+unit|candor-sealer.service|Unit|StartLimitBurst|=|5
+unit|candor-sealer.service|Service|Type|=|exec
+unit|candor-sealer.service|Service|ExecStart|=|/usr/lib/candor/sealer/candor-sealer
+unit|candor-sealer.service|Service|User|=|candor-sealer
+unit|candor-sealer.service|Service|Group|=|candor-sealer
+unit|candor-sealer.service|Service|SupplementaryGroups|=|candor-istore-clients
+unit|candor-sealer.service|Service|Restart|=|on-failure
+unit|candor-sealer.service|Service|RestartSec|=|2s
+unit|candor-sealer.service|Service|AppArmorProfile|=|candor-sealer
+unit|candor-sealer.service|Service|LoadCredentialEncrypted|=|sealer_signing_key:/etc/credstore.encrypted/candor-intake.sealer_signing_key.cred
+unit|candor-sealer.service|Service|LoadCredentialEncrypted|=|argon2_salt:/etc/credstore.encrypted/candor-intake.argon2_salt.cred
+unit|candor-sealer.service|Service|MemoryMax|=|2560M
+unit|candor-sealer.service|Service|MemorySwapMax|=|0
+unit|candor-sealer.service|Service|LimitMEMLOCK|=|2G
+unit|candor-sealer.service|Service|TasksMax|=|64
+unit|candor-sealer.service|Service|PrivateNetwork|=|yes
+unit|candor-sealer.service|Service|RestrictAddressFamilies|=|AF_UNIX
+unit|candor-sealer.service|Service|NoNewPrivileges|=|yes
+unit|candor-sealer.service|Service|ProtectSystem|=|strict
+unit|candor-sealer.service|Service|ProtectHome|=|yes
+unit|candor-sealer.service|Service|PrivateTmp|=|yes
+unit|candor-sealer.service|Service|PrivateDevices|=|yes
+unit|candor-sealer.service|Service|PrivateIPC|=|yes
+unit|candor-sealer.service|Service|PrivateMounts|=|yes
+unit|candor-sealer.service|Service|ProtectKernelTunables|=|yes
+unit|candor-sealer.service|Service|ProtectKernelModules|=|yes
+unit|candor-sealer.service|Service|ProtectKernelLogs|=|yes
+unit|candor-sealer.service|Service|ProtectControlGroups|=|yes
+unit|candor-sealer.service|Service|ProtectClock|=|yes
+unit|candor-sealer.service|Service|ProtectHostname|=|yes
+unit|candor-sealer.service|Service|ProtectProc|=|invisible
+unit|candor-sealer.service|Service|ProcSubset|=|pid
+unit|candor-sealer.service|Service|RestrictNamespaces|=|yes
+unit|candor-sealer.service|Service|RestrictRealtime|=|yes
+unit|candor-sealer.service|Service|RestrictSUIDSGID|=|yes
+unit|candor-sealer.service|Service|LockPersonality|=|yes
+unit|candor-sealer.service|Service|MemoryDenyWriteExecute|=|yes
+unit|candor-sealer.service|Service|RemoveIPC|=|yes
+unit|candor-sealer.service|Service|UMask|=|0077
+unit|candor-sealer.service|Service|CapabilityBoundingSet|=|
+unit|candor-sealer.service|Service|AmbientCapabilities|=|
+unit|candor-sealer.service|Service|KeyringMode|=|private
+unit|candor-sealer.service|Service|DevicePolicy|=|closed
+unit|candor-sealer.service|Service|SystemCallArchitectures|=|native
+unit|candor-sealer.service|Service|SystemCallErrorNumber|=|EPERM
+unit|candor-sealer.service|Service|LimitCORE|=|0
+unit|candor-sealer.service|Service|NoExecPaths|=|/
+unit|candor-sealer.service|Service|ExecPaths|=|/usr
+unit|candor-sealer.service|Service|IPAddressDeny|=|any
+unit|candor-sealer.service|Service|SocketBindDeny|=|any
+unit|candor-sealer.service|Service|SystemCallFilter|*|
+unit|candor-sealer.service|Service|TemporaryFileSystem|=|/var:ro
+unit|candor-sealer.service|Service|InaccessiblePaths|=|-/var/tmp
+unit|candor-sealer.service|Service|InaccessiblePaths|=|-/run/tor-instances -/run/candor/staging -/run/candor/intake-pg -/run/credentials/candor-intake-store.service -/etc/tor -/etc/candor/intake/postgresql -/boot
+unit|candor-sealer.service|Service|InaccessiblePaths|=|-/run/candor/source-web
+unit|candor-sealer.service|Service|StandardInput|=|null
+unit|candor-sealer.service|Service|StandardOutput|=|null
+unit|candor-sealer.service|Service|StandardError|=|null
+unit|candor-sealer.service|Service|LogNamespace|=|candor-intake
+unit|candor-sealer.service|Service|LogLevelMax|=|emerg
+unit|candor-sealer.service|Service|SyslogIdentifier|=|candor-sealer
+unit|candor-sealer.service|Install|WantedBy|=|multi-user.target
+unit|candor-intake-store.service|Unit|Description|=|Candor intake store (C-08, Z-INTAKE)
+unit|candor-intake-store.service|Unit|Requires|=|candor-intake-store.socket candor-intake-store-relay.socket candor-intake-pg.service run-candor-staging.mount nftables.service
+unit|candor-intake-store.service|Unit|After|=|candor-intake-store.socket candor-intake-store-relay.socket candor-intake-pg.service run-candor-staging.mount nftables.service
+unit|candor-intake-store.service|Unit|RequiresMountsFor|=|/var/lib/candor/intake
+unit|candor-intake-store.service|Unit|StartLimitIntervalSec|=|60s
+unit|candor-intake-store.service|Unit|StartLimitBurst|=|5
+unit|candor-intake-store.service|Service|Type|=|exec
+unit|candor-intake-store.service|Service|ExecStart|=|/usr/lib/candor/intake-store/candor-intake-store
+unit|candor-intake-store.service|Service|User|=|candor-istore
+unit|candor-intake-store.service|Service|Group|=|candor-istore
+unit|candor-intake-store.service|Service|Restart|=|on-failure
+unit|candor-intake-store.service|Service|RestartSec|=|2s
+unit|candor-intake-store.service|Service|AppArmorProfile|=|candor-intake-store
+unit|candor-intake-store.service|Service|LoadCredentialEncrypted|=|routing_key:/etc/credstore.encrypted/candor-intake.routing_key.cred
+unit|candor-intake-store.service|Service|LoadCredentialEncrypted|=|batch_signing_key:/etc/credstore.encrypted/candor-intake.batch_signing_key.cred
+unit|candor-intake-store.service|Service|LoadCredentialEncrypted|=|relay_tls_key:/etc/credstore.encrypted/candor-intake.relay_tls_key.cred
+unit|candor-intake-store.service|Service|MemoryMax|~|^5G( ;; (5G|9G))?$
+unit|candor-intake-store.service|Service|MemorySwapMax|=|0
+unit|candor-intake-store.service|Service|TasksMax|=|256
+unit|candor-intake-store.service|Service|PrivateNetwork|=|yes
+unit|candor-intake-store.service|Service|RestrictAddressFamilies|=|AF_UNIX
+unit|candor-intake-store.service|Service|NoNewPrivileges|=|yes
+unit|candor-intake-store.service|Service|ProtectSystem|=|strict
+unit|candor-intake-store.service|Service|ProtectHome|=|yes
+unit|candor-intake-store.service|Service|PrivateTmp|=|yes
+unit|candor-intake-store.service|Service|PrivateDevices|=|yes
+unit|candor-intake-store.service|Service|PrivateIPC|=|yes
+unit|candor-intake-store.service|Service|PrivateMounts|=|yes
+unit|candor-intake-store.service|Service|ProtectKernelTunables|=|yes
+unit|candor-intake-store.service|Service|ProtectKernelModules|=|yes
+unit|candor-intake-store.service|Service|ProtectKernelLogs|=|yes
+unit|candor-intake-store.service|Service|ProtectControlGroups|=|yes
+unit|candor-intake-store.service|Service|ProtectClock|=|yes
+unit|candor-intake-store.service|Service|ProtectHostname|=|yes
+unit|candor-intake-store.service|Service|ProtectProc|=|invisible
+unit|candor-intake-store.service|Service|ProcSubset|=|pid
+unit|candor-intake-store.service|Service|RestrictNamespaces|=|yes
+unit|candor-intake-store.service|Service|RestrictRealtime|=|yes
+unit|candor-intake-store.service|Service|RestrictSUIDSGID|=|yes
+unit|candor-intake-store.service|Service|LockPersonality|=|yes
+unit|candor-intake-store.service|Service|MemoryDenyWriteExecute|=|yes
+unit|candor-intake-store.service|Service|RemoveIPC|=|yes
+unit|candor-intake-store.service|Service|UMask|=|0077
+unit|candor-intake-store.service|Service|CapabilityBoundingSet|=|
+unit|candor-intake-store.service|Service|AmbientCapabilities|=|
+unit|candor-intake-store.service|Service|KeyringMode|=|private
+unit|candor-intake-store.service|Service|DevicePolicy|=|closed
+unit|candor-intake-store.service|Service|SystemCallArchitectures|=|native
+unit|candor-intake-store.service|Service|SystemCallErrorNumber|=|EPERM
+unit|candor-intake-store.service|Service|LimitCORE|=|0
+unit|candor-intake-store.service|Service|NoExecPaths|=|/
+unit|candor-intake-store.service|Service|ExecPaths|=|/usr
+unit|candor-intake-store.service|Service|IPAddressDeny|=|any
+unit|candor-intake-store.service|Service|SocketBindDeny|=|any
+unit|candor-intake-store.service|Service|SystemCallFilter|=|@system-service
+unit|candor-intake-store.service|Service|SystemCallFilter|=|~@privileged @resources @mount @debug @cpu-emulation @obsolete @raw-io @reboot @swap @module @clock @setuid @chown @keyring process_vm_readv process_vm_writev
+unit|candor-intake-store.service|Service|SystemCallFilter|=|seccomp landlock_create_ruleset landlock_add_rule landlock_restrict_self
+unit|candor-intake-store.service|Service|TemporaryFileSystem|=|/var:ro
+unit|candor-intake-store.service|Service|BindPaths|=|/var/lib/candor/intake
+unit|candor-intake-store.service|Service|BindReadOnlyPaths|=|/var/lib/candor/relay
+unit|candor-intake-store.service|Service|ReadWritePaths|=|/run/candor/staging /run/candor/directory
+unit|candor-intake-store.service|Service|InaccessiblePaths|=|-/var/tmp
+unit|candor-intake-store.service|Service|InaccessiblePaths|=|-/run/tor-instances -/run/candor/source-web -/run/credentials/candor-sealer.service -/etc/tor -/etc/candor/intake/postgresql -/boot
+unit|candor-intake-store.service|Service|StandardInput|=|null
+unit|candor-intake-store.service|Service|StandardOutput|=|null
+unit|candor-intake-store.service|Service|StandardError|=|null
+unit|candor-intake-store.service|Service|LogNamespace|=|candor-intake
+unit|candor-intake-store.service|Service|LogLevelMax|=|emerg
+unit|candor-intake-store.service|Service|SyslogIdentifier|=|candor-intake-store
+unit|candor-intake-store.service|Install|WantedBy|=|multi-user.target
+unit|candor-intake-pg.service|Unit|Description|=|Candor intake PostgreSQL (C-08 store, Unix socket only)
+unit|candor-intake-pg.service|Unit|Requires|=|nftables.service
+unit|candor-intake-pg.service|Unit|After|=|nftables.service systemd-tmpfiles-setup.service
+unit|candor-intake-pg.service|Unit|RequiresMountsFor|=|/var/lib/postgresql/16/candor-intake
+unit|candor-intake-pg.service|Unit|StartLimitIntervalSec|=|60s
+unit|candor-intake-pg.service|Unit|StartLimitBurst|=|5
+unit|candor-intake-pg.service|Service|Type|=|notify
+unit|candor-intake-pg.service|Service|User|=|postgres
+unit|candor-intake-pg.service|Service|Group|=|postgres
+unit|candor-intake-pg.service|Service|AppArmorProfile|=|candor-intake-pg
+unit|candor-intake-pg.service|Service|SupplementaryGroups|=|candor-istore
+unit|candor-intake-pg.service|Service|ExecStart|=|/usr/lib/postgresql/16/bin/postgres -c config_file=/etc/candor/intake/postgresql/candor-intake.conf
+unit|candor-intake-pg.service|Service|ExecReload|=|/bin/kill -HUP $MAINPID
+unit|candor-intake-pg.service|Service|KillMode|=|mixed
+unit|candor-intake-pg.service|Service|KillSignal|=|SIGINT
+unit|candor-intake-pg.service|Service|TimeoutStartSec|=|300
+unit|candor-intake-pg.service|Service|TimeoutStopSec|=|300
+unit|candor-intake-pg.service|Service|Restart|=|on-failure
+unit|candor-intake-pg.service|Service|RestartSec|=|5s
+unit|candor-intake-pg.service|Service|OOMScoreAdjust|=|-900
+unit|candor-intake-pg.service|Service|ReadWritePaths|=|/run/candor/intake-pg
+unit|candor-intake-pg.service|Service|MemorySwapMax|=|0
+unit|candor-intake-pg.service|Service|TasksMax|=|128
+unit|candor-intake-pg.service|Service|PrivateNetwork|=|yes
+unit|candor-intake-pg.service|Service|RestrictAddressFamilies|=|AF_UNIX
+unit|candor-intake-pg.service|Service|NoNewPrivileges|=|yes
+unit|candor-intake-pg.service|Service|ProtectSystem|=|strict
+unit|candor-intake-pg.service|Service|ProtectHome|=|yes
+unit|candor-intake-pg.service|Service|PrivateTmp|=|yes
+unit|candor-intake-pg.service|Service|PrivateDevices|=|yes
+unit|candor-intake-pg.service|Service|PrivateIPC|=|yes
+unit|candor-intake-pg.service|Service|PrivateMounts|=|yes
+unit|candor-intake-pg.service|Service|ProtectKernelTunables|=|yes
+unit|candor-intake-pg.service|Service|ProtectKernelModules|=|yes
+unit|candor-intake-pg.service|Service|ProtectKernelLogs|=|yes
+unit|candor-intake-pg.service|Service|ProtectControlGroups|=|yes
+unit|candor-intake-pg.service|Service|ProtectClock|=|yes
+unit|candor-intake-pg.service|Service|ProtectHostname|=|yes
+unit|candor-intake-pg.service|Service|ProtectProc|=|invisible
+unit|candor-intake-pg.service|Service|ProcSubset|=|pid
+unit|candor-intake-pg.service|Service|RestrictNamespaces|=|yes
+unit|candor-intake-pg.service|Service|RestrictRealtime|=|yes
+unit|candor-intake-pg.service|Service|RestrictSUIDSGID|=|yes
+unit|candor-intake-pg.service|Service|LockPersonality|=|yes
+unit|candor-intake-pg.service|Service|MemoryDenyWriteExecute|=|yes
+unit|candor-intake-pg.service|Service|RemoveIPC|=|yes
+unit|candor-intake-pg.service|Service|UMask|=|0077
+unit|candor-intake-pg.service|Service|CapabilityBoundingSet|=|
+unit|candor-intake-pg.service|Service|AmbientCapabilities|=|
+unit|candor-intake-pg.service|Service|KeyringMode|=|private
+unit|candor-intake-pg.service|Service|DevicePolicy|=|closed
+unit|candor-intake-pg.service|Service|SystemCallArchitectures|=|native
+unit|candor-intake-pg.service|Service|SystemCallErrorNumber|=|EPERM
+unit|candor-intake-pg.service|Service|LimitCORE|=|0
+unit|candor-intake-pg.service|Service|NoExecPaths|=|/
+unit|candor-intake-pg.service|Service|ExecPaths|=|/usr
+unit|candor-intake-pg.service|Service|IPAddressDeny|=|any
+unit|candor-intake-pg.service|Service|SocketBindDeny|=|any
+unit|candor-intake-pg.service|Service|SystemCallFilter|=|@system-service
+unit|candor-intake-pg.service|Service|SystemCallFilter|=|~@privileged @resources @mount @debug @cpu-emulation @obsolete @raw-io @reboot @swap @module @clock @setuid @keyring process_vm_readv process_vm_writev
+unit|candor-intake-pg.service|Service|SystemCallFilter|=|fchown fchownat chown
+unit|candor-intake-pg.service|Service|TemporaryFileSystem|=|/var:ro
+unit|candor-intake-pg.service|Service|BindPaths|=|/var/lib/postgresql/16/candor-intake
+unit|candor-intake-pg.service|Service|InaccessiblePaths|=|-/var/tmp
+unit|candor-intake-pg.service|Service|InaccessiblePaths|=|-/run/tor-instances -/run/candor/source-web -/run/candor/sealer -/run/candor/istore -/run/candor/staging -/run/credentials/candor-intake-store.service -/run/credentials/candor-sealer.service -/etc/credstore.encrypted -/etc/tor -/boot
+unit|candor-intake-pg.service|Service|StandardInput|=|null
+unit|candor-intake-pg.service|Service|StandardOutput|=|null
+unit|candor-intake-pg.service|Service|StandardError|=|null
+unit|candor-intake-pg.service|Service|LogNamespace|=|candor-intake
+unit|candor-intake-pg.service|Service|LogLevelMax|=|emerg
+unit|candor-intake-pg.service|Service|SyslogIdentifier|=|candor-intake-pg
+unit|candor-intake-pg.service|Install|WantedBy|=|multi-user.target
+unit|candor-intake-web.socket|Unit|Description|=|Candor source web socket (C-06, Z-INTAKE)
+unit|candor-intake-web.socket|Unit|After|=|systemd-tmpfiles-setup.service
+unit|candor-intake-web.socket|Unit|After|=|nftables.service
+unit|candor-intake-web.socket|Unit|Requires|=|nftables.service
+unit|candor-intake-web.socket|Socket|ListenStream|=|/run/candor/source-web/http.sock
+unit|candor-intake-web.socket|Socket|SocketUser|=|candor-web
+unit|candor-intake-web.socket|Socket|SocketGroup|=|_tor-candor-intake
+unit|candor-intake-web.socket|Socket|SocketMode|=|0660
+unit|candor-intake-web.socket|Socket|DirectoryMode|=|0750
+unit|candor-intake-web.socket|Socket|RemoveOnStop|=|yes
+unit|candor-intake-web.socket|Socket|Accept|=|no
+unit|candor-intake-web.socket|Socket|Backlog|=|512
+unit|candor-intake-web.socket|Socket|FileDescriptorName|=|http
+unit|candor-intake-web.socket|Socket|Service|=|candor-intake-web.service
+unit|candor-intake-web.socket|Install|WantedBy|=|sockets.target
+unit|candor-sealer.socket|Unit|Description|=|Candor sealer IPC socket (C-07, Z-INTAKE)
+unit|candor-sealer.socket|Unit|After|=|systemd-tmpfiles-setup.service
+unit|candor-sealer.socket|Socket|ListenSequentialPacket|=|/run/candor/sealer/seal.sock
+unit|candor-sealer.socket|Socket|SocketUser|=|candor-sealer
+unit|candor-sealer.socket|Socket|SocketGroup|=|candor-web
+unit|candor-sealer.socket|Socket|SocketMode|=|0660
+unit|candor-sealer.socket|Socket|DirectoryMode|=|0750
+unit|candor-sealer.socket|Socket|RemoveOnStop|=|yes
+unit|candor-sealer.socket|Socket|Accept|=|no
+unit|candor-sealer.socket|Socket|Backlog|=|64
+unit|candor-sealer.socket|Socket|FileDescriptorName|=|seal
+unit|candor-sealer.socket|Socket|Service|=|candor-sealer.service
+unit|candor-sealer.socket|Install|WantedBy|=|sockets.target
+unit|candor-intake-store.socket|Unit|Description|=|Candor intake store IPC socket (C-08, Z-INTAKE)
+unit|candor-intake-store.socket|Unit|After|=|systemd-tmpfiles-setup.service
+unit|candor-intake-store.socket|Socket|ListenSequentialPacket|=|/run/candor/istore/istore.sock
+unit|candor-intake-store.socket|Socket|SocketUser|=|candor-istore
+unit|candor-intake-store.socket|Socket|SocketGroup|=|candor-istore-clients
+unit|candor-intake-store.socket|Socket|SocketMode|=|0660
+unit|candor-intake-store.socket|Socket|DirectoryMode|=|0750
+unit|candor-intake-store.socket|Socket|RemoveOnStop|=|yes
+unit|candor-intake-store.socket|Socket|Accept|=|no
+unit|candor-intake-store.socket|Socket|Backlog|=|64
+unit|candor-intake-store.socket|Socket|FileDescriptorName|=|istore
+unit|candor-intake-store.socket|Socket|Service|=|candor-intake-store.service
+unit|candor-intake-store.socket|Install|WantedBy|=|sockets.target
+unit|candor-intake-store-relay.socket|Unit|Description|=|Candor intake relay endpoint socket (C-08 I1, relay0:7443)
+unit|candor-intake-store-relay.socket|Unit|Requires|=|nftables.service
+unit|candor-intake-store-relay.socket|Unit|After|=|nftables.service
+unit|candor-intake-store-relay.socket|Socket|ListenStream|=|0.0.0.0:7443
+unit|candor-intake-store-relay.socket|Socket|BindToDevice|=|relay0
+unit|candor-intake-store-relay.socket|Socket|FreeBind|=|no
+unit|candor-intake-store-relay.socket|Socket|Transparent|=|no
+unit|candor-intake-store-relay.socket|Socket|ReusePort|=|no
+unit|candor-intake-store-relay.socket|Socket|Accept|=|no
+unit|candor-intake-store-relay.socket|Socket|Backlog|=|16
+unit|candor-intake-store-relay.socket|Socket|NoDelay|=|yes
+unit|candor-intake-store-relay.socket|Socket|IPAddressDeny|=|any
+# Site drop-in (installer): exactly one <@core_relay>/32 (cross-checked with nftables).
+unit|candor-intake-store-relay.socket|Socket|IPAddressAllow|~|^([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/32)?$
+unit|candor-intake-store-relay.socket|Socket|FileDescriptorName|=|relay
+unit|candor-intake-store-relay.socket|Socket|Service|=|candor-intake-store.service
+unit|candor-intake-store-relay.socket|Install|WantedBy|=|sockets.target
+unit|run-candor-staging.mount|Unit|Description|=|Candor Tier W staging tmpfs (ciphertext only, RAM only)
+unit|run-candor-staging.mount|Unit|DefaultDependencies|=|no
+unit|run-candor-staging.mount|Unit|Conflicts|=|umount.target
+unit|run-candor-staging.mount|Unit|Before|=|local-fs.target umount.target
+unit|run-candor-staging.mount|Unit|After|=|systemd-sysusers.service
+unit|run-candor-staging.mount|Mount|What|=|tmpfs
+unit|run-candor-staging.mount|Mount|Where|=|/run/candor/staging
+unit|run-candor-staging.mount|Mount|Type|=|tmpfs
+unit|run-candor-staging.mount|Mount|Options|~|^size=4G,nr_inodes=65536,mode=0700,nosuid,nodev,noexec,noswap,X-mount.owner=candor-istore,X-mount.group=candor-istore,X-mount.mode=0700( ;; (size=4G,nr_inodes=65536,mode=0700,nosuid,nodev,noexec,noswap,X-mount.owner=candor-istore,X-mount.group=candor-istore,X-mount.mode=0700|size=8G,nr_inodes=131072,mode=0700,nosuid,nodev,noexec,noswap,X-mount.owner=candor-istore,X-mount.group=candor-istore,X-mount.mode=0700))?$
+unit|run-candor-staging.mount|Mount|DirectoryMode|=|0755
+unit|run-candor-staging.mount|Install|WantedBy|=|local-fs.target
+# ---------------------------------------------------------------- systemd-analyze security residual items (D-21, D-25)
+sec|tor@candor-intake.service|SystemCallFilter=~@resources
+sec|tor@candor-intake.service|RootDirectory=/RootImage=
+sec|tor@candor-intake.service|RestrictAddressFamilies=~AF_UNIX
+sec|tor@candor-intake.service|RestrictAddressFamilies=~AF_(INET|INET6)
+sec|tor@candor-intake.service|ProcSubset=
+sec|tor@candor-intake.service|PrivateNetwork=
+sec|tor@candor-intake.service|PrivateUsers=
+sec|tor@candor-intake.service|DeviceAllow=
+sec|tor@candor-intake.service|IPAddressDeny=
+sec|candor-intake-web.service|RootDirectory=/RootImage=
+sec|candor-intake-web.service|SupplementaryGroups=
+sec|candor-intake-web.service|RestrictAddressFamilies=~AF_UNIX
+sec|candor-intake-web.service|PrivateUsers=
+sec|candor-intake-web.service|DeviceAllow=
+sec|candor-sealer.service|RootDirectory=/RootImage=
+sec|candor-sealer.service|SupplementaryGroups=
+sec|candor-sealer.service|RestrictAddressFamilies=~AF_UNIX
+sec|candor-sealer.service|PrivateUsers=
+sec|candor-sealer.service|DeviceAllow=
+sec|candor-intake-store.service|RootDirectory=/RootImage=
+sec|candor-intake-store.service|RestrictAddressFamilies=~AF_UNIX
+sec|candor-intake-store.service|PrivateUsers=
+sec|candor-intake-store.service|DeviceAllow=
+sec|candor-intake-pg.service|SystemCallFilter=~@privileged
+sec|candor-intake-pg.service|RootDirectory=/RootImage=
+sec|candor-intake-pg.service|SupplementaryGroups=
+sec|candor-intake-pg.service|RestrictAddressFamilies=~AF_UNIX
+sec|candor-intake-pg.service|PrivateUsers=
+sec|candor-intake-pg.service|DeviceAllow=
+# ---------------------------------------------------------------- PostgreSQL static (09 §10, DB-021/022, LOG-008, AUD-RM2-STO-02, AUD-RM2-DEP-07)
+pg|data_directory|s|/var/lib/postgresql/16/candor-intake
+pg|hba_file|s|/etc/candor/intake/postgresql/pg_hba.conf
+pg|ident_file|s|/etc/candor/intake/postgresql/pg_ident.conf
+pg|listen_addresses|s|
+pg|unix_socket_directories|s|/run/candor/intake-pg
+pg|wal_level|s|minimal
+pg|archive_mode|b|off
+pg|archive_command|s|
+pg|max_wal_senders|s|0
+pg|max_replication_slots|s|0
+pg|wal_keep_size|s|0
+pg|max_wal_size|s|256mb
+pg|min_wal_size|s|32mb
+pg|wal_recycle|b|off
+pg|checkpoint_timeout|s|5min
+pg|track_commit_timestamp|b|off
+pg|fsync|b|on
+pg|full_page_writes|b|on
+pg|ssl|b|off
+pg|jit|b|off
+pg|shared_preload_libraries|s|
+pg|session_preload_libraries|s|
+pg|local_preload_libraries|s|
+pg|update_process_title|b|off
+pg|logging_collector|b|off
+pg|log_destination|s|stderr
+pg|log_min_messages|s|panic
+pg|log_min_error_statement|s|panic
+pg|log_error_verbosity|s|terse
+pg|log_statement|s|none
+pg|log_connections|b|off
+pg|log_disconnections|b|off
+pg|log_duration|b|off
+pg|log_hostname|b|off
+pg|log_min_duration_statement|s|-1
+pg|log_min_duration_sample|s|-1
+pg|log_statement_sample_rate|s|0
+pg|log_transaction_sample_rate|s|0
+pg|log_checkpoints|b|off
+pg|log_autovacuum_min_duration|s|-1
+pg|log_lock_waits|b|off
+pg|log_recovery_conflict_waits|b|off
+pg|log_temp_files|s|-1
+pg|log_replication_commands|b|off
+pg|log_startup_progress_interval|s|0
+pg|log_parameter_max_length|s|0
+pg|log_parameter_max_length_on_error|s|0
+pg|debug_print_parse|b|off
+pg|debug_print_rewritten|b|off
+pg|debug_print_plan|b|off
+pg|log_statement_stats|b|off
+pg|log_parser_stats|b|off
+pg|log_planner_stats|b|off
+pg|log_executor_stats|b|off
+# ---------------------------------------------------------------- PostgreSQL effective (postgres -C, base units; --host)
+pgc|listen_addresses|
+pgc|unix_socket_directories|/run/candor/intake-pg
+pgc|unix_socket_permissions|504
+pgc|wal_level|minimal
+pgc|archive_mode|off
+pgc|archive_command|
+pgc|max_wal_senders|0
+pgc|max_replication_slots|0
+pgc|wal_keep_size|0
+pgc|max_wal_size|256
+pgc|min_wal_size|32
+pgc|wal_recycle|off
+pgc|checkpoint_timeout|300
+pgc|track_commit_timestamp|off
+pgc|fsync|on
+pgc|full_page_writes|on
+pgc|ssl|off
+pgc|jit|off
+pgc|shared_preload_libraries|
+pgc|session_preload_libraries|
+pgc|local_preload_libraries|
+pgc|update_process_title|off
+pgc|logging_collector|off
+pgc|log_destination|stderr
+pgc|log_min_messages|panic
+pgc|log_min_error_statement|panic
+pgc|log_error_verbosity|terse
+pgc|log_statement|none
+pgc|log_connections|off
+pgc|log_disconnections|off
+pgc|log_duration|off
+pgc|log_hostname|off
+pgc|log_min_duration_statement|-1
+pgc|log_min_duration_sample|-1
+pgc|log_statement_sample_rate|0
+pgc|log_transaction_sample_rate|0
+pgc|log_checkpoints|off
+pgc|log_autovacuum_min_duration|-1
+pgc|log_lock_waits|off
+pgc|log_temp_files|-1
+pgc|log_replication_commands|off
+pgc|log_parameter_max_length|0
+pgc|log_parameter_max_length_on_error|0
+pgc|log_line_prefix|%e 
+pgc|debug_print_parse|off
+pgc|debug_print_rewritten|off
+pgc|debug_print_plan|off
+pgc|log_statement_stats|off
+pgc|log_parser_stats|off
+pgc|log_planner_stats|off
+pgc|log_executor_stats|off
+# ---------------------------------------------------------------- kernel (20 §11.4, 17 sysctl row, R7 SI-B-06; AUD-RM2-DEP-09)
+sysctl|kernel.printk|3 3 3 3
+sysctl|kernel.dmesg_restrict|1
+sysctl|kernel.kptr_restrict|2
+sysctl|kernel.yama.ptrace_scope|3
+sysctl|kernel.perf_event_paranoid|3
+sysctl|kernel.kexec_load_disabled|1
+sysctl|kernel.sysrq|0
+sysctl|kernel.unprivileged_bpf_disabled|1
+sysctl|net.core.bpf_jit_harden|2
+sysctl|user.max_user_namespaces|0
+sysctl|kernel.core_pattern||/bin/false
+sysctl|fs.suid_dumpable|0
+sysctl|fs.protected_hardlinks|1
+sysctl|fs.protected_symlinks|1
+sysctl|fs.protected_fifos|2
+sysctl|fs.protected_regular|2
+sysctl|vm.swappiness|0
+sysctl|vm.unprivileged_userfaultfd|0
+sysctl|net.ipv4.ip_forward|0
+sysctl|net.ipv4.conf.all.forwarding|0
+sysctl|net.ipv4.conf.all.rp_filter|1
+sysctl|net.ipv4.conf.default.rp_filter|1
+sysctl|net.ipv4.conf.all.accept_redirects|0
+sysctl|net.ipv4.conf.default.accept_redirects|0
+sysctl|net.ipv4.conf.all.secure_redirects|0
+sysctl|net.ipv4.conf.default.secure_redirects|0
+sysctl|net.ipv4.conf.all.send_redirects|0
+sysctl|net.ipv4.conf.default.send_redirects|0
+sysctl|net.ipv4.conf.all.accept_source_route|0
+sysctl|net.ipv4.conf.default.accept_source_route|0
+sysctl|net.ipv4.conf.all.log_martians|0
+sysctl|net.ipv4.conf.default.log_martians|0
+sysctl|net.ipv4.icmp_echo_ignore_broadcasts|1
+sysctl|net.ipv4.icmp_ignore_bogus_error_responses|1
+sysctl|net.ipv4.tcp_syncookies|1
+sysctl|net.ipv4.tcp_rfc1337|1
+sysctl|net.ipv4.tcp_timestamps|0
+sysctl|net.ipv6.conf.all.forwarding|0
+sysctl|net.ipv6.conf.all.accept_ra|0
+sysctl|net.ipv6.conf.default.accept_ra|0
+sysctl|net.ipv6.conf.all.accept_redirects|0
+sysctl|net.ipv6.conf.default.accept_redirects|0
+sysctl|net.ipv6.conf.all.accept_source_route|0
+sysctl|net.ipv6.conf.default.accept_source_route|0
+# ---------------------------------------------------------------- systemctl show of the loaded units (--host, live)
+show|all|NeedDaemonReload|no
+show|all|NoNewPrivileges|yes
+show|all|PrivateTmp|yes
+show|all|PrivateDevices|yes
+show|all|PrivateIPC|yes
+show|all|PrivateMounts|yes
+show|all|ProtectSystem|strict
+show|all|ProtectHome|yes
+show|all|ProtectKernelTunables|yes
+show|all|ProtectKernelModules|yes
+show|all|ProtectKernelLogs|yes
+show|all|ProtectControlGroups|yes
+show|all|ProtectClock|yes
+show|all|ProtectHostname|yes
+show|all|ProtectProc|invisible
+show|all|RestrictRealtime|yes
+show|all|RestrictSUIDSGID|yes
+show|all|LockPersonality|yes
+show|all|MemoryDenyWriteExecute|yes
+show|all|RemoveIPC|yes
+show|all|UMask|0077
+show|all|CapabilityBoundingSet|
+show|all|AmbientCapabilities|
+show|all|KeyringMode|private
+show|all|DevicePolicy|closed
+show|all|LimitCORE|0
+show|all|StandardOutput|null
+show|all|StandardError|null
+show|all|LogNamespace|candor-intake
+show|all|SystemCallArchitectures|native
+show|tor|User|_tor-candor-intake
+show|tor|Group|_tor-candor-intake
+show|candor,pg|PrivateNetwork|yes
+show|candor,pg|ProcSubset|pid
+show|candor,pg|MemorySwapMax|0
+show|candor,pg|RestrictAddressFamilies|AF_UNIX
+show|pg|User|postgres

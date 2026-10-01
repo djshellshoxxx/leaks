@@ -135,9 +135,9 @@ fn hardening_is_applied_and_enforced_before_serving() {
 
     // 3. Hardened: a peer UID of root or of the sealer itself is refused.
     let own = rustix::process::getuid().as_raw();
-    for bad in [0, own] {
+    for (i, bad) in [0, own].into_iter().enumerate() {
         let s = production_sealer(&f, bad);
-        let r = rt.block_on(serve_result(&s, sock_dir.path(), &format!("b{bad}.sock")));
+        let r = rt.block_on(serve_result(&s, sock_dir.path(), &format!("b{i}.sock")));
         assert_eq!(
             r.expect("serve must return at once").unwrap_err().kind(),
             std::io::ErrorKind::PermissionDenied

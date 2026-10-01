@@ -157,6 +157,7 @@ tor_canon() { # -> $WORK/tor/{verify,short,full}.out ; returns non-zero on any f
   # shellcheck disable=SC2016 # expanded by the inner shell
   unshare -m --propagation private /bin/sh -c '
     set -e
+    umask 022
     mount -t tmpfs -o mode=0755,size=16m tmpfs /var/lib
     mount -t tmpfs -o mode=0755,size=16m tmpfs /run
     mkdir -p /var/lib/tor-instances/candor-intake
@@ -209,7 +210,7 @@ check_torrc() {
         else if (mode[k]=="int") { split(val[k], r, " ")
           if (v ~ /^[0-9]+$/ && length(v) <= 10 && v+0 >= r[1]+0 && v+0 <= r[2]+0) printf "OK\ttor.effective.%s\t%s\n", k, v
           else printf "FAIL\ttor.effective.%s\texpected an integer in [%s, %s], found [%s]\n", k, r[1], r[2], v }
-      } }' "$BASE" FS=' ' "$WORK/tor/short.out" | report_lines
+      } }' "$BASE" FS=' ' "$WORK/tor/short.out" > "$WORK/rl"; report_lines < "$WORK/rl"
   # Options whose required value is tor's default (so they never appear in the short dump),
   # plus the path-selection options an attacker would use (checked in the full dump).
   awk -F'|' '
@@ -218,7 +219,7 @@ check_torrc() {
     END { for (i=1; i<=n; i++) { k=order[i]
       if (cnt[k]!=1) printf "FAIL\ttor.full.%s\texpected exactly one effective value [%s], found %d\n", k, want[k], cnt[k]
       else if (got[k]!=want[k]) printf "FAIL\ttor.full.%s\texpected [%s], found [%s]\n", k, want[k], got[k]
-      else printf "OK\ttor.full.%s\t%s\n", k, got[k] } }' "$BASE" FS=' ' "$WORK/tor/full.out" | report_lines
+      else printf "OK\ttor.full.%s\t%s\n", k, got[k] } }' "$BASE" FS=' ' "$WORK/tor/full.out" > "$WORK/rl"; report_lines < "$WORK/rl"
   # No control interface of any kind (AUD-RM2-DEP-04; NET-009).
   if grep -qE '^(ControlSocket|ControlPort|__ControlPort|__OwningControllerProcess|HashedControlPassword) [^0]' "$WORK/tor/full.out"; then
     fail tor.no_control_interface "a control listener or password is configured"
@@ -524,18 +525,18 @@ check_units() {
     awk -v u="$u" '
       FNR==NR { if (split($0, a, "|") >= 5 && a[1]=="unit" && a[2]==u) {
                   k=a[3] "|" a[4]; v=substr($0, length(a[1] a[2] a[3] a[4] a[5])+6)
-                  if (!(k in mode)) { order[++n]=k; mode[k]=a[5]; exp[k]=v }
-                  else if (a[5]=="=") exp[k]=exp[k] " ;; " v } next }
+                  if (!(k in mode)) { order[++n]=k; mode[k]=a[5]; ex[k]=v }
+                  else if (a[5]=="=") ex[k]=ex[k] " ;; " v } next }
       { e=index($0, "|"); s=substr($0, 1, e-1); r=substr($0, e+1); e=index(r, "|"); k=s "|" substr(r, 1, e-1); got[k]=substr(r, e+1); seen[k]=1
         if (!(k in mode)) printf "FAIL\tunit.%s.%s\tdirective not allowed: [%s] %s=%s\n", u, k, s, substr(r, 1, e-1), got[k] }
       END { for (i=1; i<=n; i++) { k=order[i]; m=mode[k]
         if (m=="*") { if (k in seen) printf "OK\tunit.%s.%s\t(semantic check)\n", u, k; else printf "FAIL\tunit.%s.%s\tmissing\n", u, k; continue }
         g=(k in seen) ? got[k] : ""
-        if (m=="=") { if (!(k in seen)) printf "FAIL\tunit.%s.%s\tmissing (expected %s)\n", u, k, exp[k]
-                      else if (g==exp[k]) printf "OK\tunit.%s.%s\t%s\n", u, k, (g=="" ? "<empty>" : g)
-                      else printf "FAIL\tunit.%s.%s\texpected [%s], effective [%s]\n", u, k, exp[k], g }
-        else if (m=="~") { if (g ~ exp[k]) printf "OK\tunit.%s.%s\t%s\n", u, k, (k in seen ? g : "<absent>")
-                           else printf "FAIL\tunit.%s.%s\teffective [%s] does not match %s\n", u, k, g, exp[k] } } }' "$BASE" "$WORK/eff/$u" | report_lines
+        if (m=="=") { if (!(k in seen)) printf "FAIL\tunit.%s.%s\tmissing (expected %s)\n", u, k, ex[k]
+                      else if (g==ex[k]) printf "OK\tunit.%s.%s\t%s\n", u, k, (g=="" ? "<empty>" : g)
+                      else printf "FAIL\tunit.%s.%s\texpected [%s], effective [%s]\n", u, k, ex[k], g }
+        else if (m=="~") { if (g ~ ex[k]) printf "OK\tunit.%s.%s\t%s\n", u, k, (k in seen ? g : "<absent>")
+                           else printf "FAIL\tunit.%s.%s\teffective [%s] does not match %s\n", u, k, g, ex[k] } } }' "$BASE" "$WORK/eff/$u" > "$WORK/rl"; report_lines < "$WORK/rl"
   done
 
   # Sealer syscall filter (its lines are owned by the sealer work, AUD-RM2-SEA-06): allow-list
@@ -565,7 +566,7 @@ check_units() {
       ok "unit.$name.security_threshold" "exposure within $((thr / 10)).$((thr % 10))"
     else fail "unit.$name.security_threshold" "exposure over budget $((thr / 10)).$((thr % 10)) (or assessment failed)"; fi
     jq -r '.[] | select(.exposure != null and (.exposure|tostring|tonumber) > 0) | .name' "$WORK/sec.json" 2>/dev/null | sort > "$WORK/sec.bad"
-    base sec | awk -F'|' -v u="$name" '$2==u {print $3}' | sort > "$WORK/sec.ok"
+    awk -F'|' -v u="$name" '$1=="sec" && $2==u {print substr($0, length($1 $2)+3)}' "$BASE" | sort > "$WORK/sec.ok"
     local extra
     extra=$(comm -23 "$WORK/sec.bad" "$WORK/sec.ok" | tr '\n' ' ')
     if [ ! -s "$WORK/sec.json" ]; then fail "unit.$name.security_items" "no assessment"
