@@ -251,3 +251,82 @@ The relevant adversaries in 02 §6 are the network/Tor-level attacker, a malicio
 - Low/Info: tracked, not blocking.
 
 **Gate: FAIL (conditional)** for commit `6c03b66`. It becomes PASS when both Mediums are closed (fixed or accepted) and the fuzz runs are clean. No re-audit of other areas is needed unless the fixes touch more than the named functions.
+
+---
+
+## Round 2 — re-test of the fixes (AUDIT-CHECKLIST §G)
+
+| Item | Value |
+|---|---|
+| Fix commit | `9ffeffd` ("C-06 audit fixes: …"), on top of `9f477b4` |
+| Delta reviewed | every changed line in `candor-intake-web/src/{app,flows,multipart,ratelimit,sealer,server,session,token,limits}.rs`; `candor-source-ui/src/{model,view,items}.rs`, `templates/s05b_identity.html`, `templates/seg_file_row.html`, `locales/en/sui.ftl`; `candor-sealer/src/server/handover.rs`; `candor-intake-store/src/staged.rs`; all new and changed tests. No new dependency (no `Cargo.lock` change) |
+| Date | 2026-10-01 |
+
+### Re-test results
+
+| Finding | Status | Evidence |
+|---|---|---|
+| WEB-01 (Medium) | **Fixed** | Every source- or team-text field of the view model is `Zeroizing<String>`: `form_token`, `Question.value`, `IdentityData.*`, `AttachedFile.{name,description}`, `ReviewAnswer.answer`, `InboxMessage.{sender,text}`, `draft_text`. C-06 fills them with `Zeroizing::new(x.to_owned())`, which makes one exact-size allocation that then moves; `join_z` builds an exact-size buffer. **source-ui delta:** `label()` and `neutralize_bidi()` return exact-capacity zeroizing buffers. `BIDI_MARK` and every bidi control are 3 bytes, so the output never reallocates. The `q_month`/`q_year` clones were removed, and templates now borrow `as_str()`. Askama still escapes them (default HTML escaper, no `|safe` added). The output buffer is still the RM1 `CappedWriter`, which is zeroizing and never grows. No `format!` or `String` copy of these fields remains on the render path (grep). **Output bytes (SUI-14):** `wire_bytes` (4), `render` (37), `content_limits` (9) and `tips` (12) pass, and their assertions changed only in type (`Zeroizing::new(..)` in fixtures). Regression tests: `zeroizing_fields` (type and source lint), `hygiene` |
+| WEB-02 (Medium) | **Fixed** | `Multipart::search` resumes at a carried `scan` offset, so it is linear. A per-request budget (4 windows per fed byte + 64 Ki) fails closed with `Budget`. The head-end search in `read_head` is linear too. Auditor PoC on 33 KB of near-delimiter data, debug build: 1-byte feeds **6.1 ms** (was 12.98 s), 498-byte feeds 0.65 ms, one bulk feed 0.65 ms. The offset arithmetic is correct across `consume` and state changes (`enter` resets it). Fuzz `fuzz_multipart_intake` is clean (below). Tests: `one_byte_feeds_are_linear`, `work_budget_fails_closed` |
+| WEB-03 (Low) | **Fixed** | Leave with a stale `__Host-cs` and no live session now always renders the Leave page with `Clear-Site-Data`. PoC: **200 + CSD** (was 500). Test `leave_with_stale_cookie_is_the_leave_page`. See WEB-12 for the lead-decision note |
+| WEB-04 (Low) | **Fixed** | The token is `nonce(16) ‖ HMAC-SHA256(K_leave, label ‖ nonce)[..16]`, with a fresh nonce per render and a separate per-process key. It carries no time or epoch, and validity comes from a server-side set (15-min TTL, 65,536 entries). PoC: three clients' tokens are all **different** and cannot be enumerated. Forgery needs the MAC, which is compared in constant time. Residual → WEB-11 |
+| WEB-05 (Low) | **Fixed** | The refill now carries the remainder: `at` advances only by the converted time, and both buckets are checked before either is spent, so a refused request costs nothing anywhere. PoC: **100** sessions in 10 min at 5 ms spacing (was 0). Tests `trickle_does_not_starve_refill`, `refusal_spends_nothing_globally` |
+| WEB-06 (Low) | **Fixed** | `received` is taken after the head. For floored routes the body is buffered before the work, and the release is `max(complete + floor, done) + U(0, 250 ms)`, with the jitter always added. PoC: the response came **3.007 s** after the last request byte (was 0.2–0.34 s). Tests `login_floor_from_full_request`, `floor_then_jitter_on_every_path` |
+| WEB-07 (Low) | **Fixed** | One upload per session (`WebSession::uploading`, released on drop), at most 128 uploads service-wide, and an upload deadline of 30 s + `Content-Length` / 1 KiB/s with a running average-rate floor. Residual: 128 sessions trickling at 1 KiB/s can hold 128 of the 512 slots for up to 4 h. This bounds the damage and is accepted as residual. Tests `one_upload_per_session`, `upload_deadlines_follow_the_minimum_rate` |
+| WEB-08 (Info) | **Fixed** | The over-size check is reported only after the `csrf` part is verified. Test `oversize_upload_reported_after_csrf` |
+| SEA-01 (Low) | **Fixed** (API); wiring is open item O-2 | Sealer `hand_over_with_retry` re-sends the **same** sealed bundle once on a fresh connection. In the store, `DuplicateEnvelope` (the group digest is `UNIQUE`; PG uses `ON CONFLICT DO NOTHING` and the only other unique key is the random `envelope_ref`) becomes a `replayed` success echoing the bundle hash. When the first commit is remembered (4,096 entries), the bundle SHA-256 must match, otherwise `Integrity` is returned and no ack is sent. **No double commit:** the unique digest serialises racing attempts, and the losing copy becomes an orphan, or uncertain after a backend error. C-06 maps "sent but unanswered" (`SealerError::NoReply`) to the new "could not confirm, do not resend" message instead of "not sent". Tests `late_commit_then_retry_is_one_envelope_and_success`, `unanswered_seal_finish_is_no_reply_not_unavailable`, `pg_staged_*` (PG enabled). Residual → WEB-13 |
+| STO-30 (Info) | **Fixed** | Orphan and uncertain blobs have their own bound (256), separate from the 64 active hand-overs. Both bounds fail closed. Test in `tests/staged.rs` |
+
+### New observations (round 2)
+
+#### AUD-RM2-WEB-11 — Leave-token set can be flushed by flooding cookie-clearing pages (fixer-flagged residual)
+- Severity: **Low**
+- Location: `crates/candor-intake-web/src/token.rs` (`LeaveSet::expire`, `LEAVE_TOKEN_CAP = 65,536`); `app.rs` `check_csrf`, cookieless Leave arm
+- Description: Every render of a cookie-clearing screen issues a token. A made-up `__Host-cs` reaches the signed-out page, so one request costs the attacker one issue and needs no session. Pushing 65,536 issues within the 15-minute TTL evicts every real token. PoC: 65,536 issues take 1.4 s in-process, the first token then verifies `false`, and a cookieless Leave with an evicted or unknown token gives **500 without Clear-Site-Data**. Over the network the flood needs about 73 requests/s sustained, which means ≥ 73 circuits at the per-circuit 1/s limit, within the global 600/s.
+- Impact: Only the Leave guidance page is lost for a source who presses Leave on S10s, discarded or signed-out during the flood. These screens have already cleared the cookies, and cookieless Leave changes no state. There is no confidentiality or integrity effect, and memory stays bounded (≈ 4 MB). Low.
+- Fix recommendation: For a request with no cookie at all, render the Leave page even when the token fails. It changes nothing, and WEB-03 already applies this rule to stale cookies. If the lead keeps "token always required", a valid MAC (constant time) can be accepted without set membership when the set is at capacity. Alternatively, issue tokens only for real sessions' clearing screens and not for `Gone` renders.
+- Status: Open (Low, not blocking)
+
+#### AUD-RM2-WEB-12 — WEB-03 fix accepts `/leave` without a token when a stale session cookie is present
+- Severity: Info
+- Description: `PostAuth::Leave if rq.has_cookie() => Ok(())` applies only when the session is not live; a live session still needs its token. Origin and Sec-Fetch-Site are still checked, and `SameSite=Strict` together with `__Host-` stops a cross-site sender. The request changes no server state. This is still a narrow exception to lead decision (b), "a csrf token is always required", so the lead should confirm it in SPEC-NOTES.
+- Status: Open (lead confirmation)
+
+#### AUD-RM2-WEB-13 — SEA-01 residuals for the O-2 integration
+- Severity: Info
+- Description:
+  1. The retry exists only as an API (`hand_over_with_retry`, `hand_over_group_bundle_with_retry`). The `EnvelopeSink` wiring (O-2) must use it, or the late-commit case returns.
+  2. When the first commit is no longer remembered (store restart or more than 4,096 later commits), a replay is accepted on the group digest alone. `object_hash` covers the core header and its MAC, not the bundle body, so the bundle hash is then not cross-checked. Only the uid-checked sealer can send hand-overs, and it re-sends the identical `StagedBundle` by construction, so this is defence in depth: persist `sha256` with the envelope part, or compare it with the stored blob's hash.
+  3. After "could not confirm", a source who presses Send again reaches `CONFIRM_PASSPHRASE` on a session the sealer may have consumed. The answer is an error page, never a second envelope; the wording could be aligned in O-4.
+- Status: Open (tracked to O-2)
+
+### Tool runs (round 2, commit 9ffeffd)
+
+| Tool | Result |
+|---|---|
+| `cargo test -p candor-intake-web -p candor-source-ui --locked` | all pass: web 55 + 15 + 9 + 4 + 1 + 4 + 4 tests plus the hardening harness; source-ui 24 + 9 + 2 + 37 + 12 + 3 |
+| `pg-test.sh cargo test -p candor-intake-store` | all pass, PG enabled (33 + 18 + 37 + 6 + 23) |
+| `cargo test -p candor-sealer` (root) | all suites pass, incl. `handover`, `hardening` |
+| Auditor PoCs (scratch, round-2 assertions) | 6/6 confirm the fixes and the WEB-11 residual |
+| **cargo-fuzz** (nightly-2026-09-28, ASan, scratch target, `-max_total_time=130 -rss_limit_mb=2048 -timeout=10`, seeds as corpus) | `fuzz_http_request` 3,520,127 runs, cov 810; `fuzz_form_urlencoded` 6,622,128 runs, cov 869; `fuzz_multipart_intake` 420,134 runs, cov 349. **No crash, leak, timeout or OOM; no artifacts** |
+| clippy `-D warnings` (web, source-ui, store, sealer, all targets and features) | clean |
+| safefs-lint / logging-lint | OK / ok |
+| cargo-deny (`--offline`) / cargo-vet | advisories, bans, licenses and sources ok / succeeded |
+
+All scratch builds (fuzz target 819 MB, PoC target, source copy, corpora) were deleted after the runs.
+
+### Gate verdict (round 2)
+
+- Critical: 0. High: 0.
+- Medium: WEB-01 and WEB-02 are **fixed and re-tested**.
+- Low open: WEB-11 (new, rated Low, not blocking).
+- Info open: WEB-12 (lead confirmation of the Leave exception), WEB-13 (O-2 wiring), WEB-09, WEB-10.
+- §C tools, including the three fuzz targets, ran on the fix commit with no untriaged output.
+
+**Gate: PASS 2026-10-01 9ffeffd** for the in-scope files. Any later change to them voids this PASS for the changed files (§G delta re-audit).
+
+## Lead dispositions after round 2 (2026-10-01)
+- **Gate: PASS at 9ffeffd.**
+- **WEB-11 (Low): fix in the next C-06 change.** If a leave token is unknown or evicted, Leave must render the normal Leave page and clear the cookie, never return 500. A flood must not turn eviction into an error-page signal.
+- **WEB-12 (Info): exception accepted.** Leave without a token when a stale session cookie is present only clears an already-invalid cookie. It changes no server state and reveals nothing, so the forced-logout risk is nil. Decision (b) is unchanged for every state-changing route.
+- **WEB-13 (Info): tracked.** The SEA-01 retry must be used by the O-2 / istore integration in the next build step, with an integration test.
