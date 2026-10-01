@@ -1,0 +1,75 @@
+# ST-048/049/051, AUD-RM1-LOG-10 / SFS-08, CORE fuzz plan: seeded cargo-fuzz runs of every
+# fuzz target, nightly on the default branch only (never on PR code). Seeds are read-only;
+# corpora live in $RUNNER_TEMP so nothing is written into the checkout.
+name: fuzz-nightly
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: fuzz-nightly
+  cancel-in-progress: true
+jobs:
+  fuzz:
+    name: fuzz (${{ matrix.crate }}/${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { crate: candor-core, target: fuzz_envelope_parse }
+          - { crate: candor-core, target: fuzz_header }
+          - { crate: candor-core, target: fuzz_hpke_open }
+          - { crate: candor-core, target: fuzz_normalize }
+          - { crate: candor-core, target: fuzz_recipient_entry }
+          - { crate: candor-core, target: fuzz_record }
+          - { crate: candor-core, target: fuzz_slot_block }
+          - { crate: candor-core, target: fuzz_stanza }
+          - { crate: candor-core, target: fuzz_stream_decrypt }
+          - { crate: candor-safefs, target: fuzz_safefs_names }
+          - { crate: candor-safefs, target: fuzz_archive_zip }
+          - { crate: candor-safefs, target: fuzz_archive_tar }
+          - { crate: candor-safefs, target: fuzz_archive_tar_gz }
+          - { crate: candor-log, target: fuzz_cbor_decode }
+          - { crate: candor-log, target: fuzz_checkpoint_parse }
+          - { crate: candor-log, target: fuzz_jsonl_read_verify }
+          - { crate: candor-log, target: fuzz_audit_log_verify }
+          - { crate: candor-sealer, target: fuzz_sealer_ipc }
+    env:
+      FUZZ_TOOLCHAIN: nightly-2026-09-28
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned nightly (fuzz only)
+        run: |
+          set -euo pipefail
+          rustup set auto-self-update disable || true
+          rustup toolchain install "$FUZZ_TOOLCHAIN" --profile minimal --no-self-update
+      - name: Install cargo-fuzz
+        run: cargo +"$FUZZ_TOOLCHAIN" install cargo-fuzz --locked --version =0.13.1
+      - name: Fuzz (seeds read-only, scratch corpus)
+        working-directory: crates/${{ matrix.crate }}
+        run: |
+          set -euo pipefail
+          corpus="$RUNNER_TEMP/corpus/$TARGET"
+          mkdir -p "$corpus"
+          seeds=()
+          [ -d "fuzz/seeds/$TARGET" ] && seeds=("fuzz/seeds/$TARGET")
+          cargo +"$FUZZ_TOOLCHAIN" fuzz run "$TARGET" "$corpus" "${seeds[@]}" -- \
+            -max_total_time=1200 -rss_limit_mb=2048 -timeout=10 -print_final_stats=1
+      - name: Seeds unchanged
+        run: |
+          git diff --exit-code -- 'crates/*/fuzz/seeds'
+          test -z "$(git status --porcelain -- 'crates/*/fuzz/seeds')"
+      - name: Keep crash reproducer
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-${{ matrix.crate }}-${{ matrix.target }}
+          path: crates/${{ matrix.crate }}/fuzz/artifacts/
+          retention-days: 14

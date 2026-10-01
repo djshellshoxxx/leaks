@@ -545,3 +545,74 @@ Fixed and verified: SFS-01, 02, 04, 05, 06, 07, 09; LOG-04, 05, 07, 08, 09, 10, 
 `candor-safefs` has no open Critical, High or Medium findings, so it meets the gate (§F) once the lead tracks the Lows and Infos.
 
 Gate: **FAIL** 2026-10-01 fc64069. `candor-log` has 2 open High (LOG-02 residual channel, LOG-16), and 3 Medium need a fix or written acceptance (LOG-17, LOG-18, LOG-19).
+
+---
+
+## Re-test (round 3)
+
+Re-tested HEAD `8163ede` (WIP 422fbbb/5b05257/8163ede) plus the uncommitted tree, 2026-10-01. Procedure §G, focused on the round-2 findings and variants.
+
+**Tools:**
+- `clippy -D warnings` (both crates): clean.
+- `cargo test -p candor-safefs -p candor-log`: all pass, including the new UI tests `forge_tombstone` and `no_magnitude_api` and the inotify test.
+- Miri (candor-log lib): 28/28.
+- `lint-logging.sh`: OK (90 files). The round-2 lint fixture (panic_any, Command, assert/expect messages, temp_dir+extend) is now fully reported.
+- cargo-fuzz: 8 targets, 46 s each, run in **scratch corpus dirs** (seeds read-only). No crash/OOM/timeout. Coverage: log verify 1494, jsonl 2987, checkpoint 1062, cbor 384; zip 1802, tar 1269, tar_gz 1923, names 927.
+- `git status` of both crates: unchanged.
+
+**Out-of-scope lint-safefs hits (listed only):** `crates/candor-sealer/src/server/handover.rs:32,129,142,146` (`rustix::fs` memfd/seal/fstat). No hits remain in core `vectors.rs` or intake-store `staged.rs` on this tree.
+
+| Finding | Status | Evidence / remark |
+|---|---|---|
+| LOG-02 (H) | **Fixed** | Date-only events go to the `case-slot`/`sys-slot` streams. They are staged and written only at import-slot boundaries, Fisher–Yates shuffled with rejection-sampled CSPRNG (code read OK). CASE/SYS are back to the data-independent 5-min schedule. Tests `date_only_events_never_neighbour_exact_time_events` and `checkpoint_timing_independent_of_date_only_events`. The per-slot count is visible to the witness, which is accepted (ADR-038(1) slot granularity) |
+| LOG-16 (H) | **Fixed** | Tombstones are built only via `emit_case_disposal`/`emit_retention_tombstone` (private payloads; `emit` → `TombstoneViaApi`; UI test `forge_tombstone`). `ApproverKeys::verify` requires 2 distinct pinned keys and strict Ed25519 over a domain-separated canonical request. The verifier uses its own pinned `approver_keys`. Stubs carry `case`, which is bound into `c_i` and must equal the tombstone's case. The round-2 forge PoC no longer compiles (`checkpoint_root`, `redaction_set_hash` and the variant are gone). The retention authorization is a standing (replayable) policy grant, acceptable because the age is checked per prune |
+| LOG-17 (M) | **Partially fixed → LOG-24 (M)** | Random-only ids, MAC-sealed `IdToken` (constant-time), randomized value commitments, origin-bound checkpoint values, `ForeignArtefact` check: all verified. The new variant is LOG-24 |
+| LOG-18 (M) | **Fixed** | Magnitude/ratio API removed (`no_magnitude_api`). A v1 history is refused |
+| LOG-19 (M) | **Fixed** | 5-min CASE/SYS checkpoints plus an hourly/per-slot witness feed that includes empty ticks. The verifier gives `TRUNCATED`/`ROLLBACK` against the witnessed head (test `witness_ticks_and_truncation_beyond_witnessed_head`). Residual ≤ 1 tick, conditional on the witness alarming on missed ticks (operations requirement for C-24/witness) |
+| LOG-20 (L) | **Fixed** | Dual-approved `retention_days`, verified against `max(§12 minimum, min_retention_days)` |
+| LOG-21 (L) | **Fixed** | Fixture re-run above. Clippy bans `panic_any`/`resume_unwind`/`Command::new` |
+| LOG-22 (L) | **Fixed** | Integer branch and bound after the exact simplex, failing closed at 4096 nodes. Test `integer_attacker_narrower_than_lp_is_caught` |
+| LOG-23 (I) | **Fixed** | `RedactionPlan::build(&impl CaseRecordSource)`; the diag `MODULE` is checked; the release ceiling is enforced in `emit`. Residual: a hand-written `Site` can claim `DEBUG_ASSERTIONS = true` (static text only, Info) |
+| LOG-14 (L) | **Ruling: residual acceptable** | Both `coi_tags_updated` and system-actor COI removals are now date-only, shuffled within a slot, and never adjacent to each other. The residual (co-occurrence for one case within one slot window, the granularity imports already have) is at most Low. **Recommend lead acceptance** for 90 days, on this condition: C-22 must emit *every* COI-caused removal with a system actor. A staff-actor COI removal in the exact-time CASE stream, close in time to a tags update, would reintroduce linkage. Add a C-22 test when that crate lands |
+| SFS-10 (L) | **Fixed** | Root mtime is settled to a monotonic `fetch_max` slot; abandoned writes write that slot, never a captured time. Test `overlapping_pending_objects_leave_root_at_slot_time`. Note: before the first commit, the fallback is the root's open-time mtime floored to 15 min (no finer than the slot grid) |
+| SFS-11 (L) | **Fixed** | clippy and script bans (temp_dir, set_extension, Command, panic_any, tempfile non-dev). The round-2 fixture is caught. `workspace_clippy_bans_fire_on_fixture` |
+| SFS-12 (I) | **Fixed** | Local flags == central flags; CRC/sizes always compared; bounded zip64 local-extra parse. Test `zip_local_flag_and_zip64_mismatch_rejected`; zip fuzz clean |
+| SFS-08 deferrals | **Accepted** | inotify test **done** (`no_inode_activity_outside_root_inotify`). O_TMPFILE rationale corrected and tracked (SL-R-001, before RM-2 go-live). The nightly fuzz job is specified in SPEC-NOTES but **not yet in ci.yml**: the lead must add it before RM-1 exit (it writes only to a scratch corpus, which is correct) |
+
+### AUD-RM1-LOG-24 — `Seq::of_failure` launders 64 caller-chosen bits via a crafted verification failure
+- Severity: Medium
+- Location: crates/candor-log/src/field.rs `Seq::of_failure`; src/verify.rs (failure seq read from record CBOR / `ChainRecord::Redacted.seq`)
+- Category: B1.4 (CWE-532)
+- Description: `verify_stream` can be run by anyone with the writer's **public** checkpoint key over caller-built records. A `ChainRecord::Redacted { seq: X, .. }` in the SEC stream (or a Full record whose CBOR `seq` = X with a mismatched tenant) fails with `seq = X` and `origin = writer key`. `Seq::of_failure` then yields a `Seq` that `emit` accepts (origin matches). PoC (scratch `auditlog-r2-poc/src/bin/r3seq.rs`): X = `0xcb007107000001bb` (IPv4 203.0.113.7:443) goes into `audit.verification_failed.seq` and `emit` returns Ok.
+- Exploit scenario: Same as LOG-03/17. A trust-path developer can log 64 bits (an IP and port) with code that passes review and the type system.
+- Fix recommendation: In `emit`, require every `Seq`/`SeqRange` to lie within the writer's own state for the named stream (`< next_seq`). Or clamp the failure seq in `verify_inner` to `min(seq, expected)` (it never needs to exceed the walked position), and drop the attacker-controlled `seq` in the `EnvelopeMismatch`/`UnboundRedaction` paths in favour of `expected`. Add the PoC as a test.
+- Status: Open
+
+### AUD-RM1-LOG-25 — Staged date-only events are lost on a crash (suppression of import/canary audit records)
+- Severity: Low
+- Location: crates/candor-log/src/chain.rs staging (`StreamState::staged`, `MAX_STAGED_PER_SLOT`)
+- Category: B12 / integrity (CWE-778)
+- Description: Date-only events sit in memory for up to one import slot (default 6 h). A process abort (panic=abort, OOM, kill) drops them silently, including `case.canary_escalated` and `case.imported`. The builder documents this as a residual. The only trace is `sys.service_started`. Overflow beyond `MAX_STAGED_PER_SLOT` returns `SeqOverflow`, a misleading code (it fails closed, which is correct).
+- Fix recommendation: Durable stage: append each staged event, AEAD-sealed under a per-slot ephemeral key held in memory, to a preallocated fixed-size staging file (no growth, no per-event mtime meaning), or into the C-24 DB as an unordered encrypted blob. On restart, emit a `sys.stage_lost {count bucket}` event if the key is gone. At minimum, record a staged-count high-water mark so that a restart reveals the loss. Use a distinct `StageFull` error.
+- Status: Open (Low; needs a fix or lead acceptance)
+
+### Summary (round 3)
+
+| Severity | Open |
+|---|---|
+| Critical / High | 0 / 0 |
+| Medium | 1 (LOG-24) |
+| Low | 2 (LOG-25; LOG-14 pending the lead's signature per ruling above) |
+| Info | LOG-23 residual (Site claims) |
+
+**candor-safefs: Gate PASS 2026-10-01 8163ede** (no open C/H/M). Pending lead items: add the fuzz-nightly job, track O_TMPFILE.
+
+**candor-log: Gate NOT YET PASS.** There are no open Critical or High findings. LOG-24 (Medium) needs a fix (small) or the lead's written acceptance. Then LOG-25/LOG-14 need acceptance or a fix, which does not block.
+
+## Lead dispositions after round 3 (2026-10-01)
+- **candor-safefs: gate PASS.**
+- **LOG-14 (Low residual): accepted for 90 days** (review by 2026-12-30), on condition that C-22 emits every COI-caused removal with a system actor; tracked for the C-22 build.
+- **LOG-24 (Medium): sent to the fixer**; the gate stays closed until it is re-tested.
+- **LOG-25 (Low): sent to the fixer** (crash-loss marker for staged slot events).
+- **Nightly fuzz job:** added as `.github/workflows/fuzz-nightly.yml`, covering every target in core, safefs, log and sealer.
+- **O_TMPFILE wording:** tracked before RM-2 go-live.
