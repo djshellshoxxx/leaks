@@ -269,11 +269,10 @@ pub(crate) fn check_member_path(raw: &[u8], l: &ArchiveLimits) -> Result<String,
     if matches!(b.first(), Some(b'/' | b'\\')) {
         return Err(RejectReason::AbsolutePath);
     }
-    if let (Some(d), Some(b':')) = (b.first(), b.get(1)) {
-        if d.is_ascii_alphabetic() {
+    if let (Some(d), Some(b':')) = (b.first(), b.get(1))
+        && d.is_ascii_alphabetic() {
             return Err(RejectReason::AbsolutePath);
         }
-    }
     let mut comps: Vec<&str> = Vec::new();
     for c in s.split(['/', '\\']) {
         match c {
@@ -392,11 +391,10 @@ impl<'a> Session<'a> {
             if total > l.max_total_uncompressed {
                 return Err(ArchiveError::LimitHit(LimitKind::TotalSize));
             }
-            if let Some(c) = compressed {
-                if produced > c.saturating_mul(l.max_ratio) {
+            if let Some(c) = compressed
+                && produced > c.saturating_mul(l.max_ratio) {
                     return Err(ArchiveError::LimitHit(LimitKind::Ratio));
                 }
-            }
             extra(total)?;
             if head.len() < SNIFF_LEN {
                 let take = SNIFF_LEN.saturating_sub(head.len()).min(chunk.len());

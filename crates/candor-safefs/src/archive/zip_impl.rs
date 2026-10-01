@@ -98,11 +98,10 @@ fn run<R: Read + Seek>(reader: &mut R, s: &mut Session<'_>) -> Result<(), Archiv
     }
     ranges.sort_unstable();
     for w in ranges.windows(2) {
-        if let [a, b] = w {
-            if b.0 < a.1 {
+        if let [a, b] = w
+            && b.0 < a.1 {
                 return Err(ArchiveError::OverlappingEntries);
             }
-        }
     }
 
     // Pass 3: local header must agree with the central directory (name and

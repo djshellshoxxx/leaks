@@ -19,7 +19,7 @@ pub struct SlotTime(u64);
 impl SlotTime {
     /// Builds a slot time from Unix seconds; must be aligned to 15 minutes.
     pub fn from_unix_secs(secs: u64) -> Result<Self, SafeFsError> {
-        if secs % SLOT_GRANULARITY_SECS == 0 {
+        if secs.is_multiple_of(SLOT_GRANULARITY_SECS) {
             Ok(Self(secs))
         } else {
             Err(SafeFsError::InvalidSlotTime)

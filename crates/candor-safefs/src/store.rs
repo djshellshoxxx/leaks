@@ -72,11 +72,10 @@ fn check_private_dir(st: &Stat, uid: u32, dev: Option<u64>) -> Result<(), SafeFs
     if st.st_mode & 0o077 != 0 {
         return Err(SafeFsError::UnsafeObject("directory mode not 0700"));
     }
-    if let Some(d) = dev {
-        if st.st_dev != d {
+    if let Some(d) = dev
+        && st.st_dev != d {
             return Err(SafeFsError::UnsafeObject("cross-device"));
         }
-    }
     Ok(())
 }
 
@@ -319,13 +318,12 @@ impl SafeRoot {
         for ent in self.dir.entries()? {
             let ent = ent?;
             let name = ent.file_name();
-            if let Some(n) = name.to_str() {
-                if n.starts_with(TMP_PREFIX)
+            if let Some(n) = name.to_str()
+                && n.starts_with(TMP_PREFIX)
                     && ObjectId::parse(n.get(TMP_PREFIX.len()..).unwrap_or("")).is_ok()
                 {
                     names.push(n.to_owned());
                 }
-            }
         }
         for n in &names {
             self.dir.remove_file(n)?;
@@ -364,13 +362,11 @@ fn collect_ids(dir: &Dir, out: &mut Vec<ObjectId>) -> Result<(), SafeFsError> {
     for ent in dir.entries()? {
         let ent = ent?;
         let name = ent.file_name();
-        if let Some(n) = name.to_str() {
-            if n.len() == ID_LEN {
-                if let Ok(id) = ObjectId::parse(n) {
+        if let Some(n) = name.to_str()
+            && n.len() == ID_LEN
+                && let Ok(id) = ObjectId::parse(n) {
                     out.push(id);
                 }
-            }
-        }
     }
     Ok(())
 }
