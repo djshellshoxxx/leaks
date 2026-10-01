@@ -10,6 +10,10 @@ use libfuzzer_sys::fuzz_target;
 fuzz_target!(|data: &[u8]| {
     if let Ok(v) = cbor::decode(data) {
         let again = cbor::encode(&v).expect("accepted value must re-encode");
-        assert_eq!(again.as_slice(), data, "decoder accepted non-canonical bytes");
+        assert_eq!(
+            again.as_slice(),
+            data,
+            "decoder accepted non-canonical bytes"
+        );
     }
 });

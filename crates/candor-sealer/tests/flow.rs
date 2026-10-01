@@ -265,9 +265,13 @@ async fn full_tier_w_flow() {
     for o in &env.objects {
         assert!(!contains(&o.bytes, MARKER.as_bytes()));
     }
-    // ADR-052(2): the account is a separate store operation, written before the
-    // group; the group itself carries no account reference.
-    assert_eq!(f.sink.ops(), "AG");
+    // ADR-052(2): the account is a separate store operation and the group
+    // carries no account reference; SEA-21: the account is not written next
+    // to the group but in the next (shuffled, fixed-interval) batch.
+    assert_eq!(f.sink.ops(), "G");
+    assert_eq!(f.sealer.queued_accounts(), 1);
+    assert_eq!(f.sealer.flush_accounts(), Ok(1));
+    assert_eq!(f.sink.ops(), "GA");
     let upsert = f.sink.accounts()[0].clone();
     assert!(upsert.replaces.is_none());
     let account = upsert.account;
@@ -509,7 +513,7 @@ async fn full_tier_w_flow() {
             ObjectType::Identity
         ]
     );
-    assert_eq!(f.sink.ops(), "AGG", "a follow-up writes no account");
+    assert_eq!(f.sink.ops(), "GAG", "a follow-up writes no account");
     let (_, bpt) = open_intake(&fu.objects[1], member_ctx(0), &members[0].mek.private).unwrap();
     assert_eq!(&bpt[..8], b"CBDL\0\0\0\0", "empty bundle");
     let (_, ipt) = open_intake(
@@ -583,8 +587,11 @@ async fn full_tier_w_flow() {
         panic!()
     };
     assert_ne!(new_tag, account.lookup_tag);
-    // KEY_ROTATION group first, then the account replacement (ADR-052(2)).
-    assert_eq!(f.sink.ops(), "AGGGA");
+    // KEY_ROTATION group first, then the account replacement (ADR-052(2)) in
+    // the next batch (SEA-21).
+    assert_eq!(f.sink.ops(), "GAGG");
+    assert_eq!(f.sealer.flush_accounts(), Ok(1));
+    assert_eq!(f.sink.ops(), "GAGGA");
     let req = f.sink.accounts()[1].clone();
     let kenvs = &f.sink.envelopes()[2..];
     assert_eq!(kenvs[0].objects.len(), 3);

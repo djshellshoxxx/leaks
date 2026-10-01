@@ -184,6 +184,9 @@ const STD: u16 = 1;
 
 // --- the log -------------------------------------------------------------------
 
+/// Roster rows: (user, role label, caps).
+pub type Rows = Vec<([u8; 16], u16, u64)>;
+
 #[derive(Clone)]
 pub struct TestLog {
     pub entries: Vec<Vec<u8>>,
@@ -192,7 +195,7 @@ pub struct TestLog {
     pub user_hash: HashMap<[u8; 16], [u8; 32]>,
     cert_hash: HashMap<([u8; 16], u16), [u8; 32]>,
     /// Last roster rows emitted per channel (user, label, caps).
-    roster_rows: HashMap<[u8; 16], Vec<([u8; 16], u16, u64)>>,
+    roster_rows: HashMap<[u8; 16], Rows>,
     roster_version: HashMap<[u8; 16], u64>,
     coi_emitted: HashMap<[u8; 16], Vec<Vec<u8>>>,
     routes: HashMap<[u8; 16], Option<[u8; 16]>>,

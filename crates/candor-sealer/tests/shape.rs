@@ -88,6 +88,7 @@ async fn real_and_chaff_groups_are_indistinguishable_by_shape() {
         ChaffConfig {
             enabled: false,
             followup_share_permille: 500,
+            dummy_rotation_permille: 0,
             ..ChaffConfig::default()
         },
         Limits::default(),
@@ -149,7 +150,11 @@ async fn real_and_chaff_groups_are_indistinguishable_by_shape() {
     ok(&f.sealer, followup("short")).await;
     seal(&f, s).await;
     let real_ops = f.sink.ops();
-    assert_eq!(real_ops, "AGGG", "real: account, then one group each");
+    // SEA-21: groups only; the account waits for the next batch write.
+    assert_eq!(real_ops, "GGG", "real: one group each, no adjacent account");
+    assert_eq!(f.sealer.flush_accounts(), Ok(1));
+    let real_ops = f.sink.ops();
+    assert_eq!(real_ops, "GGGA");
     let real = f.sink.envelopes();
     assert_eq!(real.len(), 3);
 
@@ -207,6 +212,15 @@ async fn real_and_chaff_groups_are_indistinguishable_by_shape() {
         assert_eq!(total(r), expected);
     }
 
+    // Chaff writes no account next to its groups either.
+    let ops: Vec<char> = f.sink.ops().chars().skip(real_ops.len()).collect();
+    assert!(ops.iter().all(|c| *c == 'G'));
+    assert_eq!(ops.len(), chaff.len());
+    let initial_chaff = chaff
+        .iter()
+        .filter(|c| shape(c)[0].0 == ObjectType::Submission)
+        .count();
+    assert_eq!(f.sealer.flush_accounts(), Ok(initial_chaff));
     // Account records: real and dummy are the same shape.
     let accts = f.sink.accounts();
     let real_acct = &accts[0];
@@ -222,16 +236,7 @@ async fn real_and_chaff_groups_are_indistinguishable_by_shape() {
         );
         assert!(a.replaces.is_none());
     }
-    // Op sequence: chaff 'A' precedes exactly the SUBMISSION-shaped groups.
-    let ops: Vec<char> = f.sink.ops().chars().skip(real_ops.len()).collect();
-    let mut i = 0;
-    for c in chaff {
-        if shape(c)[0].0 == ObjectType::Submission {
-            assert_eq!(ops[i], 'A');
-            i += 1;
-        }
-        assert_eq!(ops[i], 'G');
-        i += 1;
-    }
-    assert_eq!(i, ops.len());
+    // One dummy account per initial-shaped chaff group, written as a batch.
+    let ops: String = f.sink.ops().chars().skip(real_ops.len()).collect();
+    assert_eq!(ops, format!("{}{}", "G".repeat(chaff.len()), "A".repeat(initial_chaff)));
 }

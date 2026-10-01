@@ -1592,7 +1592,8 @@ impl Sealer {
         let me = self.clone();
         v.push(tokio::spawn(async move {
             let every = me.st.cfg.chaff.account_flush_interval;
-            let mut iv = tokio::time::interval_at(Instant::now() + every, every);
+            let start = Instant::now().checked_add(every).unwrap_or_else(Instant::now);
+            let mut iv = tokio::time::interval_at(start, every);
             loop {
                 iv.tick().await;
                 let m = me.clone();
@@ -2160,8 +2161,7 @@ fn rotate_blocking(
     if !queue_has_room(st) {
         return err(ErrorCode::Busy);
     }
-    let mut groups = groups.into_iter();
-    while let Some(group) = groups.next() {
+    for group in groups {
         if commit_group(st.sink.as_ref(),
             group,
             job.sel.epoch_id,
@@ -2188,6 +2188,37 @@ fn rotate_blocking(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
     use super::*;
+
+    fn upsert(tag: u8, replaces: Option<u8>) -> AccountUpsert {
+        AccountUpsert {
+            replaces: replaces.map(|r| [r; 32]),
+            account: AccountRecord {
+                lookup_tag: [tag; 32],
+                auth_pk: [0; 32],
+                prefs_ct: vec![],
+                mailbox_ids: vec![],
+            },
+            rewrapped_replies: vec![],
+        }
+    }
+
+    /// AUD-RM2-SEA-21: a batch is a uniformly shuffled permutation of the
+    /// creates followed by the replacements in queue order (a replacement may
+    /// target an account created in the same batch).
+    #[test]
+    fn account_batches_are_shuffled_creates_then_replacements() {
+        let mut queue: Vec<AccountUpsert> = (0..20u8).map(|t| upsert(t, None)).collect();
+        queue.push(upsert(100, Some(3)));
+        queue.push(upsert(101, Some(100)));
+        let out = shuffle_batch(queue.clone()).unwrap();
+        assert_eq!(out.len(), 22);
+        let tags: Vec<u8> = out.iter().map(|a| a.account.lookup_tag[0]).collect();
+        let mut creates = tags[..20].to_vec();
+        assert_ne!(creates, (0..20u8).collect::<Vec<_>>(), "1/20! chance");
+        creates.sort_unstable();
+        assert_eq!(creates, (0..20u8).collect::<Vec<_>>());
+        assert_eq!(&tags[20..], &[100, 101]);
+    }
 
     #[test]
     fn lossy_utf8_never_reallocates() {

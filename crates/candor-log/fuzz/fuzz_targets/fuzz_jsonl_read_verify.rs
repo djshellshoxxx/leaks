@@ -5,12 +5,12 @@
 //! attested only by checkpoints that carry a valid instance signature.
 #![no_main]
 
+use candor_log::SoftwareSigner;
 use candor_log::chain::CheckpointSigner;
 use candor_log::codes::StreamId;
 use candor_log::disposal::{ApproverKeys, DisposalApprover, SoftwareApprover};
 use candor_log::sink::read_stream;
 use candor_log::verify::{VerifyParams, verify_stream};
-use candor_log::SoftwareSigner;
 use libfuzzer_sys::fuzz_target;
 use zeroize::Zeroizing;
 
@@ -20,7 +20,9 @@ mod det;
 fuzz_target!(|data: &[u8]| {
     // First byte: stream; then the record file and checkpoint file split at
     // the first 0xff byte (not valid inside UTF-8 JSON).
-    let Some((&sel, rest)) = data.split_first() else { return };
+    let Some((&sel, rest)) = data.split_first() else {
+        return;
+    };
     let stream = match sel % 5 {
         0 => StreamId::Sec,
         1 => StreamId::Case,
@@ -31,7 +33,9 @@ fuzz_target!(|data: &[u8]| {
     let cut = rest.iter().position(|&b| b == 0xff).unwrap_or(rest.len());
     let (recs, cps) = rest.split_at(cut);
     let cps = cps.get(1..).unwrap_or_default();
-    let Ok((records, checkpoints)) = read_stream(stream, recs, cps) else { return };
+    let Ok((records, checkpoints)) = read_stream(stream, recs, cps) else {
+        return;
+    };
     let key = SoftwareSigner::from_seed(&Zeroizing::new([7; 32])).verifying_key();
     let tenant = det::tenant(b't');
     let approvers = ApproverKeys::new(
@@ -58,7 +62,11 @@ fuzz_target!(|data: &[u8]| {
             assert!(rep.next_seq >= rep.first_seq.unwrap_or(0));
             assert!(rep.redacted <= rep.records);
             if !allow_pruned_prefix {
-                assert_eq!(rep.first_seq.unwrap_or(0), 0, "prefix accepted without opt-in");
+                assert_eq!(
+                    rep.first_seq.unwrap_or(0),
+                    0,
+                    "prefix accepted without opt-in"
+                );
             }
         }
     }

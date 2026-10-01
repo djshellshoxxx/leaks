@@ -533,8 +533,16 @@ fn date_only_events_never_neighbour_exact_time_events() {
     assert_eq!(case_recs.len(), 8);
     assert_eq!(slot_recs.len(), 9);
     // No date-only record has a finer-precision neighbour in its stream.
-    assert!(case_recs.iter().all(|r| !precision_of(r).is_multiple_of(DAY)));
-    assert!(slot_recs.iter().all(|r| precision_of(r).is_multiple_of(DAY)));
+    assert!(
+        case_recs
+            .iter()
+            .all(|r| !precision_of(r).is_multiple_of(DAY))
+    );
+    assert!(
+        slot_recs
+            .iter()
+            .all(|r| precision_of(r).is_multiple_of(DAY))
+    );
     // Every record of the slot carries the same (date) ts.
     assert!(slot_recs.windows(2).all(|w| ts_of(&w[0]) == ts_of(&w[1])));
     // The slot stream's checkpoint is dated at the import-slot boundary.
@@ -1741,7 +1749,12 @@ fn checkpoint_values_cannot_be_laundered() {
     log.emit(EventContext::staff(user(1)), ok).unwrap();
     // A verification failure under another key does not bind either.
     let other_key = signer(9).verifying_key();
-    let e = verify_stream(&params(&other_key, StreamId::Sec), &[], std::slice::from_ref(&real)).unwrap_err();
+    let e = verify_stream(
+        &params(&other_key, StreamId::Sec),
+        &[],
+        std::slice::from_ref(&real),
+    )
+    .unwrap_err();
     assert_eq!(
         log.emit(
             EventContext::staff(user(1)),

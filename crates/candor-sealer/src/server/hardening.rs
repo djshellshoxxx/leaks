@@ -20,12 +20,11 @@
 //! calling thread and the threads it creates afterwards, so a process-global
 //! record is not proof that the threads serving requests are confined:
 //! * [`harden_process`] refuses unless it runs on the process's main thread
-//!   while that is the *only* thread (`Threads: 1`), so no runtime worker or
-//!   blocking-pool thread can exist outside the domain;
-//! * it verifies `VmLck > 0` after `mlockall` and probes the confinement of the
-//!   calling thread after `restrict_self`;
-//! * [`thread_confined`] probes the *calling* thread (opening `/` for reading
-//!   must fail with `EACCES`; cached per thread once confined). In serve mode
+//!   outside any tokio runtime, and probes the confinement of the calling
+//!   thread after `restrict_self`;
+//! * [`thread_confined`] probes the *calling* thread through `candor-safefs`
+//!   (opening `/` must fail with `EACCES`; cached per thread once confined),
+//!   so a runtime worker created before hardening is detected. In serve mode
 //!   ([`enforce_threads`]) every request, every frame and every blocking job
 //!   checks it first ([`guard`]); one unconfined thread poisons the sealer,
 //!   which then refuses all work and stops accepting (fail closed).
@@ -63,18 +62,17 @@ thread_local! {
     static CONFINED: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Probe the calling thread: inside a Landlock domain that only allows the
-/// staging root, opening `/` as a directory for reading fails with `EACCES`.
+/// Probe the calling thread through the audited filesystem API (ADR-027):
+/// opening `/` as a directory is denied with `EACCES` inside the sealer's
+/// Landlock domain (`READ_DIR` is handled and only the staging root is
+/// allowed). Unconfined, the open succeeds and `candor-safefs` then refuses
+/// `/` as a root for its owner and mode, which is a different error. Nothing
+/// is read or written either way.
 fn probe_confined() -> bool {
-    use rustix::fs::{Mode, OFlags, open};
-    match open(
-        "/",
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-        Mode::empty(),
-    ) {
-        Ok(_fd) => false,
-        Err(e) => e == rustix::io::Errno::ACCESS,
-    }
+    matches!(
+        candor_safefs::SafeRoot::open(Path::new("/"), candor_safefs::RootPolicy::Staging),
+        Err(candor_safefs::SafeFsError::Io(std::io::ErrorKind::PermissionDenied))
+    )
 }
 
 /// Whether the calling thread is confined (probed; a positive result is cached
@@ -205,8 +203,8 @@ pub enum HardeningError {
     Landlock,
     /// [`harden_process`] has not (successfully) run in this process.
     NotApplied,
-    /// [`harden_process`] was not called on the main thread while it was the
-    /// only thread (AUD-RM2-SEA-20).
+    /// [`harden_process`] was not called on the main thread outside a tokio
+    /// runtime (AUD-RM2-SEA-20).
     NotMainThread,
     /// The configured peer UID is 0 or the sealer's own UID.
     PeerUid,
@@ -222,7 +220,7 @@ impl core::fmt::Display for HardeningError {
             Self::Mlock => "mlockall failed",
             Self::Landlock => "Landlock restriction failed",
             Self::NotApplied => "process hardening not applied",
-            Self::NotMainThread => "hardening must run on the only (main) thread",
+            Self::NotMainThread => "hardening must run on the main thread before the runtime",
             Self::PeerUid => "peer UID must not be root or the sealer's own UID",
             Self::DevFlagNotLogged => "insecure developer mode could not be audit-logged",
         })
@@ -293,61 +291,26 @@ pub fn restrict_filesystem(staging: &Path, level: LandlockLevel) -> Result<bool,
     Ok(full)
 }
 
-/// A numeric field of `/proc/self/status` (read before Landlock applies).
-fn status_field(name: &[u8]) -> Option<u64> {
-    use rustix::fs::{Mode, OFlags, open};
-    let fd = open(
-        "/proc/self/status",
-        OFlags::RDONLY | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .ok()?;
-    let mut buf = [0u8; 8192];
-    let mut len = 0usize;
-    loop {
-        let rest = buf.get_mut(len..)?;
-        if rest.is_empty() {
-            break;
-        }
-        let n = rustix::io::read(&fd, rest).ok()?;
-        if n == 0 {
-            break;
-        }
-        len = len.checked_add(n)?;
-    }
-    let text = buf.get(..len)?;
-    text.split(|b| *b == b'\n').find_map(|line| {
-        let v = line.strip_prefix(name)?;
-        let digits: Vec<u8> = v
-            .iter()
-            .copied()
-            .skip_while(|b| !b.is_ascii_digit())
-            .take_while(u8::is_ascii_digit)
-            .collect();
-        core::str::from_utf8(&digits).ok()?.parse().ok()
-    })
+/// The caller is the process's main thread and has no tokio runtime context
+/// (a thread count needs a `/proc` read, which ADR-027 reserves to
+/// `candor-safefs`; worker threads created before hardening are caught by the
+/// per-thread [`guard`] instead).
+fn on_main_thread() -> bool {
+    rustix::thread::gettid() == rustix::process::getpid()
+        && tokio::runtime::Handle::try_current().is_err()
 }
 
-/// The caller is the main thread and the process has no other thread.
-fn only_main_thread() -> bool {
-    let main = rustix::thread::gettid() == rustix::process::getpid();
-    main && status_field(b"Threads:") == Some(1)
-}
-
-/// Apply all in-process hardening in order: no dumps, memory locked (verified
-/// `VmLck > 0`), Landlock (verified on the calling thread). Must run on the
-/// main thread while it is the only thread, i.e. before any runtime or helper
-/// thread exists (AUD-RM2-SEA-20). The result is recorded for [`self_check`]
-/// (first successful call only).
+/// Apply all in-process hardening in order: no dumps, memory locked,
+/// Landlock (verified on the calling thread). Must run on the main thread,
+/// outside any tokio runtime, before the runtime and any helper thread exist
+/// (AUD-RM2-SEA-20). The result is recorded for [`self_check`] (first
+/// successful call only).
 pub fn harden_process(staging: &Path, landlock: LandlockLevel) -> Result<bool, HardeningError> {
-    if !only_main_thread() {
+    if !on_main_thread() {
         return Err(HardeningError::NotMainThread);
     }
     disable_core_dumps()?;
     lock_memory()?;
-    if status_field(b"VmLck:").is_none_or(|kb| kb == 0) {
-        return Err(HardeningError::Mlock);
-    }
     let full = restrict_filesystem(staging, landlock)?;
     if full && !thread_confined() {
         return Err(HardeningError::Landlock);

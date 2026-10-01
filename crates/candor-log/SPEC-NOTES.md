@@ -51,11 +51,13 @@ Sources: `DECISIONS.md` ADR-016, ADR-037(3), ADR-038, ADR-046(5)/(11);
     `breakglass.key_wrapped`, `evidence.export_approved`, …) have empty
     payloads, per "carry only the fields named in the table".
 11. **`case.disposed`** additionally carries `removed_event_count` (20 §12 /
-    AUD-012 require the count in the tombstone).
+    AUD-012 require the count in the tombstone). *(Superseded by round 2: the
+    payload is the private `CaseDisposal` record, see "round 2" below.)*
 12. **`audit.retention_tombstone`** (new name; 20 §12/AUD-005 require a
     tombstone event but name none): SECURITY class, payload `stream`,
-    `seq_range`, `last_deleted_checkpoint_root`. Always written to `sec`, also
-    when the `sys` stream is pruned.
+    `seq_range`, `last_deleted_checkpoint_root`. *(Superseded: one tombstone
+    type per pruned stream with a dual-approved `RetentionPrune` payload, see
+    round 1 LOG-01 and round 2 LOG-16/20.)*
 13. **`audit.read`** (20 §9) is included in the catalog although §5.1 does not
     list it.
 14. **Checkpoints.** *(Superseded in part by "Fixes for AUD-RM1-LOG" below.)* Body: tenant, stream, first/last seq, chain head, RFC 6962
@@ -88,7 +90,8 @@ Sources: `DECISIONS.md` ADR-016, ADR-037(3), ADR-038, ADR-046(5)/(11);
     (C-24 opens append-only 0600 files via `candor-safefs`/reviewed code and
     fsyncs per line). Lines contain only static names, integers and hex; the
     reader bounds line length (1 MiB) and denies unknown fields.
-20. **SIEM export (C-26).** Pseudonym = `HMAC-SHA-256(K_siem,
+20. **SIEM export (C-26).** (Round 2: the date-only `case-slot` and
+    `sys-slot` streams are never exported.) Pseudonym = `HMAC-SHA-256(K_siem,
     "candor/v1/siem/actor" ‖ UserRef)[..8]`. `date` fields follow the
     configured precision (Date default / Hour ADVANCED / Exact DANGEROUS);
     `ts` fields (cfg, integrity alarms) are hour-truncated unless Exact.
@@ -121,7 +124,7 @@ Sources: `DECISIONS.md` ADR-016, ADR-037(3), ADR-038, ADR-046(5)/(11);
     only; a month is taken once after close (raw values leave memory); an
     increment for an older month is refused; an unreleased previous month is
     discarded at the next rollover (09 "current and previous month only").
-25. **Magnitude statistics.** *(Superseded in part by "Fixes for AUD-RM1-LOG" below.)* median/percentile (nearest rank)/mean only for
+25. **Magnitude statistics.** *(Removed entirely in round 2, AUD-RM1-LOG-18.)* median/percentile (nearest rank)/mean only for
     n ≥ k; durations rounded to whole weeks (half up); ratios (per-mille)
     only for denominator ≥ k and numerator ∉ {0, denominator}.
 26. **Lint.** *(Superseded in part by "Fixes for AUD-RM1-LOG" below.)* All `crates/*` are trust-path unless allow-listed (with a
@@ -217,7 +220,9 @@ module path/line in a record reveals code location only.
 | `sha2` | =0.11.0 | SHA-256 for chain, Merkle, checkpoint and session hashes (workspace pin) |
 | `ed25519-dalek` | =3.0.0 | Ed25519 checkpoint signatures/verification (workspace pin) |
 | `hmac` | =0.13.0 | HMAC-SHA-256 SIEM actor pseudonyms (20 §13), keyed audit identifiers/value hashes and per-case redaction salts |
-| `zeroize` | =1.8.2 | zeroize secrets (salts, SIEM key, `Sensitive<T>`, signer seed, `AuditIdKey`, `CaseCommitKey`) |
+| `zeroize` | =1.8.2 | zeroize secrets (salts, SIEM key, `Sensitive<T>`, signer seed, `AuditIdKey`, `CaseCommitKey`, commitment openings, session ids) |
+| `getrandom` | =0.4.3 | OS CSPRNG (already in the workspace via candor-safefs): random-only identifiers, value-commitment openings, uniform slot shuffle (AUD-RM1-LOG-02/17) |
+| `subtle` | =2.6.1 | constant-time comparison of identifier-token tags and commitment openings (workspace pin) |
 | `serde` | =1.0.228 | `Deserialize` for the bounded JSONL reader |
 | `serde_json` | =1.0.149 | JSONL parsing and SIEM JSON rendering |
 | `proptest` (dev) | =1.11.0 | property tests (workspace pin) |
@@ -284,3 +289,69 @@ closed. Residuals: per-day (CASE/SYSTEM) and per-slot (SECURITY) event
 counts are visible to the witness; bounded small fields can still carry a
 few bits; LP relaxation vs. integer attacker for unusual table families;
 secondary sinks may lag (reported, never silent); COI adjacency (LOG-14).
+
+## Fixes for AUD-RM1-LOG round 2 (re-test of fc64069; lead decisions of 2026-10-01)
+
+New fuzz-harness-only dependencies: `hmac =0.13.0`, `sha2 =0.11.0` in
+`fuzz/Cargo.toml` (the harness re-implements the documented identifier-token
+MAC under its own public test key to get reproducible fixtures/seeds).
+
+| Finding | Fix (implementation decisions) | Regression test |
+|---|---|---|
+| LOG-02 (H) record-order channel | Two new **date-only streams**, `case-slot` and `sys-slot` (class-separated; own genesis, checkpoints, JSONL files). Every event whose envelope `ts` is date-only (imports, envelope rejection, canary, relay, source-load `sys.health`, CASE events by a system actor, `case.coi_tags_updated`) is routed there; no exact-time event ever is. Date-only events are **staged in memory and written only at the next import-slot boundary**, the slot's batch in uniformly random order (Fisher–Yates, rejection-sampled OS CSPRNG), `ts` = UTC date; then the slot stream is checkpointed with `signed_at` = boundary. Import slots: 15-min multiples of the UTC day, default 00/06/12/18 h (ADR-038(1) 4×/day; `CheckpointPolicy::with_import_slots`, HIGH/GOV e.g. `&[180]`); **00:00 is always a boundary** so a slot never spans two dates. With no date-only events left in CASE/SYS, their checkpoints return to the 5-minute schedule (hourly on Z-INTAKE; data-independent, empty intervals included). A flush that fails part-way keeps the rest of the already-shuffled batch queued and the slot open (no reshuffle, no early checkpoint); emissions to that stream fail closed until it succeeds. `emit` returns `Emitted { record: None }` for a staged event. **Residual:** staged events live in memory — a crash loses at most one slot's date-only events (the restart is visible in `sys.service_started`); a durable stage would need typed event decoding and reintroduce an arrival-ordered store. | `date_only_events_never_neighbour_exact_time_events` (no date-only record has an exact-time neighbour; nothing written before the boundary; permutation; order differs from arrival across runs), `checkpoint_timing_independent_of_date_only_events` (CASE/SYS checkpoints byte-identical with/without the import), `timestamp_policy`, `chain::tests::policy_bounds`, `shuffle_is_a_permutation_and_varies` |
+| LOG-16 (H) forged `case.disposed` | (1) **Dual approval:** every tombstone carries two Ed25519 signatures by two *distinct pinned disposal-approver keys* (`ApproverKeys`: 2..=16 distinct keys, never the checkpoint key) over `"candor/v1/audit/disposal-auth\0" ‖ canonical request` (`disposal` module). Case request: `{kind, v, tenant, case, receipt_id, case_set: [n, H], slot_set: [n, H]}`. (2) **Construction only via the API:** tombstone payloads are the private-field types `CaseDisposal` / `RetentionPrune`; `AuditEvent::CaseDisposed { disposal }` cannot be built outside the crate; `emit` refuses every tombstone (`TombstoneViaApi`); `AuditLog::emit_case_disposal(ctx, &plan, &auth)` checks the authorization against the writer's pinned keys and the plan (case, both set commitments), requires a staff actor, refuses while records of the case are still staged, writes `case.disposed` (CASE) and stages `case.slot_disposed` (CASE-SLOT). `redaction_set_hash` and checkpoint-root helpers are crate-private; `Hash32::checkpoint_root` is gone. (3) **Verifier takes pinned keys:** `VerifyParams { key (checkpoint), approver_keys, .. }`; a checkpoint not signed by `key` or a tombstone without two valid approvals under distinct `approver_keys` fails (`BAD_SIGNATURE` / `UNBOUND_REDACTION` / `UNBOUND_PRUNE`), wherever it sits in the stream. (4) **Case binding (defence in depth):** `c_i = SHA-256("…/record-commit\0" ‖ tag ‖ inner_i)`, `tag = 0x01 ‖ CaseRef` for redactable records; a stub is `{seq, case, inner, tombstone_seq}` and must name the tombstone's case — so even a genuinely approved disposal of case Y cannot cover a record of case X (renaming the case breaks the chain). The verifier derives the tag from the record (`case` / `subject` payload field), proven equal to the writer's for every catalog type in every stream. (5) `RedactionPlan::build(&impl CaseRecordSource, case)` — any store can plan (LOG-23a). | `forged_disposal_tombstone_rejected` (round-2 PoC: (a) variant/`emit`, (b) insider-pinned approver keys ⇒ `UNBOUND_REDACTION` under the real pinned set, (c) approved disposal of another case cannot cover the victim), `tests/ui/forge_tombstone.rs`, `case_disposal_redaction_verifies` (both streams), `case_stub_without_matching_tombstone_rejected`, `chain::tests::case_tag_writer_and_verifier_agree`, fuzz `fuzz_audit_log_verify` (CASE and CASE-SLOT, stub naming arbitrary cases) |
+| LOG-17 (M) laundering paths | **No constructor takes caller bytes.** Identifiers: `X::generate()` (OS CSPRNG) only; owners persist an `IdToken` = `id ‖ HMAC(K_audit_id, "candor/v1/audit/id-token/<Type>\0" ‖ id)[..16]` and load it with `X::unseal` (constant-time; wrong key/type/arbitrary bytes ⇒ `None`). `X::derive(&key, &[u8])` removed (no keyed pseudonym of addresses). Value hashes (`query_hash`, `old_value_hash`, `policy_hash`, `entry_hash`, `recipient_key_fingerprint`, `custody_mac`, `*_hash_prefix`): **randomized hiding commitments** `Hash32::commit(purpose, value)` / `HashPrefix8::commit` = `SHA-256("…/value-commit\0" ‖ label ‖ 0 ‖ r ‖ len ‖ value)` with an internal 256-bit `r` returned as an `Opening` (zeroized; `Opening::verifies` for auditors). The logged value is independent of the input for anyone without the opening — including the writer's key holder — so it cannot carry or be tested against an address; the caller cannot choose `r`. Session tags: `SessionTag::derive(&DaySalt, &StaffSessionId)` with a random, sealable `StaffSessionId`. Checkpoint-derived values: `Seq`, `SeqRange` and the new `CheckpointRoot` carry the checkpoint key they were derived under (`AuditLog::checkpoint_seq/range/root` verify the checkpoint under the writer's own key and tenant; `Seq::of_failure`/`SeqRange::within` take the verifier's key); `emit` refuses any event whose artefact fields were derived under another key (`ForeignArtefact`). `ConfigValue::Enum` takes a const `Code<ConfigEnumValue>`. **Residual:** a random field can be ground (k bits cost ~2^k calls); small bounded fields (dates ≤ day 100 000, versions, counts) carry a few bits (LOG-03 residual). | `checkpoint_values_cannot_be_laundered` (round-2 PoC: self-signed cp with IPv6 root / IPv4:port end_seq; values from a second writer; verification failure under another key), `tests/ui/launder_raw_id.rs` (`from_bytes`, `derive`, `digest`, `Hash32::derive`, `checkpoint_root`, `checkpoint_end`, `of_checkpoint`), `ids::tests::id_tokens_bind_key_and_type`, `value_commitments_hide_and_open`, `session_tag_rotates_with_salt`, `event::tests::origin_check_covers_artefact_fields` |
+| LOG-18 (M) magnitude differencing | **Magnitude statistics removed**: `Magnitude`, `release_magnitude`, `release_ratio` and the mean/percentile/ratio helpers are gone; only k-thresholded counts (tables, `release_scalar`) are publishable. The release-history encoding is v2 without `magnitudes`; a v1 history is refused (`History`, fail closed). | `tests/ui/no_magnitude_api.rs`, `magnitude_era_history_is_refused` |
+| LOG-19 (M) unattested CASE/SYS tail | Fixed by LOG-02 (CASE/SYS back to 5-minute checkpoints) plus a **witness feed**: `WitnessSink` trait, `AuditLog::set_witness`. Each stream publishes its head checkpoint at every witness tick — hourly for SECURITY/CASE/SYSTEM (first boundary of each hour), every import slot for `case-slot`/`sys-slot` — **empty ticks included**, so a silent witness means a missed tick (the witness must alarm on it). Only the newest head is queued per stream (it attests every earlier one), retried on every emit/tick; `witness_lag()` reports a backlog. The verifier, given the latest witnessed head (`trusted_latest`), rejects any truncation into it (`TRUNCATED`) or removal of it/rollback (`ROLLBACK`). **Residual ≤ one tick:** records after the last witnessed head (≤ 1 h exact-time, ≤ 1 slot date-only). | `witness_ticks_and_truncation_beyond_witnessed_head` (24 heads/day per exact-time stream, 4 per slot stream; truncation with and without dropping later checkpoints; queued head after witness outage) |
+| LOG-20 (L) only minimum retention enforced | Retention tombstones are dual-approved standing authorizations `{kind: retention, tenant, stream, retention_days}` (`DisposalRequest::retention`, refused outside the 20 §12 bounds); the tombstone carries `retention_days` + approvals; `emit_retention_tombstone` refuses a plan younger than the authorized period (`TooEarly`) or an authorization for another stream/period (`Mismatch`). The verifier requires age ≥ `retention_days` and `retention_days` ≥ max(20 §12 minimum, `VerifyParams::min_retention_days`) — OVERSIGHT passes the configured policy. `DeletionPlan` fields are private; `apply_interval_deletion` finds the stored, checkpointed tombstone itself. `sys-slot` is pruned with SYSTEM retention (`sys.slot_retention_tombstone`, date-only). | `retention_interval_deletion` (90-day prune fails with `min_retention_days = 400`), `premature_prune_rejected` |
+| LOG-21 (L) lint gaps | `lint-logging.sh`: `assert*!`/`debug_assert*!` with a formatted message (multi-line aware, perl pass over the masked source), `.expect(&format!(..))`/`expect(&<var>)`, `panic_any`/`resume_unwind`, `Command::new`/`process::Command`; test-only code is skipped precisely (`#[cfg(test)]` items, file-level `#![cfg(test)]`, files of `#[cfg(test)] mod x;` only when every declaration of `x` is cfg(test) and none uses `#[path]`) so production code cannot hide behind it. Workspace `clippy.toml` bans `std::panic::panic_any`, `resume_unwind`, `std::process::Command::new`. | `tests/lint_logging.rs` (7 round-2 fixtures incl. multi-line, test-only exemption and two abuse attempts) |
+| LOG-22 (L) LP relaxation | The disclosure audit now computes the **integer** range of every protected quantity: exact rational simplex at the root, then depth-first branch and bound on fractional structural variables (bound constraints as single-cell priors, LP-bound pruning), failing closed past 4 096 branch nodes per audit (root solves do not count, so totally unimodular tables cost nothing extra). | `integer_attacker_narrower_than_lp_is_caught` (two odd cycles: LP 3, integer 2) and all existing suppression proptests |
+| LOG-14 (L) COI adjacency | `case.coi_tags_updated` is date-only, so it lands in the shuffled `case-slot` stream; COI-caused membership changes are emitted with a system actor (date-only ⇒ `case-slot` as well). Neither is ever adjacent to the other in order. **Residual:** co-occurrence of both for the same case within one import slot window (the granularity imports already have); staff-made removals stay exact-time in CASE. Lead-auditor acceptance still required for that residual. | `timestamp_policy`, registry (`case.coi_tags_updated: case-slot, date_only`) |
+| LOG-23 (I) | (a) `CaseRecordSource` + `RedactionPlan::build` (see LOG-16). (b) `diag::__private::emit` const- and run-time checks `MODULE` as a module path (`ident(::ident)*`, ≤ 200 bytes) and enforces the release ceiling itself from the site's `DEBUG_ASSERTIONS` constant (set by the macro from the calling crate's `cfg!(debug_assertions)`). A hand-written `Site` can still claim `DEBUG_ASSERTIONS = true` (Info, static data only). | `diag::tests::module_check`, `tests/ui/diag_forged_internals.rs` |
+
+**Downstream (outside this crate, for the lead):** `candor-sealer` tests and
+fuzz harness call the removed `TenantRef::derive(&AuditIdKey::new([3; 32]),
+b"tenant")` (`tests/common/mod.rs`, `tests/hardening.rs`,
+`fuzz/fuzz_targets/fuzz_sealer_ipc.rs`); replace with
+`TenantRef::generate().unwrap()` (or `expect`) and drop the `AuditIdKey`
+import. The sealer's production code (`EventContext`, `SysHealth`) is
+unaffected; its `Readiness` health event stays exact-time in `sys`.
+
+**Spec feedback (round 2):**
+
+- **F-6 (20 §8 cadence).** Exact-time streams keep "every 5 min" (no count
+  trigger, data-independent); date-only streams checkpoint at import-slot
+  boundaries; witness publication is hourly / per slot with empty ticks.
+  20 §4/§5 should name the slot streams and the staging rule.
+- **F-7 (value hashes).** 20 §5 `*_hash` fields and 14 §10 `custody_mac`
+  ("HMAC under case-derived key") are implemented as randomized hiding
+  commitments whose opening stays with the producing component; a keyed,
+  deterministic hash of caller data is a linkable pseudonym (P-01).
+- **F-8 (tombstones).** New implementation-defined types
+  `case.slot_disposed` and `sys.slot_retention_tombstone`; tombstone
+  payloads are nested (`disposal` / `prune`) and carry two approver
+  signatures; 20 §12 should require dual-approved disposal/retention
+  authorization and name the approver key set (C-14).
+- **F-9 (COI).** `case.coi_tags_updated` date-only (LOG-14).
+
+### Security self-review (round 2)
+
+Checked as an attacker with emit access and store write: no caller byte
+string becomes an identifier, value hash, session tag, sequence number,
+range or root; every tombstone needs two pinned approver signatures that the
+verifier checks independently of the writer's configuration, and a stub must
+name the tombstone's case, which its record commitment binds; date-only
+records never sit next to exact-time ones and their stored order is random;
+CASE/SYS checkpoints no longer change with date-only events; truncation
+beyond the witnessed head is detected; magnitude statistics no longer exist;
+the suppression audit reasons over integers and fails closed on budget;
+RNG, key-store, sink, signer and history failures all fail closed (nothing
+written). New secrets (`Opening`, `StaffSessionId`, staged case keys) are
+zeroized and never printed; approval and token checks are constant-time or
+strict Ed25519. Residuals: slot-stream checkpoints reveal the number of
+date-only events per import slot (the schedule granularity ADR-038(1)
+already exposes through commit/WAL times; never finer); staged date-only
+events are lost on a crash (≤ one slot); random fields can be ground for a few bits; witness freshness
+(≤ one tick) depends on the witness alarming on missed ticks; LOG-14
+co-occurrence within a slot window; a hand-written diag `Site` can bypass
+the release ceiling (static data only).

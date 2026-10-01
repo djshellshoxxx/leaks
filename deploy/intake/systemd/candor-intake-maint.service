@@ -14,7 +14,10 @@ After=candor-intake-pg.service nftables.service
 Type=oneshot
 ExecStart=/usr/lib/candor/intake-store/candor-intake-maint daily
 # Maintenance login (09 §10 Roles; AUD-RM2-STO-24): OS user candor-imaint, peer-mapped to the DB
-# role candor_intake_maint only (pg_hba/pg_ident). PostgreSQL socket via its group.
+# role candor_intake_maint only (pg_hba/pg_ident). That role OWNS THE TENANT DATABASE (PostgreSQL
+# 16 lets the database owner VACUUM every non-shared table) but no table, and is no member of
+# the schema-owner role: no SET ROLE (lead decision 2026-10-01; config-check pg.maint_role).
+# PostgreSQL socket via its group.
 User=candor-imaint
 Group=candor-imaint
 SupplementaryGroups=candor-istore

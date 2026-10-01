@@ -11,6 +11,8 @@
     clippy::arithmetic_side_effects,
     clippy::missing_panics_doc
 )]
+// Fixtures create and scan their own tempdirs and read procfs directly.
+#![allow(clippy::disallowed_methods)] // safefs-lint: allow(test fixtures on own tempdir/procfs)
 
 use std::os::unix::fs::PermissionsExt; // safefs-lint: allow(test fixture setup)
 use std::path::{Path, PathBuf};
@@ -36,7 +38,7 @@ use candor_sealer::server::directory::{DirectoryTrust, SnapshotBundle};
 mod kdlog;
 use candor_sealer::server::hardening::InsecureDevMode;
 use candor_sealer::server::sink::{
-    AccountUpsert, Blob, EnvelopeGroup, EnvelopeObject, EnvelopeSink, SinkError,
+    AccountUpsert, Blob, EnvelopeGroup, EnvelopeObject, EnvelopeSink, SinkError, StagedBundle,
 };
 use candor_sealer::server::{ChaffConfig, Limits, Sealer, SealerConfig, SnapshotError};
 pub use kdlog::*;
@@ -92,6 +94,8 @@ pub struct MemorySink {
     pub fail: AtomicBool,
     /// Fail only account upserts.
     pub fail_accounts: AtomicBool,
+    /// Sealed bundles as handed over (descriptor kept for hand-over tests).
+    pub bundles: Mutex<Vec<StagedBundle>>,
 }
 
 impl MemorySink {
@@ -101,6 +105,7 @@ impl MemorySink {
             Blob::Staged(b) => {
                 let v = b.read_to_vec().unwrap();
                 assert_eq!(v.len() as u64, b.len());
+                self.bundles.lock().unwrap().push(b.clone());
                 v
             }
         };
@@ -359,6 +364,7 @@ pub fn fixture_custom(
         ops: Mutex::new(Vec::new()),
         fail: AtomicBool::new(false),
         fail_accounts: AtomicBool::new(false),
+        bundles: Mutex::new(Vec::new()),
     });
     // Triage Set: labels 1 (ombudsman), 2 (audit chair), 3 (counsel); label 4 is
     // a non-triage investigator.

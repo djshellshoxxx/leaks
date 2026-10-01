@@ -98,8 +98,18 @@ fn test_only_code_and_static_messages_pass() {
         .arg(&root)
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stdout));
-    assert_eq!(out2.status.code(), Some(0), "{}", String::from_utf8_lossy(&out2.stdout));
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(
+        out2.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out2.stdout)
+    );
     let _ = std::fs::remove_dir_all(root); // safefs-lint: allow(test fixture)
     // ... but the exemptions cannot be abused to hide shipping code.
     for (i, src) in [

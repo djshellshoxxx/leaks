@@ -9,6 +9,8 @@
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects
 )]
+// The hygiene scan walks tempdirs and $TMPDIR with std::fs on purpose.
+#![allow(clippy::disallowed_methods)] // safefs-lint: allow(test scans tempdirs for plaintext)
 
 mod common;
 
@@ -241,6 +243,8 @@ async fn no_plaintext_reaches_disk() {
             assert!(!contains(&o.bytes, phrase.as_bytes()));
         }
     }
+    f.sealer.flush_accounts().unwrap();
+    assert!(!f.sink.accounts().is_empty());
     for a in f.sink.accounts() {
         assert!(!contains(&a.account.prefs_ct, marker.as_bytes()));
     }

@@ -516,7 +516,7 @@ pub(crate) fn seal_initial(
 ) -> Result<(SealedGroup, [u8; 32]), Error> {
     let mailbox_id = keys.mailbox_id(report_index)?;
     let bundle = seal_bundle(ctx, sel, parts, k36)?;
-    let result = (|| {
+    (|| {
         let identity_text = match draft.mode {
             Mode::Anonymous => "",
             _ => draft.identity.unwrap_or(""),
@@ -574,8 +574,7 @@ pub(crate) fn seal_initial(
             identity: envelope_object(&identity, Blob::Inline(identity.bytes.clone()))?,
         };
         Ok((group, sub_hash))
-    })();
-    result
+    })()
 }
 
 
@@ -651,7 +650,7 @@ pub(crate) fn seal_source_message(
     k36: &SessionKey,
 ) -> Result<SealedGroup, Error> {
     let bundle = seal_bundle(ctx, sel, parts, k36)?;
-    let result = (|| {
+    (|| {
         let (identity_list, identity) = seal_identity(ctx, sel.channel_id, "")?;
         let message_nfc = nfc(sm.message);
         let mut sigs = vec![
@@ -705,8 +704,7 @@ pub(crate) fn seal_source_message(
             bundle: bundle.object.clone(),
             identity: envelope_object(&identity, Blob::Inline(identity.bytes.clone()))?,
         })
-    })();
-    result
+    })()
 }
 
 /// Public chaff bundle-size distribution (04 §12.7; provisional values until

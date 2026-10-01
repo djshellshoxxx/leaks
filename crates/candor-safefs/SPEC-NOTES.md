@@ -199,7 +199,7 @@ R5 B-CR-52.
 | SFS-05 (L) best-effort rollback | `finish` returns `ArchiveError::RollbackIncomplete(Vec<ObjectId>)` when any stored member cannot be removed (NotFound counts as removed); callers must remove them or destroy the scratch root. | `archive::tests::incomplete_rollback_is_reported` |
 | SFS-06 (L) per-entry extension cap | The extension-header counter is archive-wide; a second local pax header for one entry is `Malformed`. | `tar_extension_header_cap_is_archive_wide` |
 | SFS-07 (L) writes after failure | Any failed write poisons the `PendingObject`; later writes and `commit` fail. | `store::tests::failed_write_poisons_pending_object` |
-| SFS-08 (I) | `ContentKey` no longer `Clone`. Fuzz seed corpora committed (`fuzz/seeds/`, from small ustar/GNU/pax tars, tar.gz, stored/deflate zips, hostile names): 30 s smoke runs reach cov 1114–1795 on the archive targets (was 160–273). **Deferred (justified):** `O_TMPFILE` + `linkat(AT_EMPTY_PATH)` needs `CAP_DAC_READ_SEARCH` or `/proc` access, which conflicts with the confinement profile — the named temp file plus SFS-03 time restore and `purge_incomplete` stay; the inotify "no inode outside root" test needs a new dependency and is left to the C-17 integration suite; the nightly fuzz CI job is left to the lead (ci.yml was limited to one additive job). | — |
+| SFS-08 (I) | `ContentKey` no longer `Clone`. Fuzz seed corpora committed (`fuzz/seeds/`, from small ustar/GNU/pax tars, tar.gz, stored/deflate zips, hostile names): 30 s smoke runs reach cov 1114–1795 on the archive targets (was 160–273). Deferrals: see "Round 2" below (rationale corrected; inotify test and fuzz CI job definition done). | — |
 | SFS-09 (I) local/central cross-check | Local header method, encryption flag and (without data descriptor) CRC and sizes must equal the central directory; every member range must end before the central directory. | `zip_local_central_field_mismatch_rejected` |
 
 ### Security self-review (this pass)
@@ -210,3 +210,112 @@ root handle and "."), no new allocation driven by input, no new panics
 names/paths (RollbackIncomplete prints a count; its ids are random storage
 ids). Residuals: ctime of the root still records abort time; display-name
 `Cn` code points survive; the grep layer remains a heuristic behind clippy.
+
+## Fixes for AUD-RM1-SFS round 2 (re-test of fc64069)
+
+| Finding | Fix (implementation decisions) | Regression test |
+|---|---|---|
+| SFS-10 (L) concurrent writers restore a real time onto the root | `PendingObject` no longer captures/restores root times. `SafeRoot` keeps the latest slot it normalized the root to (`AtomicU64`, raised with `fetch_max` by every commit / remove / purge / shard creation; before the first one: the root's mtime at open floored to the 15-minute grid). An abandoned write normalizes the root (atime+mtime, fsync) to that slot, so a concurrent writer's real temp-file time is never written back and out-of-order drops cannot move the root backwards (a late commit with an older slot leaves the root at the newer slot). ctime remains the documented residual. | `tests/store.rs::overlapping_pending_objects_leave_root_at_slot_time`, `dropped_pending_object_restores_root_times` |
+| SFS-11 (L) ban gaps | Workspace `clippy.toml` (type-resolved) adds `std::env::temp_dir`, `PathBuf::set_file_name`, `PathBuf::set_extension`, `Path::with_extension`, `std::process::Command::new`, `CommandExt::exec`, `std::panic::panic_any`/`resume_unwind`, and the `tempfile` constructors (`allow-invalid`). `PathBuf::extend` is a trait method that `disallowed-methods` cannot name (verified: "does not refer to a reachable function"), so `lint-safefs.sh` carries it: `.extend(`/`.set_extension(` on path-named receivers, `temp_dir().join/push/extend`, `PathBuf::from_iter/extend`, `env::temp_dir`, `Command::new`, `process::Command`; and `tempfile` is test-only everywhere (also in this crate): any non-`[dev-dependencies]` declaration (plain, table-form, renamed; section-aware awk + `cargo metadata` `kind`) is a violation — non-test code cannot use a dev-dependency, so no source grep is needed. A crate that must spawn a process allow-lists the single site with a reasoned `#[allow(clippy::disallowed_methods, reason = "..")]` and a `// safefs-lint: allow(<reason>)` marker on that line (the per-crate allow-list, CODEOWNERS-reviewed). | `tests/lint.rs::sfs11_temp_dir_extend_spawn_and_tempfile_are_caught`, `workspace_clippy_bans_fire_on_fixture` (runs clippy with `CLIPPY_CONF_DIR` = workspace on a fixture crate) |
+| SFS-12 (I) data-descriptor flag not cross-checked | Central-directory flags are collected while counting central records; local general-purpose flags must **equal** the central flags (bit 3 included). CRC/sizes are compared always: with bit 3 a local value may be 0, any non-zero value must match; local sizes of 0xFFFFFFFF must be backed by a local zip64 extra (id 0x0001, bounded TLV parse) whose values match the central ones. | `tests/archives.rs::zip_local_flag_and_zip64_mismatch_rejected` |
+
+**Deferral assessment follow-up (SFS-08):**
+
+* **`O_TMPFILE` — rationale corrected.** The round-1 note was wrong:
+  `linkat(AT_FDCWD, "/proc/self/fd/N", dirfd, name, AT_SYMLINK_FOLLOW)`
+  needs no capability, only procfs, and a process's own fds stay reachable
+  under `ProtectProc=invisible`; only the `AT_EMPTY_PATH` form needs
+  `CAP_DAC_READ_SEARCH`. It is still deferred, for a different reason: it
+  needs a procfs path walk (or `AT_EMPTY_PATH`) that cap-std does not expose
+  and that would reintroduce raw path handling outside the capability
+  model, and SFS-10 is now fixed without it. Tracked under SL-R-001;
+  revisit before RM-2 intake goes live (it would also remove the temp-name
+  `ctime`/inode churn on the root).
+* **inotify "no inode outside root" test — done**:
+  `tests/store.rs::no_inode_activity_outside_root_inotify` watches the
+  directory holding the root and the canary directory next to it
+  (`rustix::fs::inotify`, already a dependency, no `unsafe`) for
+  create/delete/move/modify/close-write while the store commits, dedups,
+  abandons, removes, purges and the extractor processes a traversal archive
+  aimed at the canary; any event fails the test (verified to fail when a
+  file is written to the canary directory).
+* **Nightly fuzz CI job** — `.github/workflows/` is outside this
+  assignment's paths, so the job is specified here for the lead to add to
+  `ci.yml` (scheduled/dispatch only; seeds are read-only inputs: libFuzzer
+  writes only to the first corpus directory, a runner-temp scratch dir, and
+  a final step fails if any `fuzz/seeds/` file changed):
+
+```yaml
+  fuzz-nightly:
+    # ST-048/049/051, AUD-RM1-LOG-10 / SFS-08: seeded cargo-fuzz runs of
+    # every candor-safefs and candor-log target. Never on PR code.
+    name: fuzz (nightly, ${{ matrix.crate }}/${{ matrix.target }})
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { crate: candor-safefs, target: fuzz_safefs_names }
+          - { crate: candor-safefs, target: fuzz_archive_zip }
+          - { crate: candor-safefs, target: fuzz_archive_tar }
+          - { crate: candor-safefs, target: fuzz_archive_tar_gz }
+          - { crate: candor-log, target: fuzz_cbor_decode }
+          - { crate: candor-log, target: fuzz_checkpoint_parse }
+          - { crate: candor-log, target: fuzz_jsonl_read_verify }
+          - { crate: candor-log, target: fuzz_audit_log_verify }
+    env:
+      FUZZ_TOOLCHAIN: nightly-2026-09-28
+      CRATE: ${{ matrix.crate }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned nightly (fuzz only)
+        run: |
+          set -euo pipefail
+          rustup set auto-self-update disable || true
+          rustup toolchain install "$FUZZ_TOOLCHAIN" --profile minimal --no-self-update
+      - name: Install cargo-fuzz
+        run: cargo +"$FUZZ_TOOLCHAIN" install cargo-fuzz --locked --version =0.13.1
+      - name: Fuzz (seeds read-only, scratch corpus)
+        working-directory: crates/${{ matrix.crate }}
+        run: |
+          set -euo pipefail
+          corpus="$RUNNER_TEMP/corpus/$TARGET"
+          mkdir -p "$corpus"
+          cargo +"$FUZZ_TOOLCHAIN" fuzz run "$TARGET" "$corpus" "fuzz/seeds/$TARGET" -- \
+            -max_total_time=1200 -rss_limit_mb=2048 -timeout=10 -print_final_stats=1
+      - name: Seeds unchanged
+        run: |
+          git diff --exit-code -- crates/*/fuzz/seeds
+          test -z "$(git status --porcelain -- crates/*/fuzz/seeds)"
+      - name: Keep crash reproducer
+        if: failure()
+        uses: actions/upload-artifact@<pin full SHA per 28 §7> # v4.x
+        with:
+          name: fuzz-${{ matrix.crate }}-${{ matrix.target }}
+          path: crates/${{ matrix.crate }}/fuzz/artifacts/
+          retention-days: 14
+```
+
+  (Add `actions/upload-artifact` pinned by SHA, or drop that step if no new
+  external action is wanted; a crash still fails the job.)
+
+### Security self-review (round 2)
+
+Re-read as an attacker: the root-time normalization only ever writes a
+slot-grid value (never a captured or real time), uses the root handle and
+`"."` (no new path composition), and is monotone; the zip local-header
+checks add only bounded reads (extra field ≤ 65 535 bytes, TLV parse with
+checked offsets, no indexing panics) and fail the whole archive closed; the
+lint additions only add violations (no new exemption), the cfg-free
+`tempfile` rule applies to this crate too, and the clippy-fixture test runs
+offline in a temp dir. Residuals: root ctime and temp-name inode churn
+(O_TMPFILE deferred, SL-R-001); `Cn` code points in display names; the grep
+layer remains a heuristic behind clippy (e.g. `PathBuf::extend` on a
+receiver not named like a path).

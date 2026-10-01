@@ -1338,7 +1338,7 @@ impl<'c> State<'c> {
             // An objected loosening entry (or anything under an objected
             // orphan CIK) never activates (§14.4 rules 7–8).
             .filter(|r| {
-                !(r.loosening && self.blocked(&r.entry_hash)) && !orphan_blocked(&r.orphan_cik)
+                !(orphan_blocked(&r.orphan_cik) || r.loosening && self.blocked(&r.entry_hash))
             })
             .map(|r| RosterVersion {
                 entry_hash: r.entry_hash,
@@ -1367,7 +1367,7 @@ impl<'c> State<'c> {
             .coi
             .iter()
             .filter(|c| {
-                !(c.loosening && self.blocked(&c.entry_hash)) && !orphan_blocked(&c.orphan_cik)
+                !(orphan_blocked(&c.orphan_cik) || c.loosening && self.blocked(&c.entry_hash))
             })
             .map(|c| CoiPolicy {
                 entry_hash: c.entry_hash,

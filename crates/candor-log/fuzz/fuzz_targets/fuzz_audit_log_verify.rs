@@ -7,13 +7,17 @@
 
 use std::sync::OnceLock;
 
-use candor_log::chain::{ChainRecord, ClockReading, AuditClock};
+use candor_log::chain::{AuditClock, ChainRecord, ClockReading};
 use candor_log::codes::{HostRole, Service, StreamId};
-use candor_log::disposal::{ApproverKeys, DisposalApprover, DisposalAuthorization, SoftwareApprover};
+use candor_log::disposal::{
+    ApproverKeys, DisposalApprover, DisposalAuthorization, SoftwareApprover,
+};
 use candor_log::ids::{CaseRef, ChannelId, TenantRef, UtcMillis};
 use candor_log::sink::MemorySink;
 use candor_log::verify::{VerifyParams, verify_stream};
-use candor_log::{AuditEvent, AuditLog, CheckpointPolicy, EventContext, SignedCheckpoint, SoftwareSigner};
+use candor_log::{
+    AuditEvent, AuditLog, CheckpointPolicy, EventContext, SignedCheckpoint, SoftwareSigner,
+};
 use libfuzzer_sys::fuzz_target;
 use zeroize::Zeroizing;
 
@@ -24,13 +28,19 @@ mod det;
 struct Clock(std::rc::Rc<std::cell::Cell<u64>>);
 impl AuditClock for Clock {
     fn read(&self) -> ClockReading {
-        ClockReading { now: UtcMillis(self.0.get()), drift_exceeded: false }
+        ClockReading {
+            now: UtcMillis(self.0.get()),
+            drift_exceeded: false,
+        }
     }
 }
 
 struct Keys;
 impl candor_log::chain::CaseKeyStore for Keys {
-    fn commit_key(&mut self, c: CaseRef) -> Result<candor_log::chain::CaseCommitKey, candor_log::chain::KeyUnavailable> {
+    fn commit_key(
+        &mut self,
+        c: CaseRef,
+    ) -> Result<candor_log::chain::CaseCommitKey, candor_log::chain::KeyUnavailable> {
         let mut k = [9u8; 32];
         k[..16].copy_from_slice(c.as_bytes());
         Ok(candor_log::chain::CaseCommitKey::new(k))
@@ -58,7 +68,13 @@ fn fixture() -> &'static Fixture {
         );
         let approvers =
             ApproverKeys::new(vec![a.verifying_key(), b.verifying_key()], &key).expect("keys");
-        let mut log = AuditLog::new(tenant, HostRole::Core, signer, clock.clone(), CheckpointPolicy::DEFAULT);
+        let mut log = AuditLog::new(
+            tenant,
+            HostRole::Core,
+            signer,
+            clock.clone(),
+            CheckpointPolicy::DEFAULT,
+        );
         let sink = MemorySink::new();
         log.set_primary_sink(Box::new(sink.clone()));
         log.set_case_keys(Box::new(Keys));
@@ -66,7 +82,8 @@ fn fixture() -> &'static Fixture {
         let user = det::user(b'u');
         for i in 0..12u8 {
             let case = det::case(i % 3);
-            log.emit(EventContext::staff(user), AuditEvent::CaseOpened { case }).expect("emit");
+            log.emit(EventContext::staff(user), AuditEvent::CaseOpened { case })
+                .expect("emit");
             log.emit(
                 EventContext::system(Service::Relay),
                 AuditEvent::CaseImported {
@@ -81,7 +98,11 @@ fn fixture() -> &'static Fixture {
         // Flush the import slot (6 h), dispose case 1 in both streams.
         clock.0.set(clock.0.get() + 6 * 3_600_000);
         log.tick().expect("tick");
-        let plan = sink.0.lock().expect("lock").plan_case_redaction(det::case(1));
+        let plan = sink
+            .0
+            .lock()
+            .expect("lock")
+            .plan_case_redaction(det::case(1));
         let req = plan.request(tenant, det::receipt(b'r')).expect("request");
         let auth = DisposalAuthorization::new(
             req.clone(),
@@ -90,11 +111,16 @@ fn fixture() -> &'static Fixture {
             &approvers,
         )
         .expect("auth");
-        log.emit_case_disposal(EventContext::staff(user), &plan, &auth).expect("dispose");
+        log.emit_case_disposal(EventContext::staff(user), &plan, &auth)
+            .expect("dispose");
         clock.0.set(clock.0.get() + 6 * 3_600_000);
         log.tick().expect("tick");
         for s in [StreamId::Case, StreamId::CaseSlot] {
-            sink.0.lock().expect("lock").apply_case_redaction(&plan, s).expect("redact");
+            sink.0
+                .lock()
+                .expect("lock")
+                .apply_case_redaction(&plan, s)
+                .expect("redact");
         }
         clock.0.set(clock.0.get() + 86_400_000);
         log.tick().expect("tick");
@@ -119,7 +145,8 @@ fuzz_target!(|data: &[u8]| {
     let witness = cps.last().cloned();
     let mut changed = false;
     for op in data.chunks(4) {
-        let [kind, a, b, c] = [op.first(), op.get(1), op.get(2), op.get(3)].map(|x| x.copied().unwrap_or(0));
+        let [kind, a, b, c] =
+            [op.first(), op.get(1), op.get(2), op.get(3)].map(|x| x.copied().unwrap_or(0));
         let n = recs.len().max(1);
         let i = usize::from(a) % n;
         match kind % 6 {
@@ -150,7 +177,12 @@ fuzz_target!(|data: &[u8]| {
                     let inner = candor_log::chain::record_inner(salt, bytes);
                     let seq = i as u64;
                     let case: CaseRef = det::case(c % 4);
-                    recs[i] = ChainRecord::Redacted { seq, case, inner, tombstone_seq: u64::from(b) };
+                    recs[i] = ChainRecord::Redacted {
+                        seq,
+                        case,
+                        inner,
+                        tombstone_seq: u64::from(b),
+                    };
                     changed = true;
                 }
             }

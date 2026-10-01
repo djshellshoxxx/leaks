@@ -10,6 +10,8 @@
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects
 )]
+// Landlock probes and fixture setup use std::fs/std::net directly.
+#![allow(clippy::disallowed_methods)] // safefs-lint: allow(test probes Landlock)
 
 mod common;
 
@@ -20,19 +22,6 @@ use candor_sealer::server::hardening::{
 };
 use candor_sealer::server::{ChaffConfig, Limits, Sealer};
 use common::*;
-
-/// Threads of this process (procfs; only read while unconfined).
-#[allow(
-    clippy::disallowed_methods,
-    reason = "test reads procfs before Landlock applies; not sealer code"
-)]
-fn threads() -> u32 {
-    let s = std::fs::read_to_string("/proc/self/status").unwrap(); // safefs-lint: allow(test reads procfs)
-    s.lines()
-        .find_map(|l| l.strip_prefix("Threads:"))
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap()
-}
 
 /// A production-configured sealer (no developer override, chaff on).
 fn production_sealer(f: &Fixture, peer_uid: u32) -> Sealer {
@@ -72,10 +61,6 @@ fn main() {
     hardening_is_applied_and_enforced_before_serving();
 }
 
-#[allow(
-    clippy::disallowed_methods,
-    reason = "test fixture setup and Landlock probes use std::fs/std::net directly"
-)]
 fn hardening_is_applied_and_enforced_before_serving() {
     let f = fixture();
     let sock_dir = tempfile::tempdir().unwrap();
@@ -121,33 +106,39 @@ fn hardening_is_applied_and_enforced_before_serving() {
     rt.shutdown_timeout(std::time::Duration::from_secs(5));
 
     // 2. AUD-RM2-SEA-20 PoC: hardening on a helper thread is refused and
-    //    records nothing (the main thread would stay unconfined).
+    //    records nothing (the main thread would stay unconfined); so is
+    //    hardening from inside a runtime.
     let staging = f.staging_path.clone();
     let st = staging.clone();
     let helper = std::thread::spawn(move || harden_process(&st, LandlockLevel::Required));
     assert_eq!(helper.join().unwrap(), Err(HardeningError::NotMainThread));
-    assert!(report().is_none());
-    assert_eq!(self_check().unwrap_err(), HardeningError::NotApplied);
-    // On the main thread while another thread exists: refused too.
-    let (tx, rx) = std::sync::mpsc::channel::<()>();
-    let other = std::thread::spawn(move || rx.recv().ok());
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let st = staging.clone();
     assert_eq!(
-        harden_process(&staging, LandlockLevel::Required),
+        rt.block_on(async move { harden_process(&st, LandlockLevel::Required) }),
         Err(HardeningError::NotMainThread)
     );
-    tx.send(()).unwrap();
-    other.join().unwrap();
+    drop(rt);
     assert!(report().is_none());
+    assert_eq!(self_check().unwrap_err(), HardeningError::NotApplied);
 
-    // 3. Harden on the main thread while it is the only thread. Any failure
-    //    fails the test (CI must be able to run the sealer hardened).
-    for _ in 0..100 {
-        if threads() == 1 {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    assert_eq!(threads(), 1, "test process must be single-threaded here");
+    // Threads that exist before hardening stay outside the Landlock domain:
+    // a plain thread and the workers of a runtime built too early.
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let early = std::thread::spawn(move || {
+        rx.recv().unwrap();
+        thread_confined()
+    });
+    let early_rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    // 3. Harden on the main thread, outside any runtime. Any failure fails
+    //    the test (CI must be able to run the sealer hardened).
     assert_eq!(
         harden_process(&staging, LandlockLevel::Required),
         Ok(true),
@@ -173,7 +164,24 @@ fn hardening_is_applied_and_enforced_before_serving() {
         rustix::process::DumpableBehavior::NotDumpable
     );
 
-    // 4. Runtime workers (created after hardening) are confined, and the
+    // The per-thread probe sees the early threads as unconfined, and a
+    // production sealer served from the early runtime refuses to serve
+    // although the process-wide record says "hardened" (the auditor's PoC).
+    tx.send(()).unwrap();
+    assert!(!early.join().unwrap(), "pre-hardening thread must probe unconfined");
+    let prod = production_sealer(&f, 54_321);
+    let r = early_rt.block_on(async move {
+        tokio::spawn(async move { serve_result(&prod, ld).await })
+            .await
+            .unwrap()
+    });
+    assert_eq!(
+        r.expect("serve must return at once").unwrap_err().kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+    early_rt.shutdown_background();
+
+    // 4. Runtime workers created after hardening are confined, and the
     //    self-check passes from inside a worker.
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -183,9 +191,7 @@ fn hardening_is_applied_and_enforced_before_serving() {
     let per_worker = rt.block_on(async {
         let mut v = Vec::new();
         for _ in 0..16 {
-            v.push(tokio::spawn(async {
-                (thread_confined(), self_check().is_ok())
-            }));
+            v.push(tokio::spawn(async { (thread_confined(), self_check().is_ok()) }));
         }
         let mut out = Vec::new();
         for h in v {
@@ -213,7 +219,6 @@ fn hardening_is_applied_and_enforced_before_serving() {
     // 6. Hardened and a distinct peer UID: the sealer serves (does not return).
     let s = production_sealer(&f, 54_321);
     assert!(rt.block_on(serve_result(&s, lc)).is_none());
-    drop(ld);
 }
 
 /// The developer override can only be obtained by writing a typed audit event;

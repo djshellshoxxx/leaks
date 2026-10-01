@@ -31,3 +31,12 @@ path = "fuzz_targets/fuzz_sealer_ipc.rs"
 test = false
 doc = false
 bench = false
+
+# Writes the seed corpus to fuzz/seeds/fuzz_sealer_ipc/ (AUD-RM2-SEA-23):
+#   cargo +nightly run --bin gen_seeds
+[[bin]]
+name = "gen_seeds"
+path = "fuzz_targets/gen_seeds.rs"
+test = false
+doc = false
+bench = false

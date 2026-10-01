@@ -77,7 +77,7 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd -P)
 BASE="$SCRIPT_DIR/config-check.baseline"
 MANIFEST="$SCRIPT_DIR/config-check.manifest"
 # sha256 of config-check.manifest (release-pinned; update together with the manifest).
-MANIFEST_SHA256=d0bdb180c9ea9d1884ee22d5ddbacd0d2c1a499a04dbfda9ae9f4ebed3549090
+MANIFEST_SHA256=3b9001db8699b313d504761fc1dba55599cd4b913a0b41a66e62de814eecb608
 SECTIONS="tor nft pg units journald kernel dns apparmor host"
 MODE=static
 DIR="$SCRIPT_DIR/../intake"
@@ -615,7 +615,7 @@ check_pg() {
       fail pg.stats_in_ram "/run/candor/intake-pg-stat is not a tmpfs directory"
     else ok pg.stats_in_ram "pg_stat -> /run/candor/intake-pg-stat"; fi
   else fail pg.stats_in_ram "data_directory/pg_stat must be a symlink to /run/candor/intake-pg-stat (stats file would persist on disk)"; fi
-  if snap_opt pg.auto_conf_empty "$ROOT$dd/postgresql.auto.conf" pg.auto.conf; then
+  if snap_opt pg.auto_conf_empty "$ROOT$dd/postgresql.auto.conf" pg.auto.conf "$(stat -c %u -- "$ROOT$dd")"; then
     if [ -n "$(pg_norm "$SNAP")" ]; then fail pg.auto_conf_empty "postgresql.auto.conf contains settings (ALTER SYSTEM)"; else ok pg.auto_conf_empty; fi
   fi
   [ -x "$pgbin" ] || { fail pg.effective "PostgreSQL 16 server binary missing"; return; }
@@ -630,6 +630,46 @@ check_pg() {
     if ! v=$(run_as "$owner" "$pgbin" -C "$g" -c "config_file=$PGCONF" "${extra[@]}" 2>/dev/null); then fail "pg.effective.$g" "postgres -C failed"; continue; fi
     if [ "$v" = "$w" ]; then ok "pg.effective.$g" "'$w'"; else fail "pg.effective.$g" "expected '$w', effective value differs"; fi
   done < <(base pgc)
+  pg_maint_role "$norm"
+}
+# Maintenance role (lead decision 2026-10-01; replaces D-34's SET ROLE design): VACUUM and
+# VACUUM FULL run as candor_intake_maint, the OWNER OF THE DATABASE (PostgreSQL 16 lets the
+# database owner vacuum every non-shared table). The role must own no table, schema, function
+# or type, must not be a member of any role except pg_checkpoint (granted INHERIT TRUE, SET
+# FALSE, no ADMIN) - in particular never of the schema owner candor_intake_migrator - must have
+# no member, and no SUPERUSER/CREATEROLE/CREATEDB/REPLICATION/BYPASSRLS, NOINHERIT.
+# Asked through the running server, connected exactly as the maintenance jobs connect
+# (OS user candor-imaint with the socket group, peer map "maint"); catalog reads only.
+pg_maint_role() { # normalised-conf
+  local sockdir sock out ug sg psql=/usr/lib/postgresql/16/bin/psql
+  sockdir=$(printf '%s\n' "$1" | awk -F'\t' '$1=="unix_socket_directories" {print $2}')
+  case "$sockdir" in /*) ;; *) fail pg.maint_role "unix_socket_directories is not one absolute path"; return ;; esac
+  sock="$ROOT$sockdir/.s.PGSQL.5432"
+  if [ -z "$PGDB" ]; then
+    if [ -S "$sock" ]; then fail pg.maint_role "the server is running: pass --pg-db <tenant database> so the maintenance role is checked"
+    else skip pg.maint_role "server not running and no --pg-db: role memberships not checked"; fi
+    return
+  fi
+  [ -S "$sock" ] || { fail pg.maint_role "--pg-db given but no server socket in the configured directory"; return; }
+  [ -x "$psql" ] || psql=$(command -v psql) || { fail pg.maint_role "psql missing"; return; }
+  if ! { ug=$(id -g candor-imaint 2>/dev/null) && sg=$(getent group candor-istore | cut -d: -f3) && [ -n "$sg" ]; }; then fail pg.maint_role "users candor-imaint/candor-istore missing"; return; fi
+  out=$(timeout 30 env -i PATH=/usr/bin:/bin setpriv --reuid=candor-imaint --regid="$ug" --groups="$sg" --no-new-privs -- \
+        "$psql" -X -w -q -A -t -F '|' -h "$ROOT$sockdir" -U candor_intake_maint -d "$PGDB" -c "SELECT
+      (SELECT coalesce(string_agg(pg_catalog.pg_get_userbyid(m.roleid) || ':' || m.admin_option::text || ':' || m.inherit_option::text || ':' || m.set_option::text, ' ' ORDER BY 1), '') FROM pg_catalog.pg_auth_members m WHERE m.member = r.oid),
+      (SELECT count(*) FROM pg_catalog.pg_auth_members m WHERE m.roleid = r.oid),
+      (r.rolsuper OR r.rolcreaterole OR r.rolcreatedb OR r.rolreplication OR r.rolbypassrls OR r.rolinherit)::text,
+      (SELECT pg_catalog.pg_get_userbyid(d.datdba) FROM pg_catalog.pg_database d WHERE d.datname = pg_catalog.current_database()),
+      (SELECT count(*) FROM pg_catalog.pg_class WHERE relowner = r.oid) + (SELECT count(*) FROM pg_catalog.pg_namespace WHERE nspowner = r.oid)
+        + (SELECT count(*) FROM pg_catalog.pg_proc WHERE proowner = r.oid) + (SELECT count(*) FROM pg_catalog.pg_type WHERE typowner = r.oid)
+      FROM pg_catalog.pg_roles r WHERE r.rolname = current_user" </dev/null 2>/dev/null) || { fail pg.maint_role "cannot connect as candor_intake_maint (peer map maint) to --pg-db"; return; }
+  local mem nmem attr dba own
+  IFS='|' read -r mem nmem attr dba own <<< "$out"
+  case "$mem" in ""|"pg_checkpoint:false:true:false") ok pg.maint_role.memberships "member of pg_checkpoint only (no schema owner, no SET)" ;;
+    *) fail pg.maint_role.memberships "candor_intake_maint is a member of another role (e.g. the schema owner), or with ADMIN/SET: $(printf '%s' "$mem" | tr ' ' '\n' | cut -d: -f1 | san_names)" ;; esac
+  if [ "$nmem" = 0 ]; then ok pg.maint_role.no_members; else fail pg.maint_role.no_members "$nmem role(s) are members of candor_intake_maint"; fi
+  if [ "$attr" = false ]; then ok pg.maint_role.attributes "NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS NOINHERIT"; else fail pg.maint_role.attributes "privileged attribute or INHERIT set"; fi
+  if [ "$dba" = candor_intake_maint ]; then ok pg.maint_role.db_owner "owns the tenant database"; else fail pg.maint_role.db_owner "tenant database is not owned by candor_intake_maint"; fi
+  if [ "$own" = 0 ]; then ok pg.maint_role.owns_no_objects; else fail pg.maint_role.owns_no_objects "owns $own table/schema/function/type object(s) in the tenant database"; fi
 }
 pg_exact() { # rule kind text: normalised lines must equal the baseline's <kind>| lines, in order
   local n
@@ -1157,6 +1197,38 @@ aa_classes() { # profile normalised-file inet-allowed(0|1) caps-allowed(space li
         if (c in bad) { d=bad[c]; gsub(/[^A-Za-z0-9_ ]/, "?", d); printf "FAIL\tapparmor.%s.%s\t%s at statement(s)/name(s):%s\n", p, c, c, substr(d, 1, 200) }
         else printf "OK\tapparmor.%s.%s\tnone\n", p, c } }' "$2"
 }
+aa_dist_conffiles() {
+  # Distribution AppArmor files (AUD-RM2-DEP-23): every conffile of the installed apparmor
+  # package under abi/, abstractions/ and tunables/ that is present must still have the
+  # digest dpkg recorded at installation (what `dpkg --verify apparmor` reports). Candor
+  # profiles include none of them; a rewritten abstraction still means the host's other
+  # policy is no longer the distribution's, and the ST-120 gate fails closed on it.
+  local MAXIN=67108864 st i n=0 bad=0 path
+  snap apparmor.dist_conffiles "$ROOT/var/lib/dpkg/status" dpkg.status || return
+  st=$SNAP
+  awk 'BEGIN { RS=""; FS="\n" }
+    { pkg=""; s=""; for (i=1; i<=NF; i++) { if ($i ~ /^Package: /) pkg=substr($i, 10); if ($i ~ /^Status: /) s=substr($i, 9) }
+      if (pkg != "apparmor" || s != "install ok installed") next
+      c=0
+      for (i=1; i<=NF; i++) {
+        if ($i ~ /^Conffiles:/) { c=1; continue }
+        if (c && $i ~ /^ /) { split(substr($i, 2), a, " ")
+          if (a[1] ~ /^\/etc\/apparmor\.d\/(abi|abstractions|tunables)\/[A-Za-z0-9._\/-]+$/ && a[2] ~ /^[0-9a-f]{32}$/ && a[3] != "obsolete") print a[1] " " a[2] }
+        else c=0 } }' "$st" > "$WORK/aa.conff"
+  if [ ! -s "$WORK/aa.conff" ]; then fail apparmor.dist_conffiles "no installed apparmor package with conffiles in the dpkg status"; return; fi
+  local -a paths=() sums=() got=()
+  while read -r path i; do
+    if [ -e "$ROOT$path" ] || [ -L "$ROOT$path" ]; then paths+=("$ROOT$path"); sums+=("$i"); fi
+  done < "$WORK/aa.conff"
+  [ "${#paths[@]}" -gt 0 ] || { fail apparmor.dist_conffiles "none of the apparmor conffiles is present"; return; }
+  mapfile -t got < <(timeout -k 2 60 "$PY" -I -S -B "$SAFE_READ" --md5 "$MAXIN" "$OWNERS" "$DENYMODE" "${paths[@]}" </dev/null 2>/dev/null)
+  for i in "${!paths[@]}"; do
+    n=$((n + 1))
+    [ "${got[$i]:-ERR}" = "OK ${sums[$i]}" ] || bad=$((bad + 1))
+  done
+  if [ "$bad" -gt 0 ]; then fail apparmor.dist_conffiles "$bad of $n apparmor conffile(s) under abi/, abstractions/, tunables/ differ from the dpkg digest, or are unsafe (symlink, owner, mode)"
+  else ok apparmor.dist_conffiles "$n apparmor conffile(s) under abi/, abstractions/, tunables/ equal the dpkg digests"; fi
+}
 check_apparmor() {
   local p f n want got l
   for p in $AA_PROFILES; do
@@ -1176,21 +1248,60 @@ check_apparmor() {
   [ "$MODE" = host ] || return
   # Not disabled or forced to complain mode by the distribution's mechanisms, and no other file
   # in /etc/apparmor.d defines or attaches a profile under a Candor name or binary.
+  local AAD="$ROOT/etc/apparmor.d"
   for p in $AA_PROFILES; do
-    if [ -e "$ROOT/etc/apparmor.d/disable/$p" ] || [ -L "$ROOT/etc/apparmor.d/disable/$p" ] ||
-       [ -e "$ROOT/etc/apparmor.d/force-complain/$p" ] || [ -L "$ROOT/etc/apparmor.d/force-complain/$p" ]; then
+    if [ -e "$AAD/disable/$p" ] || [ -L "$AAD/disable/$p" ] ||
+       [ -e "$AAD/force-complain/$p" ] || [ -L "$AAD/force-complain/$p" ]; then
       fail "apparmor.$p.not_disabled" "disable/ or force-complain/ entry present"
     else ok "apparmor.$p.not_disabled"; fi
   done
-  if [ -d "$ROOT/etc/apparmor.d" ] && ! l=$(symlinked_component "$INPREFIX" "$ROOT/etc/apparmor.d"); then
-    n=$(grep -rlIE --exclude-dir=disable --exclude-dir=force-complain 'candor-(tor-intake|web|sealer|intake-store|intake-pg|intake-maint)([^A-Za-z0-9_-]|$)|/usr/lib/candor/' "$ROOT/etc/apparmor.d" 2>/dev/null |
-        grep -cvxE "$(printf '%s' "$ROOT/etc/apparmor.d/" | sed 's/[][\.*^$]/\\&/g')($(printf '%s' "$AA_PROFILES" | tr ' ' '|'))")
+  if [ -d "$AAD" ] && ! l=$(symlinked_component "$INPREFIX" "$AAD"); then
+    n=$(grep -rlIE --exclude-dir=disable --exclude-dir=force-complain 'candor-(tor-intake|web|sealer|intake-store|intake-pg|intake-maint)([^A-Za-z0-9_-]|$)|/usr/lib/candor/' "$AAD" 2>/dev/null |
+        grep -cvxE "$(printf '%s' "$AAD/" | sed 's/[][\.*^$]/\\&/g')($(printf '%s' "$AA_PROFILES" | tr ' ' '|'))")
     if [ "$n" -gt 0 ]; then fail apparmor.no_foreign_profiles "$n other file(s) in /etc/apparmor.d name a Candor profile or binary"; else ok apparmor.no_foreign_profiles; fi
-  else fail apparmor.no_foreign_profiles "/etc/apparmor.d missing or behind a symlink"; fi
+  else fail apparmor.no_foreign_profiles "/etc/apparmor.d missing or behind a symlink"; return; fi
+  # AUD-RM2-DEP-23: the snippet directories the distribution's base abstraction and global
+  # tunables pull in ("include if exists <abstractions/base.d>", "<tunables/global.d>") and the
+  # local/ overrides must be empty. Candor profiles include none of them; this keeps the host's
+  # other policy free of silent widening too (local/ may hold the empty placeholder files
+  # packages create, and a README).
+  n=0
+  for l in "$AAD/abstractions/base.d" "$AAD/tunables/global.d"; do
+    if [ -L "$l" ] || { [ -e "$l" ] && [ ! -d "$l" ]; } || [ -n "$(find "$l" -mindepth 1 -print -quit 2>/dev/null)" ]; then n=$((n + 1)); fi
+  done
+  if [ -L "$AAD/local" ]; then n=$((n + 1)); else n=$((n + $(find "$AAD/local" -mindepth 1 \( ! -type f -o -size +0c \) ! \( -type f -name README \) 2>/dev/null | wc -l))); fi
+  if [ "$n" -gt 0 ]; then fail apparmor.snippet_dirs_empty "$n non-empty snippet location(s): abstractions/base.d, tunables/global.d, local/"
+  else ok apparmor.snippet_dirs_empty "abstractions/base.d, tunables/global.d empty; local/ only empty files"; fi
+  aa_dist_conffiles
+  # The only distribution file the profiles reference is the ABI: pinned digest, and the
+  # isolated compile below uses this verified copy.
+  local abi aab="$WORK/aabase" sysconf rc
+  abi=$(awk -F'|' '$1=="aa-abi" && $2=="3.0" {print $3}' "$BASE")
+  mkdir -p "$aab/abi" && : > "$aab/parser.conf"
+  if snap apparmor.abi "$AAD/abi/3.0" aa.abi; then
+    if [ -n "$abi" ] && [ "$(sha256sum < "$SNAP" | cut -c1-64)" = "$abi" ]; then ok apparmor.abi "abi/3.0 equals the pinned digest"; cp -- "$SNAP" "$aab/abi/3.0"
+    else fail apparmor.abi "abi/3.0 differs from the pinned digest (re-pin only with the Platform-Manifest apparmor package)"; fi
+  fi
+  have apparmor_parser || { fail apparmor.compiled "apparmor_parser missing"; return; }
+  # Parser configuration the system would use (--root: the root's, read from a safe copy).
+  if [ "$LIVE" -eq 1 ]; then sysconf=/etc/apparmor/parser.conf; [ -e "$sysconf" ] || sysconf="$aab/parser.conf"
+  elif snap_opt apparmor.parser_conf "$ROOT/etc/apparmor/parser.conf" aa.parser.conf; then sysconf=$SNAP
+  else return; fi
+  # Isolated compile of the release statements (aa| lines) vs. the installed file compiled the
+  # way the host would compile it (its /etc/apparmor.d as --base, its parser.conf).
+  for p in $AA_PROFILES; do
+    if [ ! -s "$WORK/aa.$p.want" ] || [ ! -f "$WORK/in/aa.$p" ]; then fail "apparmor.$p.compiled" "profile not checked"; continue; fi
+    if [ ! -f "$aab/abi/3.0" ]; then fail "apparmor.$p.compiled" "no verified abi file"; continue; fi
+    timeout 60 apparmor_parser --config-file="$aab/parser.conf" --base "$aab" -QTK -S "$WORK/aa.$p.want" > "$WORK/aa.$p.iso" 2>/dev/null; rc=$?
+    if [ "$rc" -ne 0 ] || [ ! -s "$WORK/aa.$p.iso" ]; then fail "apparmor.$p.compiled" "release profile does not compile in isolation"; continue; fi
+    if timeout 60 apparmor_parser --config-file="$sysconf" --base "$AAD" -QTK -S "$WORK/in/aa.$p" > "$WORK/aa.$p.sys" 2>/dev/null &&
+       cmp -s "$WORK/aa.$p.iso" "$WORK/aa.$p.sys"; then ok "apparmor.$p.compiled" "host compile equals the isolated compile of the release profile"
+    else fail "apparmor.$p.compiled" "host compile differs from the isolated compile of the release profile (system files change it)"; fi
+  done
   [ "$LIVE" -eq 1 ] || { skip apparmor.live "offline root: load state not checked"; return; }
-  # Live: enforce mode, and the loaded policy is the compiled checked file (a weakened
-  # parser cache or a manual `apparmor_parser -r` of another file shows up here).
-  have apparmor_parser || { fail apparmor.live "apparmor_parser missing"; return; }
+  # Live: enforce mode, and the loaded policy is the isolated compile of the release profile (a
+  # weakened parser cache, a tampered tree at load time or a manual `apparmor_parser -r` of
+  # another file shows up here).
   local d raw
   for p in $AA_PROFILES; do
     if grep -qx "$p (enforce)" /sys/kernel/security/apparmor/profiles 2>/dev/null; then ok "apparmor.$p.enforce" enforce; else fail "apparmor.$p.enforce" "profile not loaded in enforce mode"; fi
@@ -1199,8 +1310,8 @@ check_apparmor() {
       [ "$(cat "$d/name" 2>/dev/null)" = "$p" ] && raw="$d/raw_data" && break
     done
     if [ -z "$raw" ] || [ ! -r "$raw" ]; then fail "apparmor.$p.loaded_policy" "loaded raw policy not readable (kernel must export it)"; continue; fi
-    if [ "$(apparmor_parser -QTK -S "$WORK/in/aa.$p" 2>/dev/null | sha256sum | cut -c1-64)" = "$(sha256sum < "$raw" | cut -c1-64)" ]; then ok "apparmor.$p.loaded_policy" "loaded policy equals the checked file"
-    else fail "apparmor.$p.loaded_policy" "loaded policy differs from the compiled profile file"; fi
+    if [ -s "$WORK/aa.$p.iso" ] && [ "$(sha256sum < "$WORK/aa.$p.iso" | cut -c1-64)" = "$(sha256sum < "$raw" | cut -c1-64)" ]; then ok "apparmor.$p.loaded_policy" "loaded policy equals the isolated compile of the release profile"
+    else fail "apparmor.$p.loaded_policy" "loaded policy differs from the isolated compile of the release profile"; fi
   done
 }
 

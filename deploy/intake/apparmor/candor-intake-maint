@@ -29,7 +29,8 @@ profile candor-intake-maint /usr/lib/candor/intake-store/candor-intake-maint {
   /run/candor/config/ r,
   /run/candor/config/** r,
 
-  # PostgreSQL client over the Unix socket only (peer authentication as candor_intake_maint).
+  # PostgreSQL client over the Unix socket only (peer authentication as candor_intake_maint,
+  # the database owner; no SET ROLE).
   network unix stream,
   unix (create, connect, receive, send, getattr, getopt, setopt, shutdown) type=stream,
   /run/candor/intake-pg/.s.PGSQL.5432 rw,

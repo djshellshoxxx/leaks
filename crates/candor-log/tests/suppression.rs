@@ -527,10 +527,7 @@ fn group_with_one_folded_channel_absorbs_another() {
     let lone = ClosedMonth::from_counts(
         m(2026, 9),
         [(
-            (
-                ChannelId::generate().unwrap(),
-                IntakeCounter::Submissions,
-            ),
+            (ChannelId::generate().unwrap(), IntakeCounter::Submissions),
             50,
         )],
     );

@@ -29,6 +29,9 @@
 #   aa|<profile>|<statement>    AppArmor profile, normalised the same way, exact and in order
 #   aa-inet|<profile>           profile may allow `network inet stream` (AUD-RM2-DEP-15)
 #   aa-cap|<profile>|<cap>      capability an allow rule may name (none ships)
+#   aa-abi|3.0|<sha256>         digest of /etc/apparmor.d/abi/3.0, the only distribution file the
+#                               self-contained profiles reference (AUD-RM2-DEP-23); re-pin with the
+#                               Platform-Manifest apparmor package
 #   scf|<syscall>               effective sealer allow-set (systemd group expansion of the
 #                               SystemCallFilter= sequence; AUD-RM2-DEP-16)
 #   scf-never|<syscall>         must never be in that set (io_uring, userfaultfd, ptrace, ...)
@@ -1138,10 +1141,20 @@ sysctl|net.ipv6.conf.all.accept_source_route|0
 sysctl|net.ipv6.conf.default.accept_source_route|0
 # ---------------------------------------------------------------- AppArmor profiles, normalised, exact (17 §5.2, R7 SI-B-04; AUD-RM2-DEP-15)
 aa|candor-tor-intake|abi <abi/3.0>,
-aa|candor-tor-intake|include <tunables/global>
+aa|candor-tor-intake|@{PROC}=/proc/
+aa|candor-tor-intake|@{pid}={[1-9],[1-9][0-9],[1-9][0-9][0-9],[1-9][0-9][0-9][0-9],[1-9][0-9][0-9][0-9][0-9],[1-9][0-9][0-9][0-9][0-9][0-9],[1-4][0-9][0-9][0-9][0-9][0-9][0-9]}
 aa|candor-tor-intake|profile candor-tor-intake flags=(attach_disconnected) {
-aa|candor-tor-intake|include <abstractions/base>
-aa|candor-tor-intake|include <abstractions/openssl>
+aa|candor-tor-intake|/etc/ld.so.cache r,
+aa|candor-tor-intake|/usr/lib/*-linux-gnu*/**.so* mr,
+aa|candor-tor-intake|/dev/null rw,
+aa|candor-tor-intake|/dev/urandom r,
+aa|candor-tor-intake|@{PROC}/@{pid}/maps r,
+aa|candor-tor-intake|signal (send, receive) peer=@{profile_name},
+aa|candor-tor-intake|unix (create, getattr, getopt, setopt, shutdown),
+aa|candor-tor-intake|unix (receive) peer=(label=unconfined),
+aa|candor-tor-intake|unix peer=(label=@{profile_name}),
+aa|candor-tor-intake|/dev/random r,
+aa|candor-tor-intake|/etc/ssl/openssl.cnf r,
 aa|candor-tor-intake|/usr/bin/tor mr,
 aa|candor-tor-intake|/usr/sbin/tor mr,
 aa|candor-tor-intake|/etc/tor/instances/candor-intake/torrc r,
@@ -1198,9 +1211,15 @@ aa|candor-tor-intake|deny /etc/gshadow r,
 aa|candor-tor-intake|deny /boot/** rwklx,
 aa|candor-tor-intake|}
 aa|candor-web|abi <abi/3.0>,
-aa|candor-web|include <tunables/global>
+aa|candor-web|@{PROC}=/proc/
+aa|candor-web|@{pid}={[1-9],[1-9][0-9],[1-9][0-9][0-9],[1-9][0-9][0-9][0-9],[1-9][0-9][0-9][0-9][0-9],[1-9][0-9][0-9][0-9][0-9][0-9],[1-4][0-9][0-9][0-9][0-9][0-9][0-9]}
 aa|candor-web|profile candor-web /usr/lib/candor/source-web/candor-web {
-aa|candor-web|include <abstractions/base>
+aa|candor-web|/etc/ld.so.cache r,
+aa|candor-web|/usr/lib/*-linux-gnu*/**.so* mr,
+aa|candor-web|/dev/null rw,
+aa|candor-web|/dev/urandom r,
+aa|candor-web|@{PROC}/@{pid}/maps r,
+aa|candor-web|signal (send, receive) peer=@{profile_name},
 aa|candor-web|/usr/lib/candor/source-web/candor-web mr,
 aa|candor-web|/usr/share/candor/web/ r,
 aa|candor-web|/usr/share/candor/web/** r,
@@ -1249,9 +1268,15 @@ aa|candor-web|deny /run/candor/directory/** rwklx,
 aa|candor-web|deny /run/credentials/** rwklx,
 aa|candor-web|}
 aa|candor-sealer|abi <abi/3.0>,
-aa|candor-sealer|include <tunables/global>
+aa|candor-sealer|@{PROC}=/proc/
+aa|candor-sealer|@{pid}={[1-9],[1-9][0-9],[1-9][0-9][0-9],[1-9][0-9][0-9][0-9],[1-9][0-9][0-9][0-9][0-9],[1-9][0-9][0-9][0-9][0-9][0-9],[1-4][0-9][0-9][0-9][0-9][0-9][0-9]}
 aa|candor-sealer|profile candor-sealer /usr/lib/candor/sealer/candor-sealer {
-aa|candor-sealer|include <abstractions/base>
+aa|candor-sealer|/etc/ld.so.cache r,
+aa|candor-sealer|/usr/lib/*-linux-gnu*/**.so* mr,
+aa|candor-sealer|/dev/null rw,
+aa|candor-sealer|/dev/urandom r,
+aa|candor-sealer|@{PROC}/@{pid}/maps r,
+aa|candor-sealer|signal (send, receive) peer=@{profile_name},
 aa|candor-sealer|/usr/lib/candor/sealer/candor-sealer mr,
 aa|candor-sealer|/run/candor/config/ r,
 aa|candor-sealer|/run/candor/config/** r,
@@ -1302,9 +1327,15 @@ aa|candor-sealer|deny /run/candor/source-web/** rwklx,
 aa|candor-sealer|deny /run/credentials/candor-intake-store.service/** rwklx,
 aa|candor-sealer|}
 aa|candor-intake-store|abi <abi/3.0>,
-aa|candor-intake-store|include <tunables/global>
+aa|candor-intake-store|@{PROC}=/proc/
+aa|candor-intake-store|@{pid}={[1-9],[1-9][0-9],[1-9][0-9][0-9],[1-9][0-9][0-9][0-9],[1-9][0-9][0-9][0-9][0-9],[1-9][0-9][0-9][0-9][0-9][0-9],[1-4][0-9][0-9][0-9][0-9][0-9][0-9]}
 aa|candor-intake-store|profile candor-intake-store /usr/lib/candor/intake-store/candor-intake-store {
-aa|candor-intake-store|include <abstractions/base>
+aa|candor-intake-store|/etc/ld.so.cache r,
+aa|candor-intake-store|/usr/lib/*-linux-gnu*/**.so* mr,
+aa|candor-intake-store|/dev/null rw,
+aa|candor-intake-store|/dev/urandom r,
+aa|candor-intake-store|@{PROC}/@{pid}/maps r,
+aa|candor-intake-store|signal (send, receive) peer=@{profile_name},
 aa|candor-intake-store|/usr/lib/candor/intake-store/candor-intake-store mr,
 aa|candor-intake-store|/run/candor/config/ r,
 aa|candor-intake-store|/run/candor/config/** r,
@@ -1360,9 +1391,22 @@ aa|candor-intake-store|deny /run/candor/staging/** rwklx,
 aa|candor-intake-store|deny /run/credentials/candor-sealer.service/** rwklx,
 aa|candor-intake-store|}
 aa|candor-intake-pg|abi <abi/3.0>,
-aa|candor-intake-pg|include <tunables/global>
+aa|candor-intake-pg|@{PROC}=/proc/
+aa|candor-intake-pg|@{pid}={[1-9],[1-9][0-9],[1-9][0-9][0-9],[1-9][0-9][0-9][0-9],[1-9][0-9][0-9][0-9][0-9],[1-9][0-9][0-9][0-9][0-9][0-9],[1-4][0-9][0-9][0-9][0-9][0-9][0-9]}
 aa|candor-intake-pg|profile candor-intake-pg /usr/lib/postgresql/16/bin/postgres flags=(attach_disconnected) {
-aa|candor-intake-pg|include <abstractions/base>
+aa|candor-intake-pg|/etc/ld.so.cache r,
+aa|candor-intake-pg|/usr/lib/*-linux-gnu*/**.so* mr,
+aa|candor-intake-pg|/dev/null rw,
+aa|candor-intake-pg|/dev/urandom r,
+aa|candor-intake-pg|@{PROC}/@{pid}/maps r,
+aa|candor-intake-pg|signal (send, receive) peer=@{profile_name},
+aa|candor-intake-pg|unix (create, getattr, getopt, setopt, shutdown),
+aa|candor-intake-pg|unix (receive) peer=(label=unconfined),
+aa|candor-intake-pg|unix peer=(label=@{profile_name}),
+aa|candor-intake-pg|/etc/nsswitch.conf r,
+aa|candor-intake-pg|/etc/passwd r,
+aa|candor-intake-pg|/usr/lib/locale/** r,
+aa|candor-intake-pg|/usr/lib/*-linux-gnu*/gconv/gconv-modules* r,
 aa|candor-intake-pg|/usr/lib/postgresql/16/bin/postgres mr,
 aa|candor-intake-pg|/usr/lib/postgresql/16/lib/** mr,
 aa|candor-intake-pg|/usr/share/postgresql/16/** r,
@@ -1423,9 +1467,15 @@ aa|candor-intake-pg|deny /etc/gshadow r,
 aa|candor-intake-pg|deny /boot/** rwklx,
 aa|candor-intake-pg|}
 aa|candor-intake-maint|abi <abi/3.0>,
-aa|candor-intake-maint|include <tunables/global>
+aa|candor-intake-maint|@{PROC}=/proc/
+aa|candor-intake-maint|@{pid}={[1-9],[1-9][0-9],[1-9][0-9][0-9],[1-9][0-9][0-9][0-9],[1-9][0-9][0-9][0-9][0-9],[1-9][0-9][0-9][0-9][0-9][0-9],[1-4][0-9][0-9][0-9][0-9][0-9][0-9]}
 aa|candor-intake-maint|profile candor-intake-maint /usr/lib/candor/intake-store/candor-intake-maint {
-aa|candor-intake-maint|include <abstractions/base>
+aa|candor-intake-maint|/etc/ld.so.cache r,
+aa|candor-intake-maint|/usr/lib/*-linux-gnu*/**.so* mr,
+aa|candor-intake-maint|/dev/null rw,
+aa|candor-intake-maint|/dev/urandom r,
+aa|candor-intake-maint|@{PROC}/@{pid}/maps r,
+aa|candor-intake-maint|signal (send, receive) peer=@{profile_name},
 aa|candor-intake-maint|/usr/lib/candor/intake-store/candor-intake-maint mr,
 aa|candor-intake-maint|/run/candor/config/ r,
 aa|candor-intake-maint|/run/candor/config/** r,
@@ -1473,6 +1523,7 @@ aa|candor-intake-maint|deny /boot/** rwklx,
 aa|candor-intake-maint|}
 aa-inet|candor-tor-intake
 aa-inet|candor-intake-store
+aa-abi|3.0|a786a2fde512336f885805b557b0fc4df6e0c2e21e336bba8d6f9b3c8d637a66
 # ---------------------------------------------------------------- distribution units the baseline depends on (--host; AUD-RM2-DEP-18)
 hdropin|nftables.service|/etc/systemd/system/nftables.service.d/candor-intake.conf
 hunit|nftables.service|Service|Type|=|oneshot
