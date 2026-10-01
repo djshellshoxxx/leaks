@@ -21,6 +21,7 @@ candor-safefs = { path = "../../candor-safefs" }
 candor-log = { path = "../../candor-log" }
 tokio = { version = "=1.48.0", default-features = false, features = ["rt"] }
 zeroize = { version = "=1.8.2", default-features = false, features = ["alloc"] }
+ml-dsa = { version = "=0.1.1", default-features = false }
 
 [workspace]
 members = ["."]

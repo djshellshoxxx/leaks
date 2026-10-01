@@ -55,9 +55,13 @@ sealer.set_high_water_mark(persisted_hwm);
 sealer.install_snapshot(bundle, |hwm| persist(hwm))?;     // derives the view from the signed log
 rt.block_on(async {
     sealer.spawn_background();                             // reaper, account batches, chaff
-    sealer.serve(listener).await                           // refuses unless hardened, per thread
+    let term = sealer.spawn_sigterm_flush()?;              // SIGTERM: one last shuffled batch
+    tokio::select! {
+        r = sealer.serve(listener) => r,                   // refuses unless hardened, per thread
+        _ = term => Ok(()),                                // then exit
+    }
 })?;
-// at shutdown: sealer.flush_accounts()
+// Limits::memory_budget_bytes must sit below the unit's MemoryMax (SEA-26).
 ```
 
 The integrator supplies four things:

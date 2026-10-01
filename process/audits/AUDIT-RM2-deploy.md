@@ -757,3 +757,132 @@ Gate: **PASS 2026-10-01 7cae42f** for `deploy/` as committed.
 - **DEP-27 (Info):** accepted. The failure was caused by concurrent runs; validate.sh gets a per-run scratch directory.
 - **DEP-28 (Info):** accepted. The dpkg MD5 check is a consistency check, not a trust anchor; trust in the binaries comes from the signed release manifest (28/31).
 - **PG profile read of `/etc/passwd` (Info):** accepted.
+
+---
+
+## Re-test (round 5)
+
+| Field | Value |
+|---|---|
+| Date | 2026-10-01 |
+| Revision | HEAD `c928760` (on top of 8e1fba7); the working tree is clean for `deploy/` and `crates/candor-safe-read` |
+| Scratch | `/var/tmp/aud5.*`, removed afterwards. `deploy/.build/` is the builder's (created 10:45) and was left in place |
+
+### Tools
+
+| Check | Result |
+|---|---|
+| `CANDOR_TEST_PG=1 validate.sh` | 362 PASS, 0 FAIL, exit 0. It ran next to other validators without interference |
+| config-check static | 876 OK |
+| Reproducible build | Rebuilt `candor-safe-read` in scratch with the build script's flags and a different target directory. sha256 `77625961…bb29bb` **equals** the manifest pin; no host paths in the binary |
+| `cargo test -p candor-safe-read` | 7 passed |
+| clippy `-D warnings` | clean |
+| Dependencies | `rustix =1.1.2` and `md-5 =0.11.0` are exact pins with default features off, and have cargo-vet exemptions |
+
+### 1. ADR-055(1) `memfd_create` in the sealer: **re-pinned, verified**
+
+- `memfd_create` is no longer on the sealer's `~` deny line. `scf|memfd_create` is in the baseline and not in `scf-never`.
+- Manifest digests (baseline and binary) verify, and the script's pin equals the manifest digest. The static and host checks pass.
+- New Low finding DEP-29 below.
+
+### 2. DEP-25 (one intake database per cluster): **Fixed**
+
+- **pg_hba variants, all rejected (exit 30):**
+
+  | Variant | Rule |
+  |---|---|
+  | `/^candor_intake_` regex, comma list, `all`, `sameuser`, quoted name | `pg.hba_database` / `pg.hba_exact` |
+  | `@file` | also `pg.hba_no_include` |
+  | different names on different lines | `pg.hba_database` |
+  | `candor_intake_TENANT` placeholder on a host | `pg.hba_database` |
+
+- An exact `candor_intake_acme` is accepted. The placeholder is accepted only in static mode.
+- **`--pg-db` additions:**
+  - exactly one database besides `postgres` and the templates;
+  - `datconnlimit = -1` and `rolconnlimit = -1`;
+  - no database-wide `pg_db_role_setting` rows;
+  - role settings only per database and on the store's allow-list.
+- The validate PG run rejects `ALTER DATABASE … SET`, `CONNECTION LIMIT` and a second intake database, and passes again once they are undone.
+
+### 3. DEP-26 → `crates/candor-safe-read` (new T1 tool code, full review): **Fixed**
+
+**Code review.**
+- **Parent directory:** opened with `openat2(O_PATH|O_DIRECTORY|O_NOFOLLOW, RESOLVE_NO_SYMLINKS|NO_MAGICLINKS|BENEATH)` from an `O_PATH` fd of `/`. The fallback for kernels without `openat2` walks components with `O_NOFOLLOW`.
+- **Leaf:** `statat(AT_SYMLINK_NOFOLLOW)` first, then `openat2(O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_NOCTTY, NO_SYMLINKS)`.
+- **Descriptor checks (`fstat`):** regular file, same `dev:ino`, `nlink==1`, owner, denied mode bits, size cap.
+- **Read:** capped at cap+1 bytes; `EAGAIN` is treated as not-regular.
+- **Robustness:** no `unsafe`, no `unwrap`, no `panic` path on input. Non-UTF-8 argv gives exit 2.
+- **Output:** nothing on stdout or stderr. Refused inputs do not create the output file.
+
+**Behaviour (binary built from source):**
+
+| Case | Exit code |
+|---|---|
+| regular file | 0 (byte-equal copy) |
+| FIFO | 12, no blocking |
+| symlinked parent, symlinked leaf, `..` component | 10 |
+| hard link, foreign owner, world-writable | 13 |
+| larger than the cap | 14 |
+| missing | 11 |
+| relative path | 2 |
+| `--md5` | the output file holds `OK <md5>` / `ERR 12` / `ERR 10` lines with no paths; stdout is empty |
+| output path is a symlink to `/etc/passwd` | 15, target untouched |
+
+**Races:**
+- Parent ↔ symlink swap: 600 runs → 125 OK, **0 leaks**.
+- Leaf ↔ FIFO swap: 400 runs → **0 hangs**.
+
+**Output-file design (OUT is absolute; `O_CREAT|O_TRUNC|O_NOFOLLOW`, mode 0600, no `O_EXCL`, parent not resolved with `openat2`): approved, with conditions.**
+- It is safe as used today. config-check passes only paths inside a fresh `mktemp -d` work directory under a root-owned 0700 base, so no other user can pre-create or swap anything there. A pre-placed symlink is refused (15).
+- A pre-placed FIFO at OUT would block. That cannot happen inside the 0700 directory.
+- The conditions are in DEP-30. Requested hardening:
+  - open OUT with `O_EXCL` (the file is always new);
+  - open relative to a work-directory fd with `RESOLVE_BENEATH|NO_SYMLINKS`;
+  - add `O_NONBLOCK`.
+
+### 4. DEP-27 (`--work-base`): **Fixed**
+
+- Every run gets its own `mktemp` directory under the base. A base that is not root 0700 or is a symlink exits 2.
+- Concurrent validators no longer interfere.
+- One residual: ancestors are not checked (DEP-30).
+
+### New findings
+
+#### AUD-RM2-DEP-29 — `memfd_create` in the sealer (and fd hand-over to the store) reopens the classic MemoryDenyWriteExecute bypass
+- Severity: Low
+- Location: `crates/candor-sealer/src/server/handover.rs:126-131` (`MFD_CLOEXEC|MFD_ALLOW_SEALING`, no `MFD_NOEXEC_SEAL`); `deploy/intake/sysctl.d` (no `vm.memfd_noexec`)
+- Category: B10.1 (CWE-693)
+- Description:
+  - systemd's MDWE filter blocks W+X mappings and `mprotect(PROT_EXEC)`. It does not block `write()` into a memfd followed by `mmap(PROT_READ|PROT_EXEC)` of that memfd. This is the known memfd bypass, and it makes post-exploitation shellcode staging possible in the T0 process (and in the store, which receives the fd).
+  - AppArmor has no explicit rule for memfd mappings. Its behaviour there is unverified (integration item).
+- Fix recommendation: either is cheap and needs no unit change.
+  - Create the memfds with `MFD_NOEXEC_SEAL` (kernel ≥6.3).
+  - Add `vm.memfd_noexec = 2` to the sysctl baseline (Debian 13's kernel 6.12 supports it) and to config-check.
+- Status: Open
+
+#### AUD-RM2-DEP-30 — `--work-base` checks only the base itself, not its ancestors; the reader's output open trusts the parent path
+- Severity: Low
+- Location: `deploy/tools/config-check.sh:136-143`; `crates/candor-safe-read/src/lib.rs` `write_out`
+- Category: B6.2 (CWE-367, CWE-59)
+- Description:
+  - Verified: a root 0700 base inside a directory owned by `nobody` is accepted (exit 0).
+  - The owner of that parent can rename the base during a run and put a symlinked tree in its place. Later absolute OUT paths (`$WORK/in/<name>`) would then resolve through it, and the root-run reader would create or truncate a file chosen by the attacker. The content would be the attacker's own config text, for example in `/etc/cron.d`.
+  - Preconditions: an operator passes such a `--work-base`, and the attacker wins a race. The default `/run/candor-config-check` and validate's usage are not affected.
+- Fix recommendation:
+  - Require every ancestor of `--work-base` to be root-owned and not group- or world-writable, or sticky with a root-owned entry.
+  - In the reader: `O_EXCL|O_NONBLOCK`, and open OUT with `openat2` relative to a work-directory fd passed by config-check, using `RESOLVE_BENEATH|NO_SYMLINKS`.
+- Status: Open
+
+### Round-5 summary and gate
+
+| Severity | Open | IDs |
+|---|---|---|
+| Critical | 0 | — |
+| High | 0 | — |
+| Medium | 0 | — |
+| Low | 2 | DEP-29, DEP-30 |
+| Info | 3 | DEP-13 (tracking), DEP-27 now fixed, DEP-28 |
+
+Fixed this round: DEP-25, DEP-26, DEP-27; the ADR-055(1) re-pin is verified. DEP-24 and DEP-23 stay fixed.
+
+Gate: **PASS 2026-10-01 c928760** for `deploy/` and `crates/candor-safe-read`. No open Critical, High or Medium findings; DEP-29 and DEP-30 are tracked. Live-only verification remains integration items 7–9.

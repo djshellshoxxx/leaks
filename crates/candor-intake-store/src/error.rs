@@ -43,6 +43,10 @@ pub enum StoreError {
     /// A bounded resource (published-set pages, reply backlog) is at capacity;
     /// the request is refused instead of growing memory (AUD-RM2-STO-07).
     Capacity,
+    /// A bounded wait expired before anything was committed (statement or
+    /// lock timeout of a deadline-capped operation, or no pooled connection
+    /// in time; AUD-RM2-STO-27 commit cap). The operation had no effect.
+    Timeout,
     /// Database/driver failure; deliberately content-free.
     Backend,
 }
@@ -66,6 +70,7 @@ impl fmt::Display for StoreError {
             Self::Rng => f.write_str("random number generator failure"),
             Self::Signer => f.write_str("signer failure"),
             Self::Capacity => f.write_str("capacity exhausted"),
+            Self::Timeout => f.write_str("deadline exceeded"),
             Self::Backend => f.write_str("storage backend failure"),
         }
     }

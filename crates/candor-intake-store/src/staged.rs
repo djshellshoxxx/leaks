@@ -504,7 +504,8 @@ impl StagedReceiver {
     /// `store.commit_envelope`, which returns after the database `COMMIT`.
     ///
     /// Outcomes: `Ok` → the token for [`Self::acknowledge`]. A rejection
-    /// before the transaction (validation, duplicate, not initialised, …) →
+    /// before the transaction or a capped wait that expired (validation,
+    /// duplicate, not initialised, [`StoreError::Timeout`], …) →
     /// the blob is an orphan (swept). A backend error has an unknown outcome:
     /// the commit is retried once (a group that did commit is then reported
     /// as a duplicate); if that does not succeed, or the future is dropped

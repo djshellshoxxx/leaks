@@ -2096,3 +2096,107 @@ async fn pg_staged_crash_between_copy_and_commit() {
     assert_eq!(rx2.blobs().list().unwrap(), vec![keep]);
     assert_eq!(s.blob_referenced(keep_id).await, Ok(true));
 }
+
+/// Lead decision on AUD-RM2-STO-27: the envelope commit is capped inside the
+/// transaction (`SET LOCAL statement_timeout` / `lock_timeout`, ≤ 20 s per
+/// attempt). A commit stalled by a lock another session holds is refused
+/// within the bound with `Timeout` (definite: no retry, nothing committed);
+/// the copied blob is an orphan that the sweep removes once the lock is gone.
+#[tokio::test]
+async fn pg_staged_stalled_commit_refused() {
+    use candor_intake_store::staged::{
+        STAGED_BUNDLE_INDEX, StagedHeader, StagedReceiver, send_staged_bundle,
+    };
+    use candor_safefs::{RootPolicy, SafeRoot, SlotTime};
+    use sha2::Digest;
+    use std::io::Write;
+    use std::os::fd::AsFd;
+    use std::os::unix::fs::PermissionsExt;
+
+    let Some(b) = base() else { return };
+    let db = fresh_db(&b).await;
+    let tmp = tempfile::Builder::new()
+        .permissions(PermissionsExt::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let (sealer, store_sock) = rustix::net::socketpair(
+        rustix::net::AddressFamily::UNIX,
+        rustix::net::SocketType::SEQPACKET,
+        rustix::net::SocketFlags::CLOEXEC,
+        None,
+    )
+    .unwrap();
+    let uid = rustix::net::sockopt::socket_peercred(&store_sock)
+        .unwrap()
+        .uid
+        .as_raw();
+    let rx = StagedReceiver::new(
+        SafeRoot::open(tmp.path(), RootPolicy::BlobStore).unwrap(),
+        uid,
+        1 << 20,
+    )
+    .unwrap();
+    let slot = SlotTime::from_unix_secs(1_790_000_100).unwrap();
+    let data = vec![0x33u8; 3000];
+    let mut f = std::fs::File::from(
+        rustix::fs::memfd_create(
+            "staged",
+            rustix::fs::MemfdFlags::CLOEXEC | rustix::fs::MemfdFlags::ALLOW_SEALING,
+        )
+        .unwrap(),
+    );
+    f.write_all(&data).unwrap();
+    let fd: std::os::fd::OwnedFd = f.into();
+    rustix::fs::fcntl_add_seals(
+        &fd,
+        rustix::fs::SealFlags::WRITE
+            | rustix::fs::SealFlags::GROW
+            | rustix::fs::SealFlags::SHRINK
+            | rustix::fs::SealFlags::SEAL,
+    )
+    .unwrap();
+    let h = StagedHeader {
+        len: data.len() as u64,
+        sha256: sha2::Sha256::digest(&data).into(),
+    };
+    let s = open(&b, &db, common::TENANT).await;
+    s.init(common::TENANT, common::SALT).await.unwrap();
+    send_staged_bundle(&sealer, &h, fd.as_fd()).unwrap();
+    let blob = rx.receive(store_sock.as_fd(), slot).unwrap();
+    let mut env = common::envelope(0);
+    env.objects[STAGED_BUNDLE_INDEX].blob = PartRef {
+        blob_id: blob.blob_id(),
+        padded_size: blob.len(),
+    };
+    // Another session holds a conflicting lock for longer than the cap.
+    let mut holder = su(&b, &db).await;
+    sqlx::raw_sql("BEGIN; LOCK TABLE candor.envelope IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut holder)
+        .await
+        .unwrap();
+    let t0 = std::time::Instant::now();
+    let r = rx.commit_staged(&s, env.clone(), blob).await;
+    let took = t0.elapsed();
+    assert_eq!(r.unwrap_err(), StoreError::Timeout);
+    assert!(
+        took >= std::time::Duration::from_secs(2),
+        "the lock stalled it"
+    );
+    assert!(
+        took < std::time::Duration::from_secs(20),
+        "refused within the per-attempt cap"
+    );
+    rx.refuse(store_sock.as_fd()).unwrap();
+    let mut x = [0u8; 2];
+    let n = rustix::net::recv(&sealer, &mut x, rustix::net::RecvFlags::DONTWAIT).unwrap();
+    assert_eq!((n.0, x[0]), (1, 0x00));
+    sqlx::raw_sql("ROLLBACK")
+        .execute(&mut holder)
+        .await
+        .unwrap();
+    // Nothing committed; the orphan is swept; the store still works.
+    assert_eq!(s.pending_count().await.unwrap(), 0);
+    assert_eq!(rx.sweep(&s, slot).await.unwrap(), 1);
+    assert!(rx.blobs().list().unwrap().is_empty());
+    s.commit_envelope(env).await.unwrap();
+}

@@ -87,6 +87,20 @@ fn db_classified(e: sqlx::Error) -> StoreError {
     }
 }
 
+/// Map a driver error of the deadline-capped envelope commit: a statement
+/// or lock timeout (`57014`, `55P03`) or an expired pool acquire happened
+/// before `COMMIT` completed (a commit in progress is not interruptible),
+/// so nothing was committed: `Timeout` (a definite refusal).
+fn db_commit(e: sqlx::Error) -> StoreError {
+    if matches!(e, sqlx::Error::PoolTimedOut) {
+        return StoreError::Timeout;
+    }
+    match sqlstate(&e).as_deref() {
+        Some("57014" | "55P03") => StoreError::Timeout,
+        _ => db_classified(e),
+    }
+}
+
 fn uuid(b: &[u8; 16]) -> Uuid {
     Uuid::from_bytes(*b)
 }
@@ -122,6 +136,18 @@ fn i64_of(v: u64) -> Result<i64> {
 const SQL_SET_TENANT: &str =
     "SELECT pg_catalog.set_config('candor.tenant_id', $1::uuid::text, true)";
 const SQL_META: &str = "SELECT tenant_id, restore_pending FROM candor.intake_meta";
+/// Tenant scope plus the commit deadline, transaction-local (`SET LOCAL`).
+const SQL_COMMIT_SCOPE: &str = "SELECT pg_catalog.set_config('candor.tenant_id', $1::uuid::text, true), \
+     pg_catalog.set_config('statement_timeout', $2, true), \
+     pg_catalog.set_config('lock_timeout', $2, true)";
+/// Per-statement `statement_timeout` = `lock_timeout` inside a commit
+/// attempt. Six statements run under it (read `intake_meta`, insert the
+/// envelope, three parts, `COMMIT`): ≤ 15 s, plus ≤ 5 s pool acquire
+/// ([`APP_ACQUIRE_TIMEOUT`]) = ≤ 20 s per attempt (lead decision on
+/// AUD-RM2-STO-27; SPEC-NOTES decision 32).
+const COMMIT_STATEMENT_TIMEOUT: &str = "2500ms";
+/// Pool acquire bound of the application role's pool.
+pub const APP_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const SQL_META_LOCK: &str = "SELECT tenant_id, restore_pending FROM candor.intake_meta FOR UPDATE";
 const SQL_LEDGER_EXISTS: &str =
     "SELECT pg_catalog.to_regclass('candor.schema_migration') IS NOT NULL";
@@ -648,6 +674,7 @@ async fn open_pool(
     max_connections: u32,
     other: &str,
     db_owner_ok: bool,
+    acquire_timeout: Option<std::time::Duration>,
 ) -> Result<PgPool> {
     let opts = opts.options(SESSION_OPTIONS);
     // Checked on a dedicated connection first, so that a refusal is a typed
@@ -699,20 +726,22 @@ async fn open_pool(
         }
     }
     conn.close().await.map_err(db)?;
-    PgPoolOptions::new()
-        .max_connections(max_connections.max(1))
-        .after_connect(|conn, _meta| {
-            Box::pin(async move {
-                if session_ok(conn).await? {
-                    Ok(())
-                } else {
-                    Err(sqlx::Error::Protocol("session settings differ".into()))
-                }
-            })
+    let mut po = PgPoolOptions::new().max_connections(max_connections.max(1));
+    if let Some(t) = acquire_timeout {
+        po = po.acquire_timeout(t);
+    }
+    po.after_connect(|conn, _meta| {
+        Box::pin(async move {
+            if session_ok(conn).await? {
+                Ok(())
+            } else {
+                Err(sqlx::Error::Protocol("session settings differ".into()))
+            }
         })
-        .connect_with(opts.disable_statement_logging())
-        .await
-        .map_err(db)
+    })
+    .connect_with(opts.disable_statement_logging())
+    .await
+    .map_err(db)
 }
 
 async fn begin_tenant(pool: &PgPool, tenant: &TenantId) -> Result<Transaction<'static, Postgres>> {
@@ -773,7 +802,14 @@ impl PgIntakeStore {
         dummies: Box<dyn DummyReplies>,
     ) -> Result<Self> {
         cfg.validate()?;
-        let pool = open_pool(opts, max_connections, "candor_intake_maint", false).await?;
+        let pool = open_pool(
+            opts,
+            max_connections,
+            "candor_intake_maint",
+            false,
+            Some(APP_ACQUIRE_TIMEOUT),
+        )
+        .await?;
         let empty = deaddrop::empty(&cfg, dummies.as_ref())?;
         let store = Self {
             pool,
@@ -833,6 +869,29 @@ impl PgIntakeStore {
             .fetch_optional(&mut *tx)
             .await
             .map_err(db)?
+            .ok_or(StoreError::NotInitialized)?;
+        let meta = MetaRow {
+            tenant: TenantId(get_id(&row, 0)?),
+            restore_pending: row.try_get(1).map_err(db)?,
+        };
+        Ok((tx, meta))
+    }
+
+    /// [`Self::begin`] for `commit_envelope`: the first statement sets the
+    /// tenant and the transaction-local statement and lock timeouts, so every
+    /// later statement of the attempt (including `COMMIT`) is capped.
+    async fn begin_commit(&self) -> Result<(Transaction<'static, Postgres>, MetaRow)> {
+        let mut tx = self.pool.begin().await.map_err(db_commit)?;
+        sqlx::query(SQL_COMMIT_SCOPE)
+            .bind(uuid(&self.tenant.0))
+            .bind(COMMIT_STATEMENT_TIMEOUT)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_commit)?;
+        let row = sqlx::query(SQL_META)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(db_commit)?
             .ok_or(StoreError::NotInitialized)?;
         let meta = MetaRow {
             tenant: TenantId(get_id(&row, 0)?),
@@ -1342,7 +1401,7 @@ impl IntakeStore for PgIntakeStore {
         let epoch =
             i32::try_from(env.epoch_index).map_err(|_| StoreError::InvalidInput("epoch index"))?;
         let digest = group_digest(&env.objects.clone().map(|o| o.object_hash));
-        let (mut tx, m) = self.begin(false).await?;
+        let (mut tx, m) = self.begin_commit().await?;
         m.serving()?;
         let er = random_id16()?;
         let inserted = sqlx::query(SQL_ENV_INSERT)
@@ -1355,7 +1414,7 @@ impl IntakeStore for PgIntakeStore {
             .bind(release)
             .execute(&mut *tx)
             .await
-            .map_err(db_classified)?
+            .map_err(db_commit)?
             .rows_affected();
         if inserted != 1 {
             return Err(StoreError::DuplicateEnvelope);
@@ -1370,7 +1429,7 @@ impl IntakeStore for PgIntakeStore {
                 .bind(i64_of(o.blob.padded_size)?)
                 .execute(&mut *tx)
                 .await
-                .map_err(db_classified)?
+                .map_err(db_commit)?
                 .rows_affected();
             if inserted != 1 {
                 return Err(StoreError::InvalidInput("duplicate blob id"));
@@ -1378,7 +1437,7 @@ impl IntakeStore for PgIntakeStore {
         }
         // Durable on return: COMMIT waits for the WAL flush (fsync = on,
         // synchronous_commit default on; ADR-046(1)).
-        tx.commit().await.map_err(db)?;
+        tx.commit().await.map_err(db_commit)?;
         Ok(EnvelopeRef(er))
     }
 
@@ -2295,7 +2354,7 @@ impl PgIntakeMaintenance {
     /// acknowledged head with it before flagging anything (AUD-RM2-STO-21), so a
     /// compromised application role cannot make it prune unrelayed entries.
     pub async fn open(opts: PgConnectOptions, tenant: TenantId, core_pk: [u8; 32]) -> Result<Self> {
-        let pool = open_pool(opts, 1, "candor_istore", true).await?;
+        let pool = open_pool(opts, 1, "candor_istore", true, None).await?;
         Ok(Self {
             pool,
             tenant,
