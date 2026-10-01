@@ -14,10 +14,10 @@ use std::sync::Arc;
 use crate::deletion::{DeletionEntry, DeletionSigner, ReplyObjectHasher};
 use crate::error::Result;
 use crate::types::{
-    AccountId, AckResult, ApplyRepliesResult, BackupSnapshot, ChannelId, ClaimLimits,
-    ClaimedBatch, CommitEnvelope, CounterCell, CounterName, Day, EnvelopeRef, IncomingReply,
-    InstallOutcome, KdHighWater, LookupTag, MailboxId, ObjectData, PartSelector, ReplyIndex,
-    ReplyRef, SourceAccount, StoredReply, TenantId, VerifiedSnapshot,
+    AccountId, AckResult, ApplyRepliesResult, BackupSnapshot, ChannelId, ClaimLimits, ClaimedBatch,
+    CommitEnvelope, CounterCell, CounterName, Day, EnvelopeRef, IncomingReply, InstallOutcome,
+    KdHighWater, LookupTag, MailboxId, ObjectData, PartSelector, ReplyIndex, ReplyRef,
+    SourceAccount, StoredReply, TenantId, VerifiedSnapshot,
 };
 
 /// Intake Store operations. Both [`crate::MemoryStore`] and
@@ -27,7 +27,8 @@ pub trait IntakeStore: Send + Sync {
 
     /// Initialise `intake_meta` (idempotent for the same tenant; `TenantMismatch`
     /// otherwise). The salt is public (ADR-005).
-    fn init(&self, tenant: TenantId, kdf_salt: [u8; 32]) -> impl Future<Output = Result<()>> + Send;
+    fn init(&self, tenant: TenantId, kdf_salt: [u8; 32])
+    -> impl Future<Output = Result<()>> + Send;
 
     /// The tenant (`NotInitialized` before `init`).
     fn tenant(&self) -> impl Future<Output = Result<TenantId>> + Send;
@@ -223,7 +224,10 @@ pub trait IntakeStore: Send + Sync {
     ) -> impl Future<Output = Result<()>> + Send;
 
     /// RL-09 raw cells of a month (suppression per 24 §TEL is the exporter's job).
-    fn counters_for_month(&self, month: Day) -> impl Future<Output = Result<Vec<CounterCell>>> + Send;
+    fn counters_for_month(
+        &self,
+        month: Day,
+    ) -> impl Future<Output = Result<Vec<CounterCell>>> + Send;
 
     /// Delete counter months before `month`.
     fn prune_counters_before(&self, month: Day) -> impl Future<Output = Result<u64>> + Send;

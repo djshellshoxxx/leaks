@@ -219,7 +219,15 @@ pub fn make_entry(
     };
     let entry = encode_entry(seq, kind, &del_hash, del_day);
     let sig = signer.sign(&sig_message(&prev_hash, &entry))?;
-    Ok(DeletionEntry { seq, kind, del_hash, del_day, prev_hash, sig, relayed: false })
+    Ok(DeletionEntry {
+        seq,
+        kind,
+        del_hash,
+        del_day,
+        prev_hash,
+        sig,
+        relayed: false,
+    })
 }
 
 /// Verify a contiguous run of entries: consecutive `seq`, chain links and strict
@@ -321,7 +329,10 @@ mod tests {
 
         let mut gap = v.clone();
         gap.remove(2);
-        assert_eq!(verify_chain(&gap, &pk, None), Err(StoreError::DeletionList("sequence gap")));
+        assert_eq!(
+            verify_chain(&gap, &pk, None),
+            Err(StoreError::DeletionList("sequence gap"))
+        );
 
         let mut sig = v.clone();
         sig[3].sig[10] ^= 0x40;
@@ -330,9 +341,9 @@ mod tests {
         let other = Ed25519DeletionSigner::new(candor_core::sig::SigningKey::from_seed(&[8u8; 32]));
         assert!(verify_chain(&v, &other.verifying_key(), None).is_err());
 
-        let mut gen = v.clone();
-        gen[0].prev_hash = [1; 32];
-        assert!(verify_chain(&gen, &pk, None).is_err());
+        let mut genesis = v.clone();
+        genesis[0].prev_hash = [1; 32];
+        assert!(verify_chain(&genesis, &pk, None).is_err());
     }
 
     #[test]

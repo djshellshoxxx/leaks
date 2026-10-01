@@ -604,16 +604,16 @@ mod tests {
     #[test]
     fn rejects_non_canonical_indefinite_tags_floats() {
         for bad in [
-            &[0x18, 0x05][..],                   // 5 in two bytes
-            &[0x19, 0x00, 0x10],                 // 16 in three bytes
-            &[0x1a, 0, 0, 0xff, 0xff],           // u16 in five bytes
+            &[0x18, 0x05][..],         // 5 in two bytes
+            &[0x19, 0x00, 0x10],       // 16 in three bytes
+            &[0x1a, 0, 0, 0xff, 0xff], // u16 in five bytes
             &[0x1b, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff],
-            &[0x5f, 0xff],                       // indefinite bytes
-            &[0xc0, 0x00],                       // tag
-            &[0xf9, 0x00, 0x00],                 // half float
-            &[0xfb, 0, 0, 0, 0, 0, 0, 0, 0],     // double
-            &[0x20],                             // negative int
-            &[0xf7],                             // undefined
+            &[0x5f, 0xff],                   // indefinite bytes
+            &[0xc0, 0x00],                   // tag
+            &[0xf9, 0x00, 0x00],             // half float
+            &[0xfb, 0, 0, 0, 0, 0, 0, 0, 0], // double
+            &[0x20],                         // negative int
+            &[0xf7],                         // undefined
         ] {
             let mut d = Dec::new(bad);
             assert!(d.uint().is_err() || d.finish().is_err(), "{bad:?}");

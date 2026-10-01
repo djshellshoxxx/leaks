@@ -183,7 +183,7 @@ tip-after-h = Don't search for news of your report from work devices or accounts
 # @class critical
 tip-seizure-title = If your device is checked
 # @class critical
-tip-seizure-n = Don't keep notes, drafts or saved files about your report on a phone or computer that others can check.
+tip-seizure-n = Don't keep notes or drafts about your report on any phone or computer that others can check.
 # @class critical
 tip-seizure-h = A checked device can show Tor Browser, downloads and recent files. **Tails** keeps nothing after shutdown unless you set it to. Don't destroy anything you may be legally required to keep. Get legal advice if you are under investigation.
 

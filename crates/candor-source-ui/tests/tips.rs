@@ -215,8 +215,8 @@ fn budgets_all_locales() {
                 Some("Retaliation is unlawful under the Whistleblower Protection Act.".into());
             dep.high_profile = true;
             dep.failover_notice = true;
-            let p = render(s, &vm, &l)
-                .unwrap_or_else(|e| panic!("{} {}: {e:?}", s.spec_id(), l.tag()));
+            let p =
+                render(s, &vm, &l).unwrap_or_else(|e| panic!("{} {}: {e:?}", s.spec_id(), l.tag()));
             assert!(p.unpadded_len <= p.class.max_unpadded());
             assert_eq!(p.body.len(), p.class.bytes());
             if p.class == SizeClass::P1 && l == Locale::EnXA {
@@ -241,7 +241,9 @@ fn no_external_urls() {
             let html = Html::parse_document(&b);
             let a = aside(&html);
             let lower = a.html().to_ascii_lowercase();
-            for bad in ["http:", "https:", "://", "www.", ".onion", "mailto:", "tel:", "?"] {
+            for bad in [
+                "http:", "https:", "://", "www.", ".onion", "mailto:", "tel:", "?",
+            ] {
                 assert!(!lower.contains(bad), "{} {}: {bad}", s.spec_id(), l.tag());
             }
             let links: Vec<_> = a.select(&sel("a")).collect();
@@ -338,7 +340,14 @@ fn no_controls_in_tips() {
         let html = Html::parse_document(&b);
         let a = aside(&html);
         for bad in [
-            "input", "button", "select", "textarea", "form", "[checked]", "img", "svg",
+            "input",
+            "button",
+            "select",
+            "textarea",
+            "form",
+            "[checked]",
+            "img",
+            "svg",
         ] {
             assert_eq!(a.select(&sel(bad)).count(), 0, "{}: {bad}", s.spec_id());
         }

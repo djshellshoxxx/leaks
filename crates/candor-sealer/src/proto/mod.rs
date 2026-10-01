@@ -1127,7 +1127,11 @@ pub fn decode_request(bytes: &[u8]) -> Result<(u32, Request), ProtoError> {
 
 /// Encode a response to a request with `op` (use [`OP_ERROR`] semantics
 /// automatically for [`Response::Error`]).
-pub fn encode_response(op: Op, rid: u32, resp: &Response) -> Result<Zeroizing<Vec<u8>>, ProtoError> {
+pub fn encode_response(
+    op: Op,
+    rid: u32,
+    resp: &Response,
+) -> Result<Zeroizing<Vec<u8>>, ProtoError> {
     let mut e = Enc::with_capacity(MAX_FRAME_LEN);
     let mut wire_op = op as u8;
     match resp {
@@ -1135,7 +1139,11 @@ pub fn encode_response(op: Op, rid: u32, resp: &Response) -> Result<Zeroizing<Ve
             proto,
             snapshot_version,
         } => {
-            e.map(2).uint(1).uint(*proto).uint(2).uint(*snapshot_version);
+            e.map(2)
+                .uint(1)
+                .uint(*proto)
+                .uint(2)
+                .uint(*snapshot_version);
         }
         Response::Empty => {
             e.map(0);
@@ -1247,11 +1255,7 @@ pub fn decode_response(expected: Op, bytes: &[u8]) -> Result<(u32, Response), Pr
         d.req(m, 1)?;
         let code = ErrorCode::from_u8(d.u8()?)?;
         d.req(m, 2)?;
-        let alternative_channel_id = if d.null()? {
-            None
-        } else {
-            Some(d.bytes_n()?)
-        };
+        let alternative_channel_id = if d.null()? { None } else { Some(d.bytes_n()?) };
         Response::Error {
             code,
             alternative_channel_id,
@@ -1336,11 +1340,7 @@ pub fn decode_response(expected: Op, bytes: &[u8]) -> Result<(u32, Response), Pr
                 d.req(m, 1)?;
                 let ok = d.bool()?;
                 d.req(m, 2)?;
-                let confirm_positions = if d.null()? {
-                    None
-                } else {
-                    Some(positions(d)?)
-                };
+                let confirm_positions = if d.null()? { None } else { Some(positions(d)?) };
                 Response::Confirm {
                     ok,
                     confirm_positions,
@@ -1348,9 +1348,7 @@ pub fn decode_response(expected: Op, bytes: &[u8]) -> Result<(u32, Response), Pr
             }
             Op::PartBegin => {
                 d.req(m, 1)?;
-                Response::Part {
-                    part: d.bytes_n()?,
-                }
+                Response::Part { part: d.bytes_n()? }
             }
             Op::SealFinish => {
                 d.req(m, 1)?;

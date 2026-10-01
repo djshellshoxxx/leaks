@@ -8,9 +8,15 @@ use crate::types::{
     AccountLink, ClaimLimits, CommitEnvelope, DISPOSITION_CT_LEN_STD, IncomingReply,
     InstallOutcome, KdHighWater, MAX_CLAIM_BYTES, MAX_CLAIM_OBJECTS, MAX_HEADER_CT,
     MAX_MANIFEST_CT, MAX_PART_PADDED_SIZE, MAX_PARTS, MAX_PREFS_CT, MAX_PUSHED_DELETION_LIST,
-    MAX_RELEASE_OFFSET_DAYS, MAX_REPLY_CT, MAX_SNAPSHOT_BODY, MAX_SNAPSHOT_SIGNATURES,
-    NewAccount, VerifiedSnapshot, XWING_PK_LEN,
+    MAX_RELEASE_OFFSET_DAYS, MAX_REPLY_CT, MAX_SNAPSHOT_BODY, MAX_SNAPSHOT_SIGNATURES, NewAccount,
+    VerifiedSnapshot, XWING_PK_LEN,
 };
+
+pub(crate) fn has_duplicates<T: PartialEq>(v: &[T]) -> bool {
+    v.iter()
+        .enumerate()
+        .any(|(i, a)| v.iter().skip(i.saturating_add(1)).any(|b| a == b))
+}
 
 /// Validate a `COMMIT_ENVELOPE` request.
 pub(crate) fn commit(env: &CommitEnvelope) -> Result<()> {
@@ -33,7 +39,12 @@ pub(crate) fn commit(env: &CommitEnvelope) -> Result<()> {
         if p.padded_size == 0 || p.padded_size > MAX_PART_PADDED_SIZE {
             return Err(StoreError::InvalidInput("part size"));
         }
-        if env.parts.iter().skip(i.saturating_add(1)).any(|q| q.blob_id == p.blob_id) {
+        if env
+            .parts
+            .iter()
+            .skip(i.saturating_add(1))
+            .any(|q| q.blob_id == p.blob_id)
+        {
             return Err(StoreError::InvalidInput("duplicate blob id"));
         }
     }
@@ -79,7 +90,9 @@ pub(crate) fn claim_limits(l: ClaimLimits) -> Result<()> {
 pub(crate) fn object_bytes(header_len: u64, manifest_len: u64, parts: &[u64]) -> u64 {
     parts
         .iter()
-        .fold(header_len.saturating_add(manifest_len), |a, p| a.saturating_add(*p))
+        .fold(header_len.saturating_add(manifest_len), |a, p| {
+            a.saturating_add(*p)
+        })
 }
 
 /// Greedy batch fill: take objects in the given (random) order while within
@@ -141,7 +154,9 @@ pub(crate) fn snapshot(
     }
     if let Some(d) = hwm.checkpoint_day {
         if snap.checkpoint_day < d {
-            return Err(StoreError::Rollback("checkpoint older than high-water mark"));
+            return Err(StoreError::Rollback(
+                "checkpoint older than high-water mark",
+            ));
         }
     }
     if snap.version < hwm.directory_version {
@@ -156,10 +171,14 @@ pub(crate) fn snapshot(
         };
     }
     if snap.tree_size > hwm.tree_size && snap.consistent_from != hwm.tree_size {
-        return Err(StoreError::Rollback("not consistency-proven from high-water mark"));
+        return Err(StoreError::Rollback(
+            "not consistency-proven from high-water mark",
+        ));
     }
     if snap.tree_size == hwm.tree_size && snap.consistent_from != hwm.tree_size {
-        return Err(StoreError::Rollback("not consistency-proven from high-water mark"));
+        return Err(StoreError::Rollback(
+            "not consistency-proven from high-water mark",
+        ));
     }
     Ok(SnapshotDecision::Install)
 }
@@ -237,13 +256,32 @@ mod tests {
     /// BE-060 / RVW-A-04: rollback rejection matrix.
     #[test]
     fn rollback_matrix() {
-        let hwm = KdHighWater { tree_size: 100, checkpoint_day: Some(Day(50)), directory_version: 5 };
+        let hwm = KdHighWater {
+            tree_size: 100,
+            checkpoint_day: Some(Day(50)),
+            directory_version: 5,
+        };
         let body = vec![5u8; 8];
-        assert_eq!(snapshot(&hwm, Some(&body), &snap(6, 120, 51, 100)).unwrap(), SnapshotDecision::Install);
-        assert!(matches!(snapshot(&hwm, Some(&body), &snap(6, 99, 51, 99)), Err(StoreError::Rollback(_))));
-        assert!(matches!(snapshot(&hwm, Some(&body), &snap(6, 120, 49, 100)), Err(StoreError::Rollback(_))));
-        assert!(matches!(snapshot(&hwm, Some(&body), &snap(4, 120, 51, 100)), Err(StoreError::Rollback(_))));
-        assert!(matches!(snapshot(&hwm, Some(&body), &snap(6, 120, 51, 90)), Err(StoreError::Rollback(_))));
+        assert_eq!(
+            snapshot(&hwm, Some(&body), &snap(6, 120, 51, 100)).unwrap(),
+            SnapshotDecision::Install
+        );
+        assert!(matches!(
+            snapshot(&hwm, Some(&body), &snap(6, 99, 51, 99)),
+            Err(StoreError::Rollback(_))
+        ));
+        assert!(matches!(
+            snapshot(&hwm, Some(&body), &snap(6, 120, 49, 100)),
+            Err(StoreError::Rollback(_))
+        ));
+        assert!(matches!(
+            snapshot(&hwm, Some(&body), &snap(4, 120, 51, 100)),
+            Err(StoreError::Rollback(_))
+        ));
+        assert!(matches!(
+            snapshot(&hwm, Some(&body), &snap(6, 120, 51, 90)),
+            Err(StoreError::Rollback(_))
+        ));
         assert_eq!(
             snapshot(&hwm, Some(&body), &snap(5, 100, 50, 100)).unwrap(),
             SnapshotDecision::AlreadyInstalled
@@ -253,16 +291,28 @@ mod tests {
         assert!(snapshot(&hwm, Some(&body), &other).is_err());
         // First install from an empty high-water mark.
         let zero = KdHighWater::default();
-        assert_eq!(snapshot(&zero, None, &snap(1, 10, 1, 0)).unwrap(), SnapshotDecision::Install);
+        assert_eq!(
+            snapshot(&zero, None, &snap(1, 10, 1, 0)).unwrap(),
+            SnapshotDecision::Install
+        );
     }
 
     #[test]
     fn fill_batch_limits() {
-        let l = ClaimLimits { max_objects: 2, max_bytes: 100 };
+        let l = ClaimLimits {
+            max_objects: 2,
+            max_bytes: 100,
+        };
         assert_eq!(fill_batch(&[10, 10, 10], l), vec![0, 1]);
-        let l = ClaimLimits { max_objects: 10, max_bytes: 25 };
+        let l = ClaimLimits {
+            max_objects: 10,
+            max_bytes: 25,
+        };
         assert_eq!(fill_batch(&[10, 20, 10], l), vec![0, 2]);
-        let l = ClaimLimits { max_objects: 10, max_bytes: 5 };
+        let l = ClaimLimits {
+            max_objects: 10,
+            max_bytes: 5,
+        };
         assert_eq!(fill_batch(&[10, 20], l), vec![0]);
     }
 }

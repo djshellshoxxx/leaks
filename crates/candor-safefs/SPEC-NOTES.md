@@ -169,7 +169,7 @@ R5 B-CR-52.
 | ID | Tests |
 |---|---|
 | ST-005 / SDL-030 | `tests/lint.rs` |
-| ST-048 (property form; cargo-fuzz target still to add) | `id::tests::*`, `display::tests::*`, `archives::props::*`, `store::props::*` |
+| ST-048 (property form + cargo-fuzz targets in fuzz/: fuzz_safefs_names, fuzz_archive_{zip,tar,tar_gz}) | `id::tests::*`, `display::tests::*`, `archives::props::*`, `store::props::*` |
 | ST-080 | `display::tests::st080_corpus`, `zip_slip_*`, `tar_traversal_*` |
 | ST-081 / FILE-019 | `tests/archives.rs` (all) |
 | ST-086 / CVE-2026-54706 | `symlinked_shard_dir_is_refused`, `symlinked_object_is_refused…`, `root_policy_checks`, `zip_symlink_*`, `tar_traversal_links_devices` |
@@ -180,9 +180,9 @@ R5 B-CR-52.
 
 ## Open items
 
-- A cargo-fuzz target `fuzz_safefs_names` (ST-048) and fuzzing of the archive
-  extractors. Proptest stands in for now.
+- RESOLVED: cargo-fuzz targets `fuzz_safefs_names` (ST-048) and
+  `fuzz_archive_{zip,tar,tar_gz}` (ST-049) live in `fuzz/` (nightly cargo-fuzz runs pending in CI).
 - Host-side enforcement for FILE-020 (cgroups, VM memory, timers) is in C-17,
   not here. The wall-clock limit is also C-17's job.
-- Tests run as root in CI containers, so the owner check passes trivially.
-  A non-root CI job should exercise the foreign-owner refusal.
+- RESOLVED: CI job `test-nonroot` runs the workspace tests as an unprivileged user,
+  so the foreign-owner refusal path is exercised.

@@ -55,7 +55,9 @@ pub struct PublishedSet {
 
 impl core::fmt::Debug for PublishedSet {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("PublishedSet").field("page_count", &self.index.page_count).finish()
+        f.debug_struct("PublishedSet")
+            .field("page_count", &self.index.page_count)
+            .finish()
     }
 }
 
@@ -68,22 +70,25 @@ impl PublishedSet {
 
     /// SA-20 page `n` (uniform `NotFound` when out of range).
     pub fn page(&self, n: u16) -> Result<Arc<[u8]>> {
-        self.pages.get(usize::from(n)).cloned().ok_or(StoreError::NotFound)
+        self.pages
+            .get(usize::from(n))
+            .cloned()
+            .ok_or(StoreError::NotFound)
     }
 }
 
 fn fill_random(buf: &mut [u8]) -> Result<()> {
-    // candor_core::rand::fill rejects an all-zero result for requests ≥ 16 bytes;
+    // crate::rng::fill rejects an all-zero result for requests ≥ 16 bytes;
     // fill in chunks so that a huge buffer is one health-checked request each.
     for chunk in buf.chunks_mut(1 << 16) {
-        candor_core::rand::fill(chunk).map_err(|_| StoreError::Rng)?;
+        crate::rng::fill(chunk).map_err(|_| StoreError::Rng)?;
     }
     Ok(())
 }
 
 fn random_u64() -> Result<u64> {
     let mut b = [0u8; 8];
-    candor_core::rand::fill(&mut b).map_err(|_| StoreError::Rng)?;
+    crate::rng::fill(&mut b).map_err(|_| StoreError::Rng)?;
     Ok(u64::from_le_bytes(b))
 }
 
@@ -155,14 +160,18 @@ pub fn build(reply_cts: &[Vec<u8>], dummies: &dyn DummyReplies) -> Result<Publis
         for (entry, slot) in page.chunks_mut(REPLY_ENTRY_LEN).zip(page_slots) {
             match slot {
                 Some(i) => {
-                    let body = reply_cts.get(*i).ok_or(StoreError::Integrity("reply index"))?;
+                    let body = reply_cts
+                        .get(*i)
+                        .ok_or(StoreError::Integrity("reply index"))?;
                     write_entry(entry, body)?;
                 }
                 None => {
                     let hint = if n == 0 {
                         DEFAULT_DUMMY_BODY_LEN
                     } else {
-                        reply_cts.get(uniform_below(n)?).map_or(DEFAULT_DUMMY_BODY_LEN, Vec::len)
+                        reply_cts
+                            .get(uniform_below(n)?)
+                            .map_or(DEFAULT_DUMMY_BODY_LEN, Vec::len)
                     };
                     let body = Zeroizing::new(dummies.dummy_body(hint)?);
                     write_entry(entry, &body)?;
@@ -192,10 +201,16 @@ pub fn parse_page(page: &[u8]) -> Result<Vec<&[u8]>> {
     }
     page.chunks(REPLY_ENTRY_LEN)
         .map(|e| {
-            let (l, rest) = e.split_at_checked(4).ok_or(StoreError::InvalidInput("entry"))?;
-            let len = u32::from_be_bytes(l.try_into().map_err(|_| StoreError::InvalidInput("entry"))?);
+            let (l, rest) = e
+                .split_at_checked(4)
+                .ok_or(StoreError::InvalidInput("entry"))?;
+            let len = u32::from_be_bytes(
+                l.try_into()
+                    .map_err(|_| StoreError::InvalidInput("entry"))?,
+            );
             let len = usize::try_from(len).map_err(|_| StoreError::InvalidInput("entry"))?;
-            rest.get(..len).ok_or(StoreError::InvalidInput("entry length"))
+            rest.get(..len)
+                .ok_or(StoreError::InvalidInput("entry length"))
         })
         .collect()
 }
@@ -228,7 +243,11 @@ mod tests {
                 }
             }
             found.sort_unstable();
-            assert_eq!(found, (0..n).collect::<Vec<_>>(), "every real reply exactly once");
+            assert_eq!(
+                found,
+                (0..n).collect::<Vec<_>>(),
+                "every real reply exactly once"
+            );
             assert_eq!(set.page(set.index().page_count), Err(StoreError::NotFound));
         }
     }

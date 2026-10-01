@@ -92,7 +92,11 @@ impl Day {
     #[must_use]
     pub fn next_month_start(self) -> Day {
         let (y, m, _) = civil_from_days(i64::from(self.0));
-        let (ny, nm) = if m == 12 { (y.saturating_add(1), 1) } else { (y, m.saturating_add(1)) };
+        let (ny, nm) = if m == 12 {
+            (y.saturating_add(1), 1)
+        } else {
+            (y, m.saturating_add(1))
+        };
         Day(days_from_civil(ny, nm, 1).clamp(0, i64::from(u32::MAX)) as u32)
     }
 }
@@ -192,7 +196,7 @@ impl ChannelId {
 /// Generate a fresh random 128-bit identifier from the OS CSPRNG (09 §5 "IDs").
 pub fn random_id16() -> Result<[u8; 16], StoreError> {
     let mut b = [0u8; 16];
-    candor_core::rand::fill(&mut b).map_err(|_| StoreError::Rng)?;
+    crate::rng::fill(&mut b).map_err(|_| StoreError::Rng)?;
     Ok(b)
 }
 
