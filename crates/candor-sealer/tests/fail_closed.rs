@@ -17,49 +17,6 @@ use candor_sealer::proto::*;
 use candor_sealer::server::{ChaffConfig, Limits, SnapshotError};
 use common::*;
 
-/// Open a session, draft, generate and confirm a passphrase.
-async fn confirmed(f: &Fixture, s: SessionHandle, coi: Option<Coi>) {
-    let sl = &f.sealer;
-    ok(
-        sl,
-        Request::SessionOpen {
-            sess: s,
-            channel_id: CHANNEL,
-        },
-    )
-    .await;
-    ok(
-        sl,
-        Request::DraftSet(DraftSet {
-            sess: s,
-            mode: Mode::Anonymous,
-            message: SecretText::new("report"),
-            fields: vec![],
-            identity: Some(SecretText::new("dropped in anonymous mode")),
-            coi,
-        }),
-    )
-    .await;
-    let Response::Words {
-        words,
-        confirm_positions,
-    } = ok(sl, Request::GenAccount { sess: s }).await
-    else {
-        panic!()
-    };
-    let Response::Confirm { ok: true, .. } = ok(
-        sl,
-        Request::ConfirmPassphrase {
-            sess: s,
-            words: confirm_words(&words, confirm_positions),
-        },
-    )
-    .await
-    else {
-        panic!()
-    };
-}
-
 fn assert_nothing_written(f: &Fixture) {
     assert!(f.sink.envelopes().is_empty(), "an envelope was committed");
     assert!(

@@ -180,7 +180,12 @@ impl ScrubbedExport {
     /// Ingest one committed record.
     pub fn ingest(&mut self, r: &CommittedRecord) -> Disposition {
         let h = r.header();
-        if h.stream == StreamId::Case {
+        // CASE content never leaves (20 §13); the date-only slot streams
+        // never reach the SIEM either (imports, relay, source-load health).
+        if matches!(
+            h.stream,
+            StreamId::Case | StreamId::CaseSlot | StreamId::SysSlot
+        ) {
             return Disposition::Dropped;
         }
         let day = h.ts.day();

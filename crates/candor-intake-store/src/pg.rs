@@ -132,15 +132,14 @@ const SQL_LEDGER_PUT: &str =
 const SQL_MIGRATE_TIMEOUTS: &str = "SELECT pg_catalog.set_config('lock_timeout', '10s', true), pg_catalog.set_config('statement_timeout', '10min', true)";
 /// Privilege and live-guard check at open (AUD-RM2-STO-08): not superuser, not
 /// BYPASSRLS, not a member of any role owning a `candor` table, of the
-/// database owner (the VACUUM login), of the other intake role (`$1`) or of the
-/// VACUUM role; RLS enabled and forced on every data table with exactly the
+/// database owner (the maintenance role; allowed only when `$2` is true, for
+/// the maintenance role itself) or of the other intake role (`$1`); RLS enabled and forced on every data table with exactly the
 /// eight tenant policies; and the four guard triggers enabled.
 const SQL_ROLE_CHECK: &str = "SELECT r.rolsuper, r.rolbypassrls, \
      EXISTS (SELECT 1 FROM pg_catalog.pg_tables t WHERE t.schemaname = 'candor' \
              AND pg_catalog.pg_has_role(current_user, t.tableowner, 'MEMBER')) \
-       OR pg_catalog.pg_has_role(current_user, (SELECT d.datdba FROM pg_catalog.pg_database d \
-             WHERE d.datname = pg_catalog.current_database()), 'MEMBER') \
-       OR pg_catalog.pg_has_role(current_user, 'candor_intake_vacuum', 'MEMBER'), \
+       OR (NOT $2::bool AND pg_catalog.pg_has_role(current_user, (SELECT d.datdba FROM pg_catalog.pg_database d \
+             WHERE d.datname = pg_catalog.current_database()), 'MEMBER')), \
      pg_catalog.pg_has_role(current_user, $1::name, 'MEMBER'), \
      (SELECT count(*) FROM pg_catalog.pg_class k JOIN pg_catalog.pg_namespace n ON n.oid = k.relnamespace \
       WHERE n.nspname = 'candor' AND k.relkind = 'r' AND k.relname <> 'schema_migration' \
@@ -161,11 +160,13 @@ const EXPECTED_GUARD_TRIGGERS: i64 = 4;
 const EXPECTED_POLICIES: i64 = 8;
 /// Session hardening check, on every new connection (AUD-RM2-STO-08).
 /// PostgreSQL lets an ordinary role `ALTER ROLE` its own defaults, which cannot
-/// be revoked; so (1) the role's stored defaults (cluster-wide and for this
-/// database) must be exactly [`EXPECTED_ROLE_SETTINGS`], and (2) the effective
-/// session values (after the startup options of [`SESSION_OPTIONS`], which
-/// override role defaults) must be [`EXPECTED_SESSION`]. Anything else refuses
-/// the connection (fail closed).
+/// be revoked; so (1) every stored default of the role (cluster-wide and for
+/// this database) must be one of [`ALLOWED_ROLE_SETTINGS`] or a
+/// `temp_file_limit` (superuser-only: the role cannot write it), and (2) the
+/// effective session values (after the startup options of [`SESSION_OPTIONS`],
+/// which override role defaults) must be [`EXPECTED_SESSION`], with an
+/// effective `temp_file_limit` between 1 kB and [`MAX_TEMP_FILE_LIMIT_KB`]
+/// (never unlimited). Anything else refuses the connection (fail closed).
 const SQL_SESSION_CHECK: &str = "SELECT COALESCE((SELECT pg_catalog.array_agg(x ORDER BY x) \
      FROM pg_catalog.pg_db_role_setting s, pg_catalog.unnest(s.setconfig) x \
      WHERE s.setrole = (SELECT r.oid FROM pg_catalog.pg_roles r WHERE r.rolname = current_user) \
@@ -173,26 +174,27 @@ const SQL_SESSION_CHECK: &str = "SELECT COALESCE((SELECT pg_catalog.array_agg(x 
      WHERE d.datname = pg_catalog.current_database()))), '{}'::text[]), \
      pg_catalog.current_setting('search_path'), pg_catalog.current_setting('statement_timeout'), \
      pg_catalog.current_setting('idle_in_transaction_session_timeout'), \
-     pg_catalog.current_setting('lock_timeout'), pg_catalog.current_setting('temp_file_limit'), \
+     pg_catalog.current_setting('lock_timeout'), \
      pg_catalog.current_setting('synchronous_commit'), pg_catalog.current_setting('row_security'), \
      pg_catalog.current_setting('default_transaction_read_only'), \
      pg_catalog.current_setting('session_replication_role'), \
-     pg_catalog.current_setting('default_transaction_isolation')";
-/// Stored role defaults of `candor_istore` and `candor_intake_maint` (sorted;
-/// `temp_file_limit` is superuser-only and set at provisioning, 09 §10).
-const EXPECTED_ROLE_SETTINGS: [&str; 4] = [
+     pg_catalog.current_setting('default_transaction_isolation'), \
+     (SELECT p.setting FROM pg_catalog.pg_settings p WHERE p.name = 'temp_file_limit')";
+/// Stored role defaults allowed for `candor_istore` and `candor_intake_maint`
+/// (the migration's values) besides a provisioned `temp_file_limit`.
+const ALLOWED_ROLE_SETTINGS: [&str; 3] = [
     "idle_in_transaction_session_timeout=60s",
     "search_path=candor",
     "statement_timeout=30s",
-    "temp_file_limit=1GB",
 ];
-/// Effective session values (columns 1.. of [`SQL_SESSION_CHECK`]).
-const EXPECTED_SESSION: [&str; 10] = [
+/// Largest effective `temp_file_limit` (09 §10: 1 GB; the deploy may set less).
+const MAX_TEMP_FILE_LIMIT_KB: i64 = 1024 * 1024;
+/// Effective session values (columns 1..=9 of [`SQL_SESSION_CHECK`]).
+const EXPECTED_SESSION: [&str; 9] = [
     "candor",
     "30s",
     "1min",
     "10s",
-    "1GB",
     "on",
     "on",
     "off",
@@ -380,7 +382,7 @@ const SQL_RECREATE_REPLY: &str =
     "UPDATE candor.reply SET reply_ct = reply_ct || ''::bytea WHERE reply_ref = $1";
 const SQL_RECREATE_SNAPSHOT: &str = "UPDATE candor.directory_snapshot SET body = body || ''::bytea, \
      signatures = signatures || ''::bytea WHERE version = $1";
-/// Identity check of the VACUUM login (AUD-RM2-STO-24(a)): it must own the
+/// Identity check of the VACUUM connection (AUD-RM2-STO-24(a)): it must own the
 /// database (PostgreSQL 16 lets the database owner VACUUM every table in it)
 /// and must not be a superuser, BYPASSRLS, the schema owner or a member of any
 /// role owning a `candor` table (it could then disable RLS or the guard
@@ -391,7 +393,6 @@ const SQL_VACUUM_ROLE_CHECK: &str = "SELECT r.rolsuper OR r.rolbypassrls \
      OR EXISTS (SELECT 1 FROM pg_catalog.pg_namespace n WHERE n.nspname = 'candor' \
                 AND pg_catalog.pg_has_role(current_user, n.nspowner, 'MEMBER')) \
      OR pg_catalog.pg_has_role(current_user, 'candor_istore', 'MEMBER') \
-     OR pg_catalog.pg_has_role(current_user, 'candor_intake_maint', 'MEMBER') \
      OR pg_catalog.pg_has_role(current_user, 'candor_intake_backup', 'MEMBER'), \
      (SELECT d.datdba FROM pg_catalog.pg_database d WHERE d.datname = pg_catalog.current_database()) = r.oid \
      FROM pg_catalog.pg_roles r WHERE r.rolname = current_user";
@@ -413,7 +414,7 @@ const SQL_VACUUM_FULL: &str = "VACUUM (FULL, ANALYZE false) candor.source_accoun
      candor.envelope_part, candor.reply, candor.deletion_list, candor.counter_month, \
      candor.directory_snapshot, candor.intake_meta";
 const SQL_CHECKPOINT: &str = "CHECKPOINT";
-/// Session limits of the VACUUM login (a daily VACUUM FULL may take minutes).
+/// Session limits of the VACUUM connection (a daily VACUUM FULL may take minutes).
 const VACUUM_SESSION_OPTIONS: [(&str, &str); 4] = [
     ("statement_timeout", "30min"),
     ("lock_timeout", "60s"),
@@ -500,7 +501,7 @@ pub async fn migrate(opts: &PgConnectOptions) -> Result<()> {
     conn.close().await.map_err(db)
 }
 
-/// Connect as the VACUUM login and verify its identity (see
+/// Connect as the maintenance role for VACUUM and verify its identity (see
 /// `SQL_VACUUM_ROLE_CHECK`; fail closed).
 async fn vacuum_conn(vacuum_opts: &PgConnectOptions) -> Result<PgConnection> {
     let mut conn = PgConnection::connect_with(
@@ -530,10 +531,11 @@ async fn vacuum_conn(vacuum_opts: &PgConnectOptions) -> Result<PgConnection> {
 /// cluster (`autovacuum = off`, `track_counts = off`, and per table), so this
 /// scheduled run is the routine VACUUM; it follows the fixed slot schedule,
 /// never source activity. It makes the dead pre-rewrite heap and TOAST tuples
-/// reclaimable. It connects with the dedicated VACUUM login
-/// (`candor_intake_vacuum`, OS user `candor-vacuum`), which owns the database
-/// but no table (PostgreSQL 16 lets the database owner vacuum), never with the
-/// schema owner or a service role; the identity is checked first.
+/// reclaimable. It connects as the maintenance role (`candor_intake_maint`,
+/// OS user `candor-imaint`), which owns the database but no table and no schema
+/// (PostgreSQL 16 lets the database owner vacuum; no `SET ROLE` to the schema
+/// owner is needed or possible), never as the schema owner or the app role;
+/// the identity is checked first.
 pub async fn vacuum_after_rewrite(vacuum_opts: &PgConnectOptions) -> Result<()> {
     let mut conn = vacuum_conn(vacuum_opts).await?;
     sqlx::raw_sql(SQL_VACUUM)
@@ -544,7 +546,7 @@ pub async fn vacuum_after_rewrite(vacuum_opts: &PgConnectOptions) -> Result<()> 
 }
 
 /// Daily maintenance-window `VACUUM FULL` (AUD-RM2-STO-23), at a fixed time
-/// after the day's last slot, with the same VACUUM login: rewrites every
+/// after the day's last slot, as the maintenance role: rewrites every
 /// source-linkable table with its TOAST table and indexes into new files, so
 /// no pre-rewrite tuple image (old `xmin`, old TOAST `chunk_id`) survives in
 /// page free space, then `CHECKPOINT`s so that the old files are unlinked
@@ -618,7 +620,10 @@ async fn store_acked(tx: &mut PgConnection, h: &SignedDeletionHead) -> Result<()
 async fn session_ok(conn: &mut PgConnection) -> std::result::Result<bool, sqlx::Error> {
     let row = sqlx::query(SQL_SESSION_CHECK).fetch_one(conn).await?;
     let stored: Vec<String> = row.try_get(0)?;
-    if stored.iter().map(String::as_str).ne(EXPECTED_ROLE_SETTINGS) {
+    if !stored
+        .iter()
+        .all(|e| ALLOWED_ROLE_SETTINGS.contains(&e.as_str()) || e.starts_with("temp_file_limit="))
+    {
         return Ok(false);
     }
     for (i, want) in EXPECTED_SESSION.iter().enumerate() {
@@ -627,13 +632,21 @@ async fn session_ok(conn: &mut PgConnection) -> std::result::Result<bool, sqlx::
             return Ok(false);
         }
     }
-    Ok(true)
+    let tfl: String = row.try_get(EXPECTED_SESSION.len().saturating_add(1))?;
+    Ok(tfl
+        .parse::<i64>()
+        .is_ok_and(|kb| (1..=MAX_TEMP_FILE_LIMIT_KB).contains(&kb)))
 }
 
 /// Open a pool for an intake role and verify its privileges, its session
 /// settings and the live guards (`other` = the intake role this one must not
 /// be a member of). Every later pool connection re-runs the session check.
-async fn open_pool(opts: PgConnectOptions, max_connections: u32, other: &str) -> Result<PgPool> {
+async fn open_pool(
+    opts: PgConnectOptions,
+    max_connections: u32,
+    other: &str,
+    db_owner_ok: bool,
+) -> Result<PgPool> {
     let opts = opts.options(SESSION_OPTIONS);
     // Checked on a dedicated connection first, so that a refusal is a typed
     // `Integrity` error rather than a pool connection failure.
@@ -642,6 +655,7 @@ async fn open_pool(opts: PgConnectOptions, max_connections: u32, other: &str) ->
         .map_err(db)?;
     let row = sqlx::query(SQL_ROLE_CHECK)
         .bind(other)
+        .bind(db_owner_ok)
         .fetch_one(&mut conn)
         .await
         .map_err(db)?;
@@ -757,7 +771,7 @@ impl PgIntakeStore {
         dummies: Box<dyn DummyReplies>,
     ) -> Result<Self> {
         cfg.validate()?;
-        let pool = open_pool(opts, max_connections, "candor_intake_maint").await?;
+        let pool = open_pool(opts, max_connections, "candor_intake_maint", false).await?;
         let empty = deaddrop::empty(&cfg, dummies.as_ref())?;
         let store = Self {
             pool,
@@ -2258,7 +2272,7 @@ impl PgIntakeMaintenance {
     /// acknowledged head with it before flagging anything (AUD-RM2-STO-21), so a
     /// compromised application role cannot make it prune unrelayed entries.
     pub async fn open(opts: PgConnectOptions, tenant: TenantId, core_pk: [u8; 32]) -> Result<Self> {
-        let pool = open_pool(opts, 1, "candor_istore").await?;
+        let pool = open_pool(opts, 1, "candor_istore", true).await?;
         Ok(Self {
             pool,
             tenant,

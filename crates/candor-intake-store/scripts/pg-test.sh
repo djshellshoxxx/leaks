@@ -101,7 +101,6 @@ candor $CLIENT_OS $PGUSER_OS
 candor $CLIENT_OS candor_istore
 candor $CLIENT_OS candor_intake_backup
 candor $CLIENT_OS candor_intake_maint
-candor $CLIENT_OS candor_intake_vacuum
 candor $CLIENT_OS candor_probe
 candor $CLIENT_OS candor_probe2
 candor $PGUSER_OS $PGUSER_OS

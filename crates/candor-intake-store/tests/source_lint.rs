@@ -15,6 +15,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("memory.rs", include_str!("../src/memory.rs")),
     ("pg.rs", include_str!("../src/pg.rs")),
     ("rng.rs", include_str!("../src/rng.rs")),
+    ("staged.rs", include_str!("../src/staged.rs")),
     ("store.rs", include_str!("../src/store.rs")),
     ("types.rs", include_str!("../src/types.rs")),
     ("validate.rs", include_str!("../src/validate.rs")),

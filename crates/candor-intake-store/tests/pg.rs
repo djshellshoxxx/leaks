@@ -116,9 +116,10 @@ async fn open(base: &PgConnectOptions, db: &str, tenant: TenantId) -> PgIntakeSt
         .with_maintenance(maint(base, db, tenant).await)
 }
 
-/// The VACUUM login (database owner, no table; AUD-RM2-STO-24(a)).
+/// The VACUUM connection: the maintenance role (database owner, no table;
+/// AUD-RM2-STO-24(a)).
 fn vac(base: &PgConnectOptions, db: &str) -> PgConnectOptions {
-    base.clone().username("candor_intake_vacuum").database(db)
+    base.clone().username("candor_intake_maint").database(db)
 }
 
 type ChunkRow = (Vec<u8>, Option<Vec<u8>>, u32);
@@ -280,12 +281,12 @@ async fn pg_roles_and_grants() {
     let rows = sqlx::query(
         "SELECT rolname::text, rolsuper, rolbypassrls, rolcreaterole, rolcreatedb, rolreplication, rolcanlogin \
          FROM pg_catalog.pg_roles WHERE rolname IN ('candor_istore', 'candor_intake_backup', \
-         'candor_intake_migrator', 'candor_intake_maint', 'candor_intake_vacuum') ORDER BY 1",
+         'candor_intake_migrator', 'candor_intake_maint') ORDER BY 1",
     )
     .fetch_all(&mut c)
     .await
     .unwrap();
-    assert_eq!(rows.len(), 5);
+    assert_eq!(rows.len(), 4);
     for r in &rows {
         let name: String = r.get(0);
         for i in 1..6 {
@@ -307,9 +308,9 @@ async fn pg_roles_and_grants() {
     .map(|r| r.get(0))
     .collect();
     assert_eq!(owners, vec!["candor_intake_migrator".to_string()]);
-    // AUD-RM2-STO-24(a): the database is owned by the VACUUM login, which
-    // owns no table, holds no table privilege and is in no other role except
-    // pg_checkpoint.
+    // AUD-RM2-STO-24(a): the database is owned by the maintenance role, which
+    // owns no table or schema and is in no other role except pg_checkpoint
+    // (no membership in the schema owner).
     let dba: String = sqlx::query(
         "SELECT pg_catalog.pg_get_userbyid(datdba)::text FROM pg_catalog.pg_database \
          WHERE datname = pg_catalog.current_database()",
@@ -318,10 +319,10 @@ async fn pg_roles_and_grants() {
     .await
     .unwrap()
     .get(0);
-    assert_eq!(dba, "candor_intake_vacuum");
+    assert_eq!(dba, "candor_intake_maint");
     let memberships: Vec<String> = sqlx::query(
         "SELECT pg_catalog.pg_get_userbyid(m.roleid)::text FROM pg_catalog.pg_auth_members m \
-         JOIN pg_catalog.pg_roles r ON r.oid = m.member WHERE r.rolname = 'candor_intake_vacuum'",
+         JOIN pg_catalog.pg_roles r ON r.oid = m.member WHERE r.rolname = 'candor_intake_maint'",
     )
     .fetch_all(&mut c)
     .await
@@ -367,7 +368,6 @@ async fn pg_roles_and_grants() {
             .map(|(_, t, p)| (t.clone(), p.clone()))
             .collect()
     };
-    assert!(of("candor_intake_vacuum").is_empty());
     assert_eq!(
         of("candor_intake_backup"),
         vec![
@@ -1501,10 +1501,25 @@ async fn pg_role_defaults_and_live_guards() {
     }
     s.close().await;
     open_as("candor_istore").await.unwrap();
+    // Provisioning mistake: an unlimited temp_file_limit is refused, a lower
+    // one (deploy: 256MB) accepted.
+    let mut c = su(&b, &db).await;
+    for (v, ok) in [("-1", false), ("'256MB'", true), ("'1GB'", true)] {
+        sqlx::raw_sql(AssertSqlSafe(format!(
+            "ALTER ROLE candor_istore IN DATABASE {db} SET temp_file_limit = {v}"
+        )))
+        .execute(&mut c)
+        .await
+        .unwrap();
+        assert_eq!(
+            open_as("candor_istore").await.is_ok(),
+            ok,
+            "temp_file_limit {v}"
+        );
+    }
 
     // Live guards: membership in the database owner, an extra policy, and
     // NO FORCE ROW LEVEL SECURITY are refused.
-    let mut c = su(&b, &db).await;
     sqlx::raw_sql(
         "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'candor_probe2') THEN \
          CREATE ROLE candor_probe2 LOGIN NOINHERIT; END IF; END $$",
@@ -1513,7 +1528,7 @@ async fn pg_role_defaults_and_live_guards() {
     .await
     .unwrap();
     sqlx::raw_sql(AssertSqlSafe(format!(
-        "GRANT CONNECT ON DATABASE {db} TO candor_probe2; GRANT candor_intake_vacuum TO candor_probe2"
+        "GRANT CONNECT ON DATABASE {db} TO candor_probe2; GRANT candor_intake_maint TO candor_probe2"
     )))
     .execute(&mut c)
     .await
@@ -1549,10 +1564,14 @@ async fn pg_role_defaults_and_live_guards() {
     assert!(refused(open_as("candor_istore").await), "NO FORCE RLS");
 }
 
-/// AUD-RM2-STO-24(a): the VACUUM jobs run only as the dedicated VACUUM login
-/// (database owner, no table ownership): the superuser, the schema owner's
-/// members, service roles and a role that does not own the database are
-/// refused before any VACUUM. The VACUUM login cannot disable a guard.
+/// AUD-RM2-STO-24(a): the VACUUM jobs run only as the maintenance role,
+/// which owns the database but no table or schema and is no member of the
+/// schema owner (PostgreSQL 16 lets the database owner VACUUM): the
+/// superuser, a member of the schema owner and the app role are refused
+/// before any VACUUM. Neither the maintenance role nor the app role can
+/// disable a guard, read source rows or `SET ROLE` to the schema owner, and
+/// the app role cannot VACUUM (PostgreSQL skips the table: its file is
+/// unchanged).
 #[tokio::test]
 async fn pg_vacuum_login_identity() {
     let Some(b) = base() else { return };
@@ -1575,7 +1594,6 @@ async fn pg_vacuum_login_identity() {
         superuser(),
         "candor_probe".to_string(),
         "candor_istore".to_string(),
-        "candor_intake_maint".to_string(),
     ] {
         let o = b.clone().username(&role).database(&db);
         assert!(
@@ -1593,14 +1611,42 @@ async fn pg_vacuum_login_identity() {
     vacuum_after_rewrite(&vac(&b, &db)).await.unwrap();
     vacuum_full_daily(&vac(&b, &db)).await.unwrap();
     let mut v = PgConnection::connect_with(&vac(&b, &db)).await.unwrap();
-    for q in [
-        "ALTER TABLE candor.deletion_list DISABLE TRIGGER deletion_list_guard",
-        "ALTER TABLE candor.reply NO FORCE ROW LEVEL SECURITY",
-        "SELECT count(*) FROM candor.source_account",
-        "SET ROLE candor_intake_migrator",
-    ] {
-        assert!(sqlx::raw_sql(q).execute(&mut v).await.is_err(), "{q}");
+    let mut app = PgConnection::connect_with(&b.clone().username("candor_istore").database(&db))
+        .await
+        .unwrap();
+    for conn in [&mut v, &mut app] {
+        for q in [
+            "ALTER TABLE candor.deletion_list DISABLE TRIGGER deletion_list_guard",
+            "ALTER TABLE candor.reply NO FORCE ROW LEVEL SECURITY",
+            "SET ROLE candor_intake_migrator",
+        ] {
+            assert!(sqlx::raw_sql(q).execute(&mut *conn).await.is_err(), "{q}");
+        }
     }
+    assert!(
+        sqlx::raw_sql("SELECT count(*) FROM candor.source_account")
+            .execute(&mut v)
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::raw_sql("SET ROLE candor_intake_maint")
+            .execute(&mut app)
+            .await
+            .is_err()
+    );
+    let before = reply_node(&mut c).await;
+    // PostgreSQL skips (WARNING, no error) a table the role may not vacuum.
+    let _ = sqlx::raw_sql("VACUUM (FULL) candor.reply")
+        .execute(&mut app)
+        .await;
+    assert_eq!(
+        reply_node(&mut c).await,
+        before,
+        "app role must not VACUUM FULL"
+    );
+    vacuum_full_daily(&vac(&b, &db)).await.unwrap();
+    assert_ne!(reply_node(&mut c).await, before, "maintenance role does");
 }
 
 /// All pages (raw bytes) of `rel` (pageinspect).
@@ -1791,4 +1837,12 @@ async fn pg_vacuum_full_erases_old_images() {
     assert_eq!(s.export_backup().await.unwrap(), before);
     assert_eq!(distinct_xmin(&mut c).await.1, 1);
     assert_eq!(s.mailbox_list(a).await.unwrap(), mailbox);
+}
+
+async fn reply_node(c: &mut PgConnection) -> i64 {
+    sqlx::query("SELECT relfilenode::int8 FROM pg_class WHERE oid = 'candor.reply'::regclass")
+        .fetch_one(c)
+        .await
+        .unwrap()
+        .get(0)
 }

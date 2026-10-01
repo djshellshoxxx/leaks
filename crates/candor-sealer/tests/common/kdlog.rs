@@ -198,6 +198,9 @@ pub struct TestLog {
     routes: HashMap<[u8; 16], Option<[u8; 16]>>,
     revoked: Vec<Vec<u8>>,
     filler: u64,
+    /// Entry hashes of the CHANNEL_ROSTER / COI_POLICY entries per channel.
+    pub roster_hashes: HashMap<[u8; 16], Vec<[u8; 32]>>,
+    pub coi_hashes: HashMap<[u8; 16], Vec<[u8; 32]>>,
     /// Issued day of the last bundle (the sealer's high-water-mark day).
     pub last_issued_day: Option<u32>,
     /// Size of the log when the last bundle was built.
@@ -224,6 +227,8 @@ impl TestLog {
             routes: HashMap::new(),
             revoked: Vec::new(),
             filler: 0,
+            roster_hashes: HashMap::new(),
+            coi_hashes: HashMap::new(),
             last_issued_day: None,
             last_size: 0,
         }
@@ -417,7 +422,7 @@ impl TestLog {
         ])
     }
 
-    fn cert(&mut self, channel: [u8; 16], label: u16) -> [u8; 32] {
+    pub fn cert(&mut self, channel: [u8; 16], label: u16) -> [u8; 32] {
         let ov = oversight_k08();
         let subject = kd::role_label_subject(&channel, label);
         let h = self.append_if_changed(
@@ -470,13 +475,14 @@ impl TestLog {
         let version = self.roster_version.get(&channel).copied().unwrap_or(0) + 1;
         let body = self.roster_body(channel, rows, activation, loosening, route, version);
         let (c, a1, ov) = (cik(), admin1(), oversight_k08());
-        self.append(
+        let h = self.append(
             ty::CHANNEL_ROSTER,
             &channel,
             activation.saturating_sub(3),
             body,
             &[&c, &a1, &ov],
         );
+        self.roster_hashes.entry(channel).or_default().push(h);
         self.roster_rows.insert(channel, rows.to_vec());
         self.roster_version.insert(channel, version);
         self.routes.insert(channel, route);
@@ -573,13 +579,14 @@ impl TestLog {
             (5, a(vec![])),
         ]);
         let (c, a1, ov) = (cik(), admin1(), oversight_k08());
-        self.append(
+        let h = self.append(
             ty::COI_POLICY,
             &channel,
             activation.saturating_sub(3),
             body,
             &[&c, &a1, &ov],
         );
+        self.coi_hashes.entry(channel).or_default().push(h);
     }
 
     pub fn mek_body(channel: &[u8; 16], k: &MemberEpochKey, user_hash: &[u8; 32]) -> Value {

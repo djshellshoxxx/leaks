@@ -16,21 +16,73 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use candor_log::cbor;
-use candor_log::chain::{ChainRecord, CheckpointSigner, SignerError, StreamResume, record_commit};
+use candor_log::chain::{
+    ChainRecord, CheckpointSigner, SignerError, StreamResume, record_commit, record_inner,
+};
 use candor_log::codes::*;
+use candor_log::disposal::{
+    ApproverKeys, DisposalApprover, DisposalAuthorization, DisposalError, DisposalRequest,
+    SoftwareApprover,
+};
 use candor_log::envelope::EnvelopeError;
 use candor_log::field::{SlotIndex, SmallCount, StaffTimer};
 use candor_log::ids::*;
 use candor_log::retention::{self, RetentionError, RetentionPolicy};
 use candor_log::sink::{
-    AuditSink, JsonlFile, MemoryJsonl, MemorySink, ReadError, SharedJsonl, SinkError, read_stream,
+    AuditSink, JsonlFile, MemoryJsonl, MemorySink, MemoryStore, ReadError, RedactionPlan,
+    SharedJsonl, SinkError, read_stream,
 };
 use candor_log::verify::{VerifyParams, verify_stream};
 use candor_log::{
-    AuditEvent, AuditLog, CheckpointPolicy, CommittedRecord, EventContext, LogError,
-    SignedCheckpoint,
+    AuditClock, AuditEvent, AuditLog, CheckpointPolicy, CommittedRecord, EventContext, LogError,
+    SignedCheckpoint, SoftwareSigner, WitnessError, WitnessSink,
 };
 use common::*;
+
+const SLOT6H: u64 = 6 * 3_600_000;
+
+fn rec(e: candor_log::Emitted) -> CommittedRecord {
+    e.record.expect("committed immediately")
+}
+
+fn imported(n: u8) -> AuditEvent {
+    AuditEvent::CaseImported {
+        case: case(n),
+        channel_id: channel(1),
+        received_day: UtcMillis(T0).day(),
+        import_slot_date: UtcMillis(T0).day(),
+    }
+}
+
+/// Advance to just after the next import-slot boundary and tick (flushes
+/// the slot streams).
+fn next_slot(log: &mut AuditLog<SoftwareSigner, TestClock>, clock: &TestClock) {
+    let now = clock.now();
+    clock.advance(SLOT6H - now % SLOT6H + 1_000);
+    log.tick().unwrap();
+}
+
+fn approve(req: DisposalRequest) -> DisposalAuthorization {
+    let (a, b) = approvers();
+    let sa = a.approve(&req).unwrap();
+    let sb = b.approve(&req).unwrap();
+    DisposalAuthorization::new(req, sa, sb, approver_keys()).unwrap()
+}
+
+fn dispose(
+    log: &mut AuditLog<SoftwareSigner, TestClock>,
+    store: &MemoryStore,
+    target: CaseRef,
+) -> RedactionPlan {
+    let plan = store.plan_case_redaction(target);
+    let auth = approve(
+        plan.request(tenant(), ReceiptId::generate().unwrap())
+            .unwrap(),
+    );
+    log.emit_case_disposal(EventContext::staff(user(1)), &plan, &auth)
+        .unwrap();
+    plan
+}
 
 fn opened(n: u8) -> AuditEvent {
     AuditEvent::CaseOpened { case: case(n) }
@@ -50,10 +102,20 @@ fn params<'a>(key: &'a ed25519_dalek::VerifyingKey, stream: StreamId) -> VerifyP
         tenant: tenant(),
         stream,
         key,
+        approver_keys: approver_keys(),
         trusted_latest: None,
         allow_pruned_prefix: false,
+        min_retention_days: None,
     }
 }
+
+const ALL: [StreamId; 5] = [
+    StreamId::Sec,
+    StreamId::Case,
+    StreamId::Sys,
+    StreamId::CaseSlot,
+    StreamId::SysSlot,
+];
 
 #[test]
 fn class_separated_streams_verify() {
@@ -72,17 +134,18 @@ fn class_separated_streams_verify() {
     )
     .unwrap();
     clock.advance(DAY);
-    assert_eq!(log.tick().unwrap().len(), 3);
+    assert_eq!(log.tick().unwrap().len(), 5);
     for i in 0..2 {
         log.emit(EventContext::staff(user(1)), opened(i)).unwrap();
     }
     let key = log.verifying_key();
     let store = sink.0.lock().unwrap().clone();
-    for s in [StreamId::Sec, StreamId::Case, StreamId::Sys] {
+    for s in ALL {
         let rep = verify_stream(&params(&key, s), &store.chain(s), &store.checkpoints(s)).unwrap();
         assert_eq!(rep.first_seq, if rep.records > 0 { Some(0) } else { None });
     }
-    // 12 case events; one daily checkpoint over the first 10, 2 unattested.
+    // 12 case events; one checkpoint (after the downtime) over the first
+    // 10, 2 unattested.
     let rep = verify_stream(
         &params(&key, StreamId::Case),
         &store.chain(StreamId::Case),
@@ -101,8 +164,8 @@ fn class_separated_streams_verify() {
     );
 }
 
-/// `n` CASE events, `per_day` per UTC day; every completed day is
-/// checkpointed (the last one by a final tick).
+/// `n` CASE events, `per_day` per batch; every batch is followed by a
+/// checkpoint (the last one by a final tick).
 fn setup(
     n: u8,
     per_day: u8,
@@ -303,7 +366,15 @@ fn checkpoint_schedule() {
     }
     assert!(log.tick().unwrap().is_empty());
     clock.advance(5 * 60 * 1000);
-    let cps = log.tick().unwrap();
+    let sec = |v: Vec<SignedCheckpoint>| -> Vec<SignedCheckpoint> {
+        v.into_iter()
+            .filter(|c| c.body().stream == StreamId::Sec)
+            .collect()
+    };
+    let all = log.tick().unwrap();
+    // SECURITY, CASE and SYSTEM share the 5-minute cadence.
+    assert_eq!(all.len(), 3);
+    let cps = sec(all);
     assert_eq!(cps.len(), 1);
     let b = cps[0].body();
     assert_eq!((b.first_seq, b.end_seq), (0, 1500));
@@ -311,7 +382,7 @@ fn checkpoint_schedule() {
     assert!(b.signed_at.0 <= clock.now() && clock.now() - b.signed_at.0 < 300_000);
     // An empty slot still yields a checkpoint (data-independent cadence).
     clock.advance(5 * 60 * 1000);
-    let cps = log.tick().unwrap();
+    let cps = sec(log.tick().unwrap());
     assert_eq!(cps.len(), 1);
     assert!(cps[0].body().is_empty());
     let st = sink.0.lock().unwrap();
@@ -357,22 +428,16 @@ fn schedule_trace(
     (view, out)
 }
 
-// AUD-RM1-LOG-02 regression (failed on the old cadence, which emitted a
-// checkpoint one tick after the import with an exact `signed_at` and
-// `seq 0..0`): whether or not a date-only import happened, the witness sees
-// the same checkpoints at the same times. CASE/SYSTEM checkpoint only at
-// 00:00 UTC; only their (daily) seq range and roots can differ.
+// AUD-RM1-LOG-02 regression: whether or not a date-only event happened, the
+// witness sees the same checkpoints at the same times, and only the slot
+// stream that holds it changes (CASE/SYSTEM checkpoints are byte-identical,
+// so they reveal nothing about date-only events). Slot streams checkpoint
+// only at import-slot boundaries.
 #[test]
 fn checkpoint_timing_independent_of_date_only_events() {
-    let import = AuditEvent::CaseImported {
-        case: case(5),
-        channel_id: ChannelId::derive(&idk(), b"ch"),
-        received_day: UtcMillis(T0).day(),
-        import_slot_date: UtcMillis(T0).day(),
-    };
     let (with, cps_with) = schedule_trace(
         HostRole::Core,
-        Some((EventContext::system(Service::Relay), import)),
+        Some((EventContext::system(Service::Relay), imported(5))),
     );
     let (without, cps_without) = schedule_trace(HostRole::Core, None);
     assert_eq!(
@@ -380,39 +445,129 @@ fn checkpoint_timing_independent_of_date_only_events() {
         "checkpoint times/streams must not depend on events"
     );
     for (s, t) in &with {
-        if *s != StreamId::Sec {
-            assert_eq!(t % DAY, 0, "CASE/SYSTEM checkpoints only at midnight");
+        if matches!(s, StreamId::CaseSlot | StreamId::SysSlot) {
+            assert_eq!(t % SLOT6H, 0, "slot streams only at import slots");
+        } else {
+            assert_eq!(t % 300_000, 0);
         }
     }
+    let diff = |a: &[SignedCheckpoint], b: &[SignedCheckpoint]| -> Vec<StreamId> {
+        a.iter()
+            .zip(b)
+            .filter(|(x, y)| x.bytes() != y.bytes())
+            .map(|(x, _)| x.body().stream)
+            .collect()
+    };
+    let d = diff(&cps_with, &cps_without);
+    assert!(!d.is_empty() && d.iter().all(|s| *s == StreamId::CaseSlot), "{d:?}");
     // Same for a source-load-derived (date-only) SYSTEM health event.
     let flood = AuditEvent::SysHealth {
         service: Service::Upload,
         status: HealthStatus::Degraded,
         check_code: HealthCheck::AbuseFlood,
     };
-    let (with_sys, _) = schedule_trace(
+    let (with_sys, cps_sys) = schedule_trace(
         HostRole::Core,
         Some((EventContext::system(Service::Health), flood)),
     );
     assert_eq!(with_sys, without);
-    // Only the CASE checkpoint closing the import day differs, and only in
-    // its seq range / roots (counts per day are not hidden; documented).
-    let diff: Vec<_> = cps_with
-        .iter()
-        .zip(&cps_without)
-        .filter(|(a, b)| a.bytes() != b.bytes() && a.body().stream == b.body().stream)
-        .map(|(a, _)| a.body().stream)
-        .collect();
-    assert!(diff.iter().all(|s| *s == StreamId::Case));
+    let d = diff(&cps_sys, &cps_without);
+    assert!(!d.is_empty() && d.iter().all(|s| *s == StreamId::SysSlot), "{d:?}");
     // SECURITY: a staff event does not move SECURITY checkpoint times either.
     let (with_sec, _) = schedule_trace(
         HostRole::Core,
         Some((EventContext::staff(user(1)), login())),
     );
     assert_eq!(with_sec, without);
-    // Z-INTAKE: SECURITY hourly, never finer than the hour truncation.
+    // Z-INTAKE: every exact-time stream hourly, never finer than the hour
+    // truncation.
     let (intake, _) = schedule_trace(HostRole::Intake, None);
     assert!(intake.iter().all(|(_, t)| t % 3_600_000 == 0));
+}
+
+fn precision_of(r: &CommittedRecord) -> u64 {
+    ts_of(r)
+}
+
+// AUD-RM1-LOG-02 regression (record-order channel, the round-2 residual):
+// date-only events never share a stream with exact-time events, are not
+// written before their slot boundary, and are written in uniformly shuffled
+// order, so neither neighbours nor order bound their time within the slot.
+#[test]
+fn date_only_events_never_neighbour_exact_time_events() {
+    let r = rig(HostRole::Core, CheckpointPolicy::DEFAULT);
+    let (mut log, sink, clock) = (r.log, r.sink, r.clock);
+    // Interleave staff (ms) CASE events with imports, staff-performed
+    // import-related events and system-actor CASE events.
+    for i in 0..8u8 {
+        log.emit(EventContext::staff(user(1)), opened(i)).unwrap();
+        clock.advance(61_000);
+        let e = log
+            .emit(EventContext::system(Service::Relay), imported(i))
+            .unwrap();
+        assert!(e.record.is_none(), "staged, not written");
+        clock.advance(61_000);
+    }
+    log.emit(
+        EventContext::staff(user(2)),
+        AuditEvent::EvidenceImported {
+            case: case(1),
+            evid: evid(1),
+            manifest_match: true,
+        },
+    )
+    .unwrap();
+    // Nothing reaches the slot stream before the boundary.
+    log.tick().unwrap();
+    assert!(sink.0.lock().unwrap().chain(StreamId::CaseSlot).is_empty());
+    next_slot(&mut log, &clock);
+    let st = sink.0.lock().unwrap().clone();
+    let case_recs = st.records(StreamId::Case);
+    let slot_recs = st.records(StreamId::CaseSlot);
+    assert_eq!(case_recs.len(), 8);
+    assert_eq!(slot_recs.len(), 9);
+    // No date-only record has a finer-precision neighbour in its stream.
+    assert!(case_recs.iter().all(|r| precision_of(r) % DAY != 0));
+    assert!(slot_recs.iter().all(|r| precision_of(r) % DAY == 0));
+    // Every record of the slot carries the same (date) ts.
+    assert!(slot_recs.windows(2).all(|w| ts_of(&w[0]) == ts_of(&w[1])));
+    // The slot stream's checkpoint is dated at the import-slot boundary.
+    let cps = st.checkpoints(StreamId::CaseSlot);
+    assert!(cps.iter().all(|c| c.body().signed_at.0 % SLOT6H == 0));
+    let key = log.verifying_key();
+    for s in [StreamId::Case, StreamId::CaseSlot] {
+        verify_stream(&params(&key, s), &st.chain(s), &st.checkpoints(s)).unwrap();
+    }
+    // Order inside the slot is random: over repeated runs with the same
+    // arrival order the stored order differs (P(identical 8!) ≈ 2.5e-5).
+    let order = |recs: &[CommittedRecord]| -> Vec<CaseRef> {
+        recs.iter()
+            .filter_map(|r| match r.event() {
+                AuditEvent::CaseImported { case, .. } => Some(*case),
+                _ => None,
+            })
+            .collect()
+    };
+    let first = order(&slot_recs);
+    let arrival: Vec<CaseRef> = (0..8u8).map(case).collect();
+    let mut differs = first != arrival;
+    for _ in 0..4 {
+        let r = rig(HostRole::Core, CheckpointPolicy::DEFAULT);
+        let (mut l, s, c) = (r.log, r.sink, r.clock);
+        for i in 0..8u8 {
+            l.emit(EventContext::system(Service::Relay), imported(i))
+                .unwrap();
+        }
+        next_slot(&mut l, &c);
+        let o = order(&s.0.lock().unwrap().records(StreamId::CaseSlot));
+        let mut sorted = o.clone();
+        sorted.sort();
+        let mut a = arrival.clone();
+        a.sort();
+        assert_eq!(sorted, a, "a permutation of the slot's events");
+        differs |= o != first;
+    }
+    assert!(differs, "slot order must not follow arrival order");
 }
 
 fn ts_of(r: &candor_log::CommittedRecord) -> u64 {
@@ -420,82 +575,51 @@ fn ts_of(r: &candor_log::CommittedRecord) -> u64 {
     v.get("ts").unwrap().as_u64().unwrap()
 }
 
-// LOG-013 / LOG-021 / ADR-046(11): timestamp policy.
+fn find(st: &MemoryStore, s: StreamId, ty: &str) -> CommittedRecord {
+    st.records(s)
+        .into_iter()
+        .find(|r| r.event().type_name() == ty)
+        .unwrap()
+}
+
+// LOG-013 / LOG-021 / ADR-046(11): timestamp policy (and routing of
+// date-only events to the slot streams, AUD-RM1-LOG-02).
 #[test]
 fn timestamp_policy() {
-    let (mut log, _sink, _c) = log_with(HostRole::Core, CheckpointPolicy::DEFAULT);
-    let staff = log
-        .emit(EventContext::staff(user(1)), opened(1))
-        .unwrap()
-        .record;
+    let (mut log, sink, clock) = log_with(HostRole::Core, CheckpointPolicy::DEFAULT);
+    let staff = rec(log.emit(EventContext::staff(user(1)), opened(1)).unwrap());
     assert_eq!(ts_of(&staff), T0, "staff actions exact to the ms");
-    let imp = log
-        .emit(
-            EventContext::system(Service::Relay),
-            AuditEvent::CaseImported {
-                case: case(1),
-                channel_id: ChannelId::derive(&idk(), b"ch"),
-                received_day: UtcMillis(T0).day(),
-                import_slot_date: UtcMillis(T0).day(),
-            },
-        )
-        .unwrap()
-        .record;
-    assert_eq!(ts_of(&imp) % MS_PER_DAY, 0, "import events date-only");
-    // Even a staff-performed import-related event is date-only.
-    let ev = log
-        .emit(
+    for (ctx, e) in [
+        (EventContext::system(Service::Relay), imported(1)),
+        // Even a staff-performed import-related event is date-only.
+        (
             EventContext::staff(user(1)),
             AuditEvent::EvidenceImported {
                 case: case(1),
-                evid: EvidRef::derive(&idk(), b"e3"),
+                evid: evid(3),
                 manifest_match: true,
             },
-        )
-        .unwrap()
-        .record;
-    assert_eq!(ts_of(&ev) % MS_PER_DAY, 0);
-    // CASE event with a system actor: date only.
-    let sla = log
-        .emit(
+        ),
+        // CASE event with a system actor: date only.
+        (
             EventContext::system(Service::Scheduler),
             AuditEvent::CaseSlaReminder {
                 case: case(1),
-                timer_id: TimerId::derive(&idk(), b"t4"),
+                timer_id: TimerId::generate().unwrap(),
                 due_date: UtcMillis(T0).day(),
             },
-        )
-        .unwrap()
-        .record;
-    assert_eq!(ts_of(&sla) % MS_PER_DAY, 0);
-    // SYSTEM: second.
-    let sys = log
-        .emit(
-            EventContext::system(Service::Health),
-            AuditEvent::SysJob {
-                job_kind: JobKind::Backup,
-                outcome: Outcome::Ok,
-            },
-        )
-        .unwrap()
-        .record;
-    assert_eq!(ts_of(&sys), T0 - T0 % 1000);
-    // Source-load-derived health: date only.
-    let flood = log
-        .emit(
+        ),
+        // Source-load-derived health: date only.
+        (
             EventContext::system(Service::Health),
             AuditEvent::SysHealth {
                 service: Service::Upload,
                 status: HealthStatus::Degraded,
                 check_code: HealthCheck::AbuseFlood,
             },
-        )
-        .unwrap()
-        .record;
-    assert_eq!(ts_of(&flood) % MS_PER_DAY, 0);
-    // Relay daily summary and slot overrun: date only, no arrival counts.
-    let relay = log
-        .emit(
+        ),
+        // Relay daily summary: date only, no arrival counts.
+        (
             EventContext::system(Service::Relay),
             AuditEvent::SysRelayDaily {
                 date: UtcMillis(T0).day(),
@@ -503,10 +627,33 @@ fn timestamp_policy() {
                 slots_failed: SmallCount::new(0).unwrap(),
                 slots_overrun: SmallCount::new(0).unwrap(),
             },
+        ),
+    ] {
+        assert!(log.emit(ctx, e).unwrap().record.is_none());
+    }
+    // SYSTEM: second.
+    let sys = rec(log
+        .emit(
+            EventContext::system(Service::Health),
+            AuditEvent::SysJob {
+                job_kind: JobKind::Backup,
+                outcome: Outcome::Ok,
+            },
         )
-        .unwrap()
-        .record;
-    assert_eq!(ts_of(&relay) % MS_PER_DAY, 0);
+        .unwrap());
+    assert_eq!(ts_of(&sys), T0 - T0 % 1000);
+    next_slot(&mut log, &clock);
+    let st = sink.0.lock().unwrap();
+    for (s, ty) in [
+        (StreamId::CaseSlot, "case.imported"),
+        (StreamId::CaseSlot, "evidence.imported"),
+        (StreamId::CaseSlot, "case.sla_reminder"),
+        (StreamId::SysSlot, "sys.health"),
+        (StreamId::SysSlot, "sys.relay_daily"),
+    ] {
+        let r = find(&st, s, ty);
+        assert_eq!(ts_of(&r), T0 - T0 % DAY, "{ty} date-only (emission day)");
+    }
 }
 
 // LOG-004 / 20 §3: Z-INTAKE emits only SYSTEM + admin-access SECURITY
@@ -519,7 +666,7 @@ fn intake_host_rules() {
             .unwrap_err(),
         LogError::Envelope(EnvelopeError::NotAllowedOnHost)
     );
-    let r = log
+    let r = rec(log
         .emit(
             EventContext::system(Service::Tor),
             AuditEvent::SysTorStatus {
@@ -528,13 +675,9 @@ fn intake_host_rules() {
                 pow_enabled: false,
             },
         )
-        .unwrap()
-        .record;
+        .unwrap());
     assert_eq!(ts_of(&r) % MS_PER_HOUR, 0);
-    let a = log
-        .emit(EventContext::staff(user(1)), login())
-        .unwrap()
-        .record;
+    let a = rec(log.emit(EventContext::staff(user(1)), login()).unwrap());
     assert_eq!(ts_of(&a) % MS_PER_HOUR, 0);
     assert!(
         log.emit(
@@ -552,8 +695,9 @@ fn intake_host_rules() {
 #[test]
 fn envelope_rules() {
     let (mut log, _sink, _c) = log_with(HostRole::Core, CheckpointPolicy::DEFAULT);
+    let sid = StaffSessionId::generate().unwrap();
     let mut ctx = EventContext::system(Service::Core);
-    ctx.session = Some(SessionTag::derive(&DaySalt::new([1; 32]), b"sid"));
+    ctx.session = Some(SessionTag::derive(&DaySalt::new([1; 32]), &sid));
     assert_eq!(
         log.emit(ctx, opened(1)).unwrap_err(),
         LogError::Envelope(EnvelopeError::StaffFieldsOnSystemActor)
@@ -566,34 +710,51 @@ fn envelope_rules() {
     );
     let mut ctx = EventContext::staff(user(1)).with_outcome(Outcome::Error);
     ctx.reason = Some(ErrorReason::Timeout);
-    ctx.session = Some(SessionTag::derive(&DaySalt::new([1; 32]), b"sid"));
-    let r = log.emit(ctx, opened(1)).unwrap().record;
+    ctx.session = Some(SessionTag::derive(&DaySalt::new([1; 32]), &sid));
+    let r = rec(log.emit(ctx, opened(1)).unwrap());
     let v = cbor::decode(r.bytes()).unwrap();
     assert_eq!(v.get("session").unwrap().as_bytes().unwrap().len(), 8);
     assert_eq!(v.get("reason").unwrap().as_text(), Some("TIMEOUT"));
 }
 
 // Every catalog type encodes canonically and verifies (LOG-001 schema test).
+// Tombstones only through the disposal API (AUD-RM1-LOG-16) and
+// artefact-derived sample values not derived under this log's key
+// (AUD-RM1-LOG-17) are refused.
 #[test]
 fn full_catalog_round_trip() {
-    let (mut log, sink, _c) = log_with(HostRole::Core, CheckpointPolicy::DEFAULT);
+    let (mut log, sink, clock) = log_with(HostRole::Core, CheckpointPolicy::DEFAULT);
     let samples = AuditEvent::samples();
     assert_eq!(samples.len(), candor_log::CATALOG.len());
+    let (mut refused_tomb, mut refused_foreign) = (0, 0);
     for e in samples {
-        let names = e.field_names();
-        let r = log.emit(EventContext::staff(user(1)), e).unwrap().record;
-        let v = cbor::decode(r.bytes()).unwrap();
-        assert_eq!(cbor::encode(&v).unwrap(), r.bytes());
-        let cbor::Value::Map(payload) = v.get("payload").unwrap() else {
-            panic!()
-        };
-        // Payload keys ⊆ schema.
-        for (k, _) in payload {
-            assert!(names.contains(&k.as_text().unwrap()));
+        let tomb = e.is_tombstone();
+        match log.emit(EventContext::staff(user(1)), e) {
+            Err(LogError::TombstoneViaApi) => {
+                assert!(tomb);
+                refused_tomb += 1;
+            }
+            Err(LogError::ForeignArtefact) => refused_foreign += 1,
+            Err(e) => panic!("{e:?}"),
+            Ok(_) => assert!(!tomb),
         }
     }
+    assert_eq!((refused_tomb, refused_foreign), (5, 6));
+    next_slot(&mut log, &clock);
     let st = sink.0.lock().unwrap();
-    for s in [StreamId::Sec, StreamId::Case, StreamId::Sys] {
+    for s in ALL {
+        for r in st.records(s) {
+            let names = r.event().field_names();
+            let v = cbor::decode(r.bytes()).unwrap();
+            assert_eq!(cbor::encode(&v).unwrap(), r.bytes());
+            let cbor::Value::Map(payload) = v.get("payload").unwrap() else {
+                panic!()
+            };
+            // Payload keys ⊆ schema.
+            for (k, _) in payload {
+                assert!(names.contains(&k.as_text().unwrap()));
+            }
+        }
         verify_stream(
             &params(&log.verifying_key(), s),
             &st.chain(s),
@@ -603,8 +764,9 @@ fn full_catalog_round_trip() {
     }
 }
 
-// AUD-012: per-case redaction keeps the chain verifiable once the
-// tombstone that commits to the redacted set is checkpointed.
+// AUD-012: per-case redaction of CASE and CASE-SLOT records keeps both
+// chains verifiable once the dual-approved tombstones that commit to the
+// redacted sets are checkpointed.
 #[test]
 fn case_disposal_redaction_verifies() {
     let r = rig(HostRole::Core, CheckpointPolicy::DEFAULT);
@@ -613,24 +775,52 @@ fn case_disposal_redaction_verifies() {
         log.emit(EventContext::staff(user(1)), opened(i % 3))
             .unwrap();
     }
+    for i in 0..3 {
+        log.emit(EventContext::system(Service::Relay), imported(i))
+            .unwrap();
+    }
     let target = case(1);
-    let plan = sink.0.lock().unwrap().plan_case_redaction(target);
-    assert_eq!(plan.len(), 3);
-    let tomb = log
-        .emit(
-            EventContext::staff(user(1)),
-            plan.tombstone(ReceiptId::derive(&idk(), b"r5")),
-        )
-        .unwrap()
-        .record;
+    // Disposal waits while records of the case are still staged.
+    let pending = sink.0.lock().unwrap().plan_case_redaction(target);
+    let auth = approve(
+        pending
+            .request(tenant(), ReceiptId::generate().unwrap())
+            .unwrap(),
+    );
+    assert_eq!(
+        log.emit_case_disposal(EventContext::staff(user(1)), &pending, &auth)
+            .unwrap_err(),
+        LogError::Disposal(DisposalError::StagedRecordsPending)
+    );
+    next_slot(&mut log, &clock);
+    let store = sink.0.lock().unwrap().clone();
+    let plan = dispose(&mut log, &store, target);
+    assert_eq!(plan.len(), 4);
+    // A system actor cannot dispose (date-only tombstone in CASE).
+    let auth2 = approve(
+        plan.request(tenant(), ReceiptId::generate().unwrap())
+            .unwrap(),
+    );
+    assert_eq!(
+        log.emit_case_disposal(EventContext::system(Service::Core), &plan, &auth2)
+            .unwrap_err(),
+        LogError::Disposal(DisposalError::StaffActorRequired)
+    );
     let n = sink
         .0
         .lock()
         .unwrap()
-        .apply_case_redaction(&plan, &tomb)
+        .apply_case_redaction(&plan, StreamId::Case)
         .unwrap();
     assert_eq!(n, 3);
-    keys.destroy(target);
+    // The CASE-SLOT tombstone is written at the next slot boundary.
+    assert!(
+        sink.0
+            .lock()
+            .unwrap()
+            .apply_case_redaction(&plan, StreamId::CaseSlot)
+            .is_err()
+    );
     let key = log.verifying_key();
     // Not yet checkpointed: the stubs are not provably bound.
     {
@@ -643,15 +833,22 @@ fn case_disposal_redaction_verifies() {
         .unwrap_err();
         assert_eq!(err.code, VerifyFailureCode::UnboundRedaction);
     }
-    clock.advance(DAY);
+    next_slot(&mut log, &clock);
+    assert_eq!(
+        sink.0
+            .lock()
+            .unwrap()
+            .apply_case_redaction(&plan, StreamId::CaseSlot)
+            .unwrap(),
+        1
+    );
+    keys.destroy(target);
+    clock.advance(5 * 60 * 1000);
     log.tick().unwrap();
     let st = sink.0.lock().unwrap();
-    assert!(
-        st.records(StreamId::Case)
-            .iter()
-            .filter(|r| !matches!(r.event(), AuditEvent::CaseDisposed { .. }))
-            .all(|r| r.event().case_ref() != Some(target))
-    );
+    for s in [StreamId::Case, StreamId::CaseSlot] {
+        assert!(st.records(s).iter().all(|r| r.case_tag() != Some(target)));
+    }
     let rep = verify_stream(
         &params(&key, StreamId::Case),
         &st.chain(StreamId::Case),
@@ -659,14 +856,21 @@ fn case_disposal_redaction_verifies() {
     )
     .unwrap();
     assert_eq!(rep.redacted, 3);
+    let rep = verify_stream(
+        &params(&key, StreamId::CaseSlot),
+        &st.chain(StreamId::CaseSlot),
+        &st.checkpoints(StreamId::CaseSlot),
+    )
+    .unwrap();
+    assert_eq!(rep.redacted, 1);
     // Tampering with a stub is detected.
     let mut recs = st.chain(StreamId::Case);
     let pos = recs
         .iter()
         .position(|r| matches!(r, ChainRecord::Redacted { .. }))
         .unwrap();
-    if let ChainRecord::Redacted { commit, .. } = &mut recs[pos] {
-        commit[0] ^= 1;
+    if let ChainRecord::Redacted { inner, .. } = &mut recs[pos] {
+        inner[0] ^= 1;
     }
     assert!(
         verify_stream(
@@ -685,10 +889,11 @@ fn case_disposal_redaction_verifies() {
     );
 }
 
-fn stub_of(r: &CommittedRecord, tombstone_seq: u64) -> ChainRecord {
+fn forged_stub(r: &CommittedRecord, case: CaseRef, tombstone_seq: u64) -> ChainRecord {
     ChainRecord::Redacted {
         seq: r.header().seq,
-        commit: *r.commit(),
+        case,
+        inner: *r.inner(),
         tombstone_seq,
     }
 }
@@ -699,7 +904,7 @@ fn stub_of(r: &CommittedRecord, tombstone_seq: u64) -> ChainRecord {
 #[test]
 fn stub_in_security_stream_rejected() {
     let (mut log, sink, clock) = log_with(HostRole::Core, CheckpointPolicy::DEFAULT);
-    let danger = log
+    let danger = rec(log
         .emit(
             EventContext::staff(user(1)),
             AuditEvent::CfgDangerousEnabled {
@@ -707,8 +912,7 @@ fn stub_in_security_stream_rejected() {
                 expiry: StaffTimer::after(&clock, 60).unwrap(),
             },
         )
-        .unwrap()
-        .record;
+        .unwrap());
     log.emit(
         EventContext::staff(user(1)),
         AuditEvent::AuthLogout {
@@ -718,10 +922,16 @@ fn stub_in_security_stream_rejected() {
     .unwrap();
     clock.advance(5 * 60 * 1000);
     let cps = log.tick().unwrap();
-    let witness = cps.last().unwrap().clone();
+    let witness = cps
+        .iter()
+        .rev()
+        .find(|c| c.body().stream == StreamId::Sec)
+        .unwrap()
+        .clone();
     let key = log.verifying_key();
     let mut st = sink.0.lock().unwrap();
-    assert!(st.tamper_replace(StreamId::Sec, 0, stub_of(&danger, 1)));
+    assert!(danger.to_stub(1).is_none(), "SECURITY records are not redactable");
+    assert!(st.tamper_replace(StreamId::Sec, 0, forged_stub(&danger, case(9), 1)));
     let mut p = params(&key, StreamId::Sec);
     p.trusted_latest = Some(&witness);
     let err =
@@ -737,11 +947,9 @@ fn case_stub_without_matching_tombstone_rejected() {
     let (mut log, sink, clock) = (r.log, r.sink, r.clock);
     let mut recs = Vec::new();
     for i in 0..6 {
-        recs.push(
-            log.emit(EventContext::staff(user(1)), opened(i % 2))
-                .unwrap()
-                .record,
-        );
+        recs.push(rec(log
+            .emit(EventContext::staff(user(1)), opened(i % 2))
+            .unwrap()));
     }
     clock.advance(DAY);
     log.tick().unwrap();
@@ -749,7 +957,7 @@ fn case_stub_without_matching_tombstone_rejected() {
     // (a) stub pointing at an ordinary record.
     {
         let mut st = sink.0.lock().unwrap().clone();
-        st.tamper_replace(StreamId::Case, 0, stub_of(&recs[0], 1));
+        st.tamper_replace(StreamId::Case, 0, recs[0].to_stub(1).unwrap());
         let e = verify_stream(
             &params(&key, StreamId::Case),
             &st.chain(StreamId::Case),
@@ -759,23 +967,26 @@ fn case_stub_without_matching_tombstone_rejected() {
         assert_eq!(e.code, VerifyFailureCode::UnboundRedaction);
     }
     // (b) legitimate disposal of case 0, plus one extra record of case 1
-    // stubbed against the same tombstone: set/count mismatch.
-    let plan = sink.0.lock().unwrap().plan_case_redaction(case(0));
-    let tomb = log
-        .emit(
-            EventContext::staff(user(1)),
-            plan.tombstone(ReceiptId::derive(&idk(), b"r")),
-        )
-        .unwrap()
-        .record;
+    // stubbed against the same tombstone: case/set/count mismatch.
+    let store = sink.0.lock().unwrap().clone();
+    let plan = dispose(&mut log, &store, case(0));
     sink.0
         .lock()
         .unwrap()
-        .apply_case_redaction(&plan, &tomb)
+        .apply_case_redaction(&plan, StreamId::Case)
         .unwrap();
     clock.advance(DAY);
     log.tick().unwrap();
-    let tseq = tomb.header().seq;
+    let tseq = sink
+        .0
+        .lock()
+        .unwrap()
+        .records(StreamId::Case)
+        .iter()
+        .find(|r| r.event().is_tombstone())
+        .unwrap()
+        .header()
+        .seq;
     let mut st = sink.0.lock().unwrap().clone();
     verify_stream(
         &params(&key, StreamId::Case),
@@ -783,21 +994,28 @@ fn case_stub_without_matching_tombstone_rejected() {
         &st.checkpoints(StreamId::Case),
     )
     .unwrap();
-    st.tamper_replace(StreamId::Case, 1, stub_of(&recs[1], tseq));
-    let e = verify_stream(
-        &params(&key, StreamId::Case),
-        &st.chain(StreamId::Case),
-        &st.checkpoints(StreamId::Case),
-    )
-    .unwrap_err();
-    assert_eq!(e.code, VerifyFailureCode::UnboundRedaction);
+    for stub in [
+        recs[1].to_stub(tseq).unwrap(),
+        // naming the disposed case instead breaks the record commitment
+        forged_stub(&recs[1], case(0), tseq),
+    ] {
+        let mut st2 = st.clone();
+        st2.tamper_replace(StreamId::Case, 1, stub);
+        let e = verify_stream(
+            &params(&key, StreamId::Case),
+            &st2.chain(StreamId::Case),
+            &st2.checkpoints(StreamId::Case),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            e.code,
+            VerifyFailureCode::UnboundRedaction | VerifyFailureCode::ChainMismatch
+        ));
+    }
     // A tombstone cannot cover a later record.
-    let later = log
-        .emit(EventContext::staff(user(1)), opened(3))
-        .unwrap()
-        .record;
-    let mut st = sink.0.lock().unwrap().clone();
-    assert!(st.tamper_replace(StreamId::Case, later.header().seq, stub_of(&later, tseq)));
+    let later = rec(log.emit(EventContext::staff(user(1)), opened(3)).unwrap());
+    st = sink.0.lock().unwrap().clone();
+    assert!(st.tamper_replace(StreamId::Case, later.header().seq, later.to_stub(tseq).unwrap()));
     let e = verify_stream(
         &params(&key, StreamId::Case),
         &st.chain(StreamId::Case),
@@ -805,6 +1023,117 @@ fn case_stub_without_matching_tombstone_rejected() {
     )
     .unwrap_err();
     assert_eq!(e.code, VerifyFailureCode::UnboundRedaction);
+}
+
+// AUD-RM1-LOG-16 regression (round-2 PoC `forge.rs`): an insider who can
+// emit and edit the store forges a `case.disposed` for an unrelated case
+// that commits to a victim record. Every path is closed:
+// (a) the tombstone variant cannot be built (private payload; trybuild
+//     `forge_tombstone.rs`) and `emit` refuses tombstones;
+// (b) the insider's own approver keys (pinned in a writer they control) do
+//     not verify under the pinned approver keys;
+// (c) a genuine disposal of another case cannot cover the victim's record.
+#[test]
+fn forged_disposal_tombstone_rejected() {
+    // (a)
+    let (mut log, _sink, _c) = log_with(HostRole::Core, CheckpointPolicy::DEFAULT);
+    let sample = AuditEvent::samples()
+        .into_iter()
+        .find(|e| e.type_name() == "case.disposed")
+        .unwrap();
+    assert_eq!(
+        log.emit(EventContext::staff(user(1)), sample).unwrap_err(),
+        LogError::TombstoneViaApi
+    );
+    // (b) a writer whose pinned approvers are the insider's own keys.
+    let r = rig(HostRole::Core, CheckpointPolicy::DEFAULT);
+    let (mut log, sink, clock) = (r.log, r.sink, r.clock);
+    let victim = rec(log.emit(EventContext::staff(user(1)), opened(7)).unwrap());
+    log.emit(EventContext::staff(user(1)), opened(8)).unwrap();
+    let mallory = (
+        SoftwareApprover::from_seed(&zeroize::Zeroizing::new([66; 32])),
+        SoftwareApprover::from_seed(&zeroize::Zeroizing::new([67; 32])),
+    );
+    let own = ApproverKeys::new(
+        vec![mallory.0.verifying_key(), mallory.1.verifying_key()],
+        &log.verifying_key(),
+    )
+    .unwrap();
+    log.set_approver_keys(own.clone());
+    let store = sink.0.lock().unwrap().clone();
+    let plan = store.plan_case_redaction(case(7));
+    let req = plan
+        .request(tenant(), ReceiptId::generate().unwrap())
+        .unwrap();
+    let auth = DisposalAuthorization::new(
+        req.clone(),
+        mallory.0.approve(&req).unwrap(),
+        mallory.1.approve(&req).unwrap(),
+        &own,
+    )
+    .unwrap();
+    // The real pinned set refuses this authorization outright.
+    assert_eq!(
+        DisposalAuthorization::new(
+            req.clone(),
+            mallory.0.approve(&req).unwrap(),
+            mallory.1.approve(&req).unwrap(),
+            approver_keys(),
+        )
+        .unwrap_err(),
+        DisposalError::BadApprovals
+    );
+    log.emit_case_disposal(EventContext::staff(user(1)), &plan, &auth)
+        .unwrap();
+    sink.0
+        .lock()
+        .unwrap()
+        .apply_case_redaction(&plan, StreamId::Case)
+        .unwrap();
+    clock.advance(DAY);
+    log.tick().unwrap();
+    let key = log.verifying_key();
+    let st = sink.0.lock().unwrap().clone();
+    let e = verify_stream(
+        &params(&key, StreamId::Case),
+        &st.chain(StreamId::Case),
+        &st.checkpoints(StreamId::Case),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, VerifyFailureCode::UnboundRedaction);
+    // (c) genuinely approved disposal of case 8; the insider stubs the
+    // victim's (case 7) record against it.
+    let r = rig(HostRole::Core, CheckpointPolicy::DEFAULT);
+    let (mut log, sink, clock) = (r.log, r.sink, r.clock);
+    let victim2 = rec(log.emit(EventContext::staff(user(1)), opened(7)).unwrap());
+    log.emit(EventContext::staff(user(1)), opened(8)).unwrap();
+    let store = sink.0.lock().unwrap().clone();
+    dispose(&mut log, &store, case(8));
+    clock.advance(DAY);
+    log.tick().unwrap();
+    let mut st = sink.0.lock().unwrap().clone();
+    let tseq = st
+        .records(StreamId::Case)
+        .iter()
+        .find(|r| r.event().is_tombstone())
+        .unwrap()
+        .header()
+        .seq;
+    for stub in [
+        victim2.to_stub(tseq).unwrap(),
+        forged_stub(&victim2, case(8), tseq),
+    ] {
+        st.tamper_replace(StreamId::Case, victim2.header().seq, stub);
+        assert!(
+            verify_stream(
+                &params(&key, StreamId::Case),
+                &st.chain(StreamId::Case),
+                &st.checkpoints(StreamId::Case),
+            )
+            .is_err()
+        );
+    }
+    let _ = victim;
 }
 
 // AUD-RM1-LOG-08: a stub cannot be confirmed against a guessed record
@@ -812,33 +1141,38 @@ fn case_stub_without_matching_tombstone_rejected() {
 #[test]
 fn redacted_stub_reveals_nothing_without_case_key() {
     let (mut log, _sink, _c) = log_with(HostRole::Core, CheckpointPolicy::DEFAULT);
-    let a = log
-        .emit(EventContext::staff(user(1)), opened(1))
-        .unwrap()
-        .record;
-    let b = log
-        .emit(EventContext::staff(user(1)), opened(1))
-        .unwrap()
-        .record;
+    let a = rec(log.emit(EventContext::staff(user(1)), opened(1)).unwrap());
+    let b = rec(log.emit(EventContext::staff(user(1)), opened(1)).unwrap());
     assert_ne!(a.salt(), &[0; 32], "CASE records are salted");
     assert_ne!(a.salt(), b.salt(), "salt is per record");
     // An attacker who guesses the exact canonical bytes but lacks the salt
     // cannot reproduce the commitment.
-    assert_ne!(record_commit(&[0; 32], a.bytes()), *a.commit());
-    assert_eq!(record_commit(a.salt(), a.bytes()), *a.commit());
-    // Non-redactable records carry no salt.
-    let s = log
-        .emit(EventContext::staff(user(1)), login())
-        .unwrap()
-        .record;
+    let tag = a.case_tag();
+    assert_eq!(tag, Some(case(1)));
+    assert_ne!(
+        record_commit(tag.as_ref(), &record_inner(&[0; 32], a.bytes())),
+        *a.commit()
+    );
+    assert_eq!(
+        record_commit(tag.as_ref(), &record_inner(a.salt(), a.bytes())),
+        *a.commit()
+    );
+    // Non-redactable records carry no salt and no case tag.
+    let s = rec(log.emit(EventContext::staff(user(1)), login()).unwrap());
     assert_eq!(s.salt(), &[0; 32]);
+    assert_eq!(s.case_tag(), None);
     // Salts never appear in Debug output.
     assert!(!format!("{a:?}").contains(&format!("{:?}", a.salt())));
 }
 
-// AUD-005 / AUD-RM1-LOG-01: whole-interval retention with a checkpointed
-// tombstone in the same stream; the remaining chain verifies; a prefix
-// pruned without (or with a too-young) tombstone does not.
+fn retention_auth(stream: StreamId, days: u32) -> DisposalAuthorization {
+    approve(DisposalRequest::retention(tenant(), stream, days).unwrap())
+}
+
+// AUD-005 / AUD-RM1-LOG-01/16/20: whole-interval retention with a
+// checkpointed, dual-approved tombstone in the same stream; the remaining
+// chain verifies; a prefix pruned without (or with a too-young) tombstone
+// does not; the configured retention binds the verifier.
 #[test]
 fn retention_interval_deletion() {
     let (mut log, sink, clock) = log_with(HostRole::Core, CheckpointPolicy::DEFAULT);
@@ -888,26 +1222,36 @@ fn retention_interval_deletion() {
     let plan = retention::plan_interval_deletion(&policy, StreamId::Sec, &cps, 0, now)
         .unwrap()
         .unwrap();
-    assert_eq!(plan.range.last(), 9);
+    assert_eq!(plan.range(), (0, 9));
     // Without a tombstone, deletion is refused.
-    let unrelated = log
-        .emit(EventContext::staff(user(1)), login())
-        .unwrap()
-        .record;
-    assert!(
-        retention::apply_interval_deletion(&mut sink.0.lock().unwrap(), &plan, &unrelated).is_err()
-    );
-    let tomb = log
-        .emit(EventContext::system(Service::Audit), plan.tombstone())
-        .unwrap()
-        .record;
     assert_eq!(
-        retention::apply_interval_deletion(&mut sink.0.lock().unwrap(), &plan, &tomb),
+        retention::apply_interval_deletion(&mut sink.0.lock().unwrap(), &plan),
+        Err(RetentionError::MissingTombstone)
+    );
+    // The authorization must match the plan's period, and tombstones only
+    // go through the API.
+    assert_eq!(
+        log.emit_retention_tombstone(
+            EventContext::system(Service::Audit),
+            &plan,
+            &retention_auth(StreamId::Sec, 400)
+        )
+        .unwrap_err(),
+        LogError::Disposal(DisposalError::Mismatch)
+    );
+    log.emit_retention_tombstone(
+        EventContext::system(Service::Audit),
+        &plan,
+        &retention_auth(StreamId::Sec, 90),
+    )
+    .unwrap();
+    assert_eq!(
+        retention::apply_interval_deletion(&mut sink.0.lock().unwrap(), &plan),
         Err(RetentionError::TombstoneNotAttested)
     );
     clock.advance(5 * 60 * 1000);
     log.tick().unwrap();
-    retention::apply_interval_deletion(&mut sink.0.lock().unwrap(), &plan, &tomb).unwrap();
+    retention::apply_interval_deletion(&mut sink.0.lock().unwrap(), &plan).unwrap();
     let st = sink.0.lock().unwrap();
     let recs = st.chain(StreamId::Sec);
     let cps = st.checkpoints(StreamId::Sec);
@@ -918,12 +1262,25 @@ fn retention_interval_deletion() {
     p.allow_pruned_prefix = true;
     let rep = verify_stream(&p, &recs, &cps).unwrap();
     assert_eq!(rep.first_seq, Some(10));
-    // CASE stream is never interval-deleted.
-    assert!(retention::plan_interval_deletion(&policy, StreamId::Case, &cps, 0, now).is_err());
+    // AUD-RM1-LOG-20 regression: with the deployment's configured 400-day
+    // SECURITY retention, a 90-day prune no longer verifies.
+    p.min_retention_days = Some(400);
+    assert_eq!(
+        verify_stream(&p, &recs, &cps).unwrap_err().code,
+        VerifyFailureCode::UnboundPrune
+    );
+    p.min_retention_days = Some(90);
+    verify_stream(&p, &recs, &cps).unwrap();
+    // CASE streams are never interval-deleted.
+    for s in [StreamId::Case, StreamId::CaseSlot] {
+        assert!(retention::plan_interval_deletion(&policy, s, &cps, 0, now).is_err());
+        assert!(DisposalRequest::retention(tenant(), s, 90).is_none());
+    }
 }
 
-// AUD-RM1-LOG-01: a tombstone for intervals younger than the minimum
-// retention (planned with a falsified "now") does not bind the prune.
+// AUD-RM1-LOG-01/20: a tombstone for intervals younger than the authorized
+// retention (planned with a falsified "now") is refused by the writer; an
+// authorization below the 20 §12 minimum cannot be made.
 #[test]
 fn premature_prune_rejected() {
     let (mut log, sink, clock) = log_with(HostRole::Core, CheckpointPolicy::DEFAULT);
@@ -938,20 +1295,17 @@ fn premature_prune_rejected() {
     let plan = retention::plan_interval_deletion(&policy, StreamId::Sec, &cps, 0, fake_now)
         .unwrap()
         .unwrap();
-    let tomb = log
-        .emit(EventContext::system(Service::Audit), plan.tombstone())
-        .unwrap()
-        .record;
-    clock.advance(5 * 60 * 1000);
-    log.tick().unwrap();
-    retention::apply_interval_deletion(&mut sink.0.lock().unwrap(), &plan, &tomb).unwrap();
-    let st = sink.0.lock().unwrap();
-    let key = log.verifying_key();
-    let mut p = params(&key, StreamId::Sec);
-    p.allow_pruned_prefix = true;
-    let e =
-        verify_stream(&p, &st.chain(StreamId::Sec), &st.checkpoints(StreamId::Sec)).unwrap_err();
-    assert_eq!(e.code, VerifyFailureCode::UnboundPrune);
+    assert_eq!(
+        log.emit_retention_tombstone(
+            EventContext::system(Service::Audit),
+            &plan,
+            &retention_auth(StreamId::Sec, 90)
+        )
+        .unwrap_err(),
+        LogError::Disposal(DisposalError::TooEarly)
+    );
+    assert!(DisposalRequest::retention(tenant(), StreamId::Sec, 30).is_none());
+    assert!(DisposalRequest::retention(tenant(), StreamId::Sys, 6).is_none());
 }
 
 // JSONL sink round trip and tamper detection through the file format
@@ -1124,7 +1478,7 @@ fn failing_primary_commits_nothing() {
     );
     prim.fail.store(false, Ordering::SeqCst);
     let e = log.emit(EventContext::staff(user(1)), login()).unwrap();
-    assert_eq!(e.record.header().seq, 1);
+    assert_eq!(e.record.unwrap().header().seq, 1);
     let st = prim.inner.0.lock().unwrap();
     verify_stream(
         &params(&log.verifying_key(), StreamId::Sec),
@@ -1195,7 +1549,7 @@ fn signer_failure_writes_nothing() {
     fail.store(false, Ordering::SeqCst);
     let e = log.emit(EventContext::staff(user(1)), login()).unwrap();
     assert!(e.checkpoint.is_some());
-    assert_eq!(e.record.header().seq, 1);
+    assert_eq!(e.record.unwrap().header().seq, 1);
     let st = sink.0.lock().unwrap();
     verify_stream(
         &params(&log.verifying_key(), StreamId::Sec),
@@ -1203,4 +1557,200 @@ fn signer_failure_writes_nothing() {
         &st.checkpoints(StreamId::Sec),
     )
     .unwrap();
+}
+
+/// Test witness: records every published head per stream.
+#[derive(Clone, Default)]
+struct Witness {
+    heads: Arc<std::sync::Mutex<Vec<SignedCheckpoint>>>,
+    down: Arc<AtomicBool>,
+}
+
+impl WitnessSink for Witness {
+    fn publish(&mut self, head: &SignedCheckpoint) -> Result<(), WitnessError> {
+        if self.down.load(Ordering::SeqCst) {
+            return Err(WitnessError);
+        }
+        self.heads.lock().unwrap().push(head.clone());
+        Ok(())
+    }
+}
+
+impl Witness {
+    fn latest(&self, s: StreamId) -> Option<SignedCheckpoint> {
+        self.heads
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|c| c.body().stream == s)
+            .cloned()
+    }
+}
+
+// AUD-RM1-LOG-19 regression: every stream publishes its head to the
+// witness at each tick — hourly for SECURITY/CASE/SYSTEM, every import slot
+// for the slot streams, empty ticks included — and the verifier given the
+// latest witnessed head detects truncation beyond it (records and/or
+// checkpoints removed). Residual: records after the last witnessed head
+// (≤ one tick).
+#[test]
+fn witness_ticks_and_truncation_beyond_witnessed_head() {
+    let start = T0 - T0 % DAY + 30_000;
+    let r = rig_at(HostRole::Core, CheckpointPolicy::DEFAULT, start);
+    let (mut log, sink, clock) = (r.log, r.sink, r.clock);
+    let w = Witness::default();
+    log.set_witness(Box::new(w.clone()));
+    // A day of minute ticks; CASE events in the first two hours only.
+    for minute in 0..(24 * 60) {
+        clock.advance(60_000);
+        if minute < 120 && minute % 7 == 0 {
+            log.emit(EventContext::staff(user(1)), opened(1)).unwrap();
+        }
+        log.tick().unwrap();
+    }
+    let heads = w.heads.lock().unwrap().clone();
+    for s in [StreamId::Sec, StreamId::Case, StreamId::Sys] {
+        let times: Vec<u64> = heads
+            .iter()
+            .filter(|c| c.body().stream == s)
+            .map(|c| c.body().signed_at.0)
+            .collect();
+        assert_eq!(times.len(), 24, "{s:?}: one head per hour, empty included");
+        assert!(times.iter().all(|t| t % 3_600_000 == 0));
+    }
+    for s in [StreamId::CaseSlot, StreamId::SysSlot] {
+        let n = heads.iter().filter(|c| c.body().stream == s).count();
+        assert_eq!(n, 4, "{s:?}: one head per import slot");
+    }
+    assert!(!log.witness_lag());
+    let key = log.verifying_key();
+    let witnessed = w.latest(StreamId::Case).unwrap();
+    let st = sink.0.lock().unwrap().clone();
+    let recs = st.chain(StreamId::Case);
+    let cps = st.checkpoints(StreamId::Case);
+    let mut p = params(&key, StreamId::Case);
+    p.trusted_latest = Some(&witnessed);
+    verify_stream(&p, &recs, &cps).unwrap();
+    // Truncating records covered by the witnessed head is detected even when
+    // the insider also drops every checkpoint after the last surviving one.
+    let keep = recs.len() - 3;
+    let cut_cps: Vec<SignedCheckpoint> = cps
+        .iter()
+        .take_while(|c| c.body().end_seq as usize <= keep)
+        .cloned()
+        .collect();
+    let e = verify_stream(&p, &recs[..keep], &cut_cps).unwrap_err();
+    assert_eq!(e.code, VerifyFailureCode::Rollback);
+    let e = verify_stream(&p, &recs[..keep], &cps).unwrap_err();
+    assert_eq!(e.code, VerifyFailureCode::Truncated);
+    // Without the witness the same truncation is indistinguishable from
+    // an honest older state (why the witness ticks exist).
+    verify_stream(&params(&key, StreamId::Case), &recs[..keep], &cut_cps).unwrap();
+    // A head that could not be published stays queued and goes out later.
+    w.down.store(true, Ordering::SeqCst);
+    clock.advance(3_600_000);
+    log.tick().unwrap();
+    assert!(log.witness_lag());
+    w.down.store(false, Ordering::SeqCst);
+    log.tick().unwrap();
+    assert!(!log.witness_lag());
+}
+
+// AUD-RM1-LOG-17 regression (round-2 PoC `main.rs`): checkpoint-derived
+// values come only from the writer's own checkpoints and are bound to its
+// key; a self-signed checkpoint or a second log with the insider's key
+// cannot launder chosen bits into `seq`/`seq_range`/`root` fields.
+#[test]
+fn checkpoint_values_cannot_be_laundered() {
+    let (mut log, _sink, clock) = log_with(HostRole::Core, CheckpointPolicy::DEFAULT);
+    log.emit(EventContext::staff(user(1)), login()).unwrap();
+    clock.advance(5 * 60 * 1000);
+    let real = log
+        .tick()
+        .unwrap()
+        .into_iter()
+        .find(|c| c.body().stream == StreamId::Sec)
+        .unwrap();
+    // Self-signed checkpoint with an IPv6 address as root and an IPv4:port
+    // as end_seq.
+    let mut v = cbor::decode(real.bytes()).unwrap();
+    if let cbor::Value::Map(m) = &mut v {
+        for (k, val) in m.iter_mut() {
+            match k.as_text() {
+                Some("merkle_root") => *val = cbor::Value::Bytes(vec![0x20; 32]),
+                Some("end_seq") => *val = cbor::Value::Uint(0xCB00_7107_0000_01BB),
+                _ => {}
+            }
+        }
+    }
+    let bytes = cbor::encode(&v).unwrap();
+    let mine = signer(9);
+    let sig = mine.sign_checkpoint(&bytes).unwrap();
+    let forged = SignedCheckpoint::from_parts(bytes, sig.to_bytes()).unwrap();
+    assert!(log.checkpoint_root(&forged).is_none());
+    assert!(log.checkpoint_seq(&forged).is_none());
+    assert!(log.checkpoint_range(&forged).is_none());
+    // Values from the insider's own writer are refused by the real one.
+    let mut other = AuditLog::new(
+        tenant(),
+        HostRole::Core,
+        signer(9),
+        clock.clone(),
+        CheckpointPolicy::DEFAULT,
+    );
+    other.set_primary_sink(Box::new(MemorySink::new()));
+    let root = other.checkpoint_root(&forged).unwrap();
+    let range = other.checkpoint_range(&forged).unwrap();
+    let seq = other.checkpoint_seq(&forged).unwrap();
+    for ev in [
+        AuditEvent::AuditCheckpointSigned {
+            stream: StreamId::Sec,
+            seq_range: range,
+            root,
+        },
+        AuditEvent::AuditWitnessFailed {
+            witness_id: WitnessId::generate().unwrap(),
+            checkpoint_seq: seq,
+        },
+    ] {
+        assert_eq!(
+            log.emit(EventContext::staff(user(1)), ev).unwrap_err(),
+            LogError::ForeignArtefact
+        );
+    }
+    // The writer's own artefacts are accepted.
+    let ok = AuditEvent::AuditCheckpointSigned {
+        stream: StreamId::Sec,
+        seq_range: log.checkpoint_range(&real).unwrap(),
+        root: log.checkpoint_root(&real).unwrap(),
+    };
+    log.emit(EventContext::staff(user(1)), ok).unwrap();
+    // A verification failure under another key does not bind either.
+    let other_key = signer(9).verifying_key();
+    let e = verify_stream(&params(&other_key, StreamId::Sec), &[], &[real.clone()]).unwrap_err();
+    assert_eq!(
+        log.emit(
+            EventContext::staff(user(1)),
+            AuditEvent::AuditVerificationFailed {
+                stream: StreamId::Sec,
+                seq: candor_log::field::Seq::of_failure(&e),
+                failure_code: e.code,
+            }
+        )
+        .unwrap_err(),
+        LogError::ForeignArtefact
+    );
+    let e = verify_stream(&params(&log.verifying_key(), StreamId::Case), &[], &[real])
+        .unwrap_err();
+    log.emit(
+        EventContext::staff(user(1)),
+        AuditEvent::AuditVerificationFailed {
+            stream: StreamId::Case,
+            seq: candor_log::field::Seq::of_failure(&e),
+            failure_code: e.code,
+        },
+    )
+    .unwrap();
+    let _ = (clock.read(), seq);
 }

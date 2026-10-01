@@ -254,10 +254,8 @@ bounded_count!(
     SlotIndex, u8, 95);
 
 /// A small count of staff-visible objects (evidence items in an export,
-/// transform inputs/outputs, removed audit events). Never a byte size or
-/// a per-submission attachment count (P-07). Caller-constructed counts are
-/// bounded by [`Count::MAX`]; the log itself may record larger internal
-/// counts (e.g. removed events at disposal).
+/// transform inputs/outputs). Never a byte size or a per-submission
+/// attachment count (P-07). Bounded by [`Count::MAX`].
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Count(u32);
 
@@ -267,9 +265,6 @@ impl Count {
     /// `None` above [`Count::MAX`].
     pub fn new(v: u32) -> Option<Self> {
         (v <= Self::MAX).then_some(Self(v))
-    }
-    pub(crate) fn internal(v: u32) -> Self {
-        Self(v)
     }
     /// Value.
     pub fn get(self) -> u32 {

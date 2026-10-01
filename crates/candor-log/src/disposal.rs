@@ -392,7 +392,10 @@ impl AuditField for CaseDisposal {
         let mut m = MapBuilder::new();
         m.put("case", self.case.to_value())
             .put("receipt_id", self.receipt.to_value())
-            .put("removed_event_count", Value::Uint(self.removed_event_count()))
+            .put(
+                "removed_event_count",
+                Value::Uint(self.removed_event_count()),
+            )
             .put("case_set", c.to_value())
             .put("slot_set", s.to_value())
             .put("approvals", Value::Array(vec![a.to_value(), b.to_value()]));

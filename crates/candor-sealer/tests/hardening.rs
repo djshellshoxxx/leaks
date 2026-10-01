@@ -13,21 +13,25 @@
 
 mod common;
 
-use std::os::unix::fs::PermissionsExt; // safefs-lint: allow(test fixture setup)
-
 use candor_core::sig::SigningKey;
 use candor_sealer::server::hardening::{
     HardeningError, InsecureDevMode, LandlockLevel, harden_process, report, self_check,
+    thread_confined,
 };
 use candor_sealer::server::{ChaffConfig, Limits, Sealer};
 use common::*;
 
-fn status_field(name: &str) -> String {
+/// Threads of this process (procfs; only read while unconfined).
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test reads procfs before Landlock applies; not sealer code"
+)]
+fn threads() -> u32 {
     let s = std::fs::read_to_string("/proc/self/status").unwrap(); // safefs-lint: allow(test reads procfs)
     s.lines()
-        .find(|l| l.starts_with(name))
-        .map(|l| l.trim_start_matches(name).trim().to_owned())
-        .unwrap_or_default()
+        .find_map(|l| l.strip_prefix("Threads:"))
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap()
 }
 
 /// A production-configured sealer (no developer override, chaff on).
@@ -46,10 +50,10 @@ fn production_sealer(f: &Fixture, peer_uid: u32) -> Sealer {
 
 async fn serve_result(
     s: &Sealer,
-    dir: &std::path::Path,
-    name: &str,
+    l: std::os::unix::net::UnixListener,
 ) -> Option<std::io::Result<()>> {
-    let listener = tokio::net::UnixListener::bind(dir.join(name)).unwrap();
+    l.set_nonblocking(true).unwrap();
+    let listener = tokio::net::UnixListener::from_std(l).unwrap();
     let s = s.clone();
     let h = tokio::spawn(async move { s.serve(listener).await });
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -61,20 +65,35 @@ async fn serve_result(
     }
 }
 
-#[test]
+/// Runs on the main thread (`harness = false`): `harden_process` requires the
+/// main thread to be the only thread (AUD-RM2-SEA-20).
+fn main() {
+    developer_override_is_audit_logged();
+    hardening_is_applied_and_enforced_before_serving();
+}
+
+#[allow(
+    clippy::disallowed_methods,
+    reason = "test fixture setup and Landlock probes use std::fs/std::net directly"
+)]
 fn hardening_is_applied_and_enforced_before_serving() {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
     let f = fixture();
     let sock_dir = tempfile::tempdir().unwrap();
+    // Sockets are bound before Landlock (binding creates a filesystem node
+    // outside the staging root, which the hardened process may not do).
+    let bind = |n: &str| std::os::unix::net::UnixListener::bind(sock_dir.path().join(n)).unwrap();
+    let (la, lb0, lb1, lc, ld) = (bind("a"), bind("b0"), bind("b1"), bind("c"), bind("d"));
 
     // 1. Unhardened: the self-check fails and a production sealer refuses to
     //    serve (fail closed), whatever the peer UID.
     assert_eq!(self_check().unwrap_err(), HardeningError::NotApplied);
+    assert!(!thread_confined());
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     let prod = production_sealer(&f, 54_321);
-    let r = rt.block_on(serve_result(&prod, sock_dir.path(), "a.sock"));
+    let r = rt.block_on(serve_result(&prod, la));
     assert_eq!(
         r.expect("serve must return at once").unwrap_err().kind(),
         std::io::ErrorKind::PermissionDenied
@@ -99,27 +118,52 @@ fn hardening_is_applied_and_enforced_before_serving() {
         )
         .is_err()
     );
+    rt.shutdown_timeout(std::time::Duration::from_secs(5));
 
-    // 2. Harden (Landlock Required) in a dedicated thread; only the staging
-    //    root stays reachable from it. Any failure fails the test.
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap(); // safefs-lint: allow(test fixture setup)
-    let staging = dir.path().to_path_buf();
-    let t = std::thread::spawn(move || {
-        let full = harden_process(&staging, LandlockLevel::Required);
-        let outside = std::fs::read_to_string("/proc/self/status").is_ok() // safefs-lint: allow(test probes Landlock)
-            || std::fs::read("/etc/hostname").is_ok(); // safefs-lint: allow(test probes Landlock)
-        let inside = std::fs::write(staging.join("probe"), b"x").is_ok(); // safefs-lint: allow(test probes Landlock)
-        (full, outside, inside)
-    });
-    let (full, outside, inside) = t.join().unwrap();
+    // 2. AUD-RM2-SEA-20 PoC: hardening on a helper thread is refused and
+    //    records nothing (the main thread would stay unconfined).
+    let staging = f.staging_path.clone();
+    let st = staging.clone();
+    let helper = std::thread::spawn(move || harden_process(&st, LandlockLevel::Required));
+    assert_eq!(helper.join().unwrap(), Err(HardeningError::NotMainThread));
+    assert!(report().is_none());
+    assert_eq!(self_check().unwrap_err(), HardeningError::NotApplied);
+    // On the main thread while another thread exists: refused too.
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let other = std::thread::spawn(move || rx.recv().ok());
     assert_eq!(
-        full,
+        harden_process(&staging, LandlockLevel::Required),
+        Err(HardeningError::NotMainThread)
+    );
+    tx.send(()).unwrap();
+    other.join().unwrap();
+    assert!(report().is_none());
+
+    // 3. Harden on the main thread while it is the only thread. Any failure
+    //    fails the test (CI must be able to run the sealer hardened).
+    for _ in 0..100 {
+        if threads() == 1 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(threads(), 1, "test process must be single-threaded here");
+    assert_eq!(
+        harden_process(&staging, LandlockLevel::Required),
         Ok(true),
         "hardening must apply with Landlock enforced"
     );
-    assert!(inside, "staging must stay writable");
+    assert!(thread_confined());
+    let outside = std::fs::read_to_string("/proc/self/status").is_ok() // safefs-lint: allow(test probes Landlock)
+        || std::fs::read("/etc/hostname").is_ok(); // safefs-lint: allow(test probes Landlock)
     assert!(!outside, "Landlock enforced but outside path readable");
+    assert!(
+        std::net::TcpListener::bind("127.0.0.1:0").is_err(),
+        "Landlock ABI 4 must deny TCP bind"
+    );
+    let rep = report().unwrap();
+    assert!(rep.core_dumps_disabled && rep.memory_locked && rep.landlock_enforced);
+    assert_eq!(self_check(), Ok(rep));
     assert_eq!(
         rustix::process::getrlimit(rustix::process::Resource::Core).current,
         Some(0)
@@ -128,32 +172,52 @@ fn hardening_is_applied_and_enforced_before_serving() {
         rustix::process::dumpable_behavior().unwrap(),
         rustix::process::DumpableBehavior::NotDumpable
     );
-    assert_ne!(status_field("VmLck:"), "0 kB", "mlockall must lock memory");
-    let rep = report().unwrap();
-    assert!(rep.core_dumps_disabled && rep.memory_locked && rep.landlock_enforced);
-    assert_eq!(self_check(), Ok(rep));
 
-    // 3. Hardened: a peer UID of root or of the sealer itself is refused.
+    // 4. Runtime workers (created after hardening) are confined, and the
+    //    self-check passes from inside a worker.
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let per_worker = rt.block_on(async {
+        let mut v = Vec::new();
+        for _ in 0..16 {
+            v.push(tokio::spawn(async {
+                (thread_confined(), self_check().is_ok())
+            }));
+        }
+        let mut out = Vec::new();
+        for h in v {
+            out.push(h.await.unwrap());
+        }
+        out.push(
+            tokio::task::spawn_blocking(|| (thread_confined(), self_check().is_ok()))
+                .await
+                .unwrap(),
+        );
+        out
+    });
+    assert!(per_worker.iter().all(|(c, ok)| *c && *ok), "{per_worker:?}");
+
+    // 5. Hardened: a peer UID of root or of the sealer itself is refused.
     let own = rustix::process::getuid().as_raw();
-    for (i, bad) in [0, own].into_iter().enumerate() {
+    for (bad, l) in [(0, lb0), (own, lb1)] {
         let s = production_sealer(&f, bad);
-        let r = rt.block_on(serve_result(&s, sock_dir.path(), &format!("b{i}.sock")));
+        let r = rt.block_on(serve_result(&s, l));
         assert_eq!(
             r.expect("serve must return at once").unwrap_err().kind(),
             std::io::ErrorKind::PermissionDenied
         );
     }
-    // 4. Hardened and a distinct peer UID: the sealer serves (does not return).
+    // 6. Hardened and a distinct peer UID: the sealer serves (does not return).
     let s = production_sealer(&f, 54_321);
-    assert!(
-        rt.block_on(serve_result(&s, sock_dir.path(), "c.sock"))
-            .is_none()
-    );
+    assert!(rt.block_on(serve_result(&s, lc)).is_none());
+    drop(ld);
 }
 
 /// The developer override can only be obtained by writing a typed audit event;
 /// without a working audit sink it is refused.
-#[test]
 fn developer_override_is_audit_logged() {
     use candor_log::codes::{HostRole, StreamId};
     use candor_log::ids::{AuditIdKey, TenantRef};

@@ -288,7 +288,19 @@ async fn full_tier_w_flow() {
     assert_eq!(map.get(17).unwrap().u(), u64::from(CATEGORY_FRAUD));
     let rl = map.get(16).unwrap();
     assert_eq!(rl.get(3).unwrap().u(), 0, "no member skipped");
-    assert_eq!(rl.get(4).unwrap().b(), &[0x66; 32]);
+    // AUD-RM2-SEA-19: the signed Recipient List and the SUBMISSION name the
+    // verified checkpoint (which commits to every directory entry used), the
+    // COI_POLICY entry and the active roster entry by their log hashes.
+    let (coi_hash, roster_hash) = {
+        let log = f.log.lock().unwrap();
+        (log.coi_hashes[&CHANNEL][0], log.roster_hashes[&CHANNEL][0])
+    };
+    let hwm = f.sealer.high_water_mark();
+    assert_eq!(rl.get(4).unwrap().b(), &coi_hash);
+    let cp = [Item::U(hwm.tree_size), Item::B(hwm.root_hash.to_vec())];
+    assert_eq!(rl.get(5).unwrap().a(), &cp);
+    assert_eq!(map.get(7).unwrap().a(), &cp);
+    assert_eq!(map.get(6).unwrap().b(), &roster_hash);
     // Full slot-block verification (ADR-050(3)) for all three objects.
     let mek_keys: Vec<(KeyKind, &KemKeyPair)> =
         f.members.iter().map(|m| (KeyKind::Mek, &m.mek)).collect();
@@ -455,11 +467,16 @@ async fn full_tier_w_flow() {
     );
 
     // --- Follow-up: sealed only to the original eligible set (ADR-036(4)) ----
-    // Member 5 joins the Triage Set later; it must get no slot.
-    let mut members = std::mem::take(&mut f.members);
-    members.push(member(5, 5, true));
-    let snap2 = snapshot_for(&members, &f.custodian, &f.disposition, 2, TODAY);
+    // Member 5 joins the Triage Set later (a time-locked loosening roster
+    // entry, active 3 days after the sealer's last checkpoint); once active it
+    // holds a valid MEK but must still get no slot.
+    f.members.push(member(5, 5, true));
+    let snap2 = snapshot_for(&f.members, &f.custodian, &f.disposition, 2, TODAY);
     f.install(snap2).unwrap();
+    f.clock
+        .day
+        .store(TODAY + 3, std::sync::atomic::Ordering::SeqCst);
+    let members = &f.members;
     ok(
         &f.sealer,
         Request::DraftSet(DraftSet {

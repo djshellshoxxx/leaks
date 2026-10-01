@@ -47,6 +47,10 @@ pub(crate) async fn serve(
     let slots = Arc::new(Semaphore::new(lim.max_connections));
     let mut backoff = BACKOFF_MIN;
     loop {
+        // An unconfined serving thread was seen: stop serving (SEA-20).
+        if super::hardening::poisoned() {
+            return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        }
         let stream = match listener.accept().await {
             Ok((stream, _)) => {
                 backoff = BACKOFF_MIN;
@@ -162,6 +166,10 @@ async fn connection(sealer: Sealer, mut stream: UnixStream, lim: &Limits) -> Res
         let op = req.op();
         if (op == Op::Hello) == hello {
             bad_frame(&mut stream, rid, lim).await;
+            return Err(());
+        }
+        // Every frame is handled on a confined thread (SEA-20).
+        if !super::hardening::guard() {
             return Err(());
         }
         let is_hello = matches!(req, Request::Hello { .. });

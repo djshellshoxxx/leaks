@@ -285,6 +285,20 @@ fn core_err(e: candor_core::Error) -> Response {
     }
 }
 
+/// Run blocking work on the blocking pool. In serve mode the work runs only on
+/// a confined thread (AUD-RM2-SEA-20); otherwise the closure is dropped unrun
+/// and the call fails like a panicked job.
+async fn blocking<T, F>(f: F) -> Result<T, ()>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    match tokio::task::spawn_blocking(move || hardening::guard().then(f)).await {
+        Ok(Some(t)) => Ok(t),
+        _ => Err(()),
+    }
+}
+
 /// A fresh 256-bit secret from the CSPRNG. Callers never substitute a fixed
 /// value on failure (AUD-RM2-SEA-05).
 fn random_secret32() -> Result<Secret32, Response> {
@@ -510,6 +524,10 @@ impl Sealer {
 
     /// Handle one request.
     pub async fn handle(&self, req: Request) -> Response {
+        // Serve mode: refuse on an unconfined thread (AUD-RM2-SEA-20).
+        if !hardening::guard() {
+            return err(ErrorCode::Internal);
+        }
         match req {
             Request::Hello { proto } => {
                 if proto != PROTO_VERSION {
@@ -845,7 +863,7 @@ impl Sealer {
         let suite = self.st.cfg.suite;
         let salt = self.st.cfg.deployment_salt;
         let tenant = self.st.cfg.tenant_id;
-        let r = tokio::task::spawn_blocking(move || {
+        let r = blocking(move || {
             let _permit = permit;
             let keys = SourceKeys::derive(suite, &passphrase, &salt, &tenant);
             drop(passphrase);
@@ -1021,10 +1039,7 @@ impl Sealer {
             Err(e) => return e,
         };
         let st = self.st.clone();
-        let r = tokio::task::spawn_blocking(move || {
-            part_chunk_blocking(g, &st, part, &data, last, slot)
-        })
-        .await;
+        let r = blocking(move || part_chunk_blocking(g, &st, part, &data, last, slot)).await;
         r.unwrap_or_else(|_| err(ErrorCode::Internal))
     }
 
@@ -1194,7 +1209,7 @@ impl Sealer {
             release_offset_days,
             initial,
         };
-        let r = tokio::task::spawn_blocking(move || seal_blocking(g, &st, job)).await;
+        let r = blocking(move || seal_blocking(g, &st, job)).await;
         let (resp, drop_session) = r.unwrap_or_else(|_| (err(ErrorCode::Internal), false));
         if drop_session {
             // Committed, but K36 could not be replaced: the session ends (SEA-05).
@@ -1264,9 +1279,7 @@ impl Sealer {
             initial: false,
         };
         let channel_id = report.channel_id;
-        let r =
-            tokio::task::spawn_blocking(move || rotate_blocking(g, &st, job, new_keys, &replies))
-                .await;
+        let r = blocking(move || rotate_blocking(g, &st, job, new_keys, &replies)).await;
         let resp = r.unwrap_or_else(|_| err(ErrorCode::Internal));
         if matches!(resp, Response::Locator { .. }) {
             self.cancel_next_chaff(channel_id);
@@ -1315,7 +1328,7 @@ impl Sealer {
             Err(e) => return e,
         };
         let tenant = self.st.cfg.tenant_id;
-        let r = tokio::task::spawn_blocking(move || {
+        let r = blocking(move || {
             let mut g = g;
             let opened = match (g.keys.as_ref(), g.prefs.as_ref()) {
                 (Some(k), Some(p)) => seal::open_reply(&snap, tenant, k, p, &entry, today),
@@ -1408,7 +1421,7 @@ impl Sealer {
             0
         };
         let st = self.st.clone();
-        let r = tokio::task::spawn_blocking(move || {
+        let r = blocking(move || {
             let ctx = seal::SealCtx {
                 suite: st.cfg.suite,
                 tenant_id: st.cfg.tenant_id,
@@ -1459,7 +1472,7 @@ impl Sealer {
                 iv.tick().await;
                 // Unlinks happen off the async workers (AUD-RM2-SEA-13).
                 let m = me.clone();
-                let _ = tokio::task::spawn_blocking(move || m.reap_expired()).await;
+                let _ = blocking(move || m.reap_expired()).await;
             }
         }));
         if self.st.cfg.chaff.enabled {
@@ -1526,10 +1539,13 @@ impl Sealer {
     /// before accepting anything when [`hardening::self_check`] fails or the
     /// peer UID is 0 or the sealer's own UID. Otherwise never returns.
     pub async fn serve(&self, listener: tokio::net::UnixListener) -> std::io::Result<()> {
-        if self.st.cfg.insecure_dev.is_none() {
+        let enforce = self.st.cfg.insecure_dev.is_none();
+        if enforce {
             let denied = |_| std::io::Error::from(std::io::ErrorKind::PermissionDenied);
             hardening::self_check().map_err(denied)?;
             hardening::check_peer_uid(self.st.cfg.allowed_peer_uid).map_err(denied)?;
+            // From here on every thread doing sealer work is probed (SEA-20).
+            hardening::enforce_threads();
         }
         listener::serve(
             self.clone(),

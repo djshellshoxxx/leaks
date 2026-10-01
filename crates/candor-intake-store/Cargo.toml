@@ -15,6 +15,8 @@ workspace = true
 # Every dependency is justified in SPEC-NOTES.md ("Dependencies").
 [dependencies]
 candor-core = { path = "../candor-core" }
+candor-safefs = { path = "../candor-safefs" }
+rustix = { version = "=1.1.2", default-features = false, features = ["std", "fs", "net"] }
 sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "postgres", "uuid"] }
 uuid = { version = "=1.18.1", default-features = false }
 tokio = { version = "=1.48.0", default-features = false, features = ["sync"] }
@@ -26,3 +28,4 @@ zeroize = { version = "=1.8.2", default-features = false, features = ["alloc"] }
 [dev-dependencies]
 tokio = { version = "=1.48.0", default-features = false, features = ["rt", "macros", "sync"] }
 proptest = { version = "=1.11.0", default-features = false, features = ["std"] }
+tempfile = { version = "=3.23.0", default-features = false }

@@ -1,17 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Retention (20 §12, AUD-005, AUD-011).
 //!
-//! SECURITY and SYSTEM streams lose whole checkpoint intervals older than
-//! retention, after a SECURITY `audit.retention_tombstone` is written; the
-//! remaining records stay verifiable from the retained checkpoint's chain
-//! head. CASE events are removed per case at disposal (AUD-012) via
-//! [`crate::sink::MemoryStore::redact_case`].
+//! SECURITY, SYSTEM and SYSTEM-slot streams lose whole checkpoint intervals
+//! older than retention, after a dual-approved retention tombstone is
+//! written into the pruned stream ([`crate::AuditLog::emit_retention_tombstone`],
+//! AUD-RM1-LOG-16/20); the remaining records stay verifiable from the
+//! retained checkpoint's chain head. CASE / CASE-SLOT events are removed per
+//! case at disposal (AUD-012) via
+//! [`crate::sink::MemoryStore::apply_case_redaction`].
 
-use crate::chain::{CommittedRecord, SignedCheckpoint};
+use crate::chain::SignedCheckpoint;
 use crate::codes::StreamId;
 use crate::event::AuditEvent;
 use crate::field::SeqRange;
-use crate::ids::{Hash32, MS_PER_DAY, UtcMillis};
+use crate::ids::{MS_PER_DAY, UtcMillis};
 use crate::sink::MemoryStore;
 
 /// Retention configuration with the 20 §12 bounds.
@@ -93,8 +95,17 @@ impl RetentionPolicy {
     pub fn days(&self, s: StreamId) -> Option<u32> {
         match s {
             StreamId::Sec => Some(self.security_days),
-            StreamId::Sys => Some(self.system_days),
-            StreamId::Case => None,
+            StreamId::Sys | StreamId::SysSlot => Some(self.system_days),
+            StreamId::Case | StreamId::CaseSlot => None,
+        }
+    }
+
+    /// The 20 §12 retention bounds (days) of an interval-deleted stream.
+    pub fn bounds(s: StreamId) -> Option<(u32, u32)> {
+        match s {
+            StreamId::Sec => Some(Self::SECURITY_BOUNDS),
+            StreamId::Sys | StreamId::SysSlot => Some(Self::SYSTEM_BOUNDS),
+            StreamId::Case | StreamId::CaseSlot => None,
         }
     }
 
@@ -115,35 +126,29 @@ impl Default for RetentionPolicy {
     }
 }
 
-/// A planned whole-interval deletion.
+/// A planned whole-interval deletion (fields private: only
+/// [`plan_interval_deletion`] builds one from real checkpoints).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct DeletionPlan {
-    /// Stream.
-    pub stream: StreamId,
-    /// Deleted range.
-    pub range: SeqRange,
-    /// Merkle root of the last deleted checkpoint.
-    pub last_deleted_root: Hash32,
+    pub(crate) stream: StreamId,
+    pub(crate) range: SeqRange,
+    pub(crate) anchor_root: [u8; 32],
+    pub(crate) anchor_signed_at: u64,
+    pub(crate) days: u32,
 }
 
 impl DeletionPlan {
-    /// The tombstone event to emit **before** deleting. It is written into
-    /// the pruned stream itself (`audit.retention_tombstone` for SECURITY,
-    /// `sys.retention_tombstone` for SYSTEM), where the verifier requires it
-    /// (AUD-RM1-LOG-01).
-    pub fn tombstone(&self) -> AuditEvent {
-        match self.stream {
-            StreamId::Sys => AuditEvent::SysRetentionTombstone {
-                stream: self.stream,
-                seq_range: self.range,
-                last_deleted_checkpoint_root: self.last_deleted_root,
-            },
-            _ => AuditEvent::AuditRetentionTombstone {
-                stream: self.stream,
-                seq_range: self.range,
-                last_deleted_checkpoint_root: self.last_deleted_root,
-            },
-        }
+    /// Stream.
+    pub fn stream(&self) -> StreamId {
+        self.stream
+    }
+    /// Deleted range.
+    pub fn range(&self) -> (u64, u64) {
+        (self.range.first, self.range.last)
+    }
+    /// Retention period (days) the plan was made for.
+    pub fn days(&self) -> u32 {
+        self.days
     }
 }
 
@@ -165,7 +170,10 @@ pub fn plan_interval_deletion(
         .iter()
         .filter(|c| {
             let b = c.body();
-            b.signed_at.0 <= cutoff && b.end_seq > first_retained && !b.is_empty()
+            b.stream == stream
+                && b.signed_at.0 <= cutoff
+                && b.end_seq > first_retained
+                && !b.is_empty()
         })
         .max_by_key(|c| c.body().end_seq);
     Ok(last.map(|c| DeletionPlan {
@@ -173,24 +181,41 @@ pub fn plan_interval_deletion(
         range: SeqRange {
             first: first_retained,
             last: c.body().end_seq.saturating_sub(1),
+            origin: [0; 32],
         },
-        last_deleted_root: Hash32::from_bytes(c.body().merkle_root),
+        anchor_root: c.body().merkle_root,
+        anchor_signed_at: c.body().signed_at.0,
+        days,
     }))
 }
 
-/// Apply a plan to a store after its tombstone was committed.
+/// Apply a plan to a store after its tombstone was committed **and**
+/// covered by a checkpoint (the verifier rejects the pruned prefix
+/// otherwise).
 pub fn apply_interval_deletion(
     store: &mut MemoryStore,
     plan: &DeletionPlan,
-    tombstone: &CommittedRecord,
 ) -> Result<(), RetentionError> {
-    if plan.stream == StreamId::Case {
+    if matches!(plan.stream, StreamId::Case | StreamId::CaseSlot) {
         return Err(RetentionError::CaseStream);
     }
-    if tombstone.event() != &plan.tombstone()
-        || tombstone.header().stream != plan.stream
-        || tombstone.header().seq <= plan.range.last
-    {
+    let tseq = store
+        .records(plan.stream)
+        .iter()
+        .find(|r| match r.event() {
+            AuditEvent::AuditRetentionTombstone { prune }
+            | AuditEvent::SysRetentionTombstone { prune }
+            | AuditEvent::SysSlotRetentionTombstone { prune } => {
+                prune.stream == plan.stream
+                    && prune.first == plan.range.first
+                    && prune.last == plan.range.last
+                    && prune.anchor_root == plan.anchor_root
+            }
+            _ => false,
+        })
+        .map(|r| r.header().seq)
+        .ok_or(RetentionError::MissingTombstone)?;
+    if tseq <= plan.range.last {
         return Err(RetentionError::MissingTombstone);
     }
     let cps = store.checkpoints(plan.stream);
@@ -200,10 +225,7 @@ pub fn apply_interval_deletion(
     if !whole {
         return Err(RetentionError::NotWholeInterval);
     }
-    if !cps
-        .iter()
-        .any(|c| c.body().end_seq > tombstone.header().seq)
-    {
+    if !cps.iter().any(|c| c.body().end_seq > tseq) {
         return Err(RetentionError::TombstoneNotAttested);
     }
     store.drop_through(plan.stream, plan.range.last);

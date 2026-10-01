@@ -18,17 +18,14 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'candor_intake_backup') THEN
     CREATE ROLE candor_intake_backup LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS NOREPLICATION;
   END IF;
-  -- Separate maintenance role (daily deletion_list_prune, statistics reset): the
-  -- only role that may flag or delete deletion-list entries (AUD-RM2-STO-03).
+  -- Separate maintenance role (daily deletion_list_prune, statistics reset,
+  -- slot VACUUM, daily VACUUM FULL): the only role that may flag or delete
+  -- deletion-list entries (AUD-RM2-STO-03). It owns the database (PostgreSQL 16
+  -- lets the database owner VACUUM every table in it) but no table and no
+  -- schema, so it cannot disable RLS or the guard triggers and needs no
+  -- membership in the schema owner (AUD-RM2-STO-24(a)).
   IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'candor_intake_maint') THEN
     CREATE ROLE candor_intake_maint LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS NOREPLICATION;
-  END IF;
-  -- Separate VACUUM login (slot VACUUM, daily VACUUM FULL; AUD-RM2-STO-11/23/24):
-  -- it owns the database (PostgreSQL 16 lets the database owner vacuum every
-  -- table) but no table, so it cannot disable RLS or the guard triggers. It is
-  -- not the schema owner and not the migration login.
-  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'candor_intake_vacuum') THEN
-    CREATE ROLE candor_intake_vacuum LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS NOREPLICATION;
   END IF;
 END
 $roles$;
@@ -56,8 +53,8 @@ BEGIN
     EXECUTE pg_catalog.format('ALTER ROLE candor_istore IN DATABASE %I SET temp_file_limit = %L', pg_catalog.current_database(), '1GB');
     EXECUTE pg_catalog.format('ALTER ROLE candor_intake_maint IN DATABASE %I SET temp_file_limit = %L', pg_catalog.current_database(), '1GB');
     GRANT EXECUTE ON FUNCTION pg_catalog.pg_stat_reset() TO candor_intake_maint;
-    EXECUTE pg_catalog.format('ALTER DATABASE %I OWNER TO candor_intake_vacuum', pg_catalog.current_database());
-    GRANT pg_checkpoint TO candor_intake_vacuum WITH INHERIT TRUE, SET FALSE;
+    EXECUTE pg_catalog.format('ALTER DATABASE %I OWNER TO candor_intake_maint', pg_catalog.current_database());
+    GRANT pg_checkpoint TO candor_intake_maint WITH INHERIT TRUE, SET FALSE;
   END IF;
 END
 $su$;
@@ -72,7 +69,7 @@ BEGIN
                                               WHERE d.datname = pg_catalog.current_database()), 'USAGE') THEN
     EXECUTE pg_catalog.format('REVOKE ALL ON DATABASE %I FROM PUBLIC', pg_catalog.current_database());
     EXECUTE pg_catalog.format('GRANT CONNECT ON DATABASE %I TO candor_istore, candor_intake_backup, candor_intake_maint', pg_catalog.current_database());
-    -- The migrator creates the schema; the database is owned by the VACUUM login.
+    -- The migrator creates the schema; the database is owned by the maintenance role.
     EXECUTE pg_catalog.format('GRANT CREATE ON DATABASE %I TO candor_intake_migrator', pg_catalog.current_database());
   END IF;
 END
@@ -84,8 +81,6 @@ SET LOCAL ROLE candor_intake_migrator;
 CREATE SCHEMA candor AUTHORIZATION candor_intake_migrator;
 REVOKE ALL ON SCHEMA candor FROM PUBLIC;
 GRANT USAGE ON SCHEMA candor TO candor_istore, candor_intake_backup, candor_intake_maint;
--- Name lookup only, for VACUUM (no table privilege).
-GRANT USAGE ON SCHEMA candor TO candor_intake_vacuum;
 ALTER DEFAULT PRIVILEGES IN SCHEMA candor REVOKE ALL ON TABLES FROM PUBLIC;
 ALTER DEFAULT PRIVILEGES IN SCHEMA candor REVOKE ALL ON FUNCTIONS FROM PUBLIC;
 ALTER DEFAULT PRIVILEGES IN SCHEMA candor REVOKE ALL ON TYPES FROM PUBLIC;
@@ -369,7 +364,7 @@ ALTER TABLE candor.reply ALTER COLUMN reply_ct SET STORAGE EXTERNAL;
 
 -- No autovacuum on intake tables (AUD-RM2-STO-11): its timing would follow
 -- source activity (and needs track_counts). VACUUM runs at every fixed import
--- slot and VACUUM FULL daily in the maintenance window, as the VACUUM login
+-- slot and VACUUM FULL daily in the maintenance window, as the maintenance role
 -- (pg.rs vacuum_after_rewrite / vacuum_full_daily); this also holds if the
 -- cluster-wide autovacuum = off were forgotten. PostgreSQL still forces an
 -- anti-wraparound VACUUM when a table nears autovacuum_freeze_max_age.

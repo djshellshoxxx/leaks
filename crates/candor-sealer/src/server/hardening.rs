@@ -16,6 +16,20 @@
 //! [`harden_process`] on the main thread **before** the tokio runtime starts, so
 //! every runtime thread inherits the Landlock domain; refuse to start on error.
 //!
+//! **Per-thread verification (AUD-RM2-SEA-20).** Landlock confines only the
+//! calling thread and the threads it creates afterwards, so a process-global
+//! record is not proof that the threads serving requests are confined:
+//! * [`harden_process`] refuses unless it runs on the process's main thread
+//!   while that is the *only* thread (`Threads: 1`), so no runtime worker or
+//!   blocking-pool thread can exist outside the domain;
+//! * it verifies `VmLck > 0` after `mlockall` and probes the confinement of the
+//!   calling thread after `restrict_self`;
+//! * [`thread_confined`] probes the *calling* thread (opening `/` for reading
+//!   must fail with `EACCES`; cached per thread once confined). In serve mode
+//!   ([`enforce_threads`]) every request, every frame and every blocking job
+//!   checks it first ([`guard`]); one unconfined thread poisons the sealer,
+//!   which then refuses all work and stops accepting (fail closed).
+//!
 //! **Enforced (ADR-052(5), AUD-RM2-SEA-06).** [`crate::server::Sealer::serve`]
 //! runs [`self_check`] before accepting the first connection and refuses to
 //! serve unless [`harden_process`] succeeded with Landlock fully enforced and the
@@ -23,8 +37,10 @@
 //! [`InsecureDevMode`] token, which can be obtained only by emitting a typed
 //! `candor-log` event ([`InsecureDevMode::acknowledge`]).
 
+use std::cell::Cell;
 use std::path::Path;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// What [`harden_process`] achieved (recorded once per process).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +54,77 @@ pub struct HardeningReport {
 }
 
 static REPORT: OnceLock<HardeningReport> = OnceLock::new();
+/// Serve mode: every thread that does sealer work must be confined.
+static ENFORCE: AtomicBool = AtomicBool::new(false);
+/// An unconfined thread was seen while enforcing.
+static POISONED: AtomicBool = AtomicBool::new(false);
+
+thread_local! {
+    static CONFINED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Probe the calling thread: inside a Landlock domain that only allows the
+/// staging root, opening `/` as a directory for reading fails with `EACCES`.
+fn probe_confined() -> bool {
+    use rustix::fs::{Mode, OFlags, open};
+    match open(
+        "/",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(_fd) => false,
+        Err(e) => e == rustix::io::Errno::ACCESS,
+    }
+}
+
+/// Whether the calling thread is confined (probed; a positive result is cached
+/// for the thread, since a Landlock domain cannot be left).
+#[must_use]
+pub fn thread_confined() -> bool {
+    CONFINED.with(|c| {
+        if c.get() {
+            return true;
+        }
+        let v = probe_confined();
+        c.set(v);
+        v
+    })
+}
+
+/// Enter serve mode: from now on [`guard`] requires every calling thread to be
+/// confined (called by [`crate::server::Sealer::serve`] unless the developer
+/// override is set).
+pub(crate) fn enforce_threads() {
+    ENFORCE.store(true, Ordering::SeqCst);
+}
+
+/// `true` if the calling thread may do sealer work: not in serve mode, or
+/// confined. An unconfined thread in serve mode poisons the process.
+#[must_use]
+pub(crate) fn guard() -> bool {
+    guard_with(&ENFORCE, &POISONED, thread_confined)
+}
+
+fn guard_with(
+    enforce: &AtomicBool,
+    poisoned: &AtomicBool,
+    confined: impl FnOnce() -> bool,
+) -> bool {
+    if poisoned.load(Ordering::SeqCst) {
+        return false;
+    }
+    if !enforce.load(Ordering::SeqCst) || confined() {
+        return true;
+    }
+    poisoned.store(true, Ordering::SeqCst);
+    false
+}
+
+/// An unconfined serving thread was detected; the sealer refuses all work.
+#[must_use]
+pub fn poisoned() -> bool {
+    POISONED.load(Ordering::SeqCst)
+}
 
 /// The recorded hardening state, if [`harden_process`] succeeded.
 #[must_use]
@@ -46,15 +133,16 @@ pub fn report() -> Option<HardeningReport> {
 }
 
 /// Start-up self-check (07 BE-003, ADR-052(5)): hardening was applied by
-/// [`harden_process`] with Landlock fully enforced, and the process is (still)
-/// non-dumpable with a zero core limit.
+/// [`harden_process`] with Landlock fully enforced, the process is (still)
+/// non-dumpable with a zero core limit, and the **calling thread** is confined
+/// (AUD-RM2-SEA-20).
 pub fn self_check() -> Result<HardeningReport, HardeningError> {
     use rustix::process::{DumpableBehavior, Resource, dumpable_behavior, getrlimit};
     let r = report().ok_or(HardeningError::NotApplied)?;
     if !r.core_dumps_disabled || !r.memory_locked {
         return Err(HardeningError::NotApplied);
     }
-    if !r.landlock_enforced {
+    if !r.landlock_enforced || !thread_confined() {
         return Err(HardeningError::Landlock);
     }
     if dumpable_behavior().map_err(|_| HardeningError::Dumpable)? != DumpableBehavior::NotDumpable {
@@ -117,6 +205,9 @@ pub enum HardeningError {
     Landlock,
     /// [`harden_process`] has not (successfully) run in this process.
     NotApplied,
+    /// [`harden_process`] was not called on the main thread while it was the
+    /// only thread (AUD-RM2-SEA-20).
+    NotMainThread,
     /// The configured peer UID is 0 or the sealer's own UID.
     PeerUid,
     /// The developer override could not be audit-logged.
@@ -131,6 +222,7 @@ impl core::fmt::Display for HardeningError {
             Self::Mlock => "mlockall failed",
             Self::Landlock => "Landlock restriction failed",
             Self::NotApplied => "process hardening not applied",
+            Self::NotMainThread => "hardening must run on the only (main) thread",
             Self::PeerUid => "peer UID must not be root or the sealer's own UID",
             Self::DevFlagNotLogged => "insecure developer mode could not be audit-logged",
         })
@@ -201,12 +293,65 @@ pub fn restrict_filesystem(staging: &Path, level: LandlockLevel) -> Result<bool,
     Ok(full)
 }
 
-/// Apply all in-process hardening in order: no dumps, memory locked, Landlock.
-/// The result is recorded for [`self_check`] (first successful call only).
+/// A numeric field of `/proc/self/status` (read before Landlock applies).
+fn status_field(name: &[u8]) -> Option<u64> {
+    use rustix::fs::{Mode, OFlags, open};
+    let fd = open(
+        "/proc/self/status",
+        OFlags::RDONLY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .ok()?;
+    let mut buf = [0u8; 8192];
+    let mut len = 0usize;
+    loop {
+        let rest = buf.get_mut(len..)?;
+        if rest.is_empty() {
+            break;
+        }
+        let n = rustix::io::read(&fd, rest).ok()?;
+        if n == 0 {
+            break;
+        }
+        len = len.checked_add(n)?;
+    }
+    let text = buf.get(..len)?;
+    text.split(|b| *b == b'\n').find_map(|line| {
+        let v = line.strip_prefix(name)?;
+        let digits: Vec<u8> = v
+            .iter()
+            .copied()
+            .skip_while(|b| !b.is_ascii_digit())
+            .take_while(u8::is_ascii_digit)
+            .collect();
+        core::str::from_utf8(&digits).ok()?.parse().ok()
+    })
+}
+
+/// The caller is the main thread and the process has no other thread.
+fn only_main_thread() -> bool {
+    let main = rustix::thread::gettid() == rustix::process::getpid();
+    main && status_field(b"Threads:") == Some(1)
+}
+
+/// Apply all in-process hardening in order: no dumps, memory locked (verified
+/// `VmLck > 0`), Landlock (verified on the calling thread). Must run on the
+/// main thread while it is the only thread, i.e. before any runtime or helper
+/// thread exists (AUD-RM2-SEA-20). The result is recorded for [`self_check`]
+/// (first successful call only).
 pub fn harden_process(staging: &Path, landlock: LandlockLevel) -> Result<bool, HardeningError> {
+    if !only_main_thread() {
+        return Err(HardeningError::NotMainThread);
+    }
     disable_core_dumps()?;
     lock_memory()?;
+    if status_field(b"VmLck:").is_none_or(|kb| kb == 0) {
+        return Err(HardeningError::Mlock);
+    }
     let full = restrict_filesystem(staging, landlock)?;
+    if full && !thread_confined() {
+        return Err(HardeningError::Landlock);
+    }
     let _ = REPORT.set(HardeningReport {
         core_dumps_disabled: true,
         memory_locked: true,
@@ -222,4 +367,25 @@ pub(crate) fn check_peer_uid(peer: u32) -> Result<(), HardeningError> {
         return Err(HardeningError::PeerUid);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// SEA-20: in serve mode an unconfined thread is refused and poisons the
+    /// sealer for every later caller, confined or not; outside serve mode
+    /// (tests, developer override) nothing is probed.
+    #[test]
+    fn guard_fails_closed_on_an_unconfined_thread() {
+        let (enforce, poisoned) = (AtomicBool::new(false), AtomicBool::new(false));
+        assert!(guard_with(&enforce, &poisoned, || false));
+        enforce.store(true, Ordering::SeqCst);
+        assert!(guard_with(&enforce, &poisoned, || true));
+        assert!(!guard_with(&enforce, &poisoned, || false));
+        assert!(poisoned.load(Ordering::SeqCst));
+        assert!(!guard_with(&enforce, &poisoned, || true));
+        // The unit-test thread itself is not confined.
+        assert!(!thread_confined());
+    }
 }

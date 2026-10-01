@@ -25,6 +25,7 @@ pub mod cbor;
 pub mod chain;
 pub mod codes;
 pub mod diag;
+pub mod disposal;
 pub mod envelope;
 pub mod event;
 pub mod export;
@@ -39,7 +40,7 @@ pub mod verify;
 
 pub use chain::{
     AuditClock, AuditLog, CheckpointPolicy, CheckpointSigner, ClockReading, CommittedRecord,
-    Emitted, LogError, SignedCheckpoint, SoftwareSigner, SystemClock,
+    Emitted, LogError, SignedCheckpoint, SoftwareSigner, SystemClock, WitnessError, WitnessSink,
 };
 pub use envelope::{Actor, EventContext};
 pub use event::{AuditEvent, CATALOG, EventClass};

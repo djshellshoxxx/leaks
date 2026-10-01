@@ -240,11 +240,14 @@ name = "candor-intake-store"
 version = "0.1.0"
 dependencies = [
  "candor-core",
+ "candor-safefs",
  "getrandom 0.4.3",
  "proptest",
+ "rustix",
  "sha2 0.11.0",
  "sqlx",
  "subtle",
+ "tempfile",
  "tokio",
  "uuid",
  "zeroize",

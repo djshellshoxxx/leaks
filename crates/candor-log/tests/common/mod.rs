@@ -3,13 +3,14 @@
 
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use candor_log::chain::{AuditClock, CaseCommitKey, CaseKeyStore, ClockReading, KeyUnavailable};
 use candor_log::codes::HostRole;
-use candor_log::ids::{AuditIdKey, CaseRef, TenantRef, UserRef, UtcMillis};
+use candor_log::disposal::{ApproverKeys, DisposalApprover, SoftwareApprover};
+use candor_log::ids::{AuditIdKey, CaseRef, ChannelId, EvidRef, TenantRef, UserRef, UtcMillis};
 use candor_log::sink::MemorySink;
-use candor_log::{AuditLog, CheckpointPolicy, SoftwareSigner};
+use candor_log::{AuditLog, CheckpointPolicy, CheckpointSigner, SoftwareSigner};
 use zeroize::Zeroizing;
 
 /// 2026-10-01T13:37:42.123Z
@@ -44,16 +45,56 @@ pub fn idk() -> AuditIdKey {
     AuditIdKey::new([0x33; 32])
 }
 
+/// Identifiers are only ever generated (AUD-RM1-LOG-17); tests draw a fixed
+/// table once per process so `case(n)` is stable within a test binary.
+fn table<T: Copy>(cell: &'static OnceLock<Vec<T>>, gen_one: fn() -> T) -> &'static [T] {
+    cell.get_or_init(|| (0..=255).map(|_| gen_one()).collect())
+}
+
 pub fn tenant() -> TenantRef {
-    TenantRef::derive(&idk(), b"tenant-1")
+    static T: OnceLock<TenantRef> = OnceLock::new();
+    *T.get_or_init(|| TenantRef::generate().unwrap())
 }
 
 pub fn user(n: u8) -> UserRef {
-    UserRef::derive(&idk(), &[b'u', n])
+    static T: OnceLock<Vec<UserRef>> = OnceLock::new();
+    table(&T, || UserRef::generate().unwrap())[usize::from(n)]
 }
 
 pub fn case(n: u8) -> CaseRef {
-    CaseRef::derive(&idk(), &[b'c', n])
+    static T: OnceLock<Vec<CaseRef>> = OnceLock::new();
+    table(&T, || CaseRef::generate().unwrap())[usize::from(n)]
+}
+
+pub fn channel(n: u8) -> ChannelId {
+    static T: OnceLock<Vec<ChannelId>> = OnceLock::new();
+    table(&T, || ChannelId::generate().unwrap())[usize::from(n)]
+}
+
+pub fn evid(n: u8) -> EvidRef {
+    static T: OnceLock<Vec<EvidRef>> = OnceLock::new();
+    table(&T, || EvidRef::generate().unwrap())[usize::from(n)]
+}
+
+/// The two pinned disposal approvers (dedicated keys, AUD-RM1-LOG-16).
+pub fn approvers() -> (SoftwareApprover, SoftwareApprover) {
+    (
+        SoftwareApprover::from_seed(&Zeroizing::new([21; 32])),
+        SoftwareApprover::from_seed(&Zeroizing::new([22; 32])),
+    )
+}
+
+/// Pinned approver keys for the test checkpoint key (`signer(7)`).
+pub fn approver_keys() -> &'static ApproverKeys {
+    static K: OnceLock<ApproverKeys> = OnceLock::new();
+    K.get_or_init(|| {
+        let (a, b) = approvers();
+        ApproverKeys::new(
+            vec![a.verifying_key(), b.verifying_key()],
+            &signer(7).verifying_key(),
+        )
+        .unwrap()
+    })
 }
 
 pub fn signer(seed: u8) -> SoftwareSigner {
@@ -98,6 +139,7 @@ pub fn rig_at(host: HostRole, policy: CheckpointPolicy, t: u64) -> Rig {
     let mut log = AuditLog::new(tenant(), host, signer(7), clock.clone(), policy);
     let sink = MemorySink::new();
     log.set_primary_sink(Box::new(sink.clone()));
+    log.set_approver_keys(approver_keys().clone());
     let keys = TestKeys::default();
     log.set_case_keys(Box::new(keys.clone()));
     Rig {

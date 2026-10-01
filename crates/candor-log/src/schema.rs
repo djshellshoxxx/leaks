@@ -36,7 +36,7 @@ pub struct FieldSchema {
 }
 
 /// Registry format version.
-pub const REGISTRY_VERSION: u32 = 1;
+pub const REGISTRY_VERSION: u32 = 2;
 
 const HEADER: &str = "\
 # SPDX-License-Identifier: AGPL-3.0-or-later
@@ -44,6 +44,10 @@ const HEADER: &str = "\
 # Changes to this file require the `audit-schema` review label and two
 # code-owner approvals (27). It must equal candor_log::schema::registry_yaml();
 # crates/candor-log/tests/schema_registry.rs fails on any drift.
+# v2 (AUD-RM1-LOG-02/16/17): date-only events are written to the shuffled
+# slot streams `case-slot` / `sys-slot`; a CASE event with a system actor is
+# date-only and goes to `case-slot` as well. Tombstones carry dual-approved
+# payloads (`CaseDisposal`, `RetentionPrune`) built only by the disposal API.
 ";
 
 fn class_name(c: EventClass) -> &'static str {
@@ -95,7 +99,15 @@ pub fn registry_yaml() -> String {
         o.push_str("\n    class: ");
         o.push_str(class_name(e.class));
         o.push_str("\n    stream: ");
-        o.push_str(e.class.stream().code());
+        // Date-only events live in the slot streams (AUD-RM1-LOG-02); a
+        // CASE event by a system actor is date-only too and also goes to
+        // `case-slot` (see the header).
+        let stream = if e.time_policy == TimePolicy::DateOnly {
+            e.class.slot_stream()
+        } else {
+            e.class.stream()
+        };
+        o.push_str(stream.code());
         o.push_str("\n    ts: ");
         o.push_str(time_policy_name(e.time_policy));
         if e.fields.is_empty() {

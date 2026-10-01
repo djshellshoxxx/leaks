@@ -11,9 +11,9 @@ use serde::Deserialize;
 
 use crate::chain::{ChainRecord, CommittedRecord, SignedCheckpoint, redaction_set_hash};
 use crate::codes::StreamId;
+use crate::disposal::{DisposalRequest, RequestKind, SetCommit};
 use crate::event::AuditEvent;
-use crate::field::Count;
-use crate::ids::{CaseRef, Hash32, ReceiptId, hex, unhex};
+use crate::ids::{CaseRef, ReceiptId, TenantRef, hex, unhex};
 
 /// Sink failure (no data echoed).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -55,50 +55,87 @@ impl StoredEntry {
     }
 }
 
-/// The exact set of CASE records to redact for one case at disposal, and
-/// the commitment the `case.disposed` tombstone must carry (AUD-012,
-/// AUD-RM1-LOG-01).
+/// Read access to a store's redactable records, so any C-24 store (not
+/// only [`MemoryStore`]) can plan a disposal (AUD-RM1-LOG-23).
+pub trait CaseRecordSource {
+    /// `(seq, c_i)` of every full record of `stream` bound to `case`
+    /// ([`CommittedRecord::case_tag`]), in sequence order.
+    fn case_records(&self, stream: StreamId, case: CaseRef) -> Vec<(u64, [u8; 32])>;
+}
+
+/// The exact set of CASE and CASE-SLOT records to redact for one case at
+/// disposal, and the commitments its dual-approved tombstones carry
+/// (AUD-012, AUD-RM1-LOG-01/16). A plan from a misbehaving source cannot
+/// redact another case's records: each stub must name the tombstone's case,
+/// which its record commitment binds.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct RedactionPlan {
     case: CaseRef,
-    entries: Vec<(u64, [u8; 32])>,
+    /// `[CASE, CASE-SLOT]`.
+    entries: [Vec<(u64, [u8; 32])>; 2],
+}
+
+fn plan_index(stream: StreamId) -> Option<usize> {
+    match stream {
+        StreamId::Case => Some(0),
+        StreamId::CaseSlot => Some(1),
+        _ => None,
+    }
 }
 
 impl RedactionPlan {
+    /// Plan the disposal of `case` from `source`.
+    pub fn build(source: &impl CaseRecordSource, case: CaseRef) -> Self {
+        Self {
+            case,
+            entries: [
+                source.case_records(StreamId::Case, case),
+                source.case_records(StreamId::CaseSlot, case),
+            ],
+        }
+    }
     /// The case.
     pub fn case(&self) -> CaseRef {
         self.case
     }
-    /// Number of records to redact.
+    /// Number of records to redact (both streams).
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.entries.iter().map(Vec::len).sum()
     }
     /// Whether nothing is to be redacted.
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.entries.iter().all(Vec::is_empty)
     }
-    /// The `case.disposed` tombstone to emit **before** applying the plan.
-    pub fn tombstone(&self, receipt_id: ReceiptId) -> AuditEvent {
-        AuditEvent::CaseDisposed {
-            case: self.case,
-            receipt_id,
-            removed_event_count: Count::internal(
-                u32::try_from(self.entries.len()).unwrap_or(u32::MAX),
-            ),
-            redacted_set: Hash32::from_bytes(redaction_set_hash(&self.entries)),
-        }
+    pub(crate) fn set_commits(&self) -> [SetCommit; 2] {
+        self.entries.each_ref().map(|e| SetCommit {
+            count: u32::try_from(e.len()).unwrap_or(u32::MAX),
+            hash: redaction_set_hash(e),
+        })
+    }
+    /// The request the disposal approvers sign.
+    pub fn request(&self, tenant: TenantRef, receipt_id: ReceiptId) -> Option<DisposalRequest> {
+        DisposalRequest::new(
+            tenant,
+            RequestKind::Case {
+                case: self.case,
+                receipt: receipt_id,
+                sets: self.set_commits(),
+            },
+        )
     }
 }
 
 /// Redaction errors.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RedactionError {
-    /// The tombstone does not match the plan.
+    /// No tombstone for this plan in the stream.
     TombstoneMismatch,
     /// The tombstone does not follow every planned record.
     TombstoneOrder,
     /// A planned record is no longer present in full.
     StoreChanged,
+    /// Redaction exists only in the CASE and CASE-SLOT streams.
+    WrongStream,
 }
 
 /// In-memory class-separated store (tests, C-24 cache, SIEM gateway feed).
@@ -128,54 +165,50 @@ impl MemoryStore {
         self.checkpoints.get(&s).cloned().unwrap_or_default()
     }
 
-    /// Plan per-case redaction (AUD-012): every full CASE record that
-    /// refers to `case` (except a `case.disposed` tombstone).
+    /// Plan per-case redaction (AUD-012) of every full CASE / CASE-SLOT
+    /// record bound to `case`.
     pub fn plan_case_redaction(&self, case: CaseRef) -> RedactionPlan {
-        let entries = self
-            .entries
-            .get(&StreamId::Case)
-            .map(|v| {
-                v.iter()
-                    .filter_map(|e| e.record.as_ref())
-                    .filter(|r| {
-                        r.event().case_ref() == Some(case)
-                            && !matches!(r.event(), AuditEvent::CaseDisposed { .. })
-                    })
-                    .map(|r| (r.header().seq, *r.commit()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        RedactionPlan { case, entries }
+        RedactionPlan::build(self, case)
     }
 
-    /// Apply a plan after its tombstone (`plan.tombstone(..)`) was
-    /// committed: each planned record becomes a stub `{seq, commit,
-    /// tombstone_seq}`; content and salt are dropped. The caller then
-    /// destroys the case's commitment key. Returns the number redacted.
+    /// Apply the `stream` part of a plan after that stream's tombstone
+    /// (written by [`crate::AuditLog::emit_case_disposal`]) is stored: each
+    /// planned record becomes a stub `{seq, case, inner, tombstone_seq}`;
+    /// content and salt are dropped (all or nothing). Apply to CASE and,
+    /// after its slot boundary, CASE-SLOT; then destroy the case key.
+    /// Returns the number redacted.
     pub fn apply_case_redaction(
         &mut self,
         plan: &RedactionPlan,
-        tombstone: &CommittedRecord,
+        stream: StreamId,
     ) -> Result<u32, RedactionError> {
-        let AuditEvent::CaseDisposed { receipt_id, .. } = tombstone.event() else {
-            return Err(RedactionError::TombstoneMismatch);
-        };
-        if tombstone.header().stream != StreamId::Case
-            || tombstone.event() != &plan.tombstone(*receipt_id)
-        {
-            return Err(RedactionError::TombstoneMismatch);
-        }
-        let tseq = tombstone.header().seq;
-        if plan.entries.iter().any(|(s, _)| *s >= tseq) {
+        let i = plan_index(stream).ok_or(RedactionError::WrongStream)?;
+        let entries = plan.entries.get(i).ok_or(RedactionError::WrongStream)?;
+        let sets = plan.set_commits();
+        let v = self.entries.entry(stream).or_default();
+        let tseq = v
+            .iter()
+            .filter_map(|e| e.record.as_ref())
+            .find(|r| match r.event() {
+                AuditEvent::CaseDisposed { disposal }
+                | AuditEvent::CaseSlotDisposed { disposal } => {
+                    disposal.case == plan.case && disposal.sets == sets
+                }
+                _ => false,
+            })
+            .map(|r| r.header().seq)
+            .ok_or(RedactionError::TombstoneMismatch)?;
+        if entries.iter().any(|(s, _)| *s >= tseq) {
             return Err(RedactionError::TombstoneOrder);
         }
-        let v = self.entries.entry(StreamId::Case).or_default();
         // Check first, then mutate (all or nothing).
-        for (seq, commit) in &plan.entries {
+        for (seq, commit) in entries {
             let ok = v.iter().any(|e| {
-                e.record
-                    .as_ref()
-                    .is_some_and(|r| r.header().seq == *seq && r.commit() == commit)
+                e.record.as_ref().is_some_and(|r| {
+                    r.header().seq == *seq
+                        && r.commit() == commit
+                        && r.case_tag() == Some(plan.case)
+                })
             });
             if !ok {
                 return Err(RedactionError::StoreChanged);
@@ -184,16 +217,17 @@ impl MemoryStore {
         let mut n: u32 = 0;
         for e in v.iter_mut() {
             let hit = e.record.as_ref().is_some_and(|r| {
-                plan.entries
+                entries
                     .iter()
                     .any(|(s, c)| r.header().seq == *s && r.commit() == c)
             });
-            if let Some(r) = e.record.take_if(|_| hit) {
-                e.chain = ChainRecord::Redacted {
-                    seq: r.header().seq,
-                    commit: *r.commit(),
-                    tombstone_seq: tseq,
-                };
+            if !hit {
+                continue;
+            }
+            let stub = e.record.as_ref().and_then(|r| r.to_stub(tseq));
+            if let Some(stub) = stub {
+                e.record = None;
+                e.chain = stub;
                 n = n.saturating_add(1);
             }
         }
@@ -222,6 +256,21 @@ impl MemoryStore {
         e.record = None;
         e.chain = c;
         true
+    }
+}
+
+impl CaseRecordSource for MemoryStore {
+    fn case_records(&self, stream: StreamId, case: CaseRef) -> Vec<(u64, [u8; 32])> {
+        self.entries
+            .get(&stream)
+            .map(|v| {
+                v.iter()
+                    .filter_map(|e| e.record.as_ref())
+                    .filter(|r| r.case_tag() == Some(case))
+                    .map(|r| (r.header().seq, *r.commit()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 }
 
@@ -274,9 +323,13 @@ impl JsonlFile {
             Self::Records(StreamId::Sec) => "audit-sec.jsonl",
             Self::Records(StreamId::Case) => "audit-case.jsonl",
             Self::Records(StreamId::Sys) => "audit-sys.jsonl",
+            Self::Records(StreamId::CaseSlot) => "audit-case-slot.jsonl",
+            Self::Records(StreamId::SysSlot) => "audit-sys-slot.jsonl",
             Self::Checkpoints(StreamId::Sec) => "checkpoints-sec.jsonl",
             Self::Checkpoints(StreamId::Case) => "checkpoints-case.jsonl",
             Self::Checkpoints(StreamId::Sys) => "checkpoints-sys.jsonl",
+            Self::Checkpoints(StreamId::CaseSlot) => "checkpoints-case-slot.jsonl",
+            Self::Checkpoints(StreamId::SysSlot) => "checkpoints-sys-slot.jsonl",
         }
     }
 }
@@ -358,13 +411,15 @@ pub fn redacted_line(stream: StreamId, c: &ChainRecord) -> Option<String> {
     match c {
         ChainRecord::Redacted {
             seq,
-            commit,
+            case,
+            inner,
             tombstone_seq,
         } => Some(format!(
-            "{{\"k\":\"red\",\"stream\":\"{}\",\"seq\":{},\"commit\":\"{}\",\"tomb\":{}}}",
+            "{{\"k\":\"red\",\"stream\":\"{}\",\"seq\":{},\"case\":\"{}\",\"inner\":\"{}\",\"tomb\":{}}}",
             stream.code(),
             seq,
-            hex(commit),
+            hex(case.as_bytes()),
+            hex(inner),
             tombstone_seq
         )),
         ChainRecord::Full { .. } => None,
@@ -458,7 +513,8 @@ struct Line {
     hash: Option<String>,
     salt: Option<String>,
     cbor: Option<String>,
-    commit: Option<String>,
+    case: Option<String>,
+    inner: Option<String>,
     tomb: Option<u64>,
     sig: Option<String>,
 }
@@ -518,7 +574,11 @@ pub fn read_stream(
         }
         match l.k.as_str() {
             "rec" => {
-                if l.commit.is_some() || l.tomb.is_some() || l.sig.is_some() || l.end_seq.is_some()
+                if l.case.is_some()
+                    || l.inner.is_some()
+                    || l.tomb.is_some()
+                    || l.sig.is_some()
+                    || l.end_seq.is_some()
                 {
                     return Err(ReadError::Malformed);
                 }
@@ -541,12 +601,25 @@ pub fn read_stream(
                 });
             }
             "red" => {
-                if l.cbor.is_some() || l.salt.is_some() || l.hash.is_some() || l.ty.is_some() {
+                if l.cbor.is_some()
+                    || l.salt.is_some()
+                    || l.hash.is_some()
+                    || l.ty.is_some()
+                    || l.sig.is_some()
+                    || l.end_seq.is_some()
+                {
                     return Err(ReadError::Malformed);
                 }
+                let case: [u8; 16] = l
+                    .case
+                    .as_deref()
+                    .and_then(unhex)
+                    .and_then(|b| b.try_into().ok())
+                    .ok_or(ReadError::Malformed)?;
                 recs.push(ChainRecord::Redacted {
                     seq: l.seq.ok_or(ReadError::Malformed)?,
-                    commit: h32(l.commit.as_ref())?,
+                    case: CaseRef::from_bytes(case),
+                    inner: h32(l.inner.as_ref())?,
                     tombstone_seq: l.tomb.ok_or(ReadError::Malformed)?,
                 });
             }
@@ -555,7 +628,16 @@ pub fn read_stream(
     }
     let mut cps = Vec::new();
     for l in read_lines(checkpoints, MAX_LINES)? {
-        if l.stream != stream.code() || l.k != "cp" {
+        if l.stream != stream.code()
+            || l.k != "cp"
+            || l.case.is_some()
+            || l.inner.is_some()
+            || l.tomb.is_some()
+            || l.salt.is_some()
+            || l.hash.is_some()
+            || l.ty.is_some()
+            || l.seq.is_some()
+        {
             return Err(ReadError::Malformed);
         }
         let bytes = l

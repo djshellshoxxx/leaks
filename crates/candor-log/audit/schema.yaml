@@ -3,7 +3,11 @@
 # Changes to this file require the `audit-schema` review label and two
 # code-owner approvals (27). It must equal candor_log::schema::registry_yaml();
 # crates/candor-log/tests/schema_registry.rs fails on any drift.
-version: 1
+# v2 (AUD-RM1-LOG-02/16/17): date-only events are written to the shuffled
+# slot streams `case-slot` / `sys-slot`; a CASE event with a system actor is
+# date-only and goes to `case-slot` as well. Tombstones carry dual-approved
+# payloads (`CaseDisposal`, `RetentionPrune`) built only by the disposal API.
+version: 2
 events:
   - type: "auth.login_succeeded"
     class: SECURITY
@@ -491,11 +495,11 @@ events:
     fields:
       - name: "stream"
         type: "StreamId"
-        codes: ["sec", "case", "sys"]
+        codes: ["sec", "case", "sys", "case-slot", "sys-slot"]
       - name: "seq_range"
         type: "SeqRange"
       - name: "root"
-        type: "Hash32"
+        type: "CheckpointRoot"
   - type: "audit.witness_cosigned"
     class: SECURITY
     stream: sec
@@ -521,7 +525,7 @@ events:
     fields:
       - name: "stream"
         type: "StreamId"
-        codes: ["sec", "case", "sys"]
+        codes: ["sec", "case", "sys", "case-slot", "sys-slot"]
       - name: "seq"
         type: "Seq"
       - name: "failure_code"
@@ -534,7 +538,7 @@ events:
     fields:
       - name: "stream"
         type: "StreamId"
-        codes: ["sec", "case", "sys"]
+        codes: ["sec", "case", "sys", "case-slot", "sys-slot"]
       - name: "seq_range"
         type: "SeqRange"
       - name: "destination_class"
@@ -551,7 +555,7 @@ events:
     fields:
       - name: "stream"
         type: "StreamId"
-        codes: ["sec", "case", "sys"]
+        codes: ["sec", "case", "sys", "case-slot", "sys-slot"]
       - name: "seq_range"
         type: "SeqRange"
   - type: "audit.read"
@@ -561,7 +565,7 @@ events:
     fields:
       - name: "stream"
         type: "StreamId"
-        codes: ["sec", "case", "sys"]
+        codes: ["sec", "case", "sys", "case-slot", "sys-slot"]
       - name: "filter_kind"
         type: "Code<FilterKind>"
       - name: "result_count_bucket"
@@ -572,13 +576,8 @@ events:
     stream: sec
     ts: staff
     fields:
-      - name: "stream"
-        type: "StreamId"
-        codes: ["sec", "case", "sys"]
-      - name: "seq_range"
-        type: "SeqRange"
-      - name: "last_deleted_checkpoint_root"
-        type: "Hash32"
+      - name: "prune"
+        type: "RetentionPrune"
   - type: "secret.placement_violation"
     class: SECURITY
     stream: sec
@@ -720,7 +719,7 @@ events:
     fields: []
   - type: "case.imported"
     class: CASE
-    stream: case
+    stream: case-slot
     ts: date_only
     fields:
       - name: "case"
@@ -733,7 +732,7 @@ events:
         type: "DayStamp"
   - type: "case.envelope_rejected"
     class: CASE
-    stream: case
+    stream: case-slot
     ts: date_only
     fields:
       - name: "pending_envelope_bucket"
@@ -873,8 +872,8 @@ events:
         type: "UserRef"
   - type: "case.coi_tags_updated"
     class: CASE
-    stream: case
-    ts: staff
+    stream: case-slot
+    ts: date_only
     fields:
       - name: "case"
         type: "CaseRef"
@@ -945,7 +944,7 @@ events:
         type: "DayStamp"
   - type: "case.canary_escalated"
     class: CASE
-    stream: case
+    stream: case-slot
     ts: date_only
     fields:
       - name: "subject"
@@ -1062,7 +1061,7 @@ events:
         type: "ChannelId"
   - type: "evidence.imported"
     class: CASE
-    stream: case
+    stream: case-slot
     ts: date_only
     fields:
       - name: "case"
@@ -1236,14 +1235,15 @@ events:
     stream: case
     ts: staff
     fields:
-      - name: "case"
-        type: "CaseRef"
-      - name: "receipt_id"
-        type: "ReceiptId"
-      - name: "removed_event_count"
-        type: "Count"
-      - name: "redacted_set"
-        type: "Hash32"
+      - name: "disposal"
+        type: "CaseDisposal"
+  - type: "case.slot_disposed"
+    class: CASE
+    stream: case-slot
+    ts: date_only
+    fields:
+      - name: "disposal"
+        type: "CaseDisposal"
   - type: "case.data_purged"
     class: CASE
     stream: case
@@ -1410,7 +1410,7 @@ events:
         type: "PercentBucket"
   - type: "sys.relay_daily"
     class: SYSTEM
-    stream: sys
+    stream: sys-slot
     ts: date_only
     fields:
       - name: "date"
@@ -1423,7 +1423,7 @@ events:
         type: "SmallCount"
   - type: "sys.relay_slot_overrun"
     class: SYSTEM
-    stream: sys
+    stream: sys-slot
     ts: date_only
     fields:
       - name: "date"
@@ -1476,10 +1476,12 @@ events:
     stream: sys
     ts: system
     fields:
-      - name: "stream"
-        type: "StreamId"
-        codes: ["sec", "case", "sys"]
-      - name: "seq_range"
-        type: "SeqRange"
-      - name: "last_deleted_checkpoint_root"
-        type: "Hash32"
+      - name: "prune"
+        type: "RetentionPrune"
+  - type: "sys.slot_retention_tombstone"
+    class: SYSTEM
+    stream: sys-slot
+    ts: date_only
+    fields:
+      - name: "prune"
+        type: "RetentionPrune"

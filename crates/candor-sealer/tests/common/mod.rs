@@ -27,7 +27,9 @@ use candor_core::secret::ContentKey;
 use candor_core::sig::SigningKey;
 use candor_core::slots::{RecipientListEntry, RecipientSlotBlock, SlotContext};
 use candor_safefs::{RootPolicy, SafeRoot};
-use candor_sealer::proto::{Request, Response, SecretWords, SessionHandle};
+use candor_sealer::proto::{
+    Coi, DraftSet, Mode, Request, Response, SecretText, SecretWords, SessionHandle,
+};
 use candor_sealer::server::clock::{Clock, ClockError};
 use candor_sealer::server::directory::{DirectoryTrust, SnapshotBundle};
 
@@ -447,6 +449,49 @@ pub fn confirm_words(words: &SecretWords, pos: [u8; 3]) -> SecretWords {
     SecretWords(zeroize::Zeroizing::new(
         pos.iter().map(|p| words.0[usize::from(*p)]).collect(),
     ))
+}
+
+/// Open a session, draft an anonymous report and confirm a fresh passphrase.
+pub async fn confirmed(f: &Fixture, s: SessionHandle, coi: Option<Coi>) {
+    let sl = &f.sealer;
+    ok(
+        sl,
+        Request::SessionOpen {
+            sess: s,
+            channel_id: CHANNEL,
+        },
+    )
+    .await;
+    ok(
+        sl,
+        Request::DraftSet(DraftSet {
+            sess: s,
+            mode: Mode::Anonymous,
+            message: SecretText::new("report"),
+            fields: vec![],
+            identity: Some(SecretText::new("dropped in anonymous mode")),
+            coi,
+        }),
+    )
+    .await;
+    let Response::Words {
+        words,
+        confirm_positions,
+    } = ok(sl, Request::GenAccount { sess: s }).await
+    else {
+        panic!()
+    };
+    let Response::Confirm { ok: true, .. } = ok(
+        sl,
+        Request::ConfirmPassphrase {
+            sess: s,
+            words: confirm_words(&words, confirm_positions),
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
 }
 
 pub async fn ok(s: &Sealer, req: Request) -> Response {

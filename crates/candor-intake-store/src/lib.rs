@@ -16,6 +16,7 @@ pub mod lint;
 pub mod memory;
 pub mod pg;
 mod rng;
+pub mod staged;
 pub mod store;
 pub mod types;
 mod validate;

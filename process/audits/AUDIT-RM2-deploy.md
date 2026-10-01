@@ -526,3 +526,131 @@ Some of these are caught later in live `--host` mode: AppArmor complain mode, th
 All round-1 Critical/High/Medium findings are fixed and re-tested (DEP-01..12, 14). The redesign checks effective configuration (tor's own canonicalisation, the kernel-loaded nft ruleset, systemd's own unit resolution, `postgres -C`) and is a substantial improvement. It rejected all round-1 edits and most new variants.
 
 Gate: **NOT YET PASS** 2026-10-01 0051ec07ad. There are no open Critical or High findings. Integration requires DEP-15, DEP-16 and DEP-17 to be fixed, or accepted in writing by the lead auditor (§F.2). The owner sign-offs D-27 and D-28 (DEP-04/05 spec amendments) are still outstanding.
+
+---
+
+## Re-test (round 3)
+
+| Field | Value |
+|---|---|
+| Date | 2026-10-01 |
+| Revision | HEAD `201f20b` plus the uncommitted working tree (`deploy/tools/config-check.sh`, README, SPEC-NOTES) |
+| Scope | Fixes for DEP-15..22, SEA-16, STO-08/11/23/24 settings (ADR-053). New units `candor-intake-{vacuum,maint}.{service,timer}` and profile `candor-intake-maint` |
+
+### Tool re-runs
+
+| Tool | Result |
+|---|---|
+| shellcheck (`-S style -x`) | clean |
+| `CANDOR_TEST_PG=1 validate.sh` | 311 PASS, 0 FAIL, exit 0 |
+| `systemd-analyze security` | web, sealer, store, vacuum, maint 0.4; PG 0.5; tor 1.4. All within budget |
+| Work directory | `/run/candor-config-check` is root 0700 and empty after every run |
+
+### Adversarial edits
+
+**Rejected (exit 30, or exit 2 for usage)**, with the rule that caught each:
+
+| Area | Edit | Rejected by |
+|---|---|---|
+| Sealer syscalls | drop-in `@aio` | `SystemCallFilter` pinned |
+| | `io_uring_setup:EPERM` | `unit.verify` |
+| | deny line without `userfaultfd` | pinned |
+| AppArmor (in-profile) | `/** rwlkix` + `network` | `content` |
+| | `include if exists <local/…>` | `content` |
+| | `@{PROC}=/` redefinition | `content` |
+| | `alias /run/candor/ -> /,` | `content` |
+| | a deny rule removed | `content` |
+| Timers | `RandomizedDelaySec=1h`, `Persistent=true`, a drop-in adding `OnCalendar=hourly` | exact keys |
+| Maint unit | maint without `AppArmorProfile` | exact keys |
+| PostgreSQL | `track_counts on`, `autovacuum on` | `pg.<key>` |
+| | unknown key | `pg.allowed_keys` |
+| | `local all postgres peer` | `pg.hba_no_superuser` |
+| | maint role to all DBs | `pg.hba_exact` |
+| Kernel | `debug.exception-trace = 1` | sysctl |
+| nftables | `mon_hosts {0.0.0.0}` | `set.mon_hosts` |
+| Symlinks (static) | torrc symlink to a marker file | refused; marker not present in the report |
+| Invocation | `--only typo` | exit 2 |
+| Policy integrity | baseline edited; baseline edited with the manifest re-written | `tool.baseline_integrity` (the manifest pin in the script catches the second); no check runs, exit 30 |
+| Host-root: manager environment | `DefaultEnvironment=LD_PRELOAD` in `/etc/systemd/system.conf`, `system.conf.d`, `/usr/lib/systemd/system.conf.d` | `host.manager_environment` |
+| Host-root: preload | `/etc/ld.so.preload` | `host.no_ld_so_preload` |
+| Host-root: sysctl | `sysctl.conf` good + `99-zz` bad; late file in `/usr/lib/sysctl.d`; late file in `/run/sysctl.d` | sysctl |
+| Host-root: boot path | `nftables.service` drop-in `/bin/true` | `host.unit.nftables.service.dropins` |
+| Host-root: symlinks | `/etc/apparmor.d`, `/etc/tor` or `/etc/group` behind a symlink; drop-in symlink | refused |
+| Host-root: journald | `/usr/lib/systemd/journald.conf.d` with `Storage=persistent` | `journald.host.Storage` |
+
+**Accepted (exit 0):** see DEP-23.
+- `/etc/apparmor.d/abstractions/base.d/zz` containing `/** rwlkix, network, capability,`.
+- `/etc/apparmor.d/tunables/global.d/zz` containing `@{PROC}+=/`.
+- A rewritten `/etc/apparmor.d/abstractions/openssl`.
+
+Proof of effect: compiling `candor-sealer` with a base directory that has the `base.d` drop-in changes the compiled policy digest (`20a531d7…` → `11eb8b24…`), and `apparmor_parser -p` shows `/** rwlkix,` and `network,` inside the sealer profile.
+
+### Status of round-2 findings
+
+| ID | Status | Evidence / residual |
+|---|---|---|
+| DEP-15 | **Partially fixed** | Every edit inside a profile file is rejected: content is compared statement by statement, and forbidden rule classes, flags, includes and capabilities are rejected. Live mode adds enforce state and the loaded-policy digest. Not covered: files the profiles include. That residual is DEP-23 |
+| DEP-16 | **Fixed** | `SystemCallFilter=` lines pinned exactly; effective allow-set (group expansion, ordered `~`) equals `scf|` (133 calls); `scf-never` set (32 calls, including io_uring) checked |
+| DEP-17 | **Fixed** (residual race: DEP-24) | Symlinked inputs and components are refused and never read. Inputs are copied with `nofollow` into a root-owned 0700 work directory. Reports carry only sanitised names; the marker never appeared in a report |
+| DEP-18 | **Fixed** | Manager environment, `ld.so.preload`, `nftables.service`/`systemd-sysctl.service` (fragment, drop-ins, enabled), and offline sysctl precedence via `cat-config` are all checked |
+| DEP-19 | **Fixed** | `pg|` is an allow-list; `pg_hba`/`pg_ident` exact; superuser lines rejected |
+| DEP-20 | **Fixed** / accepted | `debug.exception-trace=0` is in the baseline. OOM lines are an explicit ADR-053(2) residual |
+| DEP-21 | **Fixed** | Unknown or empty `--only` exits 2. Baseline digest is in the manifest; the manifest digest is pinned in the script. Integrity of the script itself rests on the signed package, which is acceptable |
+| DEP-22 | **Fixed** | Site sets accept unicast host addresses only |
+| SEA-16 / STO settings | **Verified** | Staging is owned by the sealer, store has no staging, profiles and drop-ins are consistent. `track_counts`/`track_activities`/`autovacuum` off, `temp_file_limit` 256MB, `pg_stat` on tmpfs (PG run). Timers fire at fixed UTC times (`RandomizedDelaySec=0`, `Persistent=false`, `AccuracySec=1s`). Maint/vacuum run sandboxed (0.4) as their own user, with output off journald |
+| DEP-13 | Open (Info, tracking) | Unchanged |
+
+### New findings
+
+#### AUD-RM2-DEP-23 — AppArmor check ignores the include closure: files under `abstractions/` and `tunables/` (including the `base.d/` and `global.d/` drop-in directories) can widen every Candor profile undetected, live included
+- Severity: Medium
+- Location: `deploy/tools/config-check.sh` `check_apparmor` / `aa_classes` (allowed includes `<tunables/global>`, `<abstractions/base>`, `<abstractions/openssl>`)
+- Category: B10.3 (CWE-184, CWE-829)
+- Description:
+  - Each profile is compared statement by statement, but its includes are trusted as opaque names.
+  - `abstractions/base` ends with `include if exists <abstractions/base.d>`, and `tunables/global` ends with `include if exists <tunables/global.d>`.
+  - Verified in `--host --root`: a file in `etc/apparmor.d/abstractions/base.d/` granting `/** rwlkix, network, capability,`, a `tunables/global.d` file appending `@{PROC}+=/`, and a rewritten `abstractions/openssl` all pass with exit 0.
+  - The compiled sealer policy changes as a result.
+  - The live `loaded_policy` check compiles the checked file against the same tampered include tree, so its digest still matches. `apparmor.no_foreign_profiles` does not look at these files, because they do not name a Candor profile.
+- Exploit scenario: an insider, a config-management error or a third-party package adds a `base.d` snippet. All six Candor profiles (sealer, tor, PG included) become allow-all in enforce mode, and ST-120 stays green.
+- Fix recommendation: pin the effective policy, not the file. Choose one:
+  - Pin `sha256(apparmor_parser -p <profile>)`, the fully preprocessed text, per profile in the baseline. Re-baseline when the Platform-Manifest AppArmor package changes.
+  - Or ship self-contained profiles (abstractions inlined) that include only `<tunables/global>`, and pin the digests of the whole `tunables/` closure, with `global.d/` required to be empty.
+
+  In both cases fail when `abstractions/base.d/`, `tunables/global.d/` or `local/` contains anything. Add these three variants to `validate.sh`.
+- Spec / requirement reference: 17 §5.2, R7 SI-B-04, IMPL-RM2 §4 A14; DEP-08/15.
+- Status: Open
+
+#### AUD-RM2-DEP-24 — `snap()` check-then-open race: parent components are checked for symlinks before `dd`, but `iflag=nofollow` protects only the last component; a FIFO swap blocks the root-run checker
+- Severity: Low
+- Location: `config-check.sh` `snap()` (`symlinked_component` → `[ -f ]` → `stat` → `dd iflag=nofollow`)
+- Category: B6.2 (CWE-367)
+- Description:
+  - A user who can write a parent directory inside the checked tree can swap that directory for a symlink between the component walk and the `dd` open. This applies to static `--dir` on a developer- or CI-owned checkout, or `--root` on a non-root-owned image.
+  - The root checker then reads an arbitrary file. Contents are not printed, but `san_names` still emits up to 8 × 48 characters of first tokens for unknown torrc keys. That alphabet includes hash characters, so a won race against `/etc/shadow` could leak part of a hash.
+  - Swapping the file for a FIFO makes `dd` block indefinitely, because there is no timeout.
+- Fix recommendation:
+  - Snapshot inputs inside a private mount namespace in which the input tree is bind-mounted with `nosymfollow` (Linux ≥5.10). Or compare `stat -c '%d:%i'` of every component before and after the copy.
+  - Open with `iflag=nofollow,nonblock` under `timeout`.
+  - For torrc keys that are not on the allow-list, report only the count, never the tokens.
+- Status: Open
+
+### Round-3 summary and gate
+
+| Severity | Open | IDs |
+|---|---|---|
+| Critical | 0 | — |
+| High | 0 | — |
+| Medium | 1 | DEP-23 |
+| Low | 1 | DEP-24 |
+| Info | 1 | DEP-13 (tracking) |
+
+DEP-15..22 and SEA-16 are fixed and re-tested, with DEP-15 partially fixed and its residual tracked as DEP-23. The STO settings and the new timer and maintenance units are verified.
+
+Gate: **NOT YET PASS** 2026-10-01 201f20b+wt. There are no open Critical or High findings. Integration requires DEP-23 to be fixed, or accepted in writing by the lead auditor (§F.2, expiry ≤90 days; compensating control until then: the `base.d`/`global.d`/`local` directories must be empty and the abstractions verified by `dpkg --verify apparmor`). The owner sign-offs D-27 and D-28 are still outstanding.
+
+**Record note (2026-10-01, after round 3):** the lead signed off the D-27 and D-28 spec amendments as ADR-053 (`specs/DECISIONS.md:496`). I checked the ADR text:
+- ADR-053(1): no tor control interface on the intake instance.
+- ADR-053(2): no source-path output in any journal; OOM/segfault lines are an accepted residual.
+
+That outstanding precondition of the round-3 gate is closed. The gate now depends only on DEP-23 (Medium). DEP-24 (Low) is tracked and does not block. Fixes for both are in progress, and round 4 will re-test them.
