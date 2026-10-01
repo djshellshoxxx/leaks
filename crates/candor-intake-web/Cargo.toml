@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+[package]
+name = "candor-intake-web"
+version = "0.1.0"
+description = "Candor Source Web Service (C-06): server-rendered no-JS Tier W intake over a Unix socket behind the Tor onion"
+license = "AGPL-3.0-or-later"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Every dependency is justified in SPEC-NOTES.md ("Dependencies"). No HTTP
+# framework: the strict HTTP/1.1 subset is implemented in `src/http.rs`
+# (SPEC-NOTES "Implementation decisions" 1).
+[dependencies]
+candor-source-ui = { path = "../candor-source-ui" }
+candor-sealer = { path = "../candor-sealer", default-features = false }
+candor-intake-store = { path = "../candor-intake-store" }
+candor-core = { path = "../candor-core" }
+candor-log = { path = "../candor-log" }
+tokio = { version = "=1.48.0", default-features = false, features = ["rt", "net", "time", "sync", "io-util"] }
+zeroize = { version = "=1.8.2", default-features = false, features = ["alloc"] }
+subtle = { version = "=2.6.1", default-features = false }
+sha2 = { version = "=0.11.0", default-features = false }
+hmac = { version = "=0.13.0", default-features = false }
+hkdf = { version = "=0.13.0", default-features = false }
+unicode-normalization = { version = "=0.1.24", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+tokio = { version = "=1.48.0", default-features = false, features = ["rt", "rt-multi-thread", "net", "time", "sync", "io-util", "macros"] }
+proptest = { version = "=1.11.0", default-features = false, features = ["std"] }
+candor-sealer = { path = "../candor-sealer", default-features = true }
+rustix = { version = "=1.1.2", default-features = false, features = ["std", "fs", "mm", "net"] }
