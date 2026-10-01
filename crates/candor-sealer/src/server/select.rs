@@ -3,7 +3,7 @@
 //! ADR-036(2)/(4), ADR-037(1); 07 BE-051). Runs in RAM at `SEAL_FINISH` only,
 //! against the verified snapshot, and fails closed.
 
-use super::directory::{ChannelView, DirectorySnapshot};
+use super::directory::DirectorySnapshot;
 use candor_core::hash::{KeyKind, key_id};
 use candor_core::kem::KemPublicKey;
 use candor_core::slots::SLOT_COUNT;
@@ -56,30 +56,6 @@ pub(crate) struct Choice<'a> {
     pub original_eligible: Option<&'a [[u8; 16]]>,
 }
 
-/// The active COI_POLICY. Two active policies with the same `effective_day` are
-/// ambiguous: fail closed (`Unavailable`) instead of picking one (AUD-RM2-SEA-07).
-fn active_coi(
-    ch: &ChannelView,
-    today: u32,
-) -> Result<Option<&super::directory::CoiPolicy>, SelectError> {
-    let latest = ch
-        .coi_policies
-        .iter()
-        .filter(|p| p.effective_day <= today)
-        .map(|p| p.effective_day)
-        .max();
-    let Some(day) = latest else {
-        return Ok(None);
-    };
-    let mut it = ch.coi_policies.iter().filter(|p| p.effective_day == day);
-    match (it.next(), it.next()) {
-        (Some(p), None) => Ok(Some(p)),
-        _ => Err(SelectError::Unavailable {
-            alternative: ch.independent_route,
-        }),
-    }
-}
-
 /// Compute the recipient set.
 pub(crate) fn select(
     snap: &DirectorySnapshot,
@@ -91,21 +67,25 @@ pub(crate) fn select(
         Some(c) if c.enabled => c,
         Some(c) => {
             return Err(SelectError::Unavailable {
-                alternative: c.independent_route,
+                alternative: c.independent_route(today),
             });
         }
         None => return Err(SelectError::Unavailable { alternative: None }),
     };
-    let unavailable = SelectError::Unavailable {
-        alternative: ch.independent_route,
-    };
+    let alternative = ch.independent_route(today);
+    let unavailable = SelectError::Unavailable { alternative };
     let epoch_id = snap.epoch_for_day(today).ok_or(unavailable)?;
-    // Step 4: Triage Set of the latest active roster; time-locked additions are
-    // not yet active (ADR-036(2)). Persons, not roster entries, are counted: a
-    // user listed under several labels is one Triage Set member.
-    let mut triage: Zeroizing<Vec<[u8; 16]>> = Zeroizing::new(Vec::with_capacity(ch.members.len()));
-    for m in &ch.members {
-        if m.read_intake && m.effective_day <= today && !triage.contains(&m.user_id) {
+    // Step 4: Triage Set of the active roster (time-locked loosening entries
+    // are not yet active, ADR-036(2)), restricted to members whose role label
+    // carries a current independent ROLE_LABEL_CERT (ADR-036(3), §14.4 rule 5).
+    // Persons, not roster entries, are counted: a user listed under several
+    // labels is one Triage Set member.
+    let roster = ch.active_roster(today).ok_or(unavailable)?;
+    let mut triage: Zeroizing<Vec<[u8; 16]>> =
+        Zeroizing::new(Vec::with_capacity(roster.members.len()));
+    for m in &roster.members {
+        let certified = m.label_certified_until.is_some_and(|u| today <= u);
+        if m.read_intake && certified && !triage.contains(&m.user_id) {
             triage.push(m.user_id);
         }
     }
@@ -114,24 +94,35 @@ pub(crate) fn select(
     }
     // Step 5: COI filter (source flags + active COI_POLICY for the categories),
     // applied per person (ADR-052(3), AUD-RM2-SEA-03): a user is excluded if ANY
-    // of their roster entries — active or not, triage or not — carries an
-    // excluded role label.
-    let policy = active_coi(ch, today)?;
+    // of their roster entries — in any roster version, active or not, triage or
+    // not — carries an excluded role label.
+    let policy = ch.active_coi(today);
+    // Sized once for the flags plus every label the policy can add, so the
+    // zeroizing buffer never reallocates (AUD-RM2-SEA-08, SEA-24(d)).
+    let policy_labels = policy.map_or(0, |p| {
+        p.categories
+            .iter()
+            .filter(|(cat, _)| choice.categories.contains(cat))
+            .fold(0usize, |a, (_, l)| a.saturating_add(l.len()))
+    });
     let mut excluded: Zeroizing<Vec<u16>> = Zeroizing::new(Vec::with_capacity(
-        choice.flagged_labels.len().saturating_add(SLOT_COUNT),
+        choice.flagged_labels.len().saturating_add(policy_labels),
     ));
     excluded.extend_from_slice(choice.flagged_labels);
     if let Some(p) = policy {
         for (cat, labels) in &p.categories {
             if choice.categories.contains(cat) {
-                excluded.reserve(labels.len());
                 excluded.extend_from_slice(labels);
             }
         }
     }
+    let member_count = ch
+        .rosters
+        .iter()
+        .fold(0usize, |a, r| a.saturating_add(r.members.len()));
     let mut excluded_users: Zeroizing<Vec<[u8; 16]>> =
-        Zeroizing::new(Vec::with_capacity(ch.members.len()));
-    for m in &ch.members {
+        Zeroizing::new(Vec::with_capacity(member_count));
+    for m in ch.rosters.iter().flat_map(|r| r.members.iter()) {
         if excluded.contains(&m.role_label) && !excluded_users.contains(&m.user_id) {
             excluded_users.push(m.user_id);
         }
@@ -175,9 +166,7 @@ pub(crate) fn select(
     }
     // Step 7: fail closed.
     if recipients.is_empty() {
-        return Err(SelectError::NoEligible {
-            alternative: ch.independent_route,
-        });
+        return Err(SelectError::NoEligible { alternative });
     }
     recipients.sort_by(|a, b| a.key_id.cmp(&b.key_id));
     Ok(Selection {
@@ -187,8 +176,8 @@ pub(crate) fn select(
         eligible_user_ids: eligible,
         skipped,
         coi_policy_entry_hash: policy.map_or([0u8; 32], |p| p.entry_hash),
-        roster_entry_hash: ch.roster_entry_hash,
-        roster_version: ch.roster_version,
+        roster_entry_hash: roster.entry_hash,
+        roster_version: roster.roster_version,
         tree_size: snap.tree_size,
         root_hash: snap.root_hash,
     })
@@ -202,24 +191,44 @@ mod tests {
         clippy::arithmetic_side_effects
     )]
     use super::*;
-    use crate::server::directory::{CoiPolicy, MemberEpochKey, RosterMember};
+    use crate::server::directory::{
+        ChannelView, CoiPolicy, MemberEpochKey, RosterMember, RosterVersion,
+    };
     use candor_core::Suite;
     use candor_core::kem::KemKeyPair;
 
     const T: u32 = 1000;
     const CH: [u8; 16] = [1; 16];
 
+    fn member(user: u8, role_label: u16, read_intake: bool) -> RosterMember {
+        RosterMember {
+            user_id: [user; 16],
+            role_label,
+            read_intake,
+            label_certified_until: Some(T + 30),
+        }
+    }
+
+    fn roster(members: Vec<RosterMember>, activation_day: u32) -> RosterVersion {
+        RosterVersion {
+            entry_hash: [2; 32],
+            roster_version: 1,
+            activation_day,
+            independent_route: Some([5; 16]),
+            members,
+        }
+    }
+
+    fn members(s: &mut DirectorySnapshot) -> &mut Vec<RosterMember> {
+        &mut s.channels[0].rosters[0].members
+    }
+
     fn snap(n: u8) -> (DirectorySnapshot, Vec<KemKeyPair>) {
         let keys: Vec<KemKeyPair> = (0..n)
             .map(|_| KemKeyPair::generate(Suite::CandorStd1).unwrap())
             .collect();
         let members = (0..n)
-            .map(|i| RosterMember {
-                user_id: [i + 1; 16],
-                role_label: u16::from(i) + 1,
-                read_intake: true,
-                effective_day: T - 10,
-            })
+            .map(|i| member(i + 1, u16::from(i) + 1, true))
             .collect();
         let meks = keys
             .iter()
@@ -245,9 +254,7 @@ mod tests {
             channels: vec![ChannelView {
                 channel_id: CH,
                 enabled: true,
-                roster_entry_hash: [2; 32],
-                roster_version: 1,
-                members,
+                rosters: vec![roster(members, 0)],
                 coi_policies: vec![
                     CoiPolicy {
                         entry_hash: [3; 32],
@@ -262,7 +269,6 @@ mod tests {
                     },
                 ],
                 meks,
-                independent_route: Some([5; 16]),
             }],
             user_keys: vec![],
         };
@@ -327,12 +333,7 @@ mod tests {
     fn coi_applies_per_person_not_per_roster_entry() {
         let (mut s, _) = snap(3);
         // User 1 (label 1) is additionally listed under label 9.
-        s.channels[0].members.push(RosterMember {
-            user_id: [1; 16],
-            role_label: 9,
-            read_intake: true,
-            effective_day: T - 10,
-        });
+        members(&mut s).push(member(1, 9, true));
         // Category 9 excludes label 1: user 1 must be excluded although the
         // label-9 entry passes the filter.
         let sel = select(&s, &CH, T, choice(&[], &[9], None)).unwrap();
@@ -341,65 +342,72 @@ mod tests {
         // Source ticks label 9 only: user 1 is excluded as a person.
         let sel = select(&s, &CH, T, choice(&[9], &[], None)).unwrap();
         assert_eq!(*sel.eligible_user_ids, vec![[2; 16], [3; 16]]);
-        // An excluded label on a non-triage or not-yet-active entry also counts.
+        // An excluded label on a non-triage entry or in a not-yet-active
+        // roster version also counts.
         let (mut s, _) = snap(3);
-        s.channels[0].members.push(RosterMember {
-            user_id: [2; 16],
-            role_label: 42,
-            read_intake: false,
-            effective_day: T + 100,
-        });
+        let mut later = s.channels[0].rosters[0].clone();
+        later.activation_day = T + 100;
+        later.members.push(member(2, 42, false));
+        s.channels[0].rosters.push(later);
         let sel = select(&s, &CH, T, choice(&[42], &[], None)).unwrap();
         assert_eq!(*sel.eligible_user_ids, vec![[1; 16], [3; 16]]);
         // Without exclusions the duplicated user is one recipient.
         let (mut s, _) = snap(3);
-        s.channels[0].members.push(RosterMember {
-            user_id: [3; 16],
-            role_label: 30,
-            read_intake: true,
-            effective_day: T - 10,
-        });
+        members(&mut s).push(member(3, 30, true));
         let sel = select(&s, &CH, T, choice(&[], &[], None)).unwrap();
         assert_eq!(sel.recipients.len(), 3);
         // 16 distinct persons with duplicate entries stay within the limit.
         let (mut s, _) = snap(1);
         for i in 0..15u8 {
             for label in [60u16, 61] {
-                s.channels[0].members.push(RosterMember {
-                    user_id: [100 + i; 16],
-                    role_label: label,
-                    read_intake: true,
-                    effective_day: 0,
-                });
+                members(&mut s).push(member(100 + i, label, true));
             }
         }
         assert!(select(&s, &CH, T, choice(&[], &[], None)).is_ok());
     }
 
-    /// Two active COI policies with the same effective day: fail closed.
+    /// The latest active COI_POLICY applies; a later one with an earlier
+    /// activation day (a tightening appended after a pending loosening) wins.
     #[test]
-    fn ambiguous_coi_policy_fails_closed() {
+    fn latest_active_coi_policy_applies() {
         let (mut s, _) = snap(3);
-        let dup = s.channels[0].coi_policies[0].clone();
         s.channels[0].coi_policies.push(CoiPolicy {
             entry_hash: [9; 32],
-            ..dup
+            effective_day: 0,
+            categories: vec![(9, vec![1, 2])],
         });
-        assert!(matches!(
-            select(&s, &CH, T, choice(&[], &[], None)),
-            Err(SelectError::Unavailable { .. })
-        ));
+        let sel = select(&s, &CH, T, choice(&[], &[9], None)).unwrap();
+        assert_eq!(sel.coi_policy_entry_hash, [9; 32]);
+        assert_eq!(*sel.eligible_user_ids, vec![[3; 16]]);
     }
 
     #[test]
     fn time_locks_validity_and_invariants() {
         let (mut s, _) = snap(3);
-        // A time-locked addition is not yet a recipient.
-        s.channels[0].members[2].effective_day = T + 1;
+        // A time-locked addition (a roster version not yet active) is not yet
+        // a recipient; the previous active version applies.
+        let mut later = s.channels[0].rosters[0].clone();
+        members(&mut s).pop();
+        later.activation_day = T + 1;
+        later.entry_hash = [7; 32];
+        s.channels[0].rosters.push(later);
         let sel = select(&s, &CH, T, choice(&[], &[], None)).unwrap();
         assert_eq!(*sel.eligible_user_ids, vec![[1; 16], [2; 16]]);
+        assert_eq!(sel.roster_entry_hash, [2; 32]);
+        let sel = select(&s, &CH, T + 1, choice(&[], &[], None)).unwrap();
+        assert_eq!(sel.eligible_user_ids.len(), 3);
+        assert_eq!(sel.roster_entry_hash, [7; 32]);
+        // An expired or non-independent role-label certificate removes the
+        // member from the Triage Set (ADR-036(3)).
+        let (mut s, _) = snap(3);
+        members(&mut s)[0].label_certified_until = Some(T - 1);
+        members(&mut s)[1].label_certified_until = None;
+        let sel = select(&s, &CH, T, choice(&[], &[], None)).unwrap();
+        assert_eq!(*sel.eligible_user_ids, vec![[3; 16]]);
+        let (mut s, _) = snap(3);
         // A revoked or duplicated MEK counts as missing.
         s.channels[0].meks[0].revoked = true;
+        s.channels[0].meks[2].revoked = true;
         let dup = s.channels[0].meks[1].clone();
         s.channels[0].meks.push(dup);
         let e = select(&s, &CH, T, choice(&[], &[], None));
@@ -420,12 +428,7 @@ mod tests {
         ));
         let (mut s, _) = snap(1);
         for i in 0..17u8 {
-            s.channels[0].members.push(RosterMember {
-                user_id: [100 + i; 16],
-                role_label: 50,
-                read_intake: true,
-                effective_day: 0,
-            });
+            members(&mut s).push(member(100 + i, 50, true));
         }
         assert!(matches!(
             select(&s, &CH, T, choice(&[], &[], None)),

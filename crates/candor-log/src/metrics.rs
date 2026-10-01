@@ -16,15 +16,15 @@
 //!   primary-suppressed cell is < k and every complementary cell is ≥ k;
 //!   every protected quantity must keep a feasible range at least k − 1
 //!   wide (a primary cell stays anywhere in `[0, k-1]`).
-//! * Release history (facts, attacker priors, protections, magnitude
-//!   populations) is persisted through a caller-provided
-//!   [`ReleaseHistory`], so the differencing defence survives restarts
-//!   (AUD-RM1-LOG-06); a history that cannot be read or written fails the
-//!   release closed.
-//! * Magnitude statistics only through the registry, only when every
-//!   contributing cell is ≥ k; percentiles only for p ∈ [10, 90]; a
-//!   population differing from an earlier one of the same period by fewer
-//!   than k members is refused (mean/median differencing).
+//! * Release history (facts, attacker priors, protections) is persisted
+//!   through a caller-provided [`ReleaseHistory`], so the differencing
+//!   defence survives restarts (AUD-RM1-LOG-06); a history that cannot be
+//!   read or written fails the release closed.
+//! * **Only k-thresholded counts are publishable** (AUD-RM1-LOG-18): there
+//!   is no API for magnitude statistics (means, medians, percentiles,
+//!   sums, ratios) over source-derived data. Linear combinations of such
+//!   releases recover single cases' values and are outside the counts-only
+//!   disclosure audit, so they were removed rather than audited.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -305,8 +305,6 @@ pub enum ReleaseError {
     /// The release history could not be read, decoded or written (fail
     /// closed: nothing is released).
     History,
-    /// Statistic parameters out of range (e.g. percentile outside 10..=90).
-    BadStatistic,
 }
 
 struct Lines {
@@ -618,10 +616,18 @@ struct Region {
     index: BTreeMap<MicroKey, usize>,
 }
 
+/// The constraint system has no (real) solution.
+struct Infeasible;
+
 impl Region {
-    /// Phase 1 of the two-phase simplex. `None` on overflow or if the
-    /// system is infeasible (cannot happen for true data; fail closed).
-    fn new(facts: &[Fact], priors: &[Prior], keys: &BTreeSet<MicroKey>) -> Option<Self> {
+    /// Phase 1 of the two-phase simplex. `None` on overflow; `Err` if the
+    /// system is infeasible (cannot happen for true data at the root, only
+    /// in branch-and-bound children).
+    fn build(
+        facts: &[Fact],
+        priors: &[Prior],
+        keys: &BTreeSet<MicroKey>,
+    ) -> Option<Result<Self, Infeasible>> {
         let index: BTreeMap<MicroKey, usize> = keys
             .iter()
             .copied()
@@ -687,7 +693,7 @@ impl Region {
         }
         let v = t.minimise(&cost, ncols)??;
         if !v.is_zero() {
-            return None;
+            return Some(Err(Infeasible));
         }
         // Drive artificial variables out of the basis; drop redundant rows.
         let mut i = 0;
@@ -715,30 +721,124 @@ impl Region {
             r.truncate(art0);
         }
         t.ncols = art0;
-        Some(Self {
+        Some(Ok(Self {
             t,
             nstruct: n,
             index,
-        })
+        }))
     }
 
-    /// `(min, max)` of `Σ members`; `max = None` means unbounded.
-    fn range(&self, members: &BTreeSet<MicroKey>) -> Option<(Q, Option<Q>)> {
+    /// Cost vector of `±Σ members` over this region's columns.
+    fn cost(&self, members: &BTreeSet<MicroKey>, negate: bool) -> Option<Vec<Q>> {
+        let unit = if negate { Q::int(-1) } else { Q::ONE };
         let mut c = vec![Q::ZERO; self.t.ncols];
         for k in members {
             let j = *self.index.get(k)?;
             if j < self.nstruct {
-                *c.get_mut(j)? = Q::ONE;
+                *c.get_mut(j)? = unit;
             }
         }
-        let lo = self.t.clone().minimise(&c, self.t.ncols)??;
-        let neg: Vec<Q> = c.iter().map(|q| q.neg()).collect::<Option<_>>()?;
-        let hi = match self.t.clone().minimise(&neg, self.t.ncols)? {
-            Some(v) => Some(v.neg()?),
-            None => None,
-        };
-        Some((lo, hi))
+        Some(c)
     }
+
+    /// Minimise `cost`: `Some(None)` if unbounded below, otherwise the
+    /// optimum and the structural part of an optimal vertex.
+    fn solve(&self, cost: &[Q]) -> Option<Option<(Q, Vec<Q>)>> {
+        let mut t = self.t.clone();
+        let Some(v) = t.minimise(cost, t.ncols)? else {
+            return Some(None);
+        };
+        let mut x = vec![Q::ZERO; self.nstruct];
+        for (i, &b) in t.basis.iter().enumerate() {
+            if b < self.nstruct {
+                *x.get_mut(b)? = *t.rhs.get(i)?;
+            }
+        }
+        Some(Some((v, x)))
+    }
+}
+
+/// Branch-and-bound child nodes (extra LP solves) allowed per audit call
+/// before the audit fails closed (AUD-RM1-LOG-22).
+const MAX_BB_NODES: usize = 4_096;
+
+fn floor_q(q: Q) -> Option<i128> {
+    q.n.checked_div_euclid(q.d)
+}
+
+/// Exact **integer** minimum of `±Σ members` over the attacker's region
+/// (micro-cells are non-negative integers), by depth-first branch and
+/// bound on fractional structural variables (AUD-RM1-LOG-22: with priors on
+/// sums, folded channels and several releases the constraint matrix is not
+/// totally unimodular, so the LP relaxation can be wider than what an
+/// integer attacker can rule out). `Some(None)`: unbounded. `None`:
+/// overflow, budget exhausted or no integer point (fail closed).
+fn int_min(
+    root: &Region,
+    facts: &[Fact],
+    priors: &[Prior],
+    keys: &BTreeSet<MicroKey>,
+    members: &BTreeSet<MicroKey>,
+    negate: bool,
+    budget: &mut usize,
+) -> Option<Option<i128>> {
+    let key_at: Vec<MicroKey> = keys.iter().copied().collect();
+    let mut stack: Vec<Vec<Prior>> = vec![Vec::new()];
+    let mut best: Option<i128> = None;
+    while let Some(extra) = stack.pop() {
+        let child;
+        let region = if extra.is_empty() {
+            root
+        } else {
+            // Only branching nodes count: the root solve per objective is
+            // what the LP audit always did.
+            *budget = budget.checked_sub(1)?;
+            let mut all = priors.to_vec();
+            all.extend(extra.iter().cloned());
+            match Region::build(facts, &all, keys)? {
+                Ok(r) => {
+                    child = r;
+                    &child
+                }
+                Err(Infeasible) => continue,
+            }
+        };
+        let cost = region.cost(members, negate)?;
+        let Some((v, x)) = region.solve(&cost)? else {
+            // Unbounded relaxation: the integer problem is unbounded too
+            // (rational data, integer point exists) — the widest answer.
+            return Some(None);
+        };
+        // Objective coefficients are integers: an integer solution can do
+        // no better than ceil(v).
+        let bound = floor_q(v.neg()?)?.checked_neg()?;
+        if best.is_some_and(|b| bound >= b) {
+            continue;
+        }
+        let frac = x.iter().enumerate().find(|(_, q)| q.d != 1);
+        match frac {
+            None => best = Some(floor_q(v)?),
+            Some((j, q)) => {
+                let k = *key_at.get(j)?;
+                let fl = u64::try_from(floor_q(*q)?).ok()?;
+                let mut down = extra.clone();
+                down.push(Prior {
+                    members: BTreeSet::from([k]),
+                    lo: 0,
+                    hi: Some(fl),
+                });
+                let mut up = extra;
+                up.push(Prior {
+                    members: BTreeSet::from([k]),
+                    lo: fl.checked_add(1)?,
+                    hi: None,
+                });
+                stack.push(down);
+                stack.push(up);
+            }
+        }
+    }
+    best.map(Some)
 }
 
 /// Exact disclosure audit: `true` iff every protected functional keeps a
@@ -771,15 +871,19 @@ fn first_failure(
     for p in protected {
         keys.extend(p.iter().copied());
     }
-    let region = Region::new(facts, priors, &keys)?;
-    let w = Q::int(i128::from(width));
+    let region = Region::build(facts, priors, &keys)?.ok()?;
+    let w = i128::from(width);
+    let mut budget = MAX_BB_NODES;
     for (i, p) in protected.iter().enumerate() {
         if p.is_empty() {
             continue;
         }
-        let (lo, hi) = region.range(p)?;
-        if let Some(hi) = hi
-            && hi.sub(lo)?.lt(w)?
+        // Integer range [lo, hi] of Σ p (AUD-RM1-LOG-22).
+        let lo = int_min(&region, facts, priors, &keys, p, false, &mut budget)?;
+        let hi = int_min(&region, facts, priors, &keys, p, true, &mut budget)?;
+        let lo = lo.unwrap_or(0).max(0);
+        if let Some(neg_hi) = hi
+            && neg_hi.checked_neg()?.checked_sub(lo)? < w
         {
             return Some(Some(i));
         }
@@ -1108,8 +1212,6 @@ impl ReleaseHistory for MemoryReleaseHistory {
 struct PeriodState {
     reports: BTreeSet<String>,
     disclosed: Disclosed,
-    /// Populations of released magnitude statistics.
-    magnitudes: Vec<BTreeSet<MicroKey>>,
 }
 
 mod state_codec {
@@ -1149,7 +1251,9 @@ mod state_codec {
 
     pub(super) fn encode(s: &PeriodState) -> Option<Vec<u8>> {
         let mut m = MapBuilder::new();
-        m.put("v", Value::Uint(1))
+        // v2: magnitude populations removed with the magnitude API
+        // (AUD-RM1-LOG-18); a v1 state is refused (fail closed).
+        m.put("v", Value::Uint(2))
             .put(
                 "reports",
                 Value::Array(s.reports.iter().map(|r| Value::Text(r.clone())).collect()),
@@ -1183,17 +1287,13 @@ mod state_codec {
             .put(
                 "protected",
                 Value::Array(s.disclosed.protected.iter().map(set_v).collect()),
-            )
-            .put(
-                "magnitudes",
-                Value::Array(s.magnitudes.iter().map(set_v).collect()),
             );
         cbor::encode(&m.build()).ok()
     }
 
     pub(super) fn decode(b: &[u8]) -> Option<PeriodState> {
         let v = cbor::decode(b).ok()?;
-        if v.get("v")?.as_u64()? != 1 || !matches!(&v, Value::Map(m) if m.len() == 6) {
+        if v.get("v")?.as_u64()? != 2 || !matches!(&v, Value::Map(m) if m.len() == 5) {
             return None;
         }
         let reports = arr(v.get("reports")?)?
@@ -1228,10 +1328,6 @@ mod state_codec {
             .iter()
             .map(set_of)
             .collect::<Option<Vec<_>>>()?;
-        let magnitudes = arr(v.get("magnitudes")?)?
-            .iter()
-            .map(set_of)
-            .collect::<Option<Vec<_>>>()?;
         Some(PeriodState {
             reports,
             disclosed: Disclosed {
@@ -1239,23 +1335,8 @@ mod state_codec {
                 priors,
                 protected,
             },
-            magnitudes,
         })
     }
-}
-
-/// A magnitude statistic (TEL-015).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Magnitude {
-    /// Median (nearest rank).
-    Median,
-    /// Nearest-rank percentile `p`, only for `p ∈ 10..=90` (a 0th/100th
-    /// percentile would be one case's exact minimum/maximum).
-    Percentile(u8),
-    /// Mean (floor).
-    Mean,
-    /// Median duration in whole weeks (input in days, half up).
-    MedianDurationWeeks,
 }
 
 /// Registry of releases per tumbling monthly period: refuses open periods
@@ -1332,75 +1413,6 @@ impl<H: ReleaseHistory> PeriodRegistry<H> {
         st.disclosed.protected.extend(mine.protected);
         self.save(period, &st)?;
         Ok(rel)
-    }
-
-    /// Release a magnitude statistic over `population` (one value per
-    /// contributing case, keyed consistently across reports). `Ok(None)`
-    /// ("suppressed") unless n ≥ k and the population differs from every
-    /// earlier magnitude population of the period by 0 or ≥ k members
-    /// (blocks mean/median differencing such as n = 10 vs n = 11).
-    pub fn release_magnitude(
-        &mut self,
-        period: MonthStamp,
-        current: MonthStamp,
-        report: &'static str,
-        stat: Magnitude,
-        population: &[(MicroKey, u64)],
-        k: KThreshold,
-    ) -> Result<Option<u64>, ReleaseError> {
-        if let Magnitude::Percentile(p) = stat
-            && !(10..=90).contains(&p)
-        {
-            return Err(ReleaseError::BadStatistic);
-        }
-        let mut st = self.open(period, current, report)?;
-        let keys: BTreeSet<MicroKey> = population.iter().map(|(k, _)| *k).collect();
-        let n = u64::try_from(keys.len()).map_err(|_| ReleaseError::Shape)?;
-        if keys.len() != population.len() {
-            return Err(ReleaseError::Shape);
-        }
-        let kv = k.get();
-        let differs_safely = st.magnitudes.iter().all(|prev| {
-            let d = u64::try_from(prev.symmetric_difference(&keys).count()).unwrap_or(u64::MAX);
-            d == 0 || d >= kv
-        });
-        let values: Vec<u64> = population.iter().map(|(_, v)| *v).collect();
-        let out = if n >= kv && differs_safely {
-            match stat {
-                Magnitude::Median => percentile(&values, 50),
-                Magnitude::Percentile(p) => percentile(&values, p),
-                Magnitude::Mean => mean(&values),
-                Magnitude::MedianDurationWeeks => {
-                    percentile(&values, 50).map(|d| d.saturating_add(3) / 7)
-                }
-            }
-        } else {
-            None
-        };
-        st.reports.insert(report.to_owned());
-        if out.is_some() {
-            st.magnitudes.push(keys);
-        }
-        self.save(period, &st)?;
-        Ok(out)
-    }
-
-    /// Release a ratio `num/den` as per-mille: only if both contributing
-    /// cells (`num` and `den − num`) are ≥ k (TEL-015, AUD-RM1-LOG-06).
-    pub fn release_ratio(
-        &mut self,
-        period: MonthStamp,
-        current: MonthStamp,
-        report: &'static str,
-        num: u64,
-        den: u64,
-        k: KThreshold,
-    ) -> Result<Option<u64>, ReleaseError> {
-        let mut st = self.open(period, current, report)?;
-        let out = ratio_permille(num, den, k);
-        st.reports.insert(report.to_owned());
-        self.save(period, &st)?;
-        Ok(out)
     }
 }
 
@@ -1591,38 +1603,4 @@ pub fn round_m3(p: Published) -> Published {
         }
         other => other,
     }
-}
-
-// ---------------------------------------------------------------------
-// Magnitude statistics (TEL-015)
-// ---------------------------------------------------------------------
-
-/// Nearest-rank percentile `p` (0..=100) of a non-empty slice.
-fn percentile(values: &[u64], p: u8) -> Option<u64> {
-    let n = u64::try_from(values.len()).ok()?;
-    if n == 0 || p > 100 {
-        return None;
-    }
-    let mut v = values.to_vec();
-    v.sort_unstable();
-    // nearest rank: ceil(p/100 * n), at least 1
-    let rank = (u64::from(p).checked_mul(n)?.checked_add(99)? / 100).max(1);
-    v.get(usize::try_from(rank.checked_sub(1)?).ok()?).copied()
-}
-
-/// Mean (floor) of a non-empty slice.
-fn mean(values: &[u64]) -> Option<u64> {
-    let n = u64::try_from(values.len()).ok()?;
-    let s = values.iter().try_fold(0u64, |a, b| a.checked_add(*b))?;
-    s.checked_div(n)
-}
-
-/// Ratio `num/den` as per-mille, only if `num ≥ k` and `den − num ≥ k`
-/// (every contributing cell ≥ k).
-fn ratio_permille(num: u64, den: u64, k: KThreshold) -> Option<u64> {
-    let rest = den.checked_sub(num)?;
-    if num < k.get() || rest < k.get() {
-        return None;
-    }
-    num.checked_mul(1000)?.checked_div(den)
 }

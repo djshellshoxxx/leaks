@@ -116,6 +116,11 @@ async fn open(base: &PgConnectOptions, db: &str, tenant: TenantId) -> PgIntakeSt
         .with_maintenance(maint(base, db, tenant).await)
 }
 
+/// The VACUUM login (database owner, no table; AUD-RM2-STO-24(a)).
+fn vac(base: &PgConnectOptions, db: &str) -> PgConnectOptions {
+    base.clone().username("candor_intake_vacuum").database(db)
+}
+
 type ChunkRow = (Vec<u8>, Option<Vec<u8>>, u32);
 
 type Fut = std::pin::Pin<Box<dyn std::future::Future<Output = PgIntakeStore> + Send>>;
@@ -244,6 +249,23 @@ async fn pg_settings() {
             .get(0);
         assert_eq!(got, want, "{name}");
     }
+    // AUD-RM2-STO-11: the intake profile runs without cumulative statistics or
+    // autovacuum (scripts/pg-test.sh; the "stock" profile keeps both on to
+    // show the store does not depend on either).
+    let stats = if std::env::var("CANDOR_TEST_PG_PROFILE").as_deref() == Ok("stock") {
+        "on"
+    } else {
+        "off"
+    };
+    for (name, want) in [("track_counts", stats), ("autovacuum", stats)] {
+        let got: String = sqlx::query("SELECT pg_catalog.current_setting($1)")
+            .bind(name)
+            .fetch_one(&mut c)
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(got, want, "{name}");
+    }
 }
 
 /// DB-002, R7 SI-E-02, AUD-RM2-STO-03/08: app roles unprivileged, own nothing;
@@ -258,12 +280,12 @@ async fn pg_roles_and_grants() {
     let rows = sqlx::query(
         "SELECT rolname::text, rolsuper, rolbypassrls, rolcreaterole, rolcreatedb, rolreplication, rolcanlogin \
          FROM pg_catalog.pg_roles WHERE rolname IN ('candor_istore', 'candor_intake_backup', \
-         'candor_intake_migrator', 'candor_intake_maint') ORDER BY 1",
+         'candor_intake_migrator', 'candor_intake_maint', 'candor_intake_vacuum') ORDER BY 1",
     )
     .fetch_all(&mut c)
     .await
     .unwrap();
-    assert_eq!(rows.len(), 4);
+    assert_eq!(rows.len(), 5);
     for r in &rows {
         let name: String = r.get(0);
         for i in 1..6 {
@@ -285,6 +307,42 @@ async fn pg_roles_and_grants() {
     .map(|r| r.get(0))
     .collect();
     assert_eq!(owners, vec!["candor_intake_migrator".to_string()]);
+    // AUD-RM2-STO-24(a): the database is owned by the VACUUM login, which
+    // owns no table, holds no table privilege and is in no other role except
+    // pg_checkpoint.
+    let dba: String = sqlx::query(
+        "SELECT pg_catalog.pg_get_userbyid(datdba)::text FROM pg_catalog.pg_database \
+         WHERE datname = pg_catalog.current_database()",
+    )
+    .fetch_one(&mut c)
+    .await
+    .unwrap()
+    .get(0);
+    assert_eq!(dba, "candor_intake_vacuum");
+    let memberships: Vec<String> = sqlx::query(
+        "SELECT pg_catalog.pg_get_userbyid(m.roleid)::text FROM pg_catalog.pg_auth_members m \
+         JOIN pg_catalog.pg_roles r ON r.oid = m.member WHERE r.rolname = 'candor_intake_vacuum'",
+    )
+    .fetch_all(&mut c)
+    .await
+    .unwrap()
+    .iter()
+    .map(|r| r.get(0))
+    .collect();
+    assert_eq!(memberships, vec!["pg_checkpoint".to_string()]);
+    // AUD-RM2-STO-11: autovacuum disabled on every intake table and its TOAST.
+    let autovac: i64 = sqlx::query(
+        "SELECT count(*) FROM pg_catalog.pg_class k JOIN pg_catalog.pg_namespace n ON n.oid = k.relnamespace \
+         WHERE n.nspname = 'candor' AND k.relkind = 'r' AND k.relname <> 'schema_migration' \
+         AND 'autovacuum_enabled=false' = ANY (k.reloptions) \
+         AND (k.reltoastrelid = 0 OR (SELECT 'autovacuum_enabled=false' = ANY (t.reloptions) \
+              FROM pg_catalog.pg_class t WHERE t.oid = k.reltoastrelid))",
+    )
+    .fetch_one(&mut c)
+    .await
+    .unwrap()
+    .get(0);
+    assert_eq!(autovac, 8);
     let grants: Vec<(String, String, String)> = sqlx::query(
         "SELECT grantee::text, table_name::text, privilege_type::text FROM information_schema.role_table_grants \
          WHERE table_schema = 'candor' AND grantee <> 'candor_intake_migrator' ORDER BY 1, 2, 3",
@@ -309,6 +367,7 @@ async fn pg_roles_and_grants() {
             .map(|(_, t, p)| (t.clone(), p.clone()))
             .collect()
     };
+    assert!(of("candor_intake_vacuum").is_empty());
     assert_eq!(
         of("candor_intake_backup"),
         vec![
@@ -589,8 +648,8 @@ async fn pg_durability_and_guards() {
             &common::PrefixHasher,
             common::TODAY,
         )
-            .await
-            .unwrap(),
+        .await
+        .unwrap(),
         3
     );
     assert!(s.serving_allowed().await.unwrap());
@@ -977,7 +1036,8 @@ async fn pg_deletion_list_append_guard() {
             &db,
             app,
             &format!(
-                "UPDATE candor.intake_meta SET deletion_acked_seq = 1000, deletion_acked_hash = {}, deletion_acked_sig = {}",
+                "UPDATE candor.intake_meta SET deletion_acked_seq = 1000, deletion_acked_hash = {}, deletion_acked_sig = {}, \
+                 deletion_acked_day = DATE '2026-01-01', deletion_acked_counter = 1",
                 zeros(32),
                 zeros(64)
             )
@@ -990,7 +1050,8 @@ async fn pg_deletion_list_append_guard() {
             &db,
             app,
             &format!(
-                "UPDATE candor.intake_meta SET deletion_acked_seq = 3, deletion_acked_hash = {}, deletion_acked_sig = {}",
+                "UPDATE candor.intake_meta SET deletion_acked_seq = 3, deletion_acked_hash = {}, deletion_acked_sig = {}, \
+                 deletion_acked_day = DATE '2026-01-01', deletion_acked_counter = 1",
                 zeros(32),
                 zeros(64)
             )
@@ -1008,12 +1069,22 @@ async fn pg_deletion_list_append_guard() {
             &format!(
                 "UPDATE candor.intake_meta SET deletion_acked_seq = 4, deletion_acked_hash = \
                  (SELECT candor.deletion_chain_hash(d) FROM candor.deletion_list d WHERE d.seq = 4), \
-                 deletion_acked_sig = {}",
+                 deletion_acked_sig = {}, deletion_acked_day = DATE '2026-01-01', deletion_acked_counter = 1",
                 zeros(64)
             )
         )
         .await
     );
+    // AUD-RM2-STO-24: the stored head cannot change without a newer
+    // attestation counter, and counter and day never decrease.
+    for q in [
+        "UPDATE candor.intake_meta SET deletion_acked_sig = pg_catalog.decode(pg_catalog.repeat('11', 64), 'hex')",
+        "UPDATE candor.intake_meta SET deletion_acked_day = DATE '2026-01-02'",
+        "UPDATE candor.intake_meta SET deletion_acked_counter = 0",
+        "UPDATE candor.intake_meta SET deletion_acked_day = DATE '2025-12-31', deletion_acked_counter = 2",
+    ] {
+        assert!(!commit_as(&b, &db, app, q).await, "{q}");
+    }
     // ... but the maintenance process verifies Z-CORE's signature and refuses.
     assert!(matches!(
         s.prune_deletion_list(common::TODAY.plus(400).unwrap())
@@ -1189,9 +1260,7 @@ async fn pg_uniform_rewrite_toast() {
     s.uniform_rewrite(common::slot(common::TODAY), &[], &[a])
         .await
         .unwrap();
-    vacuum_after_rewrite(&b.clone().username(&superuser()).database(&db))
-        .await
-        .unwrap();
+    vacuum_after_rewrite(&vac(&b, &db)).await.unwrap();
 
     // One xmin over every heap row and every TOAST chunk (logical view).
     let rels: Vec<(String, Option<String>)> = sqlx::query(
@@ -1340,4 +1409,386 @@ async fn pg_dummy_rows_indistinguishable() {
         chi < common::CHI2_4DOF_P1E4,
         "real vs dummy buckets separable: chi2 {chi} {hr:?} {hd:?}"
     );
+}
+
+/// AUD-RM2-STO-08: PostgreSQL lets a role `ALTER ROLE` its own defaults (not
+/// revocable), so the store checks the stored defaults and the effective
+/// session values of every connection and refuses any deviation; the startup
+/// options override role defaults; `temp_file_limit` is superuser-only and set
+/// (1 GB); `open` also refuses membership in the database owner (VACUUM
+/// login), an extra (permissive) policy and a table without FORCE RLS.
+#[tokio::test]
+async fn pg_role_defaults_and_live_guards() {
+    let Some(b) = base() else { return };
+    let db = fresh_db(&b).await;
+    let open_as = |role: &str| {
+        PgIntakeStore::open(
+            b.clone().username(role).database(&db),
+            common::TENANT,
+            2,
+            common::TEST_DEADDROP,
+            Box::new(RandomDummyReplies),
+        )
+    };
+    let refused = |r: Result<PgIntakeStore>| matches!(r, Err(StoreError::Integrity(_)));
+    let s = open_as("candor_istore").await.unwrap();
+    s.init(common::TENANT, common::SALT).await.unwrap();
+    // The effective values with the startup options in place.
+    let mut app = PgConnection::connect_with(&b.clone().username("candor_istore").database(&db))
+        .await
+        .unwrap();
+    let tfl: String = sqlx::query("SELECT pg_catalog.current_setting('temp_file_limit')")
+        .fetch_one(&mut app)
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(tfl, "1GB");
+    // temp_file_limit cannot be changed by the role itself.
+    for q in [
+        format!("ALTER ROLE candor_istore IN DATABASE {db} SET temp_file_limit = -1"),
+        format!("ALTER ROLE candor_istore IN DATABASE {db} RESET temp_file_limit"),
+        "SET temp_file_limit = -1".to_string(),
+    ] {
+        assert!(
+            sqlx::raw_sql(AssertSqlSafe(q.clone()))
+                .execute(&mut app)
+                .await
+                .is_err(),
+            "{q}"
+        );
+    }
+    // The audit probe: the role rewrites its own default (accepted by
+    // PostgreSQL) -> every later connection of the store is refused.
+    for (q, restore) in [
+        ("statement_timeout = 0", "SET statement_timeout = '30s'"),
+        ("search_path = public, candor", "SET search_path = candor"),
+        ("synchronous_commit = off", "RESET synchronous_commit"),
+    ] {
+        sqlx::raw_sql(AssertSqlSafe(format!(
+            "ALTER ROLE candor_istore IN DATABASE {db} SET {q}"
+        )))
+        .execute(&mut app)
+        .await
+        .unwrap();
+        assert!(refused(open_as("candor_istore").await), "{q}");
+        // The startup options still win over the rewritten default.
+        let mut c2 = PgConnection::connect_with(
+            &b.clone().username("candor_istore").database(&db).options([
+                ("statement_timeout", "30s"),
+                ("search_path", "candor"),
+                ("synchronous_commit", "on"),
+            ]),
+        )
+        .await
+        .unwrap();
+        let got: (String, String, String) = {
+            let r = sqlx::query(
+                "SELECT pg_catalog.current_setting('statement_timeout'), \
+                 pg_catalog.current_setting('search_path'), pg_catalog.current_setting('synchronous_commit')",
+            )
+            .fetch_one(&mut c2)
+            .await
+            .unwrap();
+            (r.get(0), r.get(1), r.get(2))
+        };
+        assert_eq!(got, ("30s".into(), "candor".into(), "on".into()));
+        sqlx::raw_sql(AssertSqlSafe(format!(
+            "ALTER ROLE candor_istore IN DATABASE {db} {restore}"
+        )))
+        .execute(&mut app)
+        .await
+        .unwrap();
+    }
+    s.close().await;
+    open_as("candor_istore").await.unwrap();
+
+    // Live guards: membership in the database owner, an extra policy, and
+    // NO FORCE ROW LEVEL SECURITY are refused.
+    let mut c = su(&b, &db).await;
+    sqlx::raw_sql(
+        "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'candor_probe2') THEN \
+         CREATE ROLE candor_probe2 LOGIN NOINHERIT; END IF; END $$",
+    )
+    .execute(&mut c)
+    .await
+    .unwrap();
+    sqlx::raw_sql(AssertSqlSafe(format!(
+        "GRANT CONNECT ON DATABASE {db} TO candor_probe2; GRANT candor_intake_vacuum TO candor_probe2"
+    )))
+    .execute(&mut c)
+    .await
+    .unwrap();
+    assert_eq!(
+        open_as("candor_probe2").await.err(),
+        Some(StoreError::Integrity(
+            "intake role is privileged or a member of an owning role"
+        )),
+        "db owner member"
+    );
+    sqlx::raw_sql("CREATE POLICY p_open ON candor.reply USING (true)")
+        .execute(&mut c)
+        .await
+        .unwrap();
+    let extra: i64 =
+        sqlx::query("SELECT count(*) FROM pg_catalog.pg_policy WHERE polname = 'p_open'")
+            .fetch_one(&mut c)
+            .await
+            .unwrap()
+            .get(0);
+    assert_eq!(extra, 1);
+    assert!(refused(open_as("candor_istore").await), "extra policy");
+    sqlx::raw_sql("DROP POLICY p_open ON candor.reply")
+        .execute(&mut c)
+        .await
+        .unwrap();
+    assert!(open_as("candor_istore").await.is_ok());
+    sqlx::raw_sql("ALTER TABLE candor.reply NO FORCE ROW LEVEL SECURITY")
+        .execute(&mut c)
+        .await
+        .unwrap();
+    assert!(refused(open_as("candor_istore").await), "NO FORCE RLS");
+}
+
+/// AUD-RM2-STO-24(a): the VACUUM jobs run only as the dedicated VACUUM login
+/// (database owner, no table ownership): the superuser, the schema owner's
+/// members, service roles and a role that does not own the database are
+/// refused before any VACUUM. The VACUUM login cannot disable a guard.
+#[tokio::test]
+async fn pg_vacuum_login_identity() {
+    let Some(b) = base() else { return };
+    let db = fresh_db(&b).await;
+    let mut c = su(&b, &db).await;
+    sqlx::raw_sql(
+        "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'candor_probe') THEN \
+         CREATE ROLE candor_probe LOGIN NOINHERIT; END IF; END $$",
+    )
+    .execute(&mut c)
+    .await
+    .unwrap();
+    sqlx::raw_sql(AssertSqlSafe(format!(
+        "GRANT CONNECT ON DATABASE {db} TO candor_probe; GRANT candor_intake_migrator TO candor_probe"
+    )))
+    .execute(&mut c)
+    .await
+    .unwrap();
+    for role in [
+        superuser(),
+        "candor_probe".to_string(),
+        "candor_istore".to_string(),
+        "candor_intake_maint".to_string(),
+    ] {
+        let o = b.clone().username(&role).database(&db);
+        assert!(
+            matches!(
+                vacuum_after_rewrite(&o).await,
+                Err(StoreError::Integrity(_))
+            ),
+            "{role}"
+        );
+        assert!(
+            matches!(vacuum_full_daily(&o).await, Err(StoreError::Integrity(_))),
+            "{role}"
+        );
+    }
+    vacuum_after_rewrite(&vac(&b, &db)).await.unwrap();
+    vacuum_full_daily(&vac(&b, &db)).await.unwrap();
+    let mut v = PgConnection::connect_with(&vac(&b, &db)).await.unwrap();
+    for q in [
+        "ALTER TABLE candor.deletion_list DISABLE TRIGGER deletion_list_guard",
+        "ALTER TABLE candor.reply NO FORCE ROW LEVEL SECURITY",
+        "SELECT count(*) FROM candor.source_account",
+        "SET ROLE candor_intake_migrator",
+    ] {
+        assert!(sqlx::raw_sql(q).execute(&mut v).await.is_err(), "{q}");
+    }
+}
+
+/// All pages (raw bytes) of `rel` (pageinspect).
+async fn raw_pages(c: &mut PgConnection, rel: &str) -> Vec<Vec<u8>> {
+    sqlx::query(
+        "SELECT get_raw_page($1, p) FROM generate_series(0, \
+         (pg_relation_size($1::regclass) / 8192)::int - 1) p",
+    )
+    .bind(rel)
+    .fetch_all(c)
+    .await
+    .unwrap()
+    .iter()
+    .map(|r| r.get(0))
+    .collect()
+}
+
+/// Every relation holding intake data: tables, their TOAST tables, and all
+/// their indexes (`(name, relfilenode)`).
+async fn intake_relations(c: &mut PgConnection) -> Vec<(String, i64)> {
+    sqlx::query(
+        "WITH t AS (SELECT k.oid, k.reltoastrelid FROM pg_class k JOIN pg_namespace n ON n.oid = k.relnamespace \
+                    WHERE n.nspname = 'candor' AND k.relkind = 'r' AND k.relname <> 'schema_migration'), \
+              r AS (SELECT oid FROM t UNION SELECT reltoastrelid FROM t WHERE reltoastrelid <> 0), \
+              a AS (SELECT oid FROM r UNION SELECT i.indexrelid FROM pg_index i JOIN r ON r.oid = i.indrelid) \
+         SELECT a.oid::regclass::text, k.relfilenode::int8 FROM a JOIN pg_class k ON k.oid = a.oid ORDER BY 1",
+    )
+    .fetch_all(c)
+    .await
+    .unwrap()
+    .iter()
+    .map(|r| (r.get(0), r.get(1)))
+    .collect()
+}
+
+fn count_hits(pages: &[Vec<u8>], pats: &HashSet<[u8; 8]>) -> usize {
+    pages
+        .iter()
+        .flat_map(|p| p.windows(8))
+        .filter(|w| pats.contains(&<[u8; 8]>::try_from(*w).unwrap()))
+        .count()
+}
+
+/// AUD-RM2-STO-23 (the audit's raw-page probe): after `uniform_rewrite` and
+/// the slot VACUUM, pre-rewrite tuple images (`[old xmin][xmax = rewrite
+/// xid]` headers) and old TOAST chunk ids (`[chunk_id][chunk_seq 0]` in TOAST
+/// tuples and index entries, `[va_valueid][toastrelid]` in heap pointers)
+/// still sit in page free space (positive control); after the daily
+/// `VACUUM FULL` (VACUUM login) no page of any intake table, TOAST table or
+/// index holds any of them, every relation has a new file, and the store's
+/// content is unchanged.
+#[tokio::test]
+async fn pg_vacuum_full_erases_old_images() {
+    let Some(b) = base() else { return };
+    let db = fresh_db(&b).await;
+    let s = open(&b, &db, common::TENANT).await;
+    s.init(common::TENANT, common::SALT).await.unwrap();
+    let a = workload(&s).await;
+    for t in 40u8..46 {
+        let mut na = common::new_account(t);
+        na.prefs_ct = vec![t; MAX_PREFS_CT];
+        s.create_account(na, common::TODAY).await.unwrap();
+    }
+    for _ in 0..12 {
+        s.commit_envelope(common::envelope(0)).await.unwrap();
+        s.apply_replies(common::TODAY, vec![common::reply(None, 0x72, 9000)])
+            .await
+            .unwrap();
+    }
+    let mut c = su(&b, &db).await;
+    sqlx::raw_sql("CREATE EXTENSION IF NOT EXISTS pageinspect")
+        .execute(&mut c)
+        .await
+        .unwrap();
+    let rels = intake_relations(&mut c).await;
+    // Old xmins of every live heap and TOAST tuple, and every old chunk id.
+    let mut old_xmins: HashSet<u32> = HashSet::new();
+    let mut old_chunks: Vec<(u32, u32)> = Vec::new();
+    let toasts: Vec<(String, u32)> = sqlx::query(
+        "SELECT k.reltoastrelid::regclass::text, k.reltoastrelid::int8 FROM pg_class k \
+         JOIN pg_namespace n ON n.oid = k.relnamespace \
+         WHERE n.nspname = 'candor' AND k.relkind = 'r' AND k.reltoastrelid <> 0",
+    )
+    .fetch_all(&mut c)
+    .await
+    .unwrap()
+    .iter()
+    .map(|r| (r.get(0), u32::try_from(r.get::<i64, _>(1)).unwrap()))
+    .collect();
+    for (rel, _) in &rels {
+        let kind: String =
+            sqlx::query("SELECT relkind::text FROM pg_class WHERE oid = $1::regclass")
+                .bind(rel)
+                .fetch_one(&mut c)
+                .await
+                .unwrap()
+                .get(0);
+        if kind == "i" {
+            continue;
+        }
+        for x in raw_xmins(&mut c, rel).await {
+            old_xmins.insert(x.parse().unwrap());
+        }
+    }
+    for (t, oid) in &toasts {
+        for r in sqlx::query(AssertSqlSafe(format!(
+            "SELECT DISTINCT chunk_id::int8 FROM {t}"
+        )))
+        .fetch_all(&mut c)
+        .await
+        .unwrap()
+        {
+            old_chunks.push((u32::try_from(r.get::<i64, _>(0)).unwrap(), *oid));
+        }
+    }
+    assert!(old_xmins.len() > 5, "{old_xmins:?}");
+    assert!(old_chunks.len() > 20, "{}", old_chunks.len());
+
+    s.uniform_rewrite(common::slot(common::TODAY), &[], &[a])
+        .await
+        .unwrap();
+    vacuum_after_rewrite(&vac(&b, &db)).await.unwrap();
+    let slot: u32 = sqlx::query("SELECT xmin::text::int8 FROM candor.intake_meta")
+        .fetch_one(&mut c)
+        .await
+        .unwrap()
+        .get::<i64, _>(0)
+        .try_into()
+        .unwrap();
+    assert!(!old_xmins.contains(&slot));
+    let mut xmin_pats: HashSet<[u8; 8]> = HashSet::new();
+    for x in &old_xmins {
+        let mut p = [0u8; 8];
+        p[..4].copy_from_slice(&x.to_le_bytes());
+        p[4..].copy_from_slice(&slot.to_le_bytes());
+        xmin_pats.insert(p);
+    }
+    // `[chunk_id][chunk_seq 0]` is searched only in TOAST relations and their
+    // indexes (in a heap, an int8 such as a generation number could equal
+    // it); `[va_valueid][toastrelid]` everywhere.
+    let (mut seq_pats, mut ptr_pats) = (HashSet::new(), HashSet::new());
+    for (id, toastrel) in &old_chunks {
+        let mut p = [0u8; 8];
+        p[..4].copy_from_slice(&id.to_le_bytes());
+        seq_pats.insert(p);
+        p[4..].copy_from_slice(&toastrel.to_le_bytes());
+        ptr_pats.insert(p);
+    }
+    let chunk_hits = |rel: &str, pages: &[Vec<u8>]| {
+        count_hits(pages, &ptr_pats)
+            + if rel.starts_with("pg_toast.") {
+                count_hits(pages, &seq_pats)
+            } else {
+                0
+            }
+    };
+    let (mut hx, mut hc) = (0usize, 0usize);
+    for (rel, _) in &rels {
+        let pages = raw_pages(&mut c, rel).await;
+        hx += count_hits(&pages, &xmin_pats);
+        hc += chunk_hits(rel, &pages);
+    }
+    // Positive control (the audit's finding): plain VACUUM leaves them.
+    assert!(
+        hx > 0,
+        "control: no old tuple header found after plain VACUUM"
+    );
+    assert!(hc > 0, "control: no old chunk id found after plain VACUUM");
+
+    let before = s.export_backup().await.unwrap();
+    let mailbox = s.mailbox_list(a).await.unwrap();
+    vacuum_full_daily(&vac(&b, &db)).await.unwrap();
+    let after_rels = intake_relations(&mut c).await;
+    assert_eq!(after_rels.len(), rels.len());
+    for ((r0, f0), (r1, f1)) in rels.iter().zip(&after_rels) {
+        assert_eq!(r0, r1);
+        assert_ne!(f0, f1, "{r0}: not rewritten");
+    }
+    let (mut hx, mut hc) = (0usize, 0usize);
+    for (rel, _) in &after_rels {
+        let pages = raw_pages(&mut c, rel).await;
+        hx += count_hits(&pages, &xmin_pats);
+        hc += chunk_hits(rel, &pages);
+    }
+    assert_eq!(hx, 0, "old tuple headers survive VACUUM FULL");
+    assert_eq!(hc, 0, "old chunk ids survive VACUUM FULL");
+    // Content and the single slot xmin are unchanged.
+    assert_eq!(s.export_backup().await.unwrap(), before);
+    assert_eq!(distinct_xmin(&mut c).await.1, 1);
+    assert_eq!(s.mailbox_list(a).await.unwrap(), mailbox);
 }

@@ -127,10 +127,7 @@ skip-tree = []
 executables = "deny"
 interpreted = "deny"
 enable-builtin-globs = true
-# cargo-deny 0.20.2 overflows its stack when scanning dependency sources (reproduced 2026-10-01).
-# Interim: dependency file scanning off; allow-build-scripts below still gates build.rs per crate@version.
-# Re-enable when cargo-deny is fixed (tracked in process/audits/AUDIT-RM2-intake-store.md STO-17).
-include-dependencies = false
+include-dependencies = true
 include-workspace = false
 include-archives = true
 # 28 §5.2 "new build.rs ... require explicit approval" (AUD-RM0-INF-06): only the

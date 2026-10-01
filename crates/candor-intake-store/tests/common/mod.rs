@@ -1343,7 +1343,8 @@ pub async fn restore_pending_gate<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<
             &zhead(None),
             &core_pk(),
             &sg.verifying_key(),
-            &PrefixHasher, TODAY
+            &PrefixHasher,
+            TODAY
         )
         .await
         .unwrap(),
@@ -1584,6 +1585,125 @@ pub async fn backup_restore<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Output
     );
 }
 
+/// AUD-RM2-STO-24(b): Z-CORE heads carry a day and a monotonic attestation
+/// counter. A node restored from an old backup refuses the replay of a genuine
+/// but older head (stale day) that would hide later deletions; a node restored
+/// from a newer backup refuses any head with a lower counter than the head
+/// recorded in the backup, and a different head with the same counter; the
+/// acknowledgement path refuses older heads too. Pre-fix, the restored node
+/// accepted the older head, cleared restore-pending and kept serving the
+/// account deleted after it.
+pub async fn head_replay_after_restore<
+    S: Store,
+    F: Fn(TenantId) -> Fut,
+    Fut: Future<Output = S>,
+>(
+    mk: F,
+) {
+    let sg = signer();
+    let pk = sg.verifying_key();
+    let cpk = core_pk();
+    let a = fresh(&mk).await;
+    for t in [30u8, 31, 32, 33] {
+        account(&a, t).await;
+    }
+    let id = |t: u8| {
+        let a = &a;
+        async move {
+            a.lookup_account(&LookupTag([t; 32]))
+                .await
+                .unwrap()
+                .unwrap()
+                .account_id
+        }
+    };
+    let d = |n: u32| TODAY.plus(n).unwrap();
+    a.delete_account(id(30).await, TODAY, &sg).await.unwrap();
+    let l1 = a.deletion_list_after(0, 10).await.unwrap();
+    let h1 = zhead_at(l1.last(), TODAY, 10);
+    a.acknowledge_deletion_head(&h1, &cpk).await.unwrap();
+    let backup_old = a.export_backup().await.unwrap();
+    a.delete_account(id(31).await, d(1), &sg).await.unwrap();
+    let l2 = a.deletion_list_after(0, 10).await.unwrap();
+    let h2 = zhead_at(l2.last(), d(1), 11);
+    a.acknowledge_deletion_head(&h2, &cpk).await.unwrap();
+    let backup_new = a.export_backup().await.unwrap();
+    assert_eq!(backup_new.meta.deletion_head, Some(h2));
+    // The acknowledgement path refuses an older attestation.
+    assert!(matches!(
+        a.acknowledge_deletion_head(&h1, &cpk).await,
+        Err(StoreError::DeletionList(_))
+    ));
+    a.delete_account(id(32).await, d(2), &sg).await.unwrap();
+    let l3 = a.deletion_list_after(0, 10).await.unwrap();
+    assert_eq!(l3.len(), 3);
+    let h3 = zhead_at(l3.last(), d(2), 12);
+    let today = d(3);
+    let h3_fresh = zhead_at(l3.last(), today, 13);
+
+    // (1) Old backup (verified head h1); the relay replays the genuine older
+    // head h2 with the matching list 1..2 (it hides deletion 3).
+    let b = mk(TENANT).await;
+    b.restore_backup(backup_old).await.unwrap();
+    assert_eq!(
+        b.apply_pushed_deletion_list(&l2, &h2, &cpk, &pk, &PrefixHasher, today)
+            .await,
+        Err(StoreError::DeletionList("stale Z-CORE head"))
+    );
+    assert!(!b.serving_allowed().await.unwrap());
+    assert_eq!(
+        b.apply_pushed_deletion_list(&l3, &h3_fresh, &cpk, &pk, &PrefixHasher, today)
+            .await
+            .unwrap(),
+        3
+    );
+    assert!(b.serving_allowed().await.unwrap());
+    assert!(
+        b.lookup_account(&LookupTag([32; 32]))
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // (2) Newer backup (verified head h2, counter 11): a fresh head with a
+    // lower counter, or a different head with the same counter, is refused.
+    let c = mk(TENANT).await;
+    c.restore_backup(backup_new).await.unwrap();
+    for (h, why) in [
+        (zhead_at(l3.last(), today, 10), "lower counter"),
+        (zhead_at(l3.last(), today, 11), "same counter, other head"),
+        (zhead_at(l1.last(), today, 20), "newer counter, older seq"),
+    ] {
+        assert!(
+            matches!(
+                c.apply_pushed_deletion_list(&l3, &h, &cpk, &pk, &PrefixHasher, today)
+                    .await,
+                Err(StoreError::DeletionList(_))
+            ),
+            "{why}"
+        );
+        assert!(!c.serving_allowed().await.unwrap(), "{why}");
+    }
+    assert_eq!(
+        c.apply_pushed_deletion_list(&l3, &h3_fresh, &cpk, &pk, &PrefixHasher, today)
+            .await
+            .unwrap(),
+        3
+    );
+    // (3) The genuine h3 (counter 12, still fresh) is now older than the
+    // verified head: refused, and the store goes back to restore-pending.
+    assert!(
+        c.apply_pushed_deletion_list(&l3, &h3, &cpk, &pk, &PrefixHasher, today)
+            .await
+            .is_err()
+    );
+    assert!(!c.serving_allowed().await.unwrap());
+    assert_eq!(
+        c.export_backup().await.unwrap().meta.deletion_head,
+        Some(h3_fresh)
+    );
+}
+
 #[macro_export]
 macro_rules! conformance_tests {
     ($mk:expr) => {
@@ -1603,7 +1723,8 @@ macro_rules! conformance_tests {
             conf_counters => counters,
             conf_activity_fold => activity_fold,
             conf_restore_pending_gate => restore_pending_gate,
-            conf_backup_restore => backup_restore
+            conf_backup_restore => backup_restore,
+            conf_head_replay_after_restore => head_replay_after_restore
         );
     };
     (@ $mk:expr; $($name:ident => $f:ident),*) => {

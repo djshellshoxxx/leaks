@@ -103,6 +103,7 @@ candor $CLIENT_OS candor_intake_backup
 candor $CLIENT_OS candor_intake_maint
 candor $CLIENT_OS candor_intake_vacuum
 candor $CLIENT_OS candor_probe
+candor $CLIENT_OS candor_probe2
 candor $PGUSER_OS $PGUSER_OS
 EOF
 cat > "$DATA/pg_hba.conf" <<EOF

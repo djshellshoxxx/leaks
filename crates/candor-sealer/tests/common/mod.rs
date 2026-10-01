@@ -29,15 +29,15 @@ use candor_core::slots::{RecipientListEntry, RecipientSlotBlock, SlotContext};
 use candor_safefs::{RootPolicy, SafeRoot};
 use candor_sealer::proto::{Request, Response, SecretWords, SessionHandle};
 use candor_sealer::server::clock::{Clock, ClockError};
-use candor_sealer::server::directory::{
-    ChannelView, CoiPolicy, DirectorySnapshot, DirectoryTrust, MemberEpochKey, RosterMember,
-    SignedCheckpoint, SnapshotBundle, UserKeyEntry, merkle,
-};
+use candor_sealer::server::directory::{DirectoryTrust, SnapshotBundle};
+
+mod kdlog;
 use candor_sealer::server::hardening::InsecureDevMode;
 use candor_sealer::server::sink::{
     AccountUpsert, Blob, EnvelopeGroup, EnvelopeObject, EnvelopeSink, SinkError,
 };
 use candor_sealer::server::{ChaffConfig, Limits, Sealer, SealerConfig, SnapshotError};
+pub use kdlog::*;
 
 pub const TENANT: [u8; 16] = [0x11; 16];
 pub const CHANNEL: [u8; 16] = [0x22; 16];
@@ -182,66 +182,52 @@ pub struct Fixture {
     pub disposition: KemKeyPair,
     pub k35: [u8; 32],
     pub snapshot: DirectorySnapshot,
-}
-
-/// LOG_KEY of the test directory.
-pub fn log_key() -> SigningKey {
-    SigningKey::from_seed(&[0x4c; 32])
+    /// The test Key Directory log the sealer's snapshots come from.
+    pub log: Mutex<TestLog>,
 }
 
 pub fn trust() -> DirectoryTrust {
     DirectoryTrust {
         tenant_id: TENANT,
-        log_keys: vec![log_key().verifying_key_bytes()],
-        witnesses: vec![],
+        org_root_pk: k01().verifying_key_bytes(),
+        epoch_origin_day: TODAY - 2,
         min_cosignatures: 0,
         min_external: 0,
     }
 }
 
-/// Leaves of the test directory log (deterministic).
-pub fn log_leaves(n: u64) -> Vec<[u8; 32]> {
-    (0..n)
-        .map(|i| merkle::leaf_hash(&i.to_be_bytes()))
-        .collect()
-}
-
-/// Sign `view`'s checkpoint with the LOG_KEY and attach the consistency proof
-/// from a high-water mark at `from` (0 = none).
-pub fn signed_bundle(view: DirectorySnapshot, from: u64) -> SnapshotBundle {
-    let leaves = log_leaves(view.tree_size);
-    let mut cp = SignedCheckpoint {
-        tree_size: view.tree_size,
-        root_hash: view.root_hash,
-        issued_hour: view.issued_hour,
-        log_sig: [0; 64],
-        cosignatures: vec![],
-    };
-    cp.log_sig = log_key().sign(&cp.note_body(&TENANT).unwrap());
-    let proof = if from == 0 || from == view.tree_size {
-        vec![]
-    } else {
-        merkle::consistency_proof(from as usize, &leaves)
-    };
-    SnapshotBundle {
-        view,
-        checkpoint: cp,
-        consistency_proof: proof,
-    }
-}
-
-/// Change a view's tree size (and root) to a consistent extension of the log.
-pub fn resize(v: &mut DirectorySnapshot, tree_size: u64) {
-    v.tree_size = tree_size;
-    v.root_hash = merkle::root(&log_leaves(tree_size));
-}
-
 impl Fixture {
-    /// Install a view with a valid checkpoint and proof from the current mark.
+    /// Sync the log to `view` and install a bundle with a valid checkpoint and
+    /// proof from the current mark.
     pub fn install(&self, view: DirectorySnapshot) -> Result<(), SnapshotError> {
+        let b = self.bundle(&view);
+        self.sealer.install_snapshot(b, |_| true)
+    }
+
+    /// Sync the log to `view` and return the bundle (not installed). The log
+    /// keeps the new entries.
+    pub fn bundle(&self, view: &DirectorySnapshot) -> SnapshotBundle {
         let from = self.sealer.high_water_mark().tree_size;
-        self.sealer
-            .install_snapshot(signed_bundle(view, from), |_| true)
+        let mut log = self.log.lock().unwrap();
+        log.sync(view, &self.members);
+        log.bundle(view, from)
+    }
+
+    /// Like [`Fixture::bundle`] on a scratch copy of the log (for bundles the
+    /// sealer is expected to refuse, so the fixture log stays valid).
+    pub fn scratch_bundle(&self, view: &DirectorySnapshot) -> (SnapshotBundle, TestLog) {
+        let from = self.sealer.high_water_mark().tree_size;
+        let mut log = self.log.lock().unwrap().clone();
+        log.sync(view, &self.members);
+        let b = log.bundle(view, from);
+        (b, log)
+    }
+
+    /// The bundle of the current log (e.g. for a second sealer).
+    pub fn current_bundle(&self) -> SnapshotBundle {
+        let mut log = self.log.lock().unwrap();
+        let v = self.snapshot.clone();
+        log.bundle(&v, 0)
     }
 }
 
@@ -295,21 +281,16 @@ pub fn snapshot_for(
     version: u64,
     issued_day: u32,
 ) -> DirectorySnapshot {
-    let tree_size = 100 + version;
     DirectorySnapshot {
         snapshot_version: version,
-        tree_size,
-        root_hash: merkle::root(&log_leaves(tree_size)),
+        tree_size: 100 + version,
         issued_hour: u64::from(issued_day) * 24 + 3,
         suite: Suite::CandorStd1,
-        epoch_origin_day: TODAY - 2,
         custodian_pk: custodian.public.to_bytes(),
         disposition_pk: disposition.public.to_bytes(),
         channels: vec![ChannelView {
             channel_id: CHANNEL,
             enabled: true,
-            roster_entry_hash: [0x55; 32],
-            roster_version: version,
             members: members
                 .iter()
                 .map(|m| RosterMember {
@@ -338,14 +319,6 @@ pub fn snapshot_for(
                 .collect(),
             independent_route: Some(ALT_CHANNEL),
         }],
-        user_keys: members
-            .iter()
-            .map(|m| UserKeyEntry {
-                entry_hash: m.entry_hash,
-                user_id: m.user_id,
-                sig_pk: m.k08.verifying_key_bytes(),
-            })
-            .collect(),
     }
 }
 
@@ -362,6 +335,17 @@ pub fn fixture_with(chaff: ChaffConfig, limits: Limits) -> Fixture {
 }
 
 pub fn fixture_full(chaff: ChaffConfig, limits: Limits, peer_uid: u32) -> Fixture {
+    fixture_custom(chaff, limits, peer_uid, |_| {})
+}
+
+/// A fixture whose initial directory is first adjusted by `adjust` (initial
+/// entries are not subject to the high-water-mark time lock).
+pub fn fixture_custom(
+    chaff: ChaffConfig,
+    limits: Limits,
+    peer_uid: u32,
+    adjust: impl FnOnce(&mut DirectorySnapshot),
+) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap(); // safefs-lint: allow(test fixture setup)
     let (staging_path, staging) = staging_root(dir.path());
@@ -397,9 +381,16 @@ pub fn fixture_full(chaff: ChaffConfig, limits: Limits, peer_uid: u32) -> Fixtur
         sink.clone(),
     )
     .unwrap();
-    let snapshot = snapshot_for(&members, &custodian, &disposition, 1, TODAY);
+    let mut members = members;
+    let mut snapshot = snapshot_for(&members, &custodian, &disposition, 1, TODAY);
+    adjust(&mut snapshot);
+    let mut log = TestLog::new();
+    log.sync(&snapshot, &members);
+    for m in &mut members {
+        m.entry_hash = log.user_hash[&m.user_id];
+    }
     sealer
-        .install_snapshot(signed_bundle(snapshot.clone(), 0), |_| true)
+        .install_snapshot(log.bundle(&snapshot, 0), |_| true)
         .unwrap();
     Fixture {
         dir,
@@ -413,6 +404,7 @@ pub fn fixture_full(chaff: ChaffConfig, limits: Limits, peer_uid: u32) -> Fixtur
         disposition,
         k35,
         snapshot,
+        log: Mutex::new(log),
     }
 }
 

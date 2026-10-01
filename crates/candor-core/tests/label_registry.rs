@@ -2,6 +2,7 @@
 //! CRYPTO-012 / CI job `label-registry`: every `candor/...` literal in this crate's
 //! sources must live in `src/labels.rs`; registry values are unique.
 #![allow(
+    clippy::disallowed_methods, // test-only scan of this crate's own sources (CRYPTO-012)
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,

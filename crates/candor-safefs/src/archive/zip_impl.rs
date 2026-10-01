@@ -21,6 +21,8 @@ const S_IFDIR: u32 = 0o040_000;
 const S_IFLNK: u32 = 0o120_000;
 
 struct Info {
+    /// General-purpose flags of the central record.
+    flags: u16,
     header_start: u64,
     data_start: u64,
     csize: u64,
@@ -38,13 +40,16 @@ fn malformed<E>(_: E) -> ArchiveError {
 }
 
 /// Counts consecutive central-directory file headers starting at `start`.
+/// Also returns each record's general-purpose flags, in directory order
+/// (AUD-RM1-SFS-12: compared with the local header's flags).
 fn count_central_records<R: Read + Seek>(
     reader: &mut R,
     start: u64,
     max_entries: u64,
-) -> Result<u64, ArchiveError> {
+) -> Result<(u64, Vec<u16>), ArchiveError> {
     reader.seek(SeekFrom::Start(start)).map_err(malformed)?;
     let mut count: u64 = 0;
+    let mut flags = Vec::new();
     let mut fixed = [0u8; 46];
     loop {
         let mut sig = [0u8; 4];
@@ -61,6 +66,7 @@ fn count_central_records<R: Read + Seek>(
         if count > max_entries {
             return Err(ArchiveError::LimitHit(LimitKind::Entries));
         }
+        flags.push(u16::from_le_bytes([fixed[8], fixed[9]]));
         let n = u16::from_le_bytes([fixed[28], fixed[29]]);
         let m = u16::from_le_bytes([fixed[30], fixed[31]]);
         let k = u16::from_le_bytes([fixed[32], fixed[33]]);
@@ -69,7 +75,53 @@ fn count_central_records<R: Read + Seek>(
             .saturating_add(i64::from(k));
         reader.seek(SeekFrom::Current(skip)).map_err(malformed)?;
     }
-    Ok(count)
+    Ok((count, flags))
+}
+
+/// Values of the zip64 extended-information extra field (id 0x0001) of a
+/// *local* header: `(uncompressed, compressed)`, each present only when the
+/// corresponding 32-bit local field is 0xFFFFFFFF (APPNOTE 4.5.3).
+fn local_zip64_sizes(
+    extra: &[u8],
+    want_usize: bool,
+    want_csize: bool,
+) -> Result<(Option<u64>, Option<u64>), ArchiveError> {
+    let bad = || ArchiveError::Malformed("local zip64 extra field");
+    let mut rest = extra;
+    while !rest.is_empty() {
+        let (Some(&[i0, i1]), Some(&[l0, l1])) = (rest.get(0..2), rest.get(2..4)) else {
+            return Err(bad());
+        };
+        let id = u16::from_le_bytes([i0, i1]);
+        let len = usize::from(u16::from_le_bytes([l0, l1]));
+        let end = 4usize.checked_add(len).ok_or_else(bad)?;
+        let body = rest.get(4..end).ok_or_else(bad)?;
+        rest = rest.get(end..).ok_or_else(bad)?;
+        if id != 0x0001 {
+            continue;
+        }
+        let mut vals = body.chunks_exact(8).map(|c| {
+            let mut b = [0u8; 8];
+            b.copy_from_slice(c);
+            u64::from_le_bytes(b)
+        });
+        let u = if want_usize {
+            Some(vals.next().ok_or_else(bad)?)
+        } else {
+            None
+        };
+        let c = if want_csize {
+            Some(vals.next().ok_or_else(bad)?)
+        } else {
+            None
+        };
+        return Ok((u, c));
+    }
+    if want_usize || want_csize {
+        Err(bad())
+    } else {
+        Ok((None, None))
+    }
 }
 
 /// Extracts a ZIP archive into `root` (FILE-019, ST-081).
@@ -111,7 +163,7 @@ fn run<R: Read + Seek>(reader: &mut R, s: &mut Session<'_>) -> Result<(), Archiv
         // The zip crate keys entries by name, silently collapsing duplicate
         // central-directory names (a parser differential). Count the
         // central-directory records ourselves and require agreement.
-        let walked = count_central_records(reader, cd_start, l.max_entries)?;
+        let (walked, central_flags) = count_central_records(reader, cd_start, l.max_entries)?;
         if walked != u64::try_from(n).unwrap_or(u64::MAX) {
             return Err(ArchiveError::Malformed(
                 "duplicate or hidden central directory entries",
@@ -121,7 +173,11 @@ fn run<R: Read + Seek>(reader: &mut R, s: &mut Session<'_>) -> Result<(), Archiv
         let mut v = Vec::with_capacity(n);
         for i in 0..n {
             let f = za.by_index_raw(i).map_err(malformed)?;
+            let flags = *central_flags
+                .get(i)
+                .ok_or(ArchiveError::Malformed("central directory"))?;
             v.push(Info {
+                flags,
                 header_start: f.header_start(),
                 data_start: f.data_start(),
                 csize: f.compressed_size(),
@@ -215,20 +271,32 @@ fn run<R: Read + Seek>(reader: &mut R, s: &mut Session<'_>) -> Result<(), Archiv
         if central_method.is_some_and(|m| m != method) {
             return Err(ArchiveError::Malformed("local/central method mismatch"));
         }
-        if (flags & 1 == 1) != inf.encrypted {
+        // AUD-RM1-SFS-12: all general-purpose flags must be identical, in
+        // particular bit 3 (data descriptor), which would otherwise switch
+        // the CRC/size comparison below off for the local header only.
+        if flags != inf.flags || (flags & 1 == 1) != inf.encrypted {
             return Err(ArchiveError::Malformed("local/central flags mismatch"));
         }
-        if flags & 0x0008 == 0 {
-            let crc = u32::from_le_bytes([fixed[14], fixed[15], fixed[16], fixed[17]]);
-            let csize = u32::from_le_bytes([fixed[18], fixed[19], fixed[20], fixed[21]]);
-            let usize_ = u32::from_le_bytes([fixed[22], fixed[23], fixed[24], fixed[25]]);
-            let sizes_ok = (csize == u32::MAX || u64::from(csize) == inf.csize)
-                && (usize_ == u32::MAX || u64::from(usize_) == inf.usize);
-            if crc != inf.crc || !sizes_ok {
-                return Err(ArchiveError::Malformed(
-                    "local/central size or crc mismatch",
-                ));
-            }
+        let crc = u32::from_le_bytes([fixed[14], fixed[15], fixed[16], fixed[17]]);
+        let csize = u32::from_le_bytes([fixed[18], fixed[19], fixed[20], fixed[21]]);
+        let usize_ = u32::from_le_bytes([fixed[22], fixed[23], fixed[24], fixed[25]]);
+        // The extra field is bounded by its 16-bit length.
+        let mut extra = vec![0u8; usize::try_from(extra_len).unwrap_or(0)];
+        reader.read_exact(&mut extra).map_err(malformed)?;
+        let (z_usize, z_csize) = local_zip64_sizes(&extra, usize_ == u32::MAX, csize == u32::MAX)?;
+        let local_csize = z_csize.unwrap_or(u64::from(csize));
+        let local_usize = z_usize.unwrap_or(u64::from(usize_));
+        // With a data descriptor (bit 3) the local values may be zero; any
+        // value present must still equal the central one.
+        let descriptor = flags & 0x0008 != 0;
+        let agrees = |local: u64, central: u64| local == central || (descriptor && local == 0);
+        if !agrees(u64::from(crc), u64::from(inf.crc))
+            || !agrees(local_csize, inf.csize)
+            || !agrees(local_usize, inf.usize)
+        {
+            return Err(ArchiveError::Malformed(
+                "local/central size or crc mismatch",
+            ));
         }
     }
     reader.seek(SeekFrom::Start(0)).map_err(malformed)?;

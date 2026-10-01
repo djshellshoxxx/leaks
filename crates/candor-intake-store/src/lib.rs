@@ -31,7 +31,8 @@ pub use deletion::{
 pub use error::{Result, StoreError};
 pub use memory::{MEMORY_DEADDROP_CONFIG, MemoryStore};
 pub use pg::{
-    PgIntakeMaintenance, PgIntakeStore, migrate, schema_hash, vacuum_after_rewrite, vacuum_full_daily,
+    PgIntakeMaintenance, PgIntakeStore, migrate, schema_hash, vacuum_after_rewrite,
+    vacuum_full_daily,
 };
 pub use store::{IntakeMaintenance, IntakeStore};
 pub use types::*;

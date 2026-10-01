@@ -18,24 +18,25 @@ every ambiguity is recorded in [`SPEC-NOTES.md`](SPEC-NOTES.md).
 | `intake/nftables.conf` | `/etc/nftables.conf` | Default-deny ruleset. Only the two tor UIDs may leave via ext0, and only to public addresses over TCP. Other flows: E3 health push and E4 NTS to H-MON, inbound I1 relay 7443 and optional I2 ssh. There are no LOG targets. The installer fills only the three address sets. |
 | `intake/systemd/tor@candor-intake.service` | `/etc/systemd/system/` | tor runs as `_tor-candor-intake:_tor-candor-intake` (never root) with `--defaults-torrc /dev/null` under the `candor-tor-intake` AppArmor profile. It is fully sandboxed. AF_INET is allowed for tor only, and non-public IP ranges are denied in-kernel. |
 | `intake/systemd/candor-intake-web.{socket,service}` | `/etc/systemd/system/` | C-06. PID 1 creates `/run/candor/source-web/http.sock` (0660 `candor-web:_tor-candor-intake`). The service has `PrivateNetwork=yes` and AF_UNIX only. |
-| `intake/systemd/candor-sealer.{socket,service}` | `/etc/systemd/system/` | C-07. Socket `seal.sock` is SEQPACKET (0660 `candor-sealer:candor-web`). The sealer has no network and no writable path. It locks memory through `LimitMEMLOCK=2G` and has no capabilities. Its secrets arrive as TPM-sealed credentials. |
+| `intake/systemd/candor-sealer.{socket,service}` | `/etc/systemd/system/` | C-07. Socket `seal.sock` is `SOCK_STREAM` with u32be length-prefixed frames (0660 `candor-sealer:candor-web`; sealer SPEC-NOTES item 9). The sealer has no network. Its only writable path is the staging tmpfs, which it writes itself through candor-safefs (sealer SPEC-NOTES item 7; AUD-RM2-SEA-16). It locks memory through `LimitMEMLOCK=2G` and has no capabilities. Its secrets arrive as TPM-sealed credentials. The syscall allow-set is pinned exactly by config-check (AUD-RM2-DEP-16). |
 | `intake/systemd/candor-intake-store{,-relay}.socket`, `candor-intake-store.service` | `/etc/systemd/system/` | C-08. It receives the IPC socket and the relay TCP socket (relay0:7443) from PID 1. The process itself is AF_UNIX-only in an empty network namespace, so it can accept the core's pull but can never initiate a connection (ADR-009). |
-| `intake/systemd/run-candor-staging.mount` | `/etc/systemd/system/` | Tier W staging tmpfs `/run/candor/staging`, mode 0700 `candor-istore`, `noswap`. It is RAM-only (ADR-034). |
-| `intake/systemd/candor-intake-pg.service` | `/etc/systemd/system/` | Dedicated PostgreSQL 16 cluster for the intake store. Unix socket only, `PrivateNetwork=yes`. |
+| `intake/systemd/run-candor-staging.mount` | `/etc/systemd/system/` | Tier W staging tmpfs `/run/candor/staging`, mode 0700 `candor-sealer`, `noswap`. It is RAM-only (ADR-034). The store has no access; staged bundles reach it as passed file descriptors (D-33). |
+| `intake/systemd/candor-intake-pg.service` | `/etc/systemd/system/` | Dedicated PostgreSQL 16 cluster for the intake store. Unix socket only, `PrivateNetwork=yes`. Cumulative statistics live in RAM (`pg_stat` → `/run/candor/intake-pg-stat`, D-34). |
+| `intake/systemd/candor-intake-{vacuum,maint}.{service,timer}` | `/etc/systemd/system/` | Fixed-time maintenance (D-34; AUD-RM2-STO-11/23/24): plain VACUUM 15 min after each import slot, and a daily window (deletion-list prune, statistics reset, `VACUUM FULL`, `CHECKPOINT`). Both run `candor-intake-maint` as `candor-imaint` (DB role `candor_intake_maint`), sandboxed like the services, under the `candor-intake-maint` profile. Enable the two timers only. |
 | `intake/systemd/nftables.service.d/candor-intake.conf` | `/etc/systemd/system/nftables.service.d/` | Loads the ruleset only after the service users exist. |
-| `intake/postgresql/{candor-intake.conf,pg_hba.conf,pg_ident.conf}` | `/etc/candor/intake/postgresql/` (root:postgres 0640) | `wal_level=minimal`, no archiving or replication, `track_commit_timestamp=off`. PostgreSQL emits no log at all: `log_min_messages = panic` and the unit discards stderr (AUD-RM2-STO-02). Access is peer-only for `candor-istore`. |
-| `intake/apparmor/{candor-tor-intake,candor-web,candor-sealer,candor-intake-store,candor-intake-pg}` | `/etc/apparmor.d/` | Enforce-mode profiles for all five intake processes. Units attach them with `AppArmorProfile=` and no `-` prefix, so a unit fails to start if its profile is missing. |
+| `intake/postgresql/{candor-intake.conf,pg_hba.conf,pg_ident.conf}` | `/etc/candor/intake/postgresql/` (root:postgres 0640) | `wal_level=minimal`, no archiving or replication, `track_commit_timestamp=off`, `track_counts=off`, `track_activities=off`, `autovacuum=off`, `temp_file_limit=256MB`. PostgreSQL emits no log at all: `log_min_messages = panic` and the unit discards stderr (AUD-RM2-STO-02). Access is peer-only, through three ident maps: `candor-istore`, `candor-imaint` and `candor-migrate` (ADR-052(9)). config-check compares pg_hba/pg_ident line by line and the conf as an allow-list (AUD-RM2-DEP-19). |
+| `intake/apparmor/{candor-tor-intake,candor-web,candor-sealer,candor-intake-store,candor-intake-pg,candor-intake-maint}` | `/etc/apparmor.d/` | Enforce-mode profiles for all intake processes. Units attach them with `AppArmorProfile=` and no `-` prefix, so a unit fails to start if its profile is missing. config-check compares each profile statement by statement with the release (AUD-RM2-DEP-15). |
 | `intake/journald/journald@candor-intake.conf` | `/etc/systemd/` | Journal namespace of the five units. They send nothing to it (stdout/stderr discarded, D-28); it only contains a stray `syslog()` write. Volatile, hourly files, at most 24 h, nothing below `crit` stored, no forwarding. |
 | `intake/journald/candor-intake-host.conf` | `/etc/systemd/journald.conf.d/50-candor-intake.conf` | Host journal: volatile, hourly files, at most 24 h, `Audit=no`, no forwarding (17 §5.5, 20 §11.3). |
-| `intake/sysctl.d/90-candor-intake.conf` | `/etc/sysctl.d/` | Kernel baseline (20 §11.4, 17): ptrace scope 3, no core dumps, restricted dmesg/kptr/bpf/userns, no TCP timestamps, no redirects or forwarding (D-30). |
+| `intake/sysctl.d/90-candor-intake.conf` | `/etc/sysctl.d/` | Kernel baseline (20 §11.4, 17): ptrace scope 3, no core dumps, restricted dmesg/kptr/bpf/userns, no TCP timestamps, no redirects or forwarding, no `exception-trace` printk lines (D-30, AUD-RM2-DEP-20). |
 | `intake/coredump.conf.d/50-candor-intake.conf` | `/etc/systemd/coredump.conf.d/` | systemd-coredump stores nothing (D-30). |
 | `intake/sysusers.d/candor-intake.conf` | `/usr/lib/sysusers.d/` | One UID per service, plus every UID that nftables names. |
 | `intake/tmpfiles.d/candor-intake.conf` | `/usr/lib/tmpfiles.d/` | Socket and state directories. Each is 0750 with group set to the single permitted client (07 §4.1). |
 | `intake/resolv.conf` | `/etc/resolv.conf` | No DNS (`nameserver 127.0.0.1` with nothing listening). |
-| `intake/profiles/{ce-single,ce-hardened}/` | `/etc/systemd/system/<unit>.d/` | Profile drop-ins. Staging is 4 GiB on CE-SINGLE and 8 GiB on CE-HARDENED. The store's `MemoryMax` is staging plus 1 GiB, because tmpfs pages are charged to its cgroup. |
+| `intake/profiles/{ce-single,ce-hardened}/` | `/etc/systemd/system/<unit>.d/` | Profile drop-ins. Staging is 4 GiB on CE-SINGLE and 8 GiB on CE-HARDENED. The sealer's `MemoryMax` is 2560M plus the staging size, because tmpfs pages are charged to the writer's cgroup. |
 | `intake/secret-placement.toml` | `/usr/share/candor/manifests/intake.toml` | ADR-028 Secret Placement Manifest for role `intake`. |
 | `tools/check-placement.sh` | `/usr/lib/candor/tools/` | Verifies the manifest on a host: owner, group, mode, parent mode, symlinks and hard links per entry. It also scans for unlisted secret material and checks names in the ciphertext-only directories. |
-| `tools/config-check.sh`, `tools/config-check.baseline` | `/usr/lib/candor/tools/` | The subset of `candorctl check` (18 §14) that covers these files. It checks **effective** configuration against allow-lists: tor's own canonical dump, the nft ruleset as loaded into a throw-away network namespace, units as systemd merges them (all drop-in locations), `postgres -C`, `systemd-analyze cat-config`, live `/proc/sys` (SPEC-NOTES D-31). Needs root, `jq`, `tor`, `nft`, `unshare`, `setpriv`, `systemd-analyze`. |
+| `tools/config-check.sh`, `tools/config-check.baseline`, `tools/config-check.manifest` | `/usr/lib/candor/tools/` | The subset of `candorctl check` (18 §14) that covers these files. It checks **effective** configuration against allow-lists: tor's own canonical dump, the nft ruleset as loaded into a throw-away network namespace, units as systemd merges them (all drop-in locations), the sealer's expanded syscall set, `postgres -C`, `systemd-analyze cat-config`, live `/proc/sys`, AppArmor profiles statement by statement (SPEC-NOTES D-31, D-35). It never follows a symlinked input and never prints file content. The baseline is verified against the manifest, whose digest is pinned in the script. Needs root, `jq`, `tor`, `nft`, `unshare`, `setpriv`, `systemd-analyze`, `sha256sum`. |
 | `tests/validate.sh` | — (CI) | Runs all the checks listed under "Validation" below. |
 
 ## Users, sockets and flows
@@ -45,12 +46,12 @@ every ambiguity is recorded in [`SPEC-NOTES.md`](SPEC-NOTES.md).
                           │ unix:/run/candor/source-web/http.sock   (0660 candor-web:_tor-candor-intake; no control socket)
                           ▼
                     candor-web (C-06, no netns, AF_UNIX)
-                       │ seal.sock (SEQPACKET, 0660 candor-sealer:candor-web)
+                       │ seal.sock (STREAM, length-prefixed; 0660 candor-sealer:candor-web)
                        ▼                         istore.sock (SEQPACKET, 0660 candor-istore:candor-istore-clients)
                     candor-sealer (C-07) ───────────────►  candor-intake-store (C-08, no netns)
-                       (chaff only)                          │ /run/candor/intake-pg/.s.PGSQL.5432 (peer)
+                       │ (writes /run/candor/staging)        │ /run/candor/intake-pg/.s.PGSQL.5432 (peer)
                                                              ▼
-                                                     PostgreSQL (postgres, no netns)
+                    candor-intake-maint (timers) ──────► PostgreSQL (postgres, no netns)
  C-09 (core) ──relay0:7443──► socket bound by PID 1 ──► candor-intake-store (accept only)
 ```
 
@@ -62,8 +63,10 @@ every ambiguity is recorded in [`SPEC-NOTES.md`](SPEC-NOTES.md).
 3. Install `nftables.conf` with the site's address sets filled in, then enable `nftables.service`.
 4. Run `initdb` for the intake cluster as `postgres`:
    `initdb -D /var/lib/postgresql/16/candor-intake --data-checksums -A reject -U postgres`
-   (`data_checksums` per 09 §10). Install the PostgreSQL files. This must be the only PostgreSQL
-   cluster on the host: see SPEC-NOTES D-16.
+   (`data_checksums` per 09 §10). Replace its statistics directory with the RAM-only one:
+   `mv /var/lib/postgresql/16/candor-intake/pg_stat /root/pg_stat.initdb && ln -s /run/candor/intake-pg-stat /var/lib/postgresql/16/candor-intake/pg_stat`
+   (D-34). Install the PostgreSQL files. This must be the only PostgreSQL cluster on the host:
+   see SPEC-NOTES D-16.
 5. Seal the credentials with `systemd-creds encrypt --with-key=tpm2 --name=<name> <plain> /etc/credstore.encrypted/candor-intake.<name>.cred`,
    then shred the plaintext. Names and paths are in `secret-placement.toml`.
 6. Install the units, profile drop-ins, AppArmor profiles (`apparmor_parser -r`), journald,
@@ -75,16 +78,21 @@ every ambiguity is recorded in [`SPEC-NOTES.md`](SPEC-NOTES.md).
    `/etc/fstab`; only random-key dm-crypt swap is tolerated), keep `systemd-journal` and `adm`
    without members.
 8. Run `config-check.sh --host` (must exit 0) and `check-placement.sh --mode full` (must exit 0).
-   Then enable the sockets, services and `tor@candor-intake`.
+   Then enable the sockets, services, `tor@candor-intake` and the two maintenance timers.
 
 ## Requirements on the Candor binaries (C-06/C-07/C-08 implementers)
 
 - **Socket activation:** take listeners from `sd_listen_fds` by `FileDescriptorName`:
   `http` (web), `seal` (sealer), `istore` and `relay` (store). Never `bind()` an IP socket;
   `SocketBindDeny=any` and `RestrictAddressFamilies=AF_UNIX` enforce this.
-- **Secrets:** read only from `$CREDENTIALS_DIRECTORY/<name>`: `sealer_signing_key`,
-  `argon2_salt`, `routing_key`, `batch_signing_key` and `relay_tls_key`. Never read them from
-  the environment.
+- **Secrets:** read only from `$CREDENTIALS_DIRECTORY/<name>`: `sealer_signing_key` (K35; the
+  crate README's `sealer-k35` example name is superseded, D-33), `argon2_salt`, `routing_key`,
+  `batch_signing_key` and `relay_tls_key`. Never read them from the environment.
+- **Sealer transport and staging (D-33):** `seal.sock` is `SOCK_STREAM`; the sealer owns
+  `/run/candor/staging` (0700) and hands a staged bundle to the store as a file descriptor
+  (`SCM_RIGHTS` on `istore.sock`), never as a path.
+- **Maintenance binary (D-34):** `/usr/lib/candor/intake-store/candor-intake-maint vacuum|daily`,
+  connecting as `candor_intake_maint` over the PostgreSQL socket only.
 - **Logging:** stdout and stderr are discarded by the units (no journald line may carry the
   exact time of a source action, SPEC-NOTES D-28). Hour-truncated SYSTEM events (LOG-004) need
   an application-side sink; do not rely on journald.

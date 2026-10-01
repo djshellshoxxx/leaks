@@ -160,3 +160,90 @@ fn allow_marker_and_tests_scope() {
     )]);
     assert_eq!(run(d.path(), &[]).0, 1);
 }
+
+// AUD-RM1-SFS-11 regression fixtures: each passed both the script and
+// clippy in round 2.
+#[test]
+fn sfs11_temp_dir_extend_spawn_and_tempfile_are_caught() {
+    for bad in [
+        "fn f(n: &str) { let mut p = std::env::temp_dir(); p.extend([n]); }\n",
+        "fn f(n: &str) { let mut out_path = PathBuf::new(); out_path.extend([n]); }\n",
+        "fn f(n: &str) { let _ = std::process::Command::new(\"rm\").arg(n).status(); }\n",
+        "use std::process::Command;\nfn f(n: &str) { let _ = Command::new(\"unzip\").arg(n).status(); }\n",
+        "fn f(n: &str) { let mut base = PathBuf::new(); base.set_extension(n); }\n",
+    ] {
+        let d = ws(&[("crates/a/src/lib.rs", bad)]);
+        let (code, out) = run(d.path(), &[]);
+        assert_eq!(code, 1, "not caught: {bad}\n{out}");
+    }
+    // tempfile is test-only: a [dependencies] (or renamed/table-form)
+    // declaration is a violation, [dev-dependencies] is fine — also for
+    // candor-safefs itself.
+    for manifest in [
+        "[package]\nname = \"a\"\n[dependencies]\ntempfile = \"3\"\n",
+        "[package]\nname = \"a\"\n[dependencies.tempfile]\nversion = \"3\"\n",
+        "[package]\nname = \"a\"\n[dependencies]\ntmp = { package = \"tempfile\", version = \"3\" }\n",
+    ] {
+        for krate in ["a", "candor-safefs"] {
+            let d = ws(&[
+                (&format!("crates/{krate}/Cargo.toml"), manifest),
+                (&format!("crates/{krate}/src/lib.rs"), ""),
+            ]);
+            assert_eq!(run(d.path(), &[]).0, 1, "not caught in {krate}: {manifest}");
+        }
+    }
+    let d = ws(&[
+        (
+            "crates/a/Cargo.toml",
+            "[package]\nname = \"a\"\n[dev-dependencies]\ntempfile = \"3\"\n",
+        ),
+        ("crates/a/src/lib.rs", ""),
+    ]);
+    let (code, out) = run(d.path(), &[]);
+    assert_eq!(code, 0, "{out}");
+}
+
+// AUD-RM1-SFS-11: the workspace clippy.toml bans fire, type-resolved, on a
+// fixture crate (std::env::temp_dir, PathBuf::set_file_name,
+// Command::new, panic_any). Skipped when cargo-clippy is unavailable.
+#[test]
+fn workspace_clippy_bans_fire_on_fixture() {
+    let ws_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    if !Command::new("cargo")
+        .args(["clippy", "--version"])
+        .output()
+        .is_ok_and(|o| o.status.success())
+    {
+        return;
+    }
+    let d = ws(&[
+        (
+            "Cargo.toml",
+            "[package]\nname = \"fx\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[workspace]\n",
+        ),
+        (
+            "src/lib.rs",
+            "pub fn f(n: &str) {\n    let mut p = std::env::temp_dir();\n    p.set_file_name(n);\n    let _ = std::process::Command::new(\"rm\").arg(&p).status();\n    std::panic::panic_any(5u8);\n}\n",
+        ),
+    ]);
+    let out = Command::new("cargo")
+        .args(["clippy", "--quiet", "--offline", "--message-format=short"])
+        .current_dir(d.path())
+        .env("CLIPPY_CONF_DIR", &ws_root)
+        .env("CARGO_TARGET_DIR", d.path().join("target"))
+        .env_remove("RUSTFLAGS")
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    for banned in [
+        "std::env::temp_dir",
+        "std::path::PathBuf::set_file_name",
+        "std::process::Command::new",
+        "std::panic::panic_any",
+    ] {
+        assert!(
+            err.contains(&format!("disallowed method `{banned}`")),
+            "{banned} not flagged:\n{err}"
+        );
+    }
+}

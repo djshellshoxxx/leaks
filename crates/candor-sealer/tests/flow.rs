@@ -80,11 +80,17 @@ fn make_reply(
         channel_id: CHANNEL,
         mailbox_id,
     };
-    let stanza =
-        WrapStanza::seal_hpke_ck(Suite::CandorStd1, &pk, [0; 32], obj.object_hash, &ctx, ck.ck())
-            .unwrap()
-            .encode()
-            .unwrap();
+    let stanza = WrapStanza::seal_hpke_ck(
+        Suite::CandorStd1,
+        &pk,
+        [0; 32],
+        obj.object_hash,
+        &ctx,
+        ck.ck(),
+    )
+    .unwrap()
+    .encode()
+    .unwrap();
     let mut entry = ((obj.bytes.len() + stanza.len()) as u32)
         .to_be_bytes()
         .to_vec();

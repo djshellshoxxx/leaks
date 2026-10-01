@@ -485,3 +485,129 @@
   Both need a fix or the lead's written acceptance, and the §C tools must complete without untriaged output.
 
 `Gate: FAIL 2026-10-01 7d340f6` (infra). Scope A may be integrated once the lead records the acceptances for SUI-05, SUI-06 and SUI-08.
+
+---
+
+## Re-test (round 3), 2026-10-01
+
+- **Re-test commit:** `c9014b24efec320242411c18492176d01a8e615e` (pushed with `[skip ci]`).
+- **Not part of the re-test:** an uncommitted working-tree edit to `specs/11-FRONTEND-SOURCE.md` (§5.7 and SUI-013 wording). It is mentioned only where relevant (SUI-15).
+- **Inputs:** `crates/candor-source-ui/SPEC-NOTES.md` (SUI-05/06/08/11/12/13 rows; contract items 3, 6 and 7; round-2 self-review); the coordinator's infra summary (ADR-052(8) staging; INF-10 workaround).
+- **Method:** §G as in round 2. I read the diff `7d340f6..c9014b2` over the scope, ran the tests and tools, and used an auditor harness. No repository code was changed.
+
+### Tool re-runs (round 3)
+
+| Tool | Result |
+|---|---|
+| `cargo test -p candor-source-ui --locked` | 24 + 9 + 2 + 37 + 12: all pass |
+| `cargo clippy -p candor-source-ui --all-targets --all-features -- -D warnings` | clean |
+| Auditor harness: response head | 37 screens × {GET, HEAD, GET+cookie, POST+cookie} × Set-Cookie {none, 1 B, 256 B}, with `finalize_headers` called twice each time. **444/444 heads serialize to exactly 2,048 B**, and every body is exactly the class size. No render errors. |
+| `cargo deny --offline --locked check advisories bans licenses sources` | **rc 0**: "advisories ok, bans ok, licenses ok, sources ok" (7 `duplicate` and 5 `license-not-encountered` warnings, benign) |
+| cargo-deny negative check | Same config with the `blake3@1.8.2` allow-list entry removed → `error[build-script-not-allowed]` (rc 2). **The bans rules are now evaluated.** |
+| `cargo vet --locked` (PR stage) | **passes** (51 fully audited, 18 partially, 225 exempted) |
+| `scripts/vet-release.sh` (release stage) | **fails by design** (rc 1): the crypto set and its dependencies lack `candor-crypto-reviewed`. The script is bash (shebang); invoking it with `sh` fails on `set -o pipefail`, but the workflow runs it through its shebang. |
+| `scripts/check-vet-policy.py` | FAIL (12): all are the `TODO` import approvals in `trusted-importers.toml`. Nothing else. |
+
+**Correction to round 2 (INF-10 evidence).** Two of my round-2 isolation runs passed `--config` *after* `check` (`cargo deny … check --config X bans`). cargo-deny 0.20.2 rejects that ordering ("unexpected argument"). So the rc 2 results I reported for "without `allow-build-scripts`" and "audited `deny.toml`" were argument errors, not policy results. The crash itself (rc 134, stack overflow, with the 7d340f6 `deny.toml` and lockfile) was real.
+
+With the current lockfile and the correct flag order (`cargo deny --config X check bans`):
+- the round-2 `deny.toml` gives rc 2 (`sha2` duplicate), not a crash;
+- the current `deny.toml` with `include-dependencies = true` restored gives rc 0 three times out of three.
+
+The crash is therefore not reproducible on `c9014b2`; see INF-11.
+
+### Status of findings
+
+| ID | Sev | Round-3 status | Evidence / notes |
+|---|---|---|---|
+| SUI-05 | Low | **Fixed** (crate level) | `X-Pad` is the last header; `finalize_headers` validates the cookie (1–256 B, visible ASCII/space, no leading or trailing space, so no CR/LF injection) and re-pads with checked arithmetic, failing closed. Head = 2,048 B in all 444 harness cases. Old cookie values are zeroized on replacement and drop. `Page` `Debug` shows header names only. Tests: `render::response_head_length_is_constant`, `page::tests::finalize_rejects_bad_cookies_and_keeps_length`. The wire-level residual is in C-06 → **SUI-14**. |
+| SUI-06 | Low | **Fixed** (crate level) | Every form renders `csrf`; a page with a `<form` and no token fails closed (`MissingData("form token")`); test `render::every_form_carries_a_token`. The `<form` check cannot be triggered by content, because all content is escaped. C-06/C-07 obligations (contract item 6: pre-session token + cookie, `Origin`, `Sec-Fetch-Site`, negative tests) carry over to the C-07 audit. Spec inconsistency → **SUI-15**. |
+| SUI-08 | Info | **Fixed** | S03/S04 now read "Candor does not collect who you are. Your writing and files can still identify you."; address statements are conditional on Tor Browser. The lint `tips::catalog_anonymity_claims_are_conditional` covers sui/sops/tips, and the phrases are added to `honest_wording_lint` (tips region). I grepped the catalogs for IP/untraceable/"cannot be traced"/"safe" variants: none are absolute. Info: the lint works per line and splits sentences on `". "`, so an address claim that a Fluent message continues onto the next line would escape the "names Tor Browser" check. Consider linting per message (joined continuation lines). |
+| SUI-11 | Low | **Fixed** | `piece` = `field-start-end-total-tag`, where the tag is HMAC-SHA256 truncated to 128 bits under a per-session `PieceKey`. The MAC input is the domain label `candor-sui-piece-v1\0`, the field (`[a-z0-9_]`, then a 0 separator), u64 BE start/end/len and the **whole stored value**, so the encoding is injective. Verification is constant-time (`verify_truncated_left`); `splice_piece` also requires `field == piece.field`. `PieceKey` is `Zeroizing` and redacted in `Debug`, and render fails closed without a key. The audit's `XYZdef` case is now `Stale` (`same_length_change_is_stale`, proptest `any_change_is_stale`). No unkeyed digest of plaintext appears in the page. **Key lifetime and separation:** the crate cannot enforce them. Contract item 3 requires a CSPRNG key per session, kept in RAM only and dropped with the session. C-07 must not derive it from `cs` or reuse another key; check this in the C-07 audit. `PieceKey: Clone` is acceptable (each clone is zeroizing). |
+| SUI-12 | Low | **Fixed** | `reply-form` is url-encoded and holds the text/piece, delivery, Send and part navigation. `file-form` (multipart) holds only `csrf`, `file` and `action=upload`, with no navigation or Send button. Test `render::s12_navigation_never_posts_a_file`. Splice-before-every-action, including send, is now explicit in contract item 3. |
+| SUI-13 | Info | **Fixed** | The `preview` feature and module and the self dev-dependency are removed; samples live in `tests/support/preview.rs` (dev targets only). `--all-features` builds contain no sample data. |
+| SUI-01/02/03/04/07/09/10 | — | Fixed (round 2) | No regressions; the tests still pass. |
+| INF-01 | Medium | **Fixed** (per ADR-052(8)) / **Accepted-pending** (import approvals) | PR stage: `cargo vet --locked` passes and `cargo deny` passes (sha2 0.10.9 skip per ADR-052(7), expires 2026-12-30). Release stage (`release-gate.yml`: tags and dispatch only, read-only token, SHA-pinned) fails by design until real crypto audits exist. **Residual:** the PR `cargo-vet` job runs `check-vet-policy.py` before `cargo vet`, and that lint still fails on the 4 `TODO` import approvals, so the PR job stays red until the Security Lead completes `trusted-importers.toml`. Fixes are still landing with `[skip ci]`. |
+| INF-05 | Medium | Fixed (round 2) / **Accepted-pending** (same import approvals) | — |
+| INF-06 | Low | **Fixed** | Allow-list enforcement demonstrated (blake3 negative check above). |
+| INF-10 | Medium | **Resolved** | bans now runs to completion and enforces the rules. Interim workaround: `include-dependencies = false` → see INF-11. |
+| SUI-05/06/08 acceptances | — | No longer needed | Fixed instead of accepted. |
+
+### New findings (round 3)
+
+#### AUD-RM1-SUI-14: The fixed head length depends on C-06 wire behaviour that the crate cannot see
+- **Severity:** Low
+- **Location:** contract item 7 and residual 4 in `crates/candor-source-ui/SPEC-NOTES.md`; `page.rs` `reason_phrase` (200/404/405/429/500/503 only)
+- **Category:** B1.7 (CWE-203)
+- **Description:** Inside the crate, the 2,048-byte head holds in every case I tried. On the wire, typical Rust HTTP stacks add or vary bytes unless they are explicitly configured:
+  - hyper adds `date` by default;
+  - `connection: close` or `keep-alive` echoes depend on the *client's* request headers;
+  - `transfer-encoding: chunked` is used if a body is streamed without a length;
+  - the framework itself answers malformed or oversized requests (400, 408, 413, 414, 431, 505) with its own head and body, never rendered by this crate. Those statuses are outside `reason_phrase`, so the crate cannot pad them.
+
+  A network observer could then tell these responses apart by cell count, and a client-chosen `Connection` header changes the response length.
+- **Fix recommendation:** In the C-06/C-07 implementation and its audit:
+  - disable automatic `date` and `connection` headers;
+  - always send `Content-Length`;
+  - map every framework-level rejection to a crate-rendered page (S92/S90 class P1/P2), or close the connection without a response;
+  - add a wire-level test that captures raw response bytes for each screen, for HEAD, for a client `Connection: close`, and for malformed, oversized and slow requests, and asserts the total equals 2,048 + class size, or that the connection closes with no response.
+- **Status:** Open (C-06/C-07 obligation; tracked to the RM-2 C-07 audit)
+
+#### AUD-RM1-SUI-15: The two-cookie design conflicts with 11 §5.6, and the size-class input is ambiguous
+- **Severity:** Low
+- **Location:** contract item 6 (pre-session `__Host-` cookie on S01/S02/S02b/S03/S11 login/Leave/error pages); `specs/11-FRONTEND-SOURCE.md` §5.6 "There is exactly one cookie" and §5.4 "whether a session cookie is present"; `model.rs` `PageContext::has_session_cookie`
+- **Category:** spec consistency / B1.7
+- **Description:**
+  - **Every public page now sets a cookie.** Because every form needs `csrf`, and the footer Leave form is on S01–S03, every public GET must issue a pre-session cookie.
+  - **Spec conflict:** §5.6 still says there is exactly one cookie.
+  - **Ambiguous class input:** §5.4 does not say whether the pre-session cookie counts as "a session cookie".
+  - **Possible size leak:** If C-06 counts it on some routes and not others, the size class becomes route- or state-dependent. That reintroduces a size distinction between, for example, a first and a later S01 view, or a login page with and without a pre-session.
+  - **Cost of the extra cookie:** It also adds one more `Set-Cookie` (inside the padded head) and one more piece of client state for DP-12 ("no residue") to account for (`Clear-Site-Data` on Leave already covers cookies).
+- **Fix recommendation:**
+  - Spec owners update §5.6 (two cookies, attributes, lifetime) and §5.4 (state explicitly that only the `__Host-cs` session cookie selects P2).
+  - Document on `has_session_cookie` that the pre-session cookie never sets it.
+  - C-07 adds a test that S01/S03/S11-login GETs are P1 with and without the pre-session cookie.
+- **Status:** Open (spec + C-06)
+
+#### AUD-RM0-INF-11: Dependency build-file scanning is turned off, although the crash no longer reproduces
+- **Severity:** Low
+- **Location:** `deny.toml` `[bans.build] include-dependencies = false` (comment: interim, "cargo-deny 0.20.2 overflows its stack")
+- **Category:** B11.1 (INC-37 build-time execution control)
+- **Description:** With `include-dependencies = false`, cargo-deny no longer scans the *dependencies* of crates that have build scripts for shipped executables or interpreted scripts. Only the allow-listed crates themselves are checked. On `c9014b2`, the same `deny.toml` with `include-dependencies = true` passes three times out of three (rc 0, no stack overflow). The weakening is no longer needed for the current lockfile.
+- **Fix recommendation:**
+  - Restore `include-dependencies = true`.
+  - Keep each check as a separate CI step, and treat rc ≥ 128 as "gate broken".
+  - If the overflow returns on a future lockfile, bisect the offending crate and add a targeted `bypass` entry instead of switching scanning off globally.
+  - Track the upstream issue (STO-17).
+- **Status:** Open
+
+### Round-3 summary
+
+| Severity | Open | Accepted-pending | Fixed / resolved (cumulative) |
+|---|---|---|---|
+| Critical | 0 | 0 | 0 |
+| High | 0 | 0 | 1 |
+| Medium | 0 | 2 (INF-01, INF-05: import approvals) | 8 (SUI-02, -03; INF-01*, -02, -03, -04, -05*, -10) |
+| Low | 3 (SUI-14, SUI-15, INF-11) | 0 | 11 (SUI-04, -05, -06, -07, -10, -11, -12; INF-06, -07, -08, plus SUI-03's residual accepted) |
+| Info | 0 | 0 | 4 (SUI-08, -09, -13; INF-09) |
+
+\* INF-01 and INF-05 are fixed in substance. Only the Security Lead import approval records are pending.
+
+### Gate verdict (round 3)
+
+- **Scope A, `candor-source-ui`: PASS** (`Gate: PASS 2026-10-01 c9014b2`, source-ui files).
+  - No open Critical, High or Medium findings. All round-1 and round-2 Mediums are fixed and re-tested.
+  - Open Lows SUI-14 and SUI-15 do not block. They, together with the C-06/C-07 contract obligations (items 3, 6 and 7: PieceKey lifetime, splice-before-send, pre-session token/Origin, wire-exact head), are carried into the RM-2 C-07 audit.
+- **Scope B, infrastructure: PASS-conditional.**
+  - No open Critical, High or Medium findings.
+  - INF-01 and INF-05 are complete except for the Security Lead's import approval records in `supply-chain/trusted-importers.toml`. Until those exist, the PR `cargo-vet` job fails at its policy-lint step. The lead must record that acceptance, or the Security Lead must complete the records, before integration.
+  - INF-11 (Low) is tracked.
+  - Process note: every fix commit so far was pushed with `[skip ci]`, so none of the CI gates has yet run on GitHub for these commits. The first CI run must be green before integration.
+
+`Gate: PASS-conditional 2026-10-01 c9014b2` (infra; condition: Security Lead import approvals and a green first CI run).
+
+## Lead dispositions (2026-10-01)
+- **INF-11 — FIXED (lead):** `include-dependencies = true` restored in deny.toml; `cargo deny check bans` passes with dependency scanning on.
+- **SUI-15 — FIXED (lead):** spec 11 §5.6 and SUI-008 amended for the pre-session cookie `__Host-cpre` and constant header length.
+- **SUI-14 (Low) — carried into the C-06 web service build:** C-06 must test the exact serialized bytes on the wire (incl. server-added headers and server-generated error responses).
+- **INF conditional items:** Security Lead import approvals (owner action) and first green CI run (at integration).

@@ -345,7 +345,7 @@ if is_root && users_exist && have tor && have nft && have jq; then
   hmutate "/usr/local/lib template drop-in"   usr/local/lib/systemd/system/tor@.service.d/zz.conf $'+[Service]\nRestrictAddressFamilies=AF_NETLINK'
   hmutate "transient unit"                     run/systemd/transient/candor-sealer.service.d/50-x.conf $'+[Service]\nPrivateNetwork=no'
   hmutate "generator drop-in"                  run/systemd/generator.late/candor-intake-pg.service.d/x.conf $'+[Service]\nStandardError=journal'
-  hmutate "later sysctl.d overrides ptrace"    etc/sysctl.d/99-local.conf '+kernel.yama.ptrace_scope = 0'
+  hmutate "later sysctl.d overrides ptrace"    etc/sysctl.d/99-zlocal.conf '+kernel.yama.ptrace_scope = 0'
   hmutate "/etc/sysctl.conf enables forwarding" etc/sysctl.conf '+net.ipv4.ip_forward = 1'
   hmutate "journald.conf.d persistent"         etc/systemd/journald.conf.d/99-local.conf $'+[Journal]\nStorage=persistent'
   hmutate "journald@ns drop-in forwards"       etc/systemd/journald@candor-intake.conf.d/99-local.conf $'+[Journal]\nForwardToSyslog=yes'
@@ -551,7 +551,7 @@ if [ -n "${CANDOR_TEST_PG:-}" ] && is_root && users_exist && [ -x "$PGBIN/initdb
   if su -s /bin/sh pgtest -c "$PGBIN/initdb -D '$DD' -U postgres -A reject --data-checksums" >/dev/null 2>&1; then
     # AUD-RM2-STO-11 installer step: cumulative statistics in RAM (pg_stat -> tmpfs dir; the
     # target does not exist on this test host, so nothing is written at shutdown either).
-    rmdir "$DD/pg_stat" && ln -s /run/candor/intake-pg-stat "$DD/pg_stat" && chown -h pgtest "$DD/pg_stat"
+    mv "$DD/pg_stat" "$P/pg_stat.initdb" && ln -s /run/candor/intake-pg-stat "$DD/pg_stat" && chown -h pgtest "$DD/pg_stat"
     printf 'CREATE ROLE candor_istore LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;\nCREATE DATABASE candor_intake_t1 OWNER candor_istore;\n' |
       su -s /bin/sh pgtest -c "$PGBIN/postgres --single -c config_file='$P/test.conf' postgres" >/dev/null 2>&1
     su -s /bin/sh pgtest -c "$PGBIN/postgres -c config_file='$P/test.conf'" >"$P/log" 2>&1 &

@@ -582,143 +582,39 @@ fn scalar_coi_exhausted_release() {
     );
 }
 
-fn pop(vals: &[u64]) -> Vec<(MicroKey, u64)> {
-    vals.iter()
-        .enumerate()
-        .map(|(i, v)| (MicroKey([7; 16], i as u16), *v))
-        .collect()
-}
-
-// TEL-015 magnitude statistics, only through the registry (AUD-RM1-LOG-06).
+// AUD-RM1-LOG-18 regression: magnitude statistics were removed from the
+// API (the round-2 PoC combined four released means into one case's
+// value); `tests/ui/no_magnitude_api.rs` shows the calls no longer
+// compile. Here: a release history written by the old magnitude-aware
+// version (v1, with a `magnitudes` field) is refused, never silently
+// reinterpreted (fail closed).
 #[test]
-fn magnitude_rules() {
-    let nine: Vec<u64> = (1..=9).collect();
-    let ten: Vec<u64> = (1..=10).collect();
-    let mut r = reg();
-    let p = m(2026, 8);
-    let cur = m(2026, 10);
+fn magnitude_era_history_is_refused() {
+    use candor_log::cbor::{MapBuilder, Value, encode};
+    let mut mb = MapBuilder::new();
+    mb.put("v", Value::Uint(1))
+        .put("reports", Value::Array(vec![]))
+        .put("facts", Value::Array(vec![]))
+        .put("priors", Value::Array(vec![]))
+        .put("protected", Value::Array(vec![]))
+        .put("magnitudes", Value::Array(vec![]));
+    let mut h = MemoryReleaseHistory::new();
+    h.store(m(2026, 8), &encode(&mb.build()).unwrap()).unwrap();
+    let mut r = PeriodRegistry::new(h);
+    let t = Table {
+        rows: 1,
+        cols: 1,
+        cells: vec![TableCell {
+            value: 40,
+            members: vec![MicroKey([1; 16], 0)],
+        }],
+        micro: BTreeMap::from([(MicroKey([1; 16], 0), 40)]),
+        protected: vec![],
+    };
     assert_eq!(
-        r.release_magnitude(p, cur, "med9", Magnitude::Median, &pop(&nine), k())
-            .unwrap(),
-        None
-    );
-    let mut r = reg();
-    assert_eq!(
-        r.release_magnitude(p, cur, "med10", Magnitude::Median, &pop(&ten), k())
-            .unwrap(),
-        Some(5)
-    );
-    assert_eq!(
-        r.release_magnitude(p, cur, "p90", Magnitude::Percentile(90), &pop(&ten), k())
-            .unwrap(),
-        Some(9)
-    );
-    assert_eq!(
-        r.release_magnitude(p, cur, "mean", Magnitude::Mean, &pop(&ten), k())
-            .unwrap(),
-        Some(5)
-    );
-    // Min/max (single-case values) are not percentiles we publish.
-    for q in [0, 5, 95, 100] {
-        assert_eq!(
-            r.release_magnitude(p, cur, "pq", Magnitude::Percentile(q), &pop(&ten), k())
-                .unwrap_err(),
-            ReleaseError::BadStatistic
-        );
-    }
-    let mut r = reg();
-    assert_eq!(
-        r.release_magnitude(
-            p,
-            cur,
-            "w",
-            Magnitude::MedianDurationWeeks,
-            &pop(&[10; 9]),
-            k()
-        )
-        .unwrap(),
-        None
-    );
-    let mut r = reg();
-    assert_eq!(
-        r.release_magnitude(
-            p,
-            cur,
-            "w",
-            Magnitude::MedianDurationWeeks,
-            &pop(&[10; 10]),
-            k()
-        )
-        .unwrap(),
-        Some(1)
-    );
-    let mut r = reg();
-    assert_eq!(
-        r.release_magnitude(
-            p,
-            cur,
-            "w",
-            Magnitude::MedianDurationWeeks,
-            &pop(&[11; 10]),
-            k()
-        )
-        .unwrap(),
-        Some(2)
-    );
-    // Ratios: every contributing cell (num, den − num) ≥ k.
-    let mut r = reg();
-    for (i, (num, den, want)) in [
-        (1, 1, None),
-        (3, 9, None),
-        (0, 20, None),
-        (20, 20, None),
-        (5, 20, None),
-        (15, 20, None),
-        (10, 20, Some(500)),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let name: &'static str = ["r0", "r1", "r2", "r3", "r4", "r5", "r6"][i];
-        assert_eq!(r.release_ratio(p, cur, name, num, den, k()).unwrap(), want);
-    }
-}
-
-// AUD-RM1-LOG-06 regression: mean over n = 10 and later n = 11 cases
-// (different reports, same period) would reveal the 11th case exactly.
-#[test]
-fn magnitude_differencing_blocked() {
-    let mut r = reg();
-    let ten: Vec<u64> = (1..=10).map(|x| x * 7).collect();
-    let mut eleven = ten.clone();
-    eleven.push(1000);
-    let p = m(2026, 8);
-    let cur = m(2026, 9);
-    assert!(
-        r.release_magnitude(p, cur, "kpi.a", Magnitude::Mean, &pop(&ten), k())
-            .unwrap()
-            .is_some()
-    );
-    assert_eq!(
-        r.release_magnitude(p, cur, "kpi.b", Magnitude::Mean, &pop(&eleven), k())
-            .unwrap(),
-        None
-    );
-    // The same holds after a restart (history persisted).
-    let mut r2 = PeriodRegistry::new(r.history().clone());
-    assert_eq!(
-        r2.release_magnitude(p, cur, "kpi.c", Magnitude::Median, &pop(&eleven), k())
-            .unwrap(),
-        None
-    );
-    // A population differing by ≥ k is fine.
-    let other: Vec<(MicroKey, u64)> = (0..20u16)
-        .map(|i| (MicroKey([8; 16], i), u64::from(i)))
-        .collect();
-    assert!(
-        r2.release_magnitude(p, cur, "kpi.d", Magnitude::Median, &other, k())
-            .unwrap()
-            .is_some()
+        r.release(m(2026, 8), m(2026, 10), "t", &t, k())
+            .unwrap_err(),
+        ReleaseError::History
     );
 }
 
@@ -928,4 +824,35 @@ proptest! {
         }
         prop_assert!(exposed_with(r * c, vals, &eqs, &ranges).is_empty(), "{:?} {:?} {:?}", vals, rel1, rel2);
     }
+}
+
+// AUD-RM1-LOG-22 regression: with priors on sums the LP relaxation can be
+// wider than what an integer attacker can rule out. Two "triangles" of
+// pair-sum priors (each pair ≤ 1): the LP lets the six-cell total reach 3
+// (all cells 1/2), but integer cells give at most 2. With width 3 the old
+// LP audit passed; the integer audit must flag it.
+#[test]
+fn integer_attacker_narrower_than_lp_is_caught() {
+    use std::collections::BTreeSet;
+    let c = |n: u8| MicroKey([n; 16], 0);
+    let pair = |a: u8, b: u8| Prior {
+        members: BTreeSet::from([c(a), c(b)]),
+        lo: 0,
+        hi: Some(1),
+    };
+    let priors = vec![
+        pair(1, 2),
+        pair(2, 3),
+        pair(1, 3),
+        pair(4, 5),
+        pair(5, 6),
+        pair(4, 6),
+    ];
+    let total: BTreeSet<MicroKey> = (1..=6).map(c).collect();
+    assert!(!audit(&[], &priors, std::slice::from_ref(&total), 3));
+    assert!(audit(&[], &priors, std::slice::from_ref(&total), 2));
+    // One triangle alone: LP max 1.5, integer max 1.
+    let tri: BTreeSet<MicroKey> = (1..=3).map(c).collect();
+    assert!(audit(&[], &priors, std::slice::from_ref(&tri), 1));
+    assert!(!audit(&[], &priors, &[tri], 2));
 }

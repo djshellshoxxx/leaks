@@ -14,7 +14,13 @@
 #   * `allow(clippy::disallowed_*)` outside candor-safefs (opting out of the
 #     clippy gate) and crate-local clippy.toml files (which replace the
 #     workspace configuration);
-#   * a grep layer for direct fs/rustix/libc/nix calls and path joins.
+#   * a grep layer for direct fs/rustix/libc/nix calls and path joins;
+#   * AUD-RM1-SFS-11: `std::env::temp_dir`, path composition through
+#     `extend`/`set_extension`, process spawning (`Command::new`) and the
+#     `tempfile` crate outside `[dev-dependencies]` (non-test code cannot
+#     use a dev-dependency, so the manifest check suffices; clippy covers the
+#     type-resolved calls; `PathBuf::extend` is a trait method that clippy's
+#     `disallowed-methods` cannot name, so the grep layer carries it).
 #
 # Usage: lint-safefs.sh [--include-tests] [WORKSPACE_ROOT]
 #   default root: three levels above this script (the workspace root).
@@ -53,7 +59,13 @@ rust_patterns=(
   '(^|[^A-Za-z0-9_])fs::(File|OpenOptions|DirBuilder|write|read|read_to_string|read_dir|read_link|create_dir|create_dir_all|remove_file|remove_dir|remove_dir_all|rename|copy|hard_link|soft_link|symlink_metadata|metadata|canonicalize|set_permissions|exists)\b'
   '\bos::(unix|windows)::fs::symlink'
   '\bPath(Buf)?::(join|push|with_file_name|with_extension)\b'
-  '[A-Za-z0-9_]*([Pp]ath|[Dd]ir|[Rr]oot|[Bb]ase|[Dd]est|[Dd]st|[Tt]arget|[Ff]older)[A-Za-z0-9_]*(\(\))?\.(join|push|set_file_name)\('
+  '[A-Za-z0-9_]*([Pp]ath|[Dd]ir|[Rr]oot|[Bb]ase|[Dd]est|[Dd]st|[Tt]arget|[Ff]older)[A-Za-z0-9_]*(\(\))?\.(join|push|set_file_name|set_extension|extend)\('
+  '\benv::temp_dir\b'
+  '\btemp_dir\(\)\.(join|push|extend|set_file_name)\('
+  '\bPathBuf::(from_iter|extend)\b'
+  '\bCommand::new\b'
+  '\bprocess::Command\b'
+
   '\b(tar|zip|cap_std|cap_fs_ext|cap_primitives)::'
   '\bextern crate (tar|zip|flate2)\b'
   '\bextern crate std as\b'
@@ -138,6 +150,29 @@ for f in "${toml_files[@]+"${toml_files[@]}"}"; do
   done <<<"$hits"
 done
 
+# AUD-RM1-SFS-11: the `tempfile` crate is test-only everywhere (including
+# candor-safefs): a non-dev declaration is a violation. Section-aware scan.
+all_tomls=()
+while IFS= read -r -d '' f; do
+  all_tomls+=("$f")
+done < <(find "$root/crates" -mindepth 2 -maxdepth 2 -name Cargo.toml -print0)
+for f in "${all_tomls[@]+"${all_tomls[@]}"}"; do
+  hits="$(awk '
+    /^[[:space:]]*\[/ {
+      sec = $0
+      dev = (sec ~ /dev-dependencies/)
+      dep = (sec ~ /dependencies/)
+      if (!dev && sec ~ /dependencies\.tempfile[[:space:]]*\]/) print FILENAME ":" NR ": " $0
+      next
+    }
+    dep && !dev && ($0 ~ /^[[:space:]]*tempfile[[:space:]]*(=|\.)/ || $0 ~ /package[[:space:]]*=[[:space:]]*"tempfile"/) { print FILENAME ":" NR ": " $0 }
+  ' "$f")" || { echo "lint-safefs: awk failed" >&2; exit 2; }
+  while IFS= read -r hit; do
+    [[ -z "$hit" ]] && continue
+    report "$hit   [tempfile outside [dev-dependencies]]"
+  done <<<"$hits"
+done
+
 # Resolved dependency graph (renames, workspace inheritance, target tables).
 if [[ -f "$root/Cargo.toml" ]] && grep -q '^\[workspace\]' "$root/Cargo.toml"; then
   if ! command -v cargo >/dev/null || ! command -v jq >/dev/null; then
@@ -156,6 +191,15 @@ if [[ -f "$root/Cargo.toml" ]] && grep -q '^\[workspace\]' "$root/Cargo.toml"; t
   while IFS= read -r hit; do
     [[ -z "$hit" ]] && continue
     report "$hit   [banned dependency outside candor-safefs (cargo metadata)]"
+  done <<<"$hits"
+  # shellcheck disable=SC2016
+  jq_tmp='.packages[] as $p | $p.dependencies[]
+    | select(.name == "tempfile" and .kind != "dev")
+    | "\($p.name): non-dev dependency on tempfile"'
+  hits="$(jq -r "$jq_tmp" <<<"$meta")"
+  while IFS= read -r hit; do
+    [[ -z "$hit" ]] && continue
+    report "$hit   [tempfile outside [dev-dependencies] (cargo metadata)]"
   done <<<"$hits"
 fi
 

@@ -473,7 +473,11 @@ pub(crate) fn insertion_order(local_min: Option<u64>, new: &mut [DeletionEntry])
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::cast_possible_truncation)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::cast_possible_truncation,
+        clippy::arithmetic_side_effects
+    )]
     use super::*;
     use crate::types::Day;
 
@@ -725,7 +729,9 @@ mod tests {
         // Identical re-push and a newer attestation are accepted.
         assert!(merge_pushed(&all[..4], Some(&v), &[], &v).is_ok());
         assert_eq!(
-            merge_pushed(&all[..4], Some(&v), &all[4..], &h).unwrap().len(),
+            merge_pushed(&all[..4], Some(&v), &all[4..], &h)
+                .unwrap()
+                .len(),
             2
         );
     }

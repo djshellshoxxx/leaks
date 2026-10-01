@@ -26,7 +26,9 @@ use candor_core::object::{self, SealRequest, SealedObject};
 use candor_core::passphrase::SourceKeys;
 use candor_core::secret::{ContentKey, Secret32, SessionKey};
 use candor_core::sig::{SigningKey, verify_strict};
-use candor_core::slots::{RecipientList, RecipientListEntry, RecipientSlotBlock, SlotBinding, SlotContext};
+use candor_core::slots::{
+    RecipientList, RecipientListEntry, RecipientSlotBlock, SlotBinding, SlotContext,
+};
 use candor_core::stanza::{HpkeWrapContext, WrapStanza};
 use candor_core::stream::{self, CHUNK_SIZE, PartId, StreamDecryptor, StreamEncryptor};
 use candor_core::{Error, Suite, fill_random, labels, padding};
@@ -930,6 +932,7 @@ pub(crate) fn open_reply(
     keys: &SourceKeys,
     prefs: &Prefs,
     entry: &[u8],
+    today: u32,
 ) -> Option<([u8; 32], ReplyInner)> {
     let (len, rest) = entry.split_first_chunk::<4>()?;
     if usize::try_from(u32::from_be_bytes(*len)).ok()? != rest.len() {
@@ -961,8 +964,11 @@ pub(crate) fn open_reply(
             return None;
         }
         let signer = snap.user_key(&inner.sender_entry_hash)?;
+        // VR-7 (approximated, SPEC-NOTES item 14): the signer is a member of
+        // the channel's active roster.
         let in_roster = snap
             .channel(&rep.channel_id)?
+            .active_roster(today)?
             .members
             .iter()
             .any(|m| m.user_id == signer.user_id);

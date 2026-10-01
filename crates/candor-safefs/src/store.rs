@@ -16,6 +16,7 @@ use std::fs::{File, FileTimes};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::fd::AsFd;
 use std::path::{Component, Path};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const TMP_PREFIX: &str = ".tmp-";
 /// Default per-object size cap (07 §4 "Max single object 4 GiB").
@@ -48,6 +49,16 @@ pub struct SafeRoot {
     dev: u64,
     uid: u32,
     max_object_bytes: u64,
+    /// Latest slot (Unix seconds) the root directory times were normalized
+    /// to by this handle (0 = none yet). An abandoned [`PendingObject`]
+    /// normalizes the root to this value instead of restoring times it
+    /// captured, which could be the real creation time of a concurrent
+    /// writer's temp file (AUD-RM1-SFS-10). Only ever increases
+    /// (`fetch_max`), so out-of-order drops cannot roll the root back.
+    settled_secs: AtomicU64,
+    /// The root's mtime at open floored to the slot grid: used by an
+    /// abandoned write before this handle settled anything.
+    open_floor_secs: u64,
 }
 
 impl fmt::Debug for SafeRoot {
@@ -134,6 +145,27 @@ fn settle_dir(dir: &Dir, slot: SlotTime) -> Result<(), SafeFsError> {
 }
 
 impl SafeRoot {
+    /// Normalizes the root directory's times to `slot` and records it as
+    /// the latest settled slot (AUD-RM1-SFS-10).
+    fn settle_root(&self, slot: SlotTime) -> Result<(), SafeFsError> {
+        let v = self
+            .settled_secs
+            .fetch_max(slot.unix_secs(), Ordering::SeqCst)
+            .max(slot.unix_secs());
+        // Normalize to the latest settled slot, not to `slot`: an older slot
+        // passed by a late caller must not move the root backwards.
+        settle_dir(&self.dir, SlotTime::from_unix_secs(v).unwrap_or(slot))
+    }
+
+    /// The slot an abandoned write normalizes the root to.
+    fn settled_slot(&self) -> Option<SlotTime> {
+        let v = match self.settled_secs.load(Ordering::SeqCst) {
+            0 => self.open_floor_secs,
+            v => v,
+        };
+        SlotTime::from_unix_secs(v).ok()
+    }
+
     /// Opens a storage root.
     ///
     /// The path must be absolute, every component must be a real directory
@@ -176,12 +208,18 @@ impl SafeRoot {
         check_private_dir(&st, uid, None).map_err(|_| {
             SafeFsError::RootPolicy("root must be a 0700 directory owned by the service user")
         })?;
+        // Floor the existing mtime to the slot grid: never re-publish a
+        // finer value than the grid, even if an earlier crash left one.
+        let mtime = u64::try_from(st.st_mtime).unwrap_or(0);
+        let settled = mtime.saturating_sub(mtime % crate::time::SLOT_GRANULARITY_SECS);
         Ok(Self {
             dir,
             policy,
             dev: st.st_dev,
             uid,
             max_object_bytes: DEFAULT_MAX_OBJECT_BYTES,
+            settled_secs: AtomicU64::new(0),
+            open_floor_secs: settled,
         })
     }
 
@@ -226,18 +264,6 @@ impl SafeRoot {
 
     fn pending(&self, naming: Naming) -> Result<PendingObject<'_>, SafeFsError> {
         let tmp_name = format!("{TMP_PREFIX}{}", ObjectId::random()?.to_name());
-        let root_times = fstat(&self.dir).ok().map(|st| {
-            (
-                rustix::fs::Timespec {
-                    tv_sec: st.st_atime,
-                    tv_nsec: st.st_atime_nsec as _,
-                },
-                rustix::fs::Timespec {
-                    tv_sec: st.st_mtime,
-                    tv_nsec: st.st_mtime_nsec as _,
-                },
-            )
-        });
         let mut opts = OpenOptions::new();
         opts.write(true)
             .create_new(true)
@@ -252,7 +278,6 @@ impl SafeRoot {
             naming,
             written: 0,
             poisoned: false,
-            root_times,
         };
         if let Some(f) = pending.file.as_ref() {
             check_plain_file(&fstat(f)?, self.uid, self.dev)?;
@@ -279,7 +304,7 @@ impl SafeRoot {
                     Err(e) => return Err(e.into()),
                 }
                 let d = self.dir.open_dir_nofollow(&name)?;
-                settle_dir(&self.dir, slot)?;
+                self.settle_root(slot)?;
                 d
             }
             Err(e) => return Err(map_nofollow_err(e)),
@@ -339,7 +364,11 @@ impl SafeRoot {
     pub fn remove(&self, id: &ObjectId, slot: SlotTime) -> Result<(), SafeFsError> {
         let shard = self.shard_dir(id, None)?;
         shard.remove_file(id.to_name())?;
-        settle_dir(&shard, slot)
+        if self.policy.sharded() {
+            settle_dir(&shard, slot)
+        } else {
+            self.settle_root(slot)
+        }
     }
 
     /// Removes leftover temp files from interrupted writes (call at
@@ -360,7 +389,7 @@ impl SafeRoot {
             self.dir.remove_file(n)?;
         }
         if !names.is_empty() {
-            settle_dir(&self.dir, slot)?;
+            self.settle_root(slot)?;
         }
         Ok(names.len())
     }
@@ -433,9 +462,6 @@ pub struct PendingObject<'a> {
     /// hash/length state, so the object can never be committed
     /// (AUD-RM1-SFS-07).
     poisoned: bool,
-    /// Root directory times before the temp file was created, restored if
-    /// the object is abandoned (AUD-RM1-SFS-03).
-    root_times: Option<(rustix::fs::Timespec, rustix::fs::Timespec)>,
 }
 
 impl fmt::Debug for PendingObject<'_> {
@@ -514,7 +540,7 @@ impl PendingObject<'_> {
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                 root.dir.remove_file(&self.tmp_name)?;
                 self.tmp_name.clear();
-                settle_dir(&root.dir, slot)?;
+                root.settle_root(slot)?;
                 return if dedup {
                     Ok(id)
                 } else {
@@ -524,10 +550,10 @@ impl PendingObject<'_> {
             Err(e) => return Err(e.into()),
         }
         self.tmp_name.clear();
-        settle_dir(&shard, slot)?;
         if root.policy.sharded() {
-            settle_dir(&root.dir, slot)?;
+            settle_dir(&shard, slot)?;
         }
+        root.settle_root(slot)?;
         Ok(id)
     }
 }
@@ -538,39 +564,17 @@ impl Drop for PendingObject<'_> {
         if !self.tmp_name.is_empty() {
             // Best effort: purge_incomplete() handles crashes.
             if self.root.dir.remove_file(&self.tmp_name).is_ok()
-                && let Some((atime, mtime)) = self.root_times
+                && let Some(slot) = self.root.settled_slot()
             {
                 // Creating and removing the temp file moved the root's
-                // mtime to the real abort time; put back the (slot-
-                // normalized) times it had before (AUD-RM1-SFS-03).
-                let _ = restore_dir_times(&self.root.dir, atime, mtime);
+                // mtime to the real abort time. Normalize it to the latest
+                // settled slot, never to a captured value: under concurrent
+                // writers a captured mtime is another temp file's real
+                // creation time (AUD-RM1-SFS-03, AUD-RM1-SFS-10).
+                let _ = settle_dir(&self.root.dir, slot);
             }
         }
     }
-}
-
-fn restore_dir_times(
-    dir: &Dir,
-    atime: rustix::fs::Timespec,
-    mtime: rustix::fs::Timespec,
-) -> Result<(), SafeFsError> {
-    use rustix::fs::{Mode, OFlags, Timestamps};
-    let fd = rustix::fs::openat(
-        dir,
-        ".",
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
-        Mode::empty(),
-    )
-    .map_err(|e| SafeFsError::from(io::Error::from(e)))?;
-    rustix::fs::futimens(
-        &fd,
-        &Timestamps {
-            last_access: atime,
-            last_modification: mtime,
-        },
-    )
-    .map_err(|e| SafeFsError::from(io::Error::from(e)))?;
-    rustix::fs::fsync(&fd).map_err(|e| SafeFsError::from(io::Error::from(e)))
 }
 
 fn rename_noreplace(from: &Dir, old: &str, to: &Dir, new: &str) -> io::Result<()> {

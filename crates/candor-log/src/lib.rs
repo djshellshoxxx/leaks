@@ -15,7 +15,8 @@
 //! * [`sink`]: sink trait, in-memory store, JSON-lines file sink.
 //! * [`export::ScrubbedExport`]: SIEM allow-list (20 §13, C-26).
 //! * [`metrics`]: SOURCE-SENSITIVE counters released only under 24 §TEL
-//!   (k = 10, monthly, complementary suppression, magnitude rules).
+//!   (k = 10, monthly, complementary suppression; counts only, no
+//!   magnitude statistics).
 //! * [`diag!`]: restricted developer diagnostics (static message + closed
 //!   codes only, 20 §7); [`schema`]: the `audit/schema.yaml` registry
 //!   (LOG-014).

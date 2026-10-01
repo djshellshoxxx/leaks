@@ -352,3 +352,118 @@ fn debug_output_has_no_path_or_size() {
     let d = format!("{w:?}");
     assert!(!d.contains("4321"), "{d}");
 }
+
+// AUD-RM1-SFS-10 regression: with two overlapping pending objects, dropping
+// either one must leave the root at a slot-aligned time, never at the real
+// creation time of the other writer's temp file (which the old code captured
+// and restored), and out-of-order drops must not roll the root back.
+#[test]
+fn overlapping_pending_objects_leave_root_at_slot_time() {
+    let e = env();
+    let r = e.root(RootPolicy::Staging);
+    r.put_random(b"x", slot()).unwrap();
+    std::thread::sleep(Duration::from_millis(20));
+    let mut a = r.create_random().unwrap();
+    a.write_all(b"first").unwrap();
+    std::thread::sleep(Duration::from_millis(20));
+    // The root mtime is now the real creation time of a's temp file.
+    let real = std::fs::metadata(&e.root_path).unwrap();
+    assert_ne!(real.mtime() as u64, SLOT);
+    let mut b = r.create_random().unwrap();
+    b.write_all(b"second").unwrap();
+    drop(b);
+    let md = std::fs::metadata(&e.root_path).unwrap();
+    assert_eq!(md.mtime() as u64, SLOT, "root leaks a writer's real time");
+    assert_eq!(md.mtime_nsec(), 0);
+    assert_eq!(md.atime() as u64, SLOT);
+    // A later commit at a newer slot, then the older writer is dropped:
+    // the root must stay at the newer slot (no roll-back).
+    let newer = SlotTime::from_unix_secs(SLOT + 900).unwrap();
+    r.put_random(b"y", newer).unwrap();
+    drop(a);
+    let md = std::fs::metadata(&e.root_path).unwrap();
+    assert_eq!(md.mtime() as u64, SLOT + 900);
+    assert_eq!(md.mtime_nsec(), 0);
+    // An older slot passed later does not move the root backwards either.
+    r.put_random(b"z", slot()).unwrap();
+    assert_eq!(
+        std::fs::metadata(&e.root_path).unwrap().mtime() as u64,
+        SLOT + 900
+    );
+    assert_eq!(r.purge_incomplete(slot()).unwrap(), 0);
+}
+
+// IMPL-RM1 §1.6 Verify item / AUD-RM1-SFS-08 deferral: no inode is created,
+// renamed, written or deleted outside the root while the store and the
+// extractor work, observed with inotify on the directories around the root
+// (the temp base that holds the root and the canary directory next to it).
+#[cfg(target_os = "linux")]
+#[test]
+fn no_inode_activity_outside_root_inotify() {
+    use candor_safefs::archive::{ExtractOptions, extract_zip};
+    use rustix::fs::inotify::{self, CreateFlags, ReadFlags, WatchFlags};
+    use std::mem::MaybeUninit;
+
+    let e = env();
+    let base = e.root_path.parent().unwrap().to_path_buf();
+    let fd = inotify::init(CreateFlags::NONBLOCK | CreateFlags::CLOEXEC).unwrap();
+    let watched = WatchFlags::CREATE
+        | WatchFlags::DELETE
+        | WatchFlags::MOVED_FROM
+        | WatchFlags::MOVED_TO
+        | WatchFlags::MODIFY
+        | WatchFlags::CLOSE_WRITE
+        | WatchFlags::DELETE_SELF
+        | WatchFlags::MOVE_SELF;
+    inotify::add_watch(&fd, &base, watched).unwrap();
+    inotify::add_watch(&fd, &e.outside, watched).unwrap();
+
+    // Store operations on both layouts.
+    let blob = e.root(RootPolicy::BlobStore);
+    let id = blob.put_random(b"ciphertext", slot()).unwrap();
+    let key = ContentKey::from_bytes([7; 32]);
+    let mut w = blob.create_content_addressed(&key).unwrap();
+    w.write_all(b"content").unwrap();
+    w.commit(slot()).unwrap();
+    {
+        let mut abandoned = blob.create_random().unwrap();
+        abandoned.write_all(b"partial").unwrap();
+    }
+    blob.remove(&id, slot()).unwrap();
+    blob.purge_incomplete(slot()).unwrap();
+    // Hostile archive: traversal towards the watched canary directory.
+    let scratch = e.root(RootPolicy::Scratch);
+    let a = zip(&[
+        z(b"../outside/evil.txt", b"pwn"),
+        z(b"../../outside/evil2.txt", b"pwn"),
+        z(b"/tmp/evil3", b"pwn"),
+        z(b"ok.txt", b"fine"),
+    ]);
+    let rep = extract_zip(
+        std::io::Cursor::new(a),
+        &scratch,
+        &ExtractOptions::new(slot()),
+    )
+    .unwrap();
+    assert_eq!(rep.members.len(), 1);
+
+    let mut buf = [MaybeUninit::uninit(); 4096];
+    let mut rd = inotify::Reader::new(&fd, &mut buf);
+    let mut seen = Vec::new();
+    loop {
+        match rd.next() {
+            Ok(ev) => {
+                // Only the existing root directory entry may be touched (its
+                // own times); nothing may be created/renamed/written/deleted.
+                let name = ev.file_name().map(|n| n.to_string_lossy().into_owned());
+                if !ev.events().is_empty() && !ev.events().contains(ReadFlags::IGNORED) {
+                    seen.push((name, ev.events()));
+                }
+            }
+            Err(rustix::io::Errno::WOULDBLOCK) => break,
+            Err(err) => panic!("inotify read: {err}"),
+        }
+    }
+    assert!(seen.is_empty(), "inode activity outside the root: {seen:?}");
+    assert!(e.files_outside_root().is_empty());
+}

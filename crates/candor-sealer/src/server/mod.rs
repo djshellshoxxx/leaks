@@ -12,6 +12,8 @@
 pub mod clock;
 pub mod directory;
 pub mod hardening;
+pub mod kd;
+pub mod merkle;
 pub mod sink;
 
 mod inner;
@@ -370,7 +372,7 @@ impl Sealer {
             || cfg.limits.argon_permits == 0
             || cfg.limits.max_connections == 0
             || cfg.directory_trust.tenant_id != cfg.tenant_id
-            || cfg.directory_trust.log_keys.is_empty()
+            || cfg.directory_trust.org_root_pk == [0u8; 32]
             || cfg.directory_trust.min_external > cfg.directory_trust.min_cosignatures
         {
             return Err(StartError::Config);
@@ -450,8 +452,13 @@ impl Sealer {
         persist: impl FnOnce(&HighWaterMark) -> bool,
     ) -> Result<(), SnapshotError> {
         let mut h = lock(&self.st.hwm);
-        let verified =
-            VerifiedSnapshot::verify(bundle, &self.st.cfg.directory_trust, self.st.cfg.suite, &h)?;
+        let verified = VerifiedSnapshot::verify(
+            bundle,
+            &self.st.cfg.directory_trust,
+            self.st.cfg.suite,
+            &self.st.cfg.deployment_salt,
+            &h,
+        )?;
         if verified.base() != *h {
             return Err(SnapshotError::Stale);
         }
@@ -1077,7 +1084,9 @@ impl Sealer {
     > {
         let (today, slot) = self.slot_today()?;
         let snap = self.snapshot().ok_or_else(|| err(ErrorCode::Unavailable))?;
-        let alt = snap.channel(channel_id).and_then(|c| c.independent_route);
+        let alt = snap
+            .channel(channel_id)
+            .and_then(|c| c.independent_route(today));
         let unavailable = Response::Error {
             code: ErrorCode::Unavailable,
             alternative_channel_id: alt,
@@ -1301,11 +1310,15 @@ impl Sealer {
         let Some(snap) = self.snapshot() else {
             return err(ErrorCode::Unavailable);
         };
+        let today = match self.slot_today() {
+            Ok((d, _)) => d,
+            Err(e) => return e,
+        };
         let tenant = self.st.cfg.tenant_id;
         let r = tokio::task::spawn_blocking(move || {
             let mut g = g;
             let opened = match (g.keys.as_ref(), g.prefs.as_ref()) {
-                (Some(k), Some(p)) => seal::open_reply(&snap, tenant, k, p, &entry),
+                (Some(k), Some(p)) => seal::open_reply(&snap, tenant, k, p, &entry, today),
                 _ => None,
             };
             let Some((mailbox, inner)) = opened else {

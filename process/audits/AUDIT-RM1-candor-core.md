@@ -343,3 +343,126 @@ Toolchain `1.94.1` (cargo 1.94.1, clippy 0.1.94); nightly `nightly-2026-09-28`. 
 ## Gate
 
 Not signed. Gate is blocked by six open Medium findings (AUD-RM1-CORE-01..06), which need a fix and re-test (§G) or written acceptance by the lead auditor (§F.2). No Critical or High findings.
+
+---
+
+## Re-test (round 2) — 2026-10-01
+
+| Field | Value |
+|---|---|
+| Re-tested commit | `0d486a91c11bce682facdf62a8b9babeb5337d17` (candor-core code identical to `92028a9` + the `SPEC-NOTES.md` working-tree edits reviewed; only `SPEC-NOTES.md` changed in between) |
+| Delta | `git diff 60e732f..0d486a9 -- crates/candor-core`: 61 files, +26,144/−278 (src 13 files; new `src/wycheproof.rs`, `tests/ct_timing.rs`, 3 fuzz targets, `fuzz/seeds/`, Wycheproof JSON) |
+| Procedure | §G steps 1–6. Every fix diff was read (T0 depth). Variant hunt covered the remaining raw-key and nonce paths, `SealSecrets`/`RecipientList` flows, runtime `PartId` reuse, and sealer call sites. All §C tools were re-run with isolated target dirs and scratch fuzz corpora (seeds copied from `fuzz/seeds/`; nothing written to the repo) |
+
+### Tool re-runs (round 2)
+
+| Tool | Result | Triage |
+|---|---|---|
+| `cargo test -p candor-core --locked` | 113 passed, 0 failed (95 unit, 1 ct_timing, 4 KAT, 3 label-registry, 4 properties, 6 vectors) | — |
+| `cargo +nightly-2026-09-28 careful test -p candor-core` | 113 passed | — |
+| clippy deny set `--all-targets --all-features -D warnings` | **FAILS**: 8 errors, all `disallowed_methods`/`disallowed_macros` from the workspace `clippy.toml` (added after round 1 by `ba3cdfd`) in test-only code: `tests/label_registry.rs:29,39` (`std::fs`), `tests/ct_timing.rs:108,122,138` (`println!`), `src/vectors.rs:616-619` (`std::fs`, cfg(test)) | → AUD-RM1-CORE-18 |
+| clippy audit extras (lib) | 4 `as_conversions` (the same fieldless-enum discriminant FPs as round 1); no indexing, arithmetic or cast hits | FP (unchanged) |
+| `ct_timing` (debug, as shipped) | control 1090; ct_eq 1.63, header MAC 1.12, STREAM tag 1.39, X-Wing 1.67, `Wordlist::check` 1.42 | — |
+| `ct_timing --release` (×6) | control 1277; ct_eq 1.2–2.1; header MAC 0.95; **STREAM tag 6.9–9.4** (threshold 10); X-Wing 2.30; `Wordlist::check` 1.24 | A controlled experiment (`t0` vs `t0`-copy ≤ 2.0, `t15` vs `t15`-copy ≤ 3.5, `t0` vs `t15` sign flips with seed and order) shows environment drift on this shared 4-core host, not a leak. The tag compare is `subtle` (`universal-hash 0.6.1` `verify` → `ct_eq`). Test validity → AUD-RM1-CORE-19 |
+| cargo-fuzz, 9 targets × 150 s, seeds + README `-max_len` | No crash, leak, OOM or timeout. cov/execs: envelope_parse 2,464/141 k; header 170/34.1 M; hpke_open 1,332/49.5 k; normalize 617/300 k; recipient_entry 212/20.6 M; record 571/3.1 M; slot_block 1,876/2.2 k; stanza 1,987/834 k; stream_decrypt 704/526 k | Deep paths are now reached: slot_block cov 40 → 1,876, stanza 64 → 1,987, envelope 126 → 2,464. `fuzz_slot_block` runs ≈ 15 exec/s (16 decapsulations per input), so it needs long CI runs (ST-040 threshold) |
+| Wycheproof provenance | All 6 full files byte-identical to `C2SP/wycheproof@3fa63dd0` `testvectors_v1/` (SHA-256 recomputed from upstream). The ML-KEM subset: all 136 tests occur verbatim upstream, and all 132 upstream invalid tests are included | Verified |
+| cargo-audit 0.22.1 | 0 vulnerabilities (1,278 advisories) | — |
+| cargo-deny 0.20.2 | advisories ok, **bans ok**, licenses ok, sources ok | Round-1 workspace `sha2` failure resolved |
+| cargo-vet | Workspace still has unvetted crates; none of the 66 crates in candor-core's normal/build tree is among them | — |
+| cargo-geiger | candor-core 0 unsafe (forbid); dependency set unchanged (`x25519-dalek` is dev-only) | — |
+| Miri | Not re-run by the auditor (round-1 attempt hit the timeout under Miri on this host). The builder records 37 parser tests clean in SPEC-NOTES; accepted as builder evidence only | Optional for a forbid-unsafe crate (§C) |
+| `cargo check -p candor-sealer` | Compiles against the new API | Variant hunt below |
+
+### Per-finding status
+
+| ID | Sev. | Round-2 status | Verification notes |
+|---|---|---|---|
+| CORE-01 | M | **Fixed** (60e732f→0d486a9; tests `recipient_entries_are_secret`, `submission_end_to_end`) | `RecipientListEntry` has private fields, no `enc_rand` accessor, `Zeroize + ZeroizeOnDrop`, no `Clone`/`PartialEq` (constant-time `ct_eq`), redacted `Debug` and `to_bytes() -> Zeroizing<[u8;97]>`. Entries are filled in place in a pre-sized `Vec` (no sort/collect). `SealedObject` no longer carries entries. `SealSecrets`/`RecipientList` are not `Clone` and have redacted `Debug`. `seal_base_with_randomness` takes `&[u8;64]`. `from_bytes` errors drop a zeroizing value. Variant: the sealer copies `to_bytes()` output into its CBOR encoder (`candor-sealer/src/server/seal.rs:428-445`). Whether that buffer is zeroizing belongs to the sealer audit |
+| CORE-02 | M | **Fixed, residual accepted by design** (test `argon2_arena_is_wiped`) | `Argon2Arena` (`Zeroizing<Vec<Block>>`, `try_reserve_exact`, no growth) goes to `hash_password_into_with_memory`, is wiped after success or error and zeroized on drop. `derive_in` allows a long-lived mlocked arena. The mlock residual is moved to the process (`mlockall`/`LimitMEMLOCK`, swap off), which matches 04 §11.5 and 17 INFRA-013. The sealer and Source App audits must confirm it |
+| CORE-03 | M | **Fixed** (tests `generate_never_reallocates`, `lowercase_fixed_never_reallocates`, `normalize_rejects_overlong`, proptest `normalize_matches_reference`) | Fixed-capacity buffers with bounded pushes that fail closed. The 18× byte bound is safe: the worst NFKC byte expansion is U+FDFA, 3 → 33 bytes. `lowercase_fixed` was reviewed. The KELVIN-SIGN shrink padding keeps every prefix ≤ capacity (needs max growth ≤ 2·pads; it is), and Final_Sigma is unaffected because U+0020 is neither cased nor case-ignorable. It relies on `str::to_lowercase` reserving `len` (std implementation detail; the capacity test catches a change) → Info AUD-RM1-CORE-20. Residual: `unicode-normalization` spill buffer (> 4 combining marks; unreachable for wordlist passphrases) |
+| CORE-04 | M | **Fixed** (tests `payload_encryptor_fresh_nonce_roundtrip`, `staged_part_id_is_single_use`, `encryptor_enforces_lengths`) | No public encrypt constructor takes a key or nonce. `derive_payload_key`/`derive_stage_part_key` are `pub(crate)`; raw `encrypt` is cfg(test). `for_payload` draws the nonce internally. `PartId` is CSPRNG-only, not `Clone`, cannot be built from bytes, and `for_staged_part` single use is enforced by `AtomicBool::swap` (fails closed). Variant hunt: the remaining public AEAD-encrypt APIs (`record::seal_record`, stanzas, HPKE) all use fresh random nonces or encapsulations; `StreamDecryptor::new(AeadKey)` is decrypt-only; the chaff `seal_with_ck` path still draws a fresh `payload_nonce`; the sealer uses `for_payload`/`for_staged_part` (seal.rs:71-84, 271). Runtime `PartId` reuse is impossible without the same object, and a retry on the same object errors. Uniqueness argument documented |
+| CORE-05 | M | **Fixed (a–d); (e) residual** | (a) `fuzz_hpke_open`, `fuzz_recipient_entry`, `fuzz_normalize` added; HPKE open, trial-open and `verify_slot_block` are reached (see coverage). (b) Wycheproof verified against upstream (above). (c) `single_slot_substitution_rejected_for_every_k` covers 16 positions × 3 replacement kinds. (d) `ct_timing` added; validity limits → AUD-RM1-CORE-19. (e) ST-027 zeroization scan is not automated; type-level guarantees and arena/capacity tests partly substitute → tracked in AUD-RM1-CORE-19 |
+| CORE-06 | M | **Fixed** (seeds + `vectors::fuzz_seeds_are_current`; coverage above) | Structure-aware harnesses with fixed keys (`common.rs`), committed seeds, per-target `-max_len`. The envelope target checks MAC-before-release and buffered/chunked agreement |
+| CORE-07 | L | **Fixed** (residual: compiler stack temporaries) | PRK array wiped; AEAD keys via `new_from_slice`; `KemPrivateKey::to_bytes` intermediate wiped; dummy-slot `r`/`eseed` are guards; `EvidenceHasher` zeroizes its BLAKE3 state, and SHA-256 via `sha2/zeroize`. The `rand_chacha` state holding `r` is not wiped → Info AUD-RM1-CORE-20 |
+| CORE-08 | L | **Fixed** (`check_constant_time_semantics`; ct_timing \|t\| ≈ 1.2–1.4) | Every token is compared with every 33-byte slot via `subtle`, with no early exit; only the token count (public) branches |
+| CORE-09 | L | **Fixed** | Duplicate `key_id` and > 1 custodian entry are rejected in `verify_slot_block` and `build`; `check_context` enforces IDENTITY ⇔ custodian and tenant/channel/epoch equality; `slot_binding_from_header()` added |
+| CORE-10 | L | **Fixed** (`prefix_pairs_are_injective`) | The test enumerates shared-use prefix pairs (4), asserting different total lengths and a non-colliding next byte; new pairs fail until argued |
+| CORE-11 | L | **Fixed** | Redacted `Debug` for `EvidenceHashes`, `HpkeWrapContext`, `RecordAad`, `ParsedObject`, `SealedObject` (type and lengths only) |
+| CORE-12 | L | **Fixed** (`stuck_high_rng_fails_closed`, `stuck_rng_fails_closed`) | 128-rejection bound → `Error::Rng`; an all-same-index passphrase → `Error::Rng` |
+| CORE-13 | I | **Partially fixed; deferral acceptable** | `open_bounded` added. The `Verified<T>` typestate and closure-scoped chunk API are deferred to the RM-2 API review. Chunk release is spec-allowed and documented. Tracked; non-blocking |
+| CORE-14 | I | **Fixed** (`wycheproof_x25519_and_xwing_pk_validation`) | Rejects top-bit-set, ≥ p, and the 5 canonical low-order u-coordinates (0, 1, two order-8 points, p−1). List checked against RFC 7748 / libsodium |
+| CORE-15 | I | **Deferred; acceptable with a hard precondition** | Only STD exists, and `open_record` rejects non-STD suites. Binding `version‖suite‖key_version` (format v2) must land **before** any second suite is enabled. Track as a release blocker for FIPS |
+| CORE-16 | I | **(b) Fixed** (HPKE-PQ open KAT + tamper check in `self_test`); **(a) deferred; acceptable**; (c) n/a | A strict deterministic-CBOR decoder belongs with the consumer schemas. The sealer already has `proto/cbor.rs`; Desk/C-03 need one before they parse §13.4/13.5 (track in RM-2/RM-3) |
+
+### New findings (round 2)
+
+### AUD-RM1-CORE-17 — §11.3 `normalize` is not idempotent; wordlists are not checked for fixed points
+- Severity: Low
+- Location: crates/candor-core/src/passphrase.rs (`normalize`, `Wordlist::from_words`) (commit 0d486a9)
+- Category: B2.10 (+ CWE-176)
+- Description: confirmed. `normalize("\u{0130}\u{031F}") = "i\u{0307}\u{031F}"`, and a second pass reorders the marks to `"i\u{031F}\u{0307}"`. NFKC runs before full lowercasing, and U+0130's lowercase (`i U+0307`) followed by a mark of lower canonical class is not in NFKC order. `normalize∘normalize` is stable (a third pass changes nothing). Only U+0130 has an unconditional multi-code-point lowercase mapping, so the non-idempotent set is narrow: U+0130 followed by a combining mark with 0 < ccc < 230. Examples in the passphrase alphabet are U+0130+U+0323 (which NFKC composes first, so it is idempotent) and Turkish input such as `KİWİ` (idempotent, but normalizes to `ki̇wi̇`, not `kiwi`).
+- **Security impact (answer to the coordinator's question).** Derivation is a pure function of the raw input bytes: the same keystrokes always derive the same keys. Non-idempotence never merges two different passphrases (no collision, no entropy loss), so confidentiality and anonymity are unaffected. What it can do is *split* one passphrase: two entries derive different keys, and so different `lookup_tag`s and accounts, only if some layer normalizes twice. Examples: a client pre-normalizes before sending to C-07; the Source App stores or displays `normalize(p)` and later derives from it; two implementations (Rust C-07, WASM C-03) differ in Unicode version or normalization order. The result is a source lockout (availability), and only for passphrases containing U+0130 + marks. The EFF list is ASCII and every ASCII output is a fixed point (fuzzed), so the shipped default is unaffected. A localized list could contain a non-fixed-point word, which `from_words` does not reject. Such a word would make `Wordlist::check` fail for generated passphrases, although derivation would stay self-consistent.
+- Exploit scenario: no adversarial gain. The risk is an integration bug causing lockout of a source using a future localized list.
+- Fix recommendation:
+  - `Wordlist::from_words` must reject any word `w` with `normalize(normalize(w)) != normalize(w)`, and any list where two words are equal after double normalization.
+  - Document the contract "normalize exactly once, on the raw input, in every component; never derive from or transmit a normalized form that will be normalized again".
+  - Pin the Unicode version used by both `unicode-normalization` and std lowercasing, and add a cross-implementation vector containing U+0130/U+031F.
+  - The proposed spec amendment (`separators ∘ NFKC ∘ lowercase ∘ NFKC`, or `toNFKC_Casefold`) is endorsed. It changes derived keys only for non-fixed-point inputs, none of which are reachable from the shipped list, so it should be decided before the first localized list ships.
+- Spec / requirement reference: 04 §11.1(a), §11.3; ADR-047(6); ST-053.
+- Status: Open
+
+### AUD-RM1-CORE-18 — Clippy deny run fails on test code under the workspace `clippy.toml`
+- Severity: Low
+- Location: crates/candor-core/tests/label_registry.rs:29,39; crates/candor-core/tests/ct_timing.rs:108,122,138; crates/candor-core/src/vectors.rs:616-619 (cfg(test)) (commit 0d486a9)
+- Category: B1.3/B6.1 tooling; §F.4 (all tools clean)
+- Description: `cargo clippy -p candor-core --all-targets --all-features -- -D warnings` fails with 8 `disallowed_methods` (`std::fs::*`) and `disallowed_macros` (`println!`) errors. The workspace `clippy.toml` (ADR-027 / LOG-001) now applies to test targets. The `// safefs-lint: allow` comments satisfy the repo lint but not clippy. All hits are test-only: there is no production impact, but the §C gate run is not clean.
+- Fix recommendation: add scoped `#[allow(clippy::disallowed_methods)]` / `#[allow(clippy::disallowed_macros)]` with a justification comment on these test functions (or print via `eprintln!` behind the same allow), and re-run the deny set.
+- Spec / requirement reference: AUDIT-CHECKLIST §C, §F.4; BUILD-BRIEF rule 7.
+- Status: Open
+
+### AUD-RM1-CORE-19 — Constant-time and zeroization evidence is weaker than the gate needs (ST-026/ST-027)
+- Severity: Low
+- Location: crates/candor-core/tests/ct_timing.rs (whole file); SPEC-NOTES CORE-05(e) (commit 0d486a9)
+- Category: B12.1, B3.6, B3.2
+- Description:
+  - (a) `ct_timing` runs in the debug profile under plain `cargo test`. Constant-time behaviour must be measured on optimized code: the release profile changes the results, for example STREAM tag 1.4 → 6.9–9.4.
+  - (b) Classes are fixed-vs-fixed with a fixed class schedule seed and small sample counts (150–2,000). In release, the STREAM tag check sits at |t| 7–9 against a pass threshold of 10 on code that is constant-time by inspection (`subtle` in `universal-hash`). My control experiment attributes this to host drift. So the test has low power for real small leaks and is close to flaky for constant-time code.
+  - (c) The test can be silently skipped with `CANDOR_SKIP_CT_TIMING=1`.
+  - (d) ST-027 (zeroization scan) is not automated (CORE-05(e)).
+- Fix recommendation:
+  - Run ct_timing in a dedicated release-profile CI job on a pinned, quiet runner.
+  - Use dudect's fixed-vs-random classes with ≥ 10^5–10^6 measurements and repeated runs, and report the max |t| over runs as an artifact (advisory), not as a flaky unit-test gate.
+  - Fail CI if the job is skipped on the release branch.
+  - For ST-027, add an out-of-crate harness (allow-listed `unsafe` crate or Miri-based heap inspection) that seals/derives and scans freed allocations for known secret patterns, or record a written acceptance with its expiry.
+- Spec / requirement reference: ST-026, ST-027; IMPL-RM1 §1.2 Verify; 04 §23.1–23.2.
+- Status: Open
+
+### AUD-RM1-CORE-20 — Minor residuals in the fixes
+- Severity: Info
+- Location: crates/candor-core/src/slots.rs (`dummy_slot`: `rand_chacha::ChaCha20Rng::from_seed(*r32)`); crates/candor-core/src/passphrase.rs (`lowercase_fixed`) (commit 0d486a9)
+- Category: B3.2
+- Description:
+  - (a) The ChaCha20Rng state, keyed by the CK-derived `r`, is dropped without zeroization (`rand_chacha` has no zeroize). It yields only dummy-slot randomness, and anyone holding CK can recompute it, so the impact is negligible.
+  - (b) `lowercase_fixed` depends on `str::to_lowercase` allocating exactly `len` and growing only past it. This is a std implementation detail, guarded by the capacity test; re-check the test on every toolchain bump.
+  - (c) `fuzz_slot_block` runs at about 15 exec/s, so meaningful ST-040 coverage needs long CI fuzz budgets for this target.
+- Fix recommendation:
+  - Generate the ChaCha20 keystream with `chacha20::ChaCha20` (zeroize feature) instead of `rand_chacha`, which also removes rand_chacha from production.
+  - Keep the capacity tests mandatory.
+  - Give `fuzz_slot_block` a long nightly budget.
+- Status: Open
+
+### Gate verdict (round 2)
+
+All six Medium findings (AUD-RM1-CORE-01..06) are **Fixed** and verified, with the CORE-02 mlock residual assigned to the process per 04 §11.5. All round-1 Lows are Fixed. The Info deferrals (CORE-13 typestate, CORE-15 AAD v2, CORE-16(a) CBOR decoder) are acceptable as tracked items, with CORE-15 a hard precondition for enabling any second suite. Round 2 adds three Lows (CORE-17, -18, -19) and one Info (CORE-20). There are **no open Critical, High or Medium findings**.
+
+§F.4 is **not yet met**: the clippy deny run fails (AUD-RM1-CORE-18, test-only). Once CORE-18 is fixed and the deny run is clean, the step meets §F.1–F.5 for candor-core.
+
+**Gate: CONDITIONAL — PASS on re-run of `cargo clippy -p candor-core --all-targets --all-features -- -D warnings` clean (CORE-18); no other blocker. 2026-10-01 0d486a9.**
+
+## Lead dispositions (2026-10-01)
+- **AUD-RM1-CORE-18 — FIXED (lead):** justified `#[allow(clippy::disallowed_methods/macros)]` on test-only vector/seed regeneration, label-registry scan and the ct_timing harness; `cargo clippy -p candor-core --all-targets --all-features -- -D warnings` clean.
+- **CORE-13, CORE-15, CORE-16(a) — deferrals ACCEPTED as tracked items** with the auditor's conditions (CORE-15 before any second suite; CORE-16(a) before Desk/C-03 parse §13.4/13.5).
+- **CORE-17 (Low) — scheduled:** wordlist loader rejects words that change under a second normalization; spec 04 §11.3 amendment (normalize must be applied exactly once by every component). Tracked for RM-3 entry.
+- **CORE-19 (Low) — ACCEPTED for now:** optimized-build timing runs moved to a dedicated quiet CI runner before RM-6; constant-time comparison verified by code review.
+- **CORE-02 residual / CORE-05(e) ST-027:** process-level memory locking is enforced by the sealer/systemd hardening (ADR-052(5)); ST-027 zeroization scan tracked for RM-1 exit.
+- **Gate: PASS (candor-core).**

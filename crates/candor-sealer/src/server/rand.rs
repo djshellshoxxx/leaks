@@ -94,7 +94,6 @@ pub(crate) fn weighted<T: Copy>(table: &[(T, u32)]) -> Result<T, Error> {
     Err(Error::Internal)
 }
 
-
 #[cfg(test)]
 mod tests {
     #![allow(

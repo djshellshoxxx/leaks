@@ -357,7 +357,7 @@ async fn poisson_schedule_runs_and_real_commits_cancel_events() {
     )
     .unwrap();
     f.sealer
-        .install_snapshot(signed_bundle(f.snapshot.clone(), 0), |_| true)
+        .install_snapshot(f.current_bundle(), |_| true)
         .unwrap();
     let tasks = f.sealer.spawn_background();
     // 4 hours at a mean of 10 minutes: ~24 events.

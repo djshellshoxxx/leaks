@@ -72,6 +72,26 @@ disallowed-methods = [
     { path = "std::path::Path::join", reason = "ADR-027: never compose paths from input; use candor-safefs ids" },
     { path = "std::path::PathBuf::push", reason = "ADR-027: never compose paths from input; use candor-safefs ids" },
     { path = "std::path::Path::with_file_name", reason = "ADR-027: never compose paths from input" },
+    { path = "std::path::Path::with_extension", reason = "ADR-027: never compose paths from input" },
+    { path = "std::path::PathBuf::set_file_name", reason = "ADR-027: never compose paths from input (AUD-RM1-SFS-11)" },
+    { path = "std::path::PathBuf::set_extension", reason = "ADR-027: never compose paths from input (AUD-RM1-SFS-11)" },
+    { path = "std::env::temp_dir", reason = "ADR-027: no ad-hoc temp files; use a candor-safefs staging/scratch root (AUD-RM1-SFS-11)" },
+    { path = "tempfile::tempdir", reason = "ADR-027: test-only crate; use a candor-safefs root (AUD-RM1-SFS-11)", allow-invalid = true },
+    { path = "tempfile::tempdir_in", reason = "ADR-027: test-only crate; use a candor-safefs root (AUD-RM1-SFS-11)", allow-invalid = true },
+    { path = "tempfile::tempfile", reason = "ADR-027: test-only crate; use a candor-safefs root (AUD-RM1-SFS-11)", allow-invalid = true },
+    { path = "tempfile::tempfile_in", reason = "ADR-027: test-only crate; use a candor-safefs root (AUD-RM1-SFS-11)", allow-invalid = true },
+    { path = "tempfile::NamedTempFile::new", reason = "ADR-027: test-only crate; use a candor-safefs root (AUD-RM1-SFS-11)", allow-invalid = true },
+    { path = "tempfile::NamedTempFile::new_in", reason = "ADR-027: test-only crate; use a candor-safefs root (AUD-RM1-SFS-11)", allow-invalid = true },
+    { path = "tempfile::Builder::tempfile", reason = "ADR-027: test-only crate; use a candor-safefs root (AUD-RM1-SFS-11)", allow-invalid = true },
+    { path = "tempfile::Builder::tempdir", reason = "ADR-027: test-only crate; use a candor-safefs root (AUD-RM1-SFS-11)", allow-invalid = true },
+    # Spawning processes passes input to tools outside every gate (rm, tar,
+    # unzip, logger). A crate that must spawn (e.g. tor supervision) adds a
+    # reasoned `#[allow(clippy::disallowed_methods, reason = "..")]` on that
+    # item with a `// safefs-lint: allow(<reason>)` marker on the same line,
+    # which is the per-crate allow-list reviewed in CODEOWNERS
+    # (AUD-RM1-SFS-11, AUD-RM1-LOG-21).
+    { path = "std::process::Command::new", reason = "AUD-RM1-SFS-11/LOG-21: no process spawning outside reviewed, allow-listed sites" },
+    { path = "std::os::unix::process::CommandExt::exec", reason = "AUD-RM1-SFS-11: no process spawning outside reviewed sites" },
     { path = "rustix::fs::open", reason = "ADR-027: use candor-safefs", allow-invalid = true },
     { path = "rustix::fs::openat", reason = "ADR-027: use candor-safefs", allow-invalid = true },
     { path = "rustix::fs::openat2", reason = "ADR-027: use candor-safefs", allow-invalid = true },
@@ -99,6 +119,8 @@ disallowed-methods = [
     { path = "nix::unistd::unlink", reason = "ADR-027: use candor-safefs", allow-invalid = true },
     { path = "std::io::stdout", reason = "LOG-001: no free-text output; use the candor-log typed API" },
     { path = "std::io::stderr", reason = "LOG-001: no free-text output; use the candor-log typed API" },
+    { path = "std::panic::panic_any", reason = "LOG-001 / AUD-RM1-LOG-21: a panic payload reaches stderr/journald" },
+    { path = "std::panic::resume_unwind", reason = "LOG-001 / AUD-RM1-LOG-21: a panic payload reaches stderr/journald" },
 ]
 
 # Archive extraction only through candor-safefs::archive (10 §10).

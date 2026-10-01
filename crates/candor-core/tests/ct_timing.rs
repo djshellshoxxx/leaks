@@ -12,6 +12,7 @@
 //!
 //! Set `CANDOR_SKIP_CT_TIMING=1` to skip on machines too noisy for timing (e.g. heavily
 //! shared CI runners); the skip is printed.
+#![allow(clippy::disallowed_macros, clippy::disallowed_methods)] // test harness: prints timing statistics to stdout for CI diagnosis; not trust-path code
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

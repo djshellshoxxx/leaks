@@ -712,3 +712,66 @@ fn zip_local_central_field_mismatch_rejected() {
         );
     }
 }
+
+// AUD-RM1-SFS-12 regression: local bit 3 (data descriptor) set while the
+// central record has it clear used to skip the CRC/size cross-check; local
+// and central flags must now be identical, and local zip64 sizes must agree.
+#[test]
+fn zip_local_flag_and_zip64_mismatch_rejected() {
+    let e = env();
+    let data = b"hello";
+    let c = crc(data);
+    let n = data.len() as u32;
+    let build = |lflags: u16, lcrc: u32, lcs: u32, lus: u32, extra: &[u8]| {
+        let mut body = local_header(b"a.txt", 0, lflags, lcrc, lcs, lus);
+        // patch the extra-field length and append the extra field
+        let el = (extra.len() as u16).to_le_bytes();
+        body[28] = el[0];
+        body[29] = el[1];
+        body.extend_from_slice(extra);
+        body.extend_from_slice(data);
+        finish_zip(
+            body,
+            &[Cd {
+                name: b"a.txt".to_vec(),
+                method: 0,
+                flags: 0,
+                crc: c,
+                csize: n,
+                usize: n,
+                offset: 0,
+                unix_mode: None,
+            }],
+        )
+    };
+    let run = |a: Vec<u8>| extract_zip(Cursor::new(a), &e.root(RootPolicy::Scratch), &opts());
+    // Control: consistent headers extract.
+    assert!(run(build(0, c, n, n, &[])).is_ok());
+    // Local bit 3 + bogus CRC/sizes: rejected (was accepted).
+    assert!(matches!(
+        run(build(0x0008, 0xdead_beef, 77, 99, &[])),
+        Err(ArchiveError::Malformed(_))
+    ));
+    // Any other flag difference (e.g. bit 11 UTF-8) is rejected too.
+    assert!(matches!(
+        run(build(0x0800, c, n, n, &[])),
+        Err(ArchiveError::Malformed(_))
+    ));
+    // Local zip64 sizes: agreeing values extract; disagreeing or missing
+    // zip64 values are rejected.
+    let z64 = |u: u64, cs: u64| {
+        let mut x = vec![0x01, 0x00, 16, 0];
+        x.extend_from_slice(&u.to_le_bytes());
+        x.extend_from_slice(&cs.to_le_bytes());
+        x
+    };
+    assert!(run(build(0, c, u32::MAX, u32::MAX, &z64(5, 5))).is_ok());
+    assert!(matches!(
+        run(build(0, c, u32::MAX, u32::MAX, &z64(5, 4096))),
+        Err(ArchiveError::Malformed(_))
+    ));
+    assert!(matches!(
+        run(build(0, c, u32::MAX, u32::MAX, &[])),
+        Err(ArchiveError::Malformed(_))
+    ));
+}

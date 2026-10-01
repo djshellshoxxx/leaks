@@ -437,6 +437,36 @@ impl<'a> Dec<'a> {
         Ok(())
     }
 
+    /// Skip one complete item of any supported type (Key Directory entry
+    /// bodies the sealer does not use). Iterative: a pending-item counter, no
+    /// recursion; every head costs one unit of the item budget, so hostile
+    /// lengths or nesting stop at [`CborError::Limit`]. Text must be UTF-8.
+    /// Map key order inside a skipped item is not checked.
+    pub fn skip(&mut self) -> Result<(), CborError> {
+        let mut pending: u64 = 1;
+        while pending > 0 {
+            pending = pending.checked_sub(1).ok_or(CborError::Limit)?;
+            let (major, v) = self.head()?;
+            match major {
+                MAJOR_UINT | 0xe0 => {}
+                MAJOR_BYTES | MAJOR_TEXT => {
+                    let n = usize::try_from(v).map_err(|_| CborError::Limit)?;
+                    let b = self.take(n)?;
+                    if major == MAJOR_TEXT {
+                        core::str::from_utf8(b).map_err(|_| CborError::Utf8)?;
+                    }
+                }
+                MAJOR_ARRAY => pending = pending.checked_add(v).ok_or(CborError::Limit)?,
+                MAJOR_MAP => {
+                    let items = v.checked_mul(2).ok_or(CborError::Limit)?;
+                    pending = pending.checked_add(items).ok_or(CborError::Limit)?;
+                }
+                _ => return Err(CborError::Unsupported),
+            }
+        }
+        Ok(())
+    }
+
     /// All entries of `m` must have been consumed (no unknown keys).
     pub fn end_map(&self, m: MapKeys) -> Result<(), CborError> {
         if m.remaining == 0 {
