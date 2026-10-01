@@ -25,10 +25,9 @@ use std::collections::HashSet;
 use sqlx::{AssertSqlSafe, Connection, PgConnection, Row};
 
 fn base() -> Option<PgConnectOptions> {
-    let Ok(dir) = std::env::var("CANDOR_TEST_PG") else {
-        eprintln!("skipping PostgreSQL test: CANDOR_TEST_PG unset (run scripts/pg-test.sh)");
-        return None;
-    };
+    // Unset: the test returns early and passes trivially (no free-text output
+    // is allowed, LOG-001; run scripts/pg-test.sh to enable the suite).
+    let dir = std::env::var("CANDOR_TEST_PG").ok()?;
     let port = std::env::var("CANDOR_TEST_PG_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
@@ -116,6 +115,8 @@ async fn open(base: &PgConnectOptions, db: &str, tenant: TenantId) -> PgIntakeSt
         .await
         .with_maintenance(maint(base, db, tenant).await)
 }
+
+type ChunkRow = (Vec<u8>, Option<Vec<u8>>, u32);
 
 type Fut = std::pin::Pin<Box<dyn std::future::Future<Output = PgIntakeStore> + Send>>;
 
@@ -768,12 +769,11 @@ async fn pg_uniform_rewrite_xmin() {
 /// databases log at `warning`; every other database logs nothing (`panic`).
 #[tokio::test]
 async fn pg_no_server_errors_on_expected_paths() {
-    let Some(_) = base() else { return };
+    let Some(b) = base() else { return };
     let Ok(log) = std::env::var("CANDOR_TEST_PG_LOG") else {
-        eprintln!("skipping: CANDOR_TEST_PG_LOG unset (run scripts/pg-test.sh)");
         return;
     };
-    let start = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
+    let start = server_log(&b, &log).await.len();
     macro_rules! run {
         ($($f:ident),*) => { $( common::$f(factory_with(true).unwrap()).await; )* };
     }
@@ -792,10 +792,11 @@ async fn pg_no_server_errors_on_expected_paths() {
         counters,
         activity_fold,
         restore_pending_gate,
-        backup_restore
+        backup_restore,
+        dead_drop_sizes
     );
-    let text = std::fs::read(&log).unwrap();
-    let new = String::from_utf8_lossy(text.get(usize::try_from(start).unwrap()..).unwrap_or(&[]));
+    let text = server_log(&b, &log).await;
+    let new = String::from_utf8_lossy(text.get(start..).unwrap_or(&[]));
     let bad: Vec<&str> = new
         .lines()
         .filter(|l| l.contains("ERROR") || l.contains("WARNING") || l.contains("FATAL"))
@@ -804,12 +805,23 @@ async fn pg_no_server_errors_on_expected_paths() {
     // Positive control: a real server error in such a database is captured
     // (with the pre-fix duplicate handling, every DuplicateEnvelope and
     // AccountExists produced a line like this).
-    let b = base().unwrap();
     let db = fresh_db_with(&b, true).await;
     assert!(!try_as(&b, &db, "candor_istore", "SELECT 1 / 0").await);
-    let text = std::fs::read(&log).unwrap();
+    let text = server_log(&b, &log).await;
     let all = String::from_utf8_lossy(&text);
     assert!(all.contains("ERROR"), "log capture does not work");
+}
+
+/// The test cluster's server log, read through the server itself (superuser
+/// `pg_read_binary_file`; the workspace bans direct filesystem reads, ADR-027).
+async fn server_log(b: &PgConnectOptions, path: &str) -> Vec<u8> {
+    let mut c = su(b, "postgres").await;
+    sqlx::query("SELECT pg_catalog.pg_read_binary_file($1)")
+        .bind(path)
+        .fetch_one(&mut c)
+        .await
+        .unwrap()
+        .get(0)
 }
 
 /// ADR-010 / DB-008: after a full workload, every date-typed value in the intake
@@ -1036,7 +1048,7 @@ async fn chunk_ids(
     table: &str,
     key_attr: usize,
     toast_attr: usize,
-) -> Vec<(Vec<u8>, Option<Vec<u8>>, u32)> {
+) -> Vec<ChunkRow> {
     let rows = sqlx::query(AssertSqlSafe(format!(
         "SELECT a.t_attrs[{key_attr}], a.t_attrs[2], a.t_attrs[{toast_attr}] \
          FROM generate_series(0, (pg_relation_size('{table}') / 8192)::int - 1) p, \
@@ -1132,7 +1144,7 @@ async fn pg_uniform_rewrite_toast() {
         .execute(&mut c)
         .await
         .unwrap();
-    let env_rank = |rows: &[(Vec<u8>, Option<Vec<u8>>, u32)]| -> Vec<(usize, u32)> {
+    let env_rank = |rows: &[ChunkRow]| -> Vec<(usize, u32)> {
         rows.iter()
             .filter(|(_, part, _)| part.as_deref() == Some(&[0u8, 0][..]))
             .filter_map(|(k, _, id)| {
@@ -1142,7 +1154,7 @@ async fn pg_uniform_rewrite_toast() {
             })
             .collect()
     };
-    let reply_rank = |rows: &[(Vec<u8>, Option<Vec<u8>>, u32)],
+    let reply_rank = |rows: &[ChunkRow],
                       cts: &[(Vec<u8>, Vec<u8>)]|
      -> Vec<(usize, u32)> {
         rows.iter()

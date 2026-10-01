@@ -25,6 +25,65 @@ fn ws(files: &[(&str, &str)]) -> tempfile::TempDir {
     d
 }
 
+#[test]
+fn audit_bypasses_are_caught() {
+    // AUD-RM1-SFS-01 regression fixtures (each passed the old script).
+    for bad in [
+        "extern crate std as s;\nfn f() { let _ = s::fs::write(\"x\", b\"\"); }\n",
+        "fn f(v: &mut Vec<u8>) {\n    *v = s::fs::read(p).unwrap_or_default();\n}\n",
+        "fn f() { let _ = rustix::fs::openat(d, \"x\", f, m); }\n",
+        "fn f() { unsafe { libc::open(p, 0) }; }\n",
+        "fn f() { let _ = nix::fcntl::open(p, f, m); }\n",
+        "#[allow(clippy::disallowed_methods)]\nfn f() {}\n",
+    ] {
+        let d = ws(&[("crates/a/src/lib.rs", bad)]);
+        let (code, out) = run(d.path(), &[]);
+        assert_eq!(code, 1, "not caught: {bad}\n{out}");
+    }
+    for manifest in [
+        "[package]\nname = \"a\"\n[dependencies.tar]\nversion = \"0.4\"\n",
+        "[package]\nname = \"a\"\n[dependencies]\narc = { package = \"zip\", version = \"4\" }\n",
+        "[package]\nname = \"a\"\n[target.'cfg(unix)'.dev-dependencies.zip]\nversion = \"4\"\n",
+    ] {
+        let d = ws(&[
+            ("crates/a/Cargo.toml", manifest),
+            ("crates/a/src/lib.rs", ""),
+        ]);
+        assert_eq!(run(d.path(), &[]).0, 1, "not caught: {manifest}");
+    }
+    // A crate-local clippy.toml would replace the workspace bans.
+    let d = ws(&[
+        ("crates/a/clippy.toml", "msrv = \"1.94\"\n"),
+        ("crates/a/src/lib.rs", ""),
+    ]);
+    assert_eq!(run(d.path(), &[]).0, 1);
+}
+
+#[test]
+fn renamed_dependency_resolved_through_cargo_metadata() {
+    // A quoted key escapes the regex layer; cargo metadata resolves it.
+    let d = ws(&[
+        (
+            "Cargo.toml",
+            "[workspace]\nresolver = \"3\"\nmembers = [\"crates/*\"]\n",
+        ),
+        (
+            "crates/a/Cargo.toml",
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[dependencies]\n\"tar\" = \"0.4\"\n",
+        ),
+        ("crates/a/src/lib.rs", ""),
+    ]);
+    let (code, out) = run(d.path(), &[]);
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("cargo metadata"), "{out}");
+    // A broken workspace manifest fails closed (status 2), never "OK".
+    let d = ws(&[
+        ("Cargo.toml", "[workspace]\nmembers = [\n"),
+        ("crates/a/src/lib.rs", ""),
+    ]);
+    assert_eq!(run(d.path(), &[]).0, 2);
+}
+
 fn run(root: &Path, extra: &[&str]) -> (i32, String) {
     let out = Command::new("bash")
         .arg(script())

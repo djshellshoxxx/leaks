@@ -323,3 +323,206 @@ Gate: **FAIL** (3 open High). The shipped configuration files themselves are str
 - **Two-host HA (ADR-032).** Not applicable to CE-SINGLE/CE-HARDENED. The manifest and check enforce a single source onion key (NET-043).
 
 Gate: FAIL 2026-10-01 9f368a303d (open High: DEP-01, DEP-02, DEP-03)
+
+---
+
+## Re-test (round 2)
+
+| Field | Value |
+|---|---|
+| Date | 2026-10-01 |
+| Revision | HEAD `0051ec07ad`. `deploy/` was last changed in `c421366`; the working tree is clean for `deploy/` |
+| Procedure | AUDIT-CHECKLIST §G: fix verification, variant hunt, delta review of `config-check.sh` (814 lines), `config-check.baseline` (804), `check-placement.sh` and `validate.sh`, then tool re-runs |
+
+### Tool re-runs
+
+| Tool | Result |
+|---|---|
+| shellcheck 0.9.0 (`-S style -x`) | clean |
+| `validate.sh` with `CANDOR_TEST_PG=1` (root, users present, tor 0.4.9.11, nft 1.0.9, AppArmor parser 4.0.1, PG 16.13) | 223 PASS, 0 FAIL, exit 0. This includes the builder's static and `--host --root` mutations, `apparmor_parser` on all 5 profiles, and the PG effective-settings and zero-log run |
+| `systemd-analyze security` | web 0.4, sealer 0.4, store 0.4, PostgreSQL 0.5, tor 1.4. All within budget |
+| `config-check.sh` on the shipped tree (base / ce-hardened) | 635 OK, exit 0 |
+| Fail-closed probes | `unshare` that exits 1 → `tor.effective` and `nft.load` FAIL, exit 30. `nft` missing from PATH → FAIL, exit 30 |
+
+### Round-1 adversarial edits (21 static edits, plus the host-mode set)
+
+**All rejected (exit 30).** Each edit and the rule that caught it:
+
+| Edit | Rejected by |
+|---|---|
+| `/Sandbox`, `/CookieAuthentication`, `+Log info stderr` | `tor.raw.no_prefix` |
+| `SafeLog 0`, `HiddenServicePor 81 127.0.0.1:8080`, `HSLayer2Nodes`, `StrictNodes 1`, `AlternateDirAuthority` | `tor.raw.allowed_keys` |
+| nft `include` with accept-all | `nft.no_include_define` |
+| nft E1 accept moved above the safety drops | `nft.file.safety_drops_first` |
+| PG drop-in `ExecStart= -c logging_collector=on` | `unit…ExecStart` |
+| Sealer `PrivateNetwork`/`RestrictAddressFamilies` moved to `[Install]` | `unit.verify` |
+| `ReadWritePaths=/` + `DeviceAllow` | allow-list |
+| Wrong `AppArmorProfile` | allow-list |
+| `SocketGroup=users` | allow-list |
+| Relay `IPAddressAllow=any` | `unit.verify` |
+| `SocketBindAllow` | allow-list |
+| `TemporaryFileSystem` / `InaccessiblePaths` removed | allow-list |
+| Prefix drop-in `candor-.service.d`, template drop-in `tor@.service.d`, type drop-in `service.d` | effective-unit merge |
+
+The host-mode cases (`system.control`, `/run`, `/usr/lib`, `/usr/local/lib`, transient, generator) are covered by `validate.sh` hmutate and pass.
+
+### New variants against the round-2 design
+
+| Variant | Result |
+|---|---|
+| ExecStartPre / ExecStartPost / EnvironmentFile drop-ins | rejected |
+| nft: named map, `ct mark set`, chain priority −150, extra netdev ingress table | rejected |
+| sysctl.d extra key; coredump `Storage=external`; namespace `MaxLevelStore=warning` | rejected |
+| torrc symlink (host-root) | rejected, **but leaks the target's content** (DEP-17) |
+| Sealer drop-in `SystemCallFilter=io_uring_setup io_uring_enter io_uring_register` | **accepted** (DEP-16) |
+| Sealer drop-in re-allowing `ptrace process_vm_readv` | rejected (`security_threshold`) |
+| AppArmor `flags=(complain)` on candor-web (static and host-root) | **accepted**; caught only by the live `--host` check |
+| AppArmor `/** rwlkix,` + `network,` in candor-sealer; `/usr/bin/** ux,` in candor-tor-intake | **accepted in every mode** (DEP-15) |
+| host-root: `system.conf.d DefaultEnvironment=LD_PRELOAD=…`, `/etc/ld.so.preload` | **accepted** (DEP-18) |
+| host-root: `/etc/sysctl.conf` good + `sysctl.d/99-zz.conf` bad | **accepted** (DEP-18) |
+| host-root: `nftables.service` drop-in loading another file or `/bin/true`; `systemd-sysctl.service` masked | **accepted** (DEP-18) |
+| `pg_hba.conf` first line `local all postgres peer` | **accepted** (DEP-19) |
+| `--only typo` | 0 checks, **exit 0** (DEP-21) |
+| `mon_hosts` elements `0.0.0.0, 255.255.255.255` | accepted (DEP-22) |
+
+Some of these are caught later in live `--host` mode: AppArmor complain mode, the effective sysctl, and the loaded ruleset.
+
+### Status of round-1 findings
+
+| ID | Status | Re-test evidence / residual |
+|---|---|---|
+| DEP-01 | **Fixed** (c421366) | Three layers now check the torrc: (1) a raw-key allow-list that rejects `+`/`/` prefixes, abbreviations, `%` directives and duplicates; (2) tor's own `--dump-config short` against the allow-list; (3) `--dump-config full` for defaults and node-restriction options. All 7 round-1 variants are rejected. The canonicalisation runs unprivileged (`setpriv --no-new-privs`) in a private mount namespace, so it cannot touch the real tor state or keys |
+| DEP-02 | **Fixed** | `include`/`define`/`$` are rejected. The kernel-loaded JSON must equal the template rule by rule; the object-type, chain, set and counter lists are exact; the safety-drop order is checked; `--host` also checks the loaded ruleset. Residual: DEP-22 (Info) |
+| DEP-03 | **Fixed** | Units are evaluated as systemd resolves them, section-aware, against an exact per-unit allow-list. Every round-1 case is rejected. Residuals: DEP-16 (sealer filter is checked semantically only), DEP-18 (paths outside the unit set) |
+| DEP-04 | **Fixed** | No control interface; `_candor-torctl` removed; the host check fails if the group exists or tor's group has members. Spec amendment D-27 is pending with the owner |
+| DEP-05 | **Fixed** | All five units: `StandardError=null`, `LogLevelMax=emerg`; namespace `MaxLevelStore=crit`. Trade-off: no service diagnostics at all (D-28). The owner must accept it |
+| DEP-06 | **Fixed** | Host journal now has `Audit=no` and `MaxFileSec=1h`. Unit `LogLevelMax=emerg` also suppresses PID 1's messages about these units. Residual: kernel kmsg (DEP-20) |
+| DEP-07 | **Fixed** | `max_wal_size` 256MB, `min_wal_size` 32MB, `wal_recycle=off`, `checkpoint_timeout` 5min. Pinned statically and via `postgres -C` |
+| DEP-08 | **Fixed** (attachment) | `candor-tor-intake` and `candor-intake-pg` exist in enforce mode, attached without `-`, and parse cleanly; the live check requires enforce mode. Profile **content** is unverified (DEP-15) |
+| DEP-09 | **Fixed** | sysctl / coredump / swap baseline shipped. Static allow-list; live `/proc/sys`. Residual: offline precedence (DEP-18) |
+| DEP-10 | **Fixed** | `[forbidden]` is enforced; symlinks are checked on every path component; the dm-crypt check is live-only (SKIP with `--root`); `ED25519-V3:` pattern added |
+| DEP-11 | **Fixed** (static) | tor now runs with `Group=_tor-candor-intake`. Confirming a real rendezvous remains an integration item |
+| DEP-12 | **Fixed** | `apparmor_parser` exit status is checked; PG is stopped by PID; `InaccessiblePaths=-/var/tmp` on all five units |
+| DEP-13 | Open (Info, tracking) | Unchanged by design (integration item 5) |
+| DEP-14 | **Fixed** for this slice | The `--host` check requires `tor.service` and `tor@default` to be masked. The update instance, chrony and apt remain next-slice work |
+
+### New findings
+
+#### AUD-RM2-DEP-15 — AppArmor profile content is never verified; a weakened profile passes every mode
+- Severity: Medium
+- Location: `deploy/tools/config-check.sh` `check_host` (AppArmor block); there is no static AppArmor check
+- Category: B10.3, B10.7 (CWE-184)
+- Description: the checker verifies only that the five profiles exist (static/offline) and, live, that they are loaded in enforce mode. These edits were accepted in static and host-root mode:
+  - `/** rwlkix,` + `network,` added to `candor-sealer` (with `deny network inet,` deleted);
+  - `/usr/bin/** ux,` added to `candor-tor-intake`;
+  - `flags=(complain)` added to `candor-web`.
+
+  The first two would also pass the live check, because they load in enforce mode. AppArmor is the only MAC layer, and the round-1 class (DEP-03) applies to it unchanged.
+- Exploit scenario: an insider or a config-management error turns a profile into allow-all. ST-120 stays green, and a sealer or tor compromise is no longer confined beyond systemd.
+- Fix recommendation:
+  - Pin the profile files to the baseline (exact normalised text or digest).
+  - On a live host, compare the loaded policy hash (`/sys/kernel/security/apparmor/policy/profiles/*/sha1`, or `apparmor_parser -QTKS` output) with the release.
+  - Reject `flags=` other than `attach_disconnected`, and reject any `ux`/`Ux`/`px`/`pix`/`cx` rule, `/** w`, or a bare `network,`.
+  - Add these mutations to `validate.sh`.
+- Spec / requirement reference: 17 §5.2, R7 SI-B-04, IMPL-RM2 §4 A14, DEP-08.
+- Status: Open
+
+#### AUD-RM2-DEP-16 — Sealer syscall filter is checked only semantically; a drop-in can re-allow syscalls the unit explicitly denies (io_uring)
+- Severity: Medium
+- Location: `config-check.sh` (`unit.candor-sealer.syscall_allow_list`); baseline `unit|candor-sealer.service|Service|SystemCallFilter|*|`
+- Category: B10.1 (CWE-693)
+- Description:
+  - The sealer's `SystemCallFilter` is exempt from the exact allow-list (D-31, pending AUD-RM2-SEA-06). Only "allow-list mode, never reset" and the `systemd-analyze security` items are checked.
+  - The unit denies `io_uring_setup/enter/register`, `userfaultfd` and others on line 88. A drop-in `SystemCallFilter=io_uring_setup io_uring_enter io_uring_register` re-allows them and passes with exit 0, because no `systemd-analyze` item covers io_uring.
+  - io_uring is a frequent kernel LPE surface and is denied on purpose for the T0 process.
+- Exploit scenario: a drop-in silently widens the sealer's kernel attack surface; a sealer memory bug becomes easier to escalate. Precondition: root write. The sealer's self-applied seccomp (07 §4.3) remains once it exists.
+- Fix recommendation:
+  - Until SEA-06 lands, pin the effective sealer filter as the ordered list of the shipped lines (`=` mode).
+  - Or compute the effective allow-set (`systemd-analyze syscall-filter` expansion: allow-list minus deny lines plus re-adds) and compare it with the set of the shipped unit.
+- Spec / requirement reference: 07 §4.2/§4.3, IMPL-RM2 §4 A14, AUD-RM2-SEA-06.
+- Status: Open
+
+#### AUD-RM2-DEP-17 — The root-run checker follows symlinked inputs and echoes the target's content (tested: `/etc/shadow` entries printed); in `--root` mode absolute symlinks resolve on the auditor's host
+- Severity: Medium
+- Location: `config-check.sh` `check_torrc` (`sed … "$TORRC"`, `tor.raw.allowed_keys` detail; `tor_canon` `cp "$TORRC"` then `chmod 0644` inside a 0755 `$WORK`). The same pattern applies to `pg_norm` "duplicate keys", `kernel.sysctl.allowed_keys`, `nft` and `resolv`
+- Category: B10.7, B1.3 (CWE-59, CWE-200)
+- Description:
+  - `need_file` accepts symlinks. With `etc/tor/instances/candor-intake/torrc → /etc/shadow` in a `--root` tree, the FAIL detail printed the first field of each shadow line (`_apt:*:20501:…`, `_chrony:!*:…`); password hashes would be printed the same way, up to 400 characters.
+  - `tor_canon` also writes a world-readable copy of the target under `/tmp/candor-config-check.*/tor/torrc` (directory 0755, file 0644) while tor runs.
+  - An offline image (`--root`) is attacker-influenced input, and its absolute symlinks point at the checker's own host.
+- Exploit scenario: a crafted image or tree is checked in CI or on an admin workstation. Host secret material ends up in the check report or CI log, and is readable by local users during the run. On a live host the precondition is root, so the impact there is low.
+- Fix recommendation:
+  - Refuse any input path that is, or has a component that is, a symlink (the `symlinked_component` helper from check-placement can be reused), or open inputs with `O_NOFOLLOW` via `readlink -e` inside the root.
+  - Never echo unknown tokens; print counts or line numbers only.
+  - Keep the tor working copy in a 0700 directory with 0600 mode; tor can read it through a pre-opened fd, or use the namespace's tmpfs.
+- Spec / requirement reference: BUILD-BRIEF "Security self-review" (tools run as root on attacker-influenced input), 18 §14.
+- Status: Open
+
+#### AUD-RM2-DEP-18 — Paths outside the checked unit and config set: manager environment / `ld.so.preload`, `nftables.service`/`systemd-sysctl.service`, offline sysctl precedence
+- Severity: Low
+- Location: `config-check.sh` (`ALL_UNITS`, `check_kernel` offline branch)
+- Category: B10.1 (CWE-184)
+- Description: these were accepted in `--host --root` mode:
+  - `/etc/systemd/system.conf.d` `DefaultEnvironment=LD_PRELOAD=…`;
+  - `/etc/ld.so.preload`;
+  - an `nftables.service` drop-in that loads a different file or runs `/bin/true`;
+  - masking `systemd-sysctl.service`;
+  - `/etc/sysctl.conf` setting `ptrace_scope=3` while `sysctl.d/99-zz.conf` sets 0. The offline merge appends `sysctl.conf` last, so the checker sees 3 while systemd applies 0.
+
+  Live mode catches the effective sysctl and the loaded ruleset at check time, but not the boot path or the environment. The library-injection cases need a malicious library under `/usr`.
+- Fix recommendation:
+  - Add `nftables.service`, `systemd-sysctl.service` and `systemd-journald@candor-intake.service` to the unit set with baselines.
+  - Fail on a non-empty `/etc/ld.so.preload` and on any `DefaultEnvironment`/`ManagerEnvironment` (`systemctl show -p Environment` on PID 1 when live).
+  - In offline mode, use only `cat-config sysctl.d` (which already includes the `99-sysctl.conf` symlink) and do not append `/etc/sysctl.conf`.
+- Status: Open
+
+#### AUD-RM2-DEP-19 — PostgreSQL config checks are a required subset, not an allow-list; `pg_hba` accepts a superuser peer line
+- Severity: Low
+- Location: `config-check.sh` `check_pg`; baseline `pg|` / `pgc|`
+- Category: B9.3/B9.5 (CWE-184)
+- Description:
+  - A first line `local all postgres peer` passes, so `postgres` (and root via `su`) regains superuser socket access, which 09 §10 and D-11 forbid. That re-enables `ALTER SYSTEM` at run time; the `postgresql.auto.conf` check catches it only on the next host run.
+  - Keys outside the list are not pinned: `unix_socket_group`, `temp_file_limit`, `idle_in_transaction_session_timeout` (STO-08), `track_counts`/`track_activities` (STO-11) and `dynamic_library_path`.
+- Fix recommendation: compare `pg_hba.conf` and `pg_ident.conf` exactly with the template, and make `pg|` an allow-list of every key in the shipped file.
+- Status: Open
+
+#### AUD-RM2-DEP-20 — Kernel messages about source-path processes still reach the host journal with exact timestamps
+- Severity: Low
+- Location: `deploy/intake/journald/candor-intake-host.conf` (`ReadKMsg` default yes); `sysctl.d` (no `debug.exception-trace`)
+- Category: B1.2, B10.6
+- Description:
+  - With `Audit=no` and `LogLevelMax=emerg`, PID 1 and audit records are gone. Kernel printk lines are still stored, for example `Memory cgroup out of memory: Killed process … (candor-intake-sto)` when an upload burst hits `MemoryMax`, or `traps: tor[…] general protection` / `segfault at` (enabled by `debug.exception-trace=1`, the default).
+  - Both can be triggered from the source path and carry a µs journal timestamp for ≤24 h.
+- Fix recommendation: add `debug.exception-trace=0` to the sysctl baseline. Either set `ReadKMsg=no` on Z-INTAKE (kernel issues then become visible only via the health agent's unit state), or accept OOM lines explicitly as residual in D-28.
+- Status: Open
+
+#### AUD-RM2-DEP-21 — Checker fail-open on invocation: `--only <unknown>` runs zero checks and exits 0; baseline and script integrity are not self-verified
+- Severity: Low
+- Location: `config-check.sh` (`--only` parsing, `want()`, `BASE`)
+- Description:
+  - `--only typo` gives "all 0 checks OK (exit=0)". A mistyped self-test or cron line would report a green ST-120 forever.
+  - `config-check.baseline` is the policy, and it is read from next to the script with no digest check. Integrity rests entirely on package verification, which is not invoked.
+- Fix recommendation:
+  - Reject unknown section names and exit 2 when zero checks ran.
+  - In `--host`, verify the script and baseline against the release manifest (`dpkg --verify candor-tools`, or the TUF target digest), and report it as a rule.
+- Status: Open
+
+#### AUD-RM2-DEP-22 — Site address sets accept unspecified, broadcast and non-public addresses
+- Severity: Info
+- Location: `nft.jq` site-set rule
+- Description: `mon_hosts` with `{ 0.0.0.0, 255.255.255.255 }` passes; only "plain IPv4 address" is enforced. This is harmless today, because the accept rules are pinned to mgmt0 and a UID. Rejecting `0.0.0.0/8`, `255.255.255.255`, multicast and loopback would make installer errors visible.
+- Status: Open
+
+### Round-2 summary and gate
+
+| Severity | Open | IDs |
+|---|---|---|
+| Critical | 0 | — |
+| High | 0 | (DEP-01/02/03 fixed) |
+| Medium | 3 | DEP-15, DEP-16, DEP-17 |
+| Low | 4 | DEP-18, DEP-19, DEP-20, DEP-21 |
+| Info | 2 | DEP-13, DEP-22 |
+
+All round-1 Critical/High/Medium findings are fixed and re-tested (DEP-01..12, 14). The redesign checks effective configuration (tor's own canonicalisation, the kernel-loaded nft ruleset, systemd's own unit resolution, `postgres -C`) and is a substantial improvement. It rejected all round-1 edits and most new variants.
+
+Gate: **NOT YET PASS** 2026-10-01 0051ec07ad. There are no open Critical or High findings. Integration requires DEP-15, DEP-16 and DEP-17 to be fixed, or accepted in writing by the lead auditor (§F.2). The owner sign-offs D-27 and D-28 (DEP-04/05 spec amendments) are still outstanding.

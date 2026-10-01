@@ -556,10 +556,11 @@ mod tests {
             size: 1,
             nested_archive: false,
         });
-        match s.finish(Err(ArchiveError::Malformed("x"))) {
-            Err(ArchiveError::RollbackIncomplete(ids)) => assert_eq!(ids, vec![stuck]),
-            other => panic!("{other:?}"),
-        }
+        let res = s.finish(Err(ArchiveError::Malformed("x")));
+        assert!(
+            matches!(&res, Err(ArchiveError::RollbackIncomplete(ids)) if ids == &vec![stuck]),
+            "rollback leftovers not reported"
+        );
     }
 
     #[test]

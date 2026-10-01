@@ -70,7 +70,7 @@ rust_patterns=(
 banned_deps='tar|zip|cap-std|cap-fs-ext|cap-primitives|async-tar|async_zip'
 toml_patterns=(
   "^[[:space:]]*($banned_deps)[[:space:]]*(=|\\.)"
-  "^[[:space:]]*\\[([a-z-]+\\.)?(dev-|build-)?dependencies\\.($banned_deps)\\]"
+  "^[[:space:]]*\\[(.*\\.)?(dev-|build-)?dependencies\\.($banned_deps)\\]"
   "package[[:space:]]*=[[:space:]]*\"($banned_deps)\""
 )
 allow_marker='safefs-lint: allow\([^)]+\)'

@@ -3,20 +3,45 @@
 //! 07 BE-031 time-lint; R7 SI-E-05 no dynamic SQL; ADR-016 no ad-hoc logging).
 #![allow(clippy::unwrap_used, clippy::panic)]
 
-use std::fs;
-use std::path::Path;
+/// Every source file of the crate, embedded at compile time (the workspace
+/// clippy configuration bans direct filesystem reads, ADR-027). A new file in
+/// `src/` must be added here; `every_module_is_listed` checks `lib.rs`.
+const SOURCES: &[(&str, &str)] = &[
+    ("deaddrop.rs", include_str!("../src/deaddrop.rs")),
+    ("deletion.rs", include_str!("../src/deletion.rs")),
+    ("error.rs", include_str!("../src/error.rs")),
+    ("lib.rs", include_str!("../src/lib.rs")),
+    ("lint.rs", include_str!("../src/lint.rs")),
+    ("memory.rs", include_str!("../src/memory.rs")),
+    ("pg.rs", include_str!("../src/pg.rs")),
+    ("rng.rs", include_str!("../src/rng.rs")),
+    ("store.rs", include_str!("../src/store.rs")),
+    ("types.rs", include_str!("../src/types.rs")),
+    ("validate.rs", include_str!("../src/validate.rs")),
+];
 
 fn sources() -> Vec<(String, String)> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut v = Vec::new();
-    for e in fs::read_dir(dir).unwrap() {
-        let p = e.unwrap().path();
-        if p.extension().is_some_and(|x| x == "rs") {
-            v.push((p.display().to_string(), fs::read_to_string(&p).unwrap()));
-        }
+    SOURCES
+        .iter()
+        .map(|(p, s)| ((*p).to_string(), (*s).to_string()))
+        .collect()
+}
+
+/// Every `mod` declared in lib.rs is in [`SOURCES`].
+#[test]
+fn every_module_is_listed() {
+    let lib = include_str!("../src/lib.rs");
+    for line in lib.lines() {
+        let l = line.trim();
+        let Some(rest) = l
+            .strip_prefix("pub mod ")
+            .or_else(|| l.strip_prefix("mod "))
+        else {
+            continue;
+        };
+        let name = format!("{}.rs", rest.trim_end_matches(';'));
+        assert!(SOURCES.iter().any(|(p, _)| *p == name), "{name} not listed");
     }
-    assert!(v.len() >= 8);
-    v
 }
 
 /// Strip `#[cfg(test)]` modules (tests may print diagnostics).
@@ -32,10 +57,7 @@ fn every_source_file_has_spdx_header() {
             "{p}"
         );
     }
-    let sql = fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations/0001_intake_schema.sql"),
-    )
-    .unwrap();
+    let sql = include_str!("../migrations/0001_intake_schema.sql");
     assert!(sql.starts_with("-- SPDX-License-Identifier: AGPL-3.0-or-later"));
 }
 
@@ -98,7 +120,7 @@ fn no_ad_hoc_output() {
 /// Every connection disables sqlx statement logging.
 #[test]
 fn statement_logging_disabled() {
-    let pg = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/pg.rs")).unwrap();
+    let pg = include_str!("../src/pg.rs");
     assert_eq!(
         pg.matches("connect_with(").count(),
         pg.matches("disable_statement_logging()").count()
