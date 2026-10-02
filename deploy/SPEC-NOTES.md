@@ -1,0 +1,389 @@
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+# deploy/ — SPEC-NOTES (intake host, CE-SINGLE / CE-HARDENED)
+
+This file records implementation decisions, spec conflicts and residual risks for
+`deploy/intake` and `deploy/tools`. When specs conflict, the stricter reading is taken. No
+protection named in the specs is weakened. Section references: 07 = `07-BACKEND.md`,
+09 = `09-DATABASE.md`, 16 = `16-TOR-I2P.md`, 17 = `17-INFRASTRUCTURE.md`,
+18 = `18-DEPLOYMENT.md`, 20 = `20-LOGGING-AUDITING.md`, 32 = `32-OPERATIONS.md`,
+R7 = `research/R7-secure-implementation.md`.
+
+## Implementation decisions and spec conflicts
+
+**D-01 Names.**
+- **Unit name.** The unit is `candor-intake-web.service`, as the RM-2 brief names it. 07 calls the service `candor-web` and 17 §5.2 calls the profile `candor-source-web`.
+- **Users.** Users follow 07 §4.1: `candor-web`, `candor-sealer`, `candor-istore` and `postgres`.
+- **tor user.** 07 §4.1 lists `debian-tor` for tor. 16 §7.3 and 17 §4.3 require one user per instance, so tor runs as `_tor-candor-intake`, which is stricter.
+- **Binaries.** Binary paths are `/usr/lib/candor/{source-web/candor-web,sealer/candor-sealer,intake-store/candor-intake-store}`. These are new and follow 17 §5.2's `/usr/lib/candor/source-web/**`.
+- **Socket paths.** Socket paths follow 16 §7.1 (`/run/candor/source-web/http.sock`) and 07 (`/run/candor/sealer/seal.sock`, `/run/candor/istore/istore.sock`). 17 §5.2's `/run/candor/source-web.sock` is superseded by 16 §7.1, the torrc template, which is normative per NET-004.
+
+**D-02 tor logging.**
+- **Destination.** 16 §7.1 says `Log warn syslog`. LOG-005 says "stderr only". `Log warn stderr` is used. stderr goes only to the volatile `candor-intake` journal namespace, so no syslog daemon can ever receive tor output.
+- **Level.** Level `warn` satisfies NET-008 and 32 `tor.log_level`.
+- **Added from LOG-005.** `LogTimeGranularity 1 hour` and `HiddenServiceStatistics 0` are added; neither is in 16 §7.1.
+- **Version banner.** tor prints its banner at notice level to stdout before the torrc is applied. The unit sets `StandardOutput=null`, so no version string reaches any log (R7 D3).
+- **Superseded in part by D-28.** stderr is now discarded too (`StandardError=null`), so tor output reaches no journal at all. `LogTimeGranularity` only coarsens tor's own text prefix; it never could coarsen journald's timestamps (AUD-RM2-DEP-05).
+
+**D-03 `CompiledProofOfWorkHash 0`.**
+- **Reason.** 16 §7.3 and NET-010 require `MemoryDenyWriteExecute=yes`. The HashX JIT that tor uses for Equi-X needs W+X memory, so the interpreted verifier is forced.
+- **Cost.** PoW verification costs more CPU under a flood. The PoW queue parameters must be load-tested in that mode (34).
+- **Not used instead.** Dropping MDWE would weaken a stated control, so it was not done.
+
+**D-04 `HiddenServiceExportCircuitID haproxy`.**
+- **Conflict.** 17 §5.5 says "No `HiddenServiceExportCircuitID`". 16 §7.1, which is normative for the torrc (NET-004), and 16 §13 L4 / NET-029 need the circuit ID for per-circuit rate limiting.
+- **Decision.** The option is kept. The identifier is an internal tor circuit counter, not an address. It must stay in RAM only (NET-013) and must never be logged (C-06 obligation).
+- **Unverified.** PROXY-header support on Unix-socket targets is Knowledge (unverified) per 16 §7.1 and must be confirmed in integration.
+- **Request.** 17 §5.5 should be aligned with this.
+
+**D-05 Socket activation for C-06, C-07 and C-08.**
+- **Mechanism.** PID 1 creates every listener with fixed owner, group and mode: `http`, `seal`, `istore` and the relay TCP socket.
+- **Effect.** No Candor service needs write access to `/run`, and none can change socket permissions. The intake store needs no `AF_INET` and runs with `PrivateNetwork=yes`. It accepts the core's pull on the inherited socket but cannot initiate any connection. That enforces ADR-009 in the kernel instead of only through nftables.
+- **Relation to 07 §4.2.** This replaces the 07 §4.2 delta for `candor-intake-store` (`RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6`, `IPAddressAllow=<core>`). The IP allow-list now sits on `candor-intake-store-relay.socket`, set through the installer drop-in.
+- **Binaries.** The binaries must support `sd_listen_fds`; see README.
+
+**D-06 tor sandbox details.**
+- **Address families.** `RestrictAddressFamilies=AF_UNIX AF_INET`. 16 §7.3 lists `AF_INET6 AF_NETLINK` as well. AF_NETLINK is not needed by a non-relay onion service. AF_INET6 is added only by a site drop-in when the host has an IPv6 uplink (16 §7.1 note, 17 §4.3).
+- **Address ranges.** `IPAddressDeny=` lists every non-public range, because Tor relays are public. nftables does the same for both tor UIDs.
+- **No `ProcSubset=pid`.** tor reads `/proc/meminfo` for `MaxMemInQueues`.
+- **Syscalls.** `setrlimit` is re-allowed because tor raises `RLIMIT_NOFILE` at start. `seccomp` is re-allowed for `Sandbox 1`.
+- **Exposure.** The tor unit scores 1.4 (budget 1.5).
+
+**D-07 tor control-socket group (superseded by D-27).** The intake tor instance has no control socket and no `_candor-torctl` group any more. The unit runs with `Group=_tor-candor-intake`, which also gives tor access to `/run/candor/source-web` (AUD-RM2-DEP-11).
+
+**D-08 nftables. The 17 §4.3 ruleset and the §4.3.1 matrix are the base; the following are stricter.**
+- **No `log` statement.** 16 §14.2's sample has one; LOG-007 forbids LOG targets. Drops go to named counters only.
+- **`ct state invalid drop`.** Added in both directions.
+- **Non-public destinations dropped for tor UIDs.**
+- **ICMPv6 router advertisements and redirects dropped** (NET-041).
+- **Empty address sets.** `mon_hosts`, `admin_jump` and `core_relay` ship empty, so the default is fail-closed. The installer fills them; config-check pins every accept rule to the template.
+
+**D-09 E5 (Tang).** 17 §4.3's ruleset contains a `skuid 0 … dport 7500 accept`. Both matrices (16 §14.2 E5, 17 §4.3.1 E5) say the rule must exist only in the initramfs and be absent after switch-root. The main ruleset therefore omits it. The initramfs ruleset belongs to the FDE/clevis work and is not part of this slice.
+
+**D-10 Tier W staging.**
+- **Brief vs spec.** The brief mentions "sealer with tmpfs staging dir". 07 §5.3, ADR-034 and 17 §5.4 make `/run/candor/staging` the intake store's tmpfs. The sealer has no writable path at all (07 §4.2), so the only tmpfs it has is its `PrivateTmp`.
+- **Mount.** Staging is `run-candor-staging.mount`: tmpfs, `noswap`, `nosuid,nodev,noexec`, 0700 `candor-istore` via libmount `X-mount.owner/group/mode`. This was verified with util-linux 2.39.
+- **Sizes.** 4 GiB on CE-SINGLE (18 §4.1) and 8 GiB on CE-HARDENED (18 §4.2, 32 default).
+- **Restart.** The mount is not remounted when the store restarts. Emptying it on start stays an application duty (07 §4.5). Staged parts are undecryptable once the sealer's K36 is gone.
+
+**D-11 PostgreSQL.**
+- **Unit.** A dedicated `candor-intake-pg.service` starts `postgres` directly, so the full sandbox applies. `pg_ctlcluster` and `postgresql@16-main` are not used.
+- **Log prefix.** `log_line_prefix='%e '` is stricter than 09's `'%m %e '`. LOG-004 asks for coarse intake timestamps. Since D-26, PostgreSQL output is discarded anyway.
+- **Defaults turned off.** `log_checkpoints` and `log_autovacuum_min_duration` are disabled because PG ≥ 15 enables them by default and both timestamp write activity. `update_process_title=off` is also set.
+- **pg_hba (amended by ADR-052(9), AUD-RM2-DEP-19).** Three peer lines, each through its own ident map and only to `candor_intake_*` databases: `candor-istore` → `candor_istore`, `candor-imaint` → `candor_intake_maint` (maintenance jobs, D-34), `candor-migrate` → `candor_intake_migrator` (`candorctl migrate`, the non-superuser schema owner). The `postgres` superuser is still rejected on the socket; only the one-time bootstrap (creating the roles) runs in single-user mode with the service stopped. `candorctl migrate` and the maintenance units reach the socket through `SupplementaryGroups=candor-istore` set per unit, never through `/etc/group`.
+- **Socket.** The socket group is set via `unix_socket_group='candor-istore'` (0770). `SupplementaryGroups=candor-istore` exists in the unit only, so `postgres` is not added to `/etc/group`. `@chown` stays allowed for that. The directory is 0750 `postgres:candor-istore`.
+
+**D-12 Manifest format and paths.**
+- **Format.** 18 §15.1 shows YAML at `/usr/share/candor/manifests/<role>.yaml`. The brief asks for `secret-placement.toml`, so a strict TOML subset is used, parseable with awk because H-INTAKE has no interpreter (17 §5.1).
+- **Onion key path.** It is `/var/lib/tor-instances/candor-intake/hs-source/…`, following the 16 §7.1 torrc, not 18's `/var/lib/tor/candor-source/…`.
+- **Key group.** The key's group is `_tor-candor-intake` (tor's primary group; D-27). Mode 0600 gives it no access.
+
+**D-13 Secrets as TPM-sealed systemd credentials.** This follows R7 SI-B-01 and the "never Environment=" bar.
+- **Storage.** Every service secret is a `.cred` file in `/etc/credstore.encrypted`, root 0700, files root 0400.
+- **Delivery.** PID 1 unseals each one into the unit's private `$CREDENTIALS_DIRECTORY`.
+- **Owner.** 18 §15.1 lists per-service owners. Root ownership is stricter: no service user can read another service's secret, or the sealed file itself.
+- **Added entries.** The manifest adds K31 (intake batch signing) and K35 (sealer signing). Both are on the intake host per 04 §19, but 18 §15.1 omits them.
+- **Optional entries.** The health-agent and backup-signer keys are `required = false` until those packages exist.
+- **Relay key path.** The relay mTLS server key moves from 18's `/var/lib/candor/relay/tls.key` (owner `candor-relay`, a core user) to a credential owned by the intake store.
+
+**D-14 check-placement scope.**
+- **Content-scanned files.** Regular files up to `max_file_kib` (1 MiB) are content-scanned. Symlinks are not followed.
+- **Ciphertext directories.** The blob and staging directories are checked by name layout only (candor-safefs: `<2>/<26 base32>`, `.tmp-<26>`). Reading them would touch source-data atimes and cost I/O.
+- **Excluded.** `/run/credentials` is excluded because it holds PID 1's unsealed per-unit copies.
+- **Binary formats.** Binary OpenPGP and PKCS#12 are recognised only by armour or by file name.
+- **Exit codes.** Manifest parse errors and invalid paths exit 2 (fail closed).
+
+**D-15 Journald namespace (owner OPSEC instruction; amended by D-28).** tor, web, sealer, store and PostgreSQL run in `LogNamespace=candor-intake`, but since D-28 none of them sends stdout/stderr to it. The namespace remains as containment for any `syslog()`/journal-socket write (`MaxLevelStore=crit`). The bullets below describe the namespace configuration.
+- **Storage.** Volatile, `RuntimeMaxUse=16M`, `MaxRetentionSec=24h`, `MaxFileSec=1h`.
+- **Filtering.** `MaxLevelStore=warning`. No forwarding to syslog, kmsg, console or wall.
+- **Per unit (D-28).** All five units set `StandardOutput=null`, `StandardError=null` and `LogLevelMax=emerg`.
+- **Not chosen.** `Storage=none` for the namespace: it would also drop the containment value of a separate store. With D-28 nothing is stored in practice.
+
+**D-16 One PostgreSQL cluster per intake host.**
+- **Why.** `RemoveIPC=yes` with `User=postgres` would remove IPC objects of any other cluster run by `postgres`.
+- **Installer.** The installer must set `create_main_cluster = false` (postgresql-common) and must not enable `postgresql@16-main`.
+
+**D-17 Sealer memory locking.** 17 §5.3 grants `CAP_IPC_LOCK` with `LimitMEMLOCK=infinity`; 07 §4.2 uses `LimitMEMLOCK=2G`. The 07 approach is followed and the capability set is empty, which is stricter. 17 §5.2 lets the sealer "write ciphertext to blobs", which contradicts 07 §4.2 (`InaccessiblePaths=/var/lib/candor`). 07 is followed: the sealer hands envelopes to the store over IPC.
+
+**D-18 (spec gap, 07 §4.3 vs §5.3).** The sealer's in-process seccomp allow-list has no `socket`/`connect`. Yet 07 §5.3 has the sealer call `COMMIT_ENVELOPE` on `istore.sock` for chaff. Either the connection is opened before the filter and never re-established, so a reconnect means a restart, or `socket(AF_UNIX)`/`connect` must join the allow-list. Feedback for the 07 owner. The deployment allows both: AppArmor permits `connect` to `istore.sock` only.
+
+**D-19 Key Directory snapshot hand-off.**
+- **Location.** `/run/candor/directory` is 0750 `candor-istore:candor-sealer`. The store writes the snapshot that C-09 pushes; the sealer reads it.
+- **Open question.** 07 §4.3 says the sealer re-reads only on restart, and a restart drops every Tier W session. How snapshot updates trigger that restart (for example, only at import slots) needs a design decision. No `.path` unit is shipped.
+
+**D-20 Requirements on future binaries** (listed in the README):
+- socket activation by fd name;
+- secrets only from `$CREDENTIALS_DIRECTORY`;
+- `SO_PEERCRED` checks;
+- stderr-only typed logging;
+- self-applied seccomp and Landlock. `seccomp` and `landlock_*` are re-allowed in the systemd filter for that purpose.
+
+**D-21 Hardening not enabled (and why).**
+- **`PrivateUsers=`.** It would break `SO_PEERCRED` UID checks and group-based socket access.
+- **`PrivatePIDs=`.** It needs systemd 257. Its interaction with `LISTEN_PID` and `SO_PEERCRED` PIDs is untested.
+- **`RestrictFileSystems=`.** It needs the BPF LSM, which Debian does not enable by default.
+- **`ProcSubset=pid` for tor.** See D-06.
+
+All four are follow-ups for the Debian 13 integration run.
+
+**D-22 AppArmor coverage.** Enforce-mode profiles ship for all intake processes (since round 2 also `candor-intake-maint`, D-34): `candor-web`, `candor-sealer`, `candor-intake-store`, `candor-tor-intake` (derived from Debian's `system_tor`, limited to this instance: no capabilities, no exec, TCP only, no UDP, no control socket, no log file) and `candor-intake-pg` (no exec, no IP, only its data, socket and configuration paths). Every unit attaches its profile without a `-` prefix (AUD-RM2-DEP-08). Enforce-mode behaviour (no `DENIED` lines under load) is an integration item.
+
+**D-23 sysusers.** `_tor-candor-update`, `candor-health` and `_chrony` are created here, even though their packages are outside this slice. Two failures depend on it:
+- nft refuses a ruleset that names an unknown user, which would leave the host unfiltered.
+- Every intake unit has `Requires=nftables.service`, and `nftables.service` is ordered after `systemd-sysusers`.
+
+**D-24 DNS.** `resolv.conf` points at `127.0.0.1` with nothing listening (17 §4.5). The config check fails on any non-loopback nameserver.
+
+**D-26 PostgreSQL emits no log at all (AUD-RM2-STO-02).**
+- **Finding.** Expected-path errors would become server `ERROR` lines with millisecond timestamps, for example a unique violation when a source retries. Each such line records the exact time of a source action.
+- **Settings.** The intake cluster sets `log_min_messages = panic` and `log_min_error_statement = panic`. It also keeps `logging_collector = off`, `log_destination = stderr`, `log_connections`/`log_disconnections = off`, `log_statement = none`, `log_checkpoints = off` and `track_commit_timestamp = off`.
+- **Unit.** `candor-intake-pg.service` sets `StandardError=null` and `LogLevelMax=emerg`, so not even PANIC lines reach a journal.
+- **Checks.** config-check asserts each of these, and two mutations test it. The PostgreSQL run in `validate.sh` shows zero bytes of server output after rejected connections and a deliberate unique violation.
+- **Residual.** PANIC-level crash messages and start-up configuration errors are discarded too. A crashed or misconfigured intake database is visible only through the unit state (`systemctl`, health agent `SYSTEM:service_failed`). Diagnosis needs `config-check.sh`, `postgres -C` or a dual-approved, time-boxed debugging window (NET-037 pattern) with `StandardError=journal`. The `09 §10` value `log_min_messages = warning` is superseded by this audit finding.
+
+**D-25 `systemd-analyze security` budgets** (R7 SI-B-01, internal scale ×10):
+- Candor services and PostgreSQL: ≤ 0.5. Achieved: 0.4, 0.4, 0.4 and 0.5.
+- tor: ≤ 1.5 (17 §5.3). Achieved: 1.4.
+- config-check now enforces both the threshold and the exact list of scoring items per unit (`sec|` lines in `config-check.baseline`), offline in static mode and against the loaded unit with `--host`.
+
+The remaining exposure items are `PrivateUsers`, `RootDirectory`, AF_UNIX allowed, `SupplementaryGroups`, and the implicit `char-rtc` device ACL that comes with `ProtectClock`. tor additionally has network access by design.
+
+**D-27 No tor control interface; health without control access (AUD-RM2-DEP-04; lead decision; spec amendment requested).**
+- **Decision.** The intake torrc has `ControlPort 0` and no `ControlSocket`; the `_candor-torctl` group is gone. tor has no per-command ACL, so any control access gives circuit/stream events (exact visit times, forbidden by LOG-005) and `SETCONF` of path-selection options.
+- **Health.** The health agent derives liveness from the unit/process state (`systemctl is-active`, `NRestarts`) and from a periodic self-fetch of the onion's `/.well-known/candor/health` through a tor SOCKS listener on a Unix socket readable only by the health agent's group.
+- **Where that SOCKS listener lives.** NET-045 forbids a SocksPort on the source onion instance, so the listener belongs to the client-only `candor-update` instance (`_tor-candor-update`, flow E2), e.g. `SocksPort unix:/run/tor-instances/candor-update/health.sock GroupWritable` with group `_candor-health`, IsolateSOCKSAuth. That instance is outside this slice (AUD-RM2-DEP-14), so nothing for it ships yet; this is recorded as a requirement for the next deploy slice.
+- **Residual.** The descriptor-integrity values of 16 §15 (intro points, revision counter, PoW-active flag) and the daily load band are no longer available from the intake host. C-25 on the monitor host can still compare descriptors it fetches itself. A self-fetch cannot tell "onion unreachable from the Internet" from "local tor broken" on its own; the external C-25 probe (16 §15) stays the reachability signal.
+- **Spec amendment (for the lead).** NET-009 ("control access via a Unix socket ... readable only by the vanguards and health-exporter users") and 16 §15 "Intake health exporter ... reads the control socket" should be amended to "no control interface on the intake tor instance".
+- **Enforced.** config-check fails on any effective `ControlSocket`/`ControlPort`/`HashedControlPassword`; `--host` fails if `_candor-torctl` exists or if the group `_tor-candor-intake` has members or is any other user's primary group.
+
+**D-28 No service output in any journal (AUD-RM2-DEP-05/06; lead decision; spec amendment requested).**
+- **Why.** journald stores `__REALTIME_TIMESTAMP` with µs precision on every line and has no option to coarsen it. LOG-004's hour truncation therefore cannot be met by any journald setting, and any source-triggerable warning would record the exact time of a source action.
+- **Decision.** All five source-path units (tor, web, sealer, store, intake PostgreSQL) set `StandardOutput=null`, `StandardError=null` and `LogLevelMax=emerg`. `LogLevelMax=` also filters the messages PID 1 logs about the unit (start, stop, "Main process exited, code=killed"), which would otherwise land in the host journal with µs timestamps.
+- **Host journal.** `Storage=volatile`, `MaxRetentionSec=24h`, `MaxFileSec=1h` (journald deletes only whole files, so hourly files are what makes 24 h real on a quiet host), `Audit=no` (20 §11.3; no kernel audit/AppArmor records), no forwarding. No `MaxLevelStore` cap: admin SSH/sudo accountability needs INFO (20 §11.4). config-check checks the effective configuration (`systemd-analyze cat-config`, all drop-ins) and `--host` requires the `systemd-journal` and `adm` groups to be empty (journal files are readable by those groups).
+- **Crash diagnostics.** None are kept by default. Diagnosis uses unit state, `config-check.sh`, `postgres -C`, or a dual-approved, time-boxed (≤ 1 h) debugging window with `StandardError=journal` into the volatile namespace (NET-037 / 16 §15 pattern).
+- **Spec amendment (for the lead).** NET-008 ("tor ... SHALL log at warn ... to volatile journald storage"), 32 `tor.daemon`/`logging.config` and 20 §11.3 should say that intake source-path services emit nothing to journald, and that service health comes from unit state and the health agent's coarse codes, not from log lines. Hour-granular SYSTEM events (LOG-004) need a candor-log sink that truncates before storage; that is application work (C-06/C-07/C-08), not deployment.
+- **Residual.** Kernel messages (OOM kills, segfault lines from `print-fatal-signals`, which is off by default) still go to the host journal with µs timestamps. `kernel.printk = 3 3 3 3` and `dmesg_restrict` limit them; they are retained ≤ 24 h in RAM.
+
+**D-29 WAL size (AUD-RM2-DEP-07).** `max_wal_size = 256MB` (09 §10), `min_wal_size = 32MB`, `wal_recycle = off` (old segments are removed, not renamed with their content), `checkpoint_timeout = 5min`. Every WAL commit record carries the commit time (ms) whatever `track_commit_timestamp` says; the conf comment no longer claims otherwise. Residual: commit times inside the live WAL (≤ 256 MB); handled by AT-007/AT-020 and the 09 §13 small-WAL mitigation, not by configuration.
+
+**D-30 Kernel baseline (AUD-RM2-DEP-09).**
+- **sysctl.** `sysctl.d/90-candor-intake.conf` carries the 20 §11.4 / 17 values (`kernel.printk=3 3 3 3`, `dmesg_restrict=1`, `core_pattern=|/bin/false`, `fs.suid_dumpable=0`, `yama.ptrace_scope=3`, `kptr_restrict=2`, `unprivileged_bpf_disabled=1`, `tcp_timestamps=0`, `vm.swappiness=0`) plus stricter items: `perf_event_paranoid=3`, `kexec_load_disabled=1`, `sysrq=0`, `bpf_jit_harden=2`, `unprivileged_userfaultfd=0`, the `fs.protected_*` set, redirect/source-route/forwarding off, `log_martians=0` (martian logging would record addresses, LOG-007), `rp_filter=1`.
+- **`user.max_user_namespaces = 0`.** No unit uses `PrivateUsers=`. config-check's nftables check uses `unshare -n` as root, which needs CAP_SYS_ADMIN but no user namespace, so it keeps working.
+- **ptrace_scope 3.** Chosen over 2: nothing on H-INTAKE needs ptrace, and mode 3 cannot be lowered without a reboot.
+- **Core dumps.** `coredump.conf.d/50-candor-intake.conf` (`Storage=none`, all sizes 0); the installer masks `systemd-coredump.socket`; `LimitCORE=0` in all units.
+- **Swap.** Disabled; `--host` accepts only no swap or dm-crypt swap with a fresh `/dev/urandom` key (`crypttab` option `swap`). zram and plain swap fail.
+- **Checks.** Static mode checks the file against the baseline (no extra or missing keys). `--host` reads the live `/proc/sys` values (so any later sysctl.d file or runtime change is caught) and the effective coredump configuration.
+
+**D-31 config-check architecture (AUD-RM2-DEP-01/02/03).**
+- **Effective configuration, allow-lists.** See the script header. Expected values live in `deploy/tools/config-check.baseline` next to the script (root-owned like the script; the mutation tests copy only `deploy/intake`, so they cannot edit it).
+- **tor.** The torrc text must use only full template option names (no abbreviations, no `+`/`/` prefixes, no `%include`, no repeats). Then tor itself canonicalises it in a private mount namespace (tmpfs over `/var/lib` and `/run`, so real state and keys are never touched), running as the instance user. The `--dump-config short` output (every non-default option) must equal the allow-list exactly, with integer ranges only for the six DoS tunables; the `--dump-config full` output must show the required defaults and empty `HSLayer2Nodes`/`HSLayer3Nodes`/`EntryNodes`/`ExcludeNodes`/...
+- **nftables.** `include`/`define`/`$` are rejected before nft sees the file (an include could also make the root-run checker read an arbitrary file; nft's error output is never echoed). The file is loaded with `unshare -n` and read back with `nft -j list ruleset`; every rule of every chain must equal the template rule at the same position, so extra accepts, reordering and include-injected rules all fail. Sets `non_public4/6` are pinned; `mon_hosts`/`admin_jump`/`core_relay` may only contain plain IPv4 addresses (`core_relay` at most one). `--host` checks the loaded ruleset as well and that its `@core_relay` matches the file.
+- **systemd.** `systemd-analyze verify --root=<tree>` at debug level lists the fragment and every drop-in systemd applies (unit, prefix `candor-.service.d`, template `tor@.service.d`, type `service.d`, `/etc`, `system.control`, `/run`, `/usr/local/lib`, `/usr/lib`). Their section-aware merge must equal the baseline for every key in every section; resets, overrides, extra directives and directives in the wrong section all fail. `systemd-analyze verify` must be clean, and `systemd-analyze security` must meet the budget with only the documented items scoring. `--host` also rejects transient and generator drop-ins, compares `systemctl show -p DropInPaths` with the files, requires `NeedDaemonReload=no`, and checks key properties of the loaded units. The relay socket's `IPAddressAllow=` must be exactly `<@core_relay>/32`.
+- **Sealer syscall filter (round 2, AUD-RM2-DEP-16).** The four `SystemCallFilter=` lines are pinned exactly (`=`), and the effective allow-set is computed the way systemd does it (D-35) and compared with `scf|` lines; `scf-never|` names (io_uring, userfaultfd, ptrace, bpf, ...) must stay out.
+- **PostgreSQL.** Static: the conf file (no includes, no duplicates, exact values incl. WAL). `--host`: `postgresql.auto.conf` must be empty, and `postgres -C <guc>` (run as the data directory owner) must return the expected effective value for 51 settings. `-c` options on `ExecStart` are impossible because `ExecStart` is pinned exactly.
+- **Requirements.** root, `jq`, `tor`, `nft`, `unshare`, `setpriv`, `systemd-analyze`, and the PostgreSQL binary for `--host`; anything missing is a FAIL. **Spec feedback (17 §5.1 "no interpreter"):** `jq` is a JSON filter, not a general interpreter; it must be added to the H-INTAKE Platform Manifest for this check (or the check runs off-host on an exported ruleset).
+- **Not verifiable here.** The live `--host` parts (`systemctl show` property formats, the loaded ruleset, `/proc/sys`, AppArmor load state) need a real PID 1; they were exercised only offline (`--root`) in this container.
+
+**D-32 check-placement (AUD-RM2-DEP-10).** A manifest entry whose `id` is in `[forbidden]` is a violation. Every path component of an entry is checked for symlinks, not only the leaf. On a host (no `--root`), the onion key's filesystem must be backed by a dm-crypt device (`findmnt -T` + `lsblk -s`); with `--root` that check is reported as SKIP. The `ED25519-V3:` export format is recognised as a tor onion key.
+
+**D-33 Sealer transport and staging owner (AUD-RM2-SEA-16; reconciles the unit with crates/candor-sealer SPEC-NOTES items 7 and 9).**
+- **Transport.** `candor-sealer.socket` is `ListenStream=` (u32be length-prefixed frames, ≤ 128 KiB, strict decoding in the crate) instead of 07 §5.2's SEQPACKET. AppArmor: the sealer accepts stream connections and connects to `istore.sock` (SEQPACKET) only; the web may create/connect stream sockets (seal.sock) besides accepting `http`.
+- **Staging.** The sealer writes staged parts and bundles itself through candor-safefs, which requires a 0700 root owned by its own uid. So the tmpfs is mounted `X-mount.owner=candor-sealer` 0700 and is the sealer's only `ReadWritePaths=` (noexec, nosuid, nodev, noswap); AppArmor grants `rwl` beneath it (`l`: the safefs rename fallback `linkat`+`unlinkat`), Landlock confines it in-process. `PrivateNetwork=yes`, `RestrictAddressFamilies=AF_UNIX`, the syscall set and the absence of any other writable path are unchanged. The store loses all access (`InaccessiblePaths=`, AppArmor deny).
+- **Memory.** tmpfs pages are charged to the writer's cgroup, so `MemoryMax` moves from the store (now 1G) to the sealer: 2560M (07 §4.2) + staging (6656M CE-SINGLE, 10752M CE-HARDENED via profile drop-ins).
+- **Integration item (store and sealer owners).** A staged bundle reaches the store as a file descriptor passed over `istore.sock` (`SCM_RIGHTS`; `sendmsg`/`recvmsg` are in both filters), never as a path. Until both sides implement it, the store cannot read staged bundles (fail closed).
+- **Credentials.** The deploy names stay `sealer_signing_key` and `argon2_salt` from `/etc/credstore.encrypted` (secret-placement manifest); the crate README's `sealer-k35` example is superseded. The integrating binary reads `$CREDENTIALS_DIRECTORY/sealer_signing_key`.
+- **Syscalls.** The pinned effective set is the sealer README's explicit list plus `seccomp` (deliberate re-add) and `riscv_hwprobe` (left in by the `@system-service`-minus form; inert under `SystemCallArchitectures=native` on x86_64/arm64). Feedback for the sealer owner: drop it from the next list.
+
+**D-34 Intake PostgreSQL statistics and fixed-time vacuum (lead disposition 2026-10-01 for AUD-RM2-STO-08/11/23/24).**
+- **Settings.** `track_counts = off`, `track_activities = off` (no per-table counts, no `last_autovacuum` times, no query text), `autovacuum = off` (its run times would follow source activity; anti-wraparound vacuum still runs on xid age), `temp_file_limit = 256MB` (server-wide; roles cannot raise it, it is superuser-only). `autovacuum_vacuum_scale_factor` removed (meaningless with autovacuum off).
+- **No persisted statistics.** PostgreSQL ≥ 15 writes `pg_stat/pgstat.stat` at shutdown. `pg_stat` in the data directory is a symlink (installer step) to `/run/candor/intake-pg-stat` (tmpfiles, 0700 `postgres`, RAM), writable in the PG unit and its AppArmor profile; `config-check --host` verifies the link (read, never followed) and, live, that the target is tmpfs.
+- **Fixed-time maintenance.** `candor-intake-vacuum.timer` (00/06/12/18:15 UTC, 15 min after the default import slots; HIGH/GOV sites change `OnCalendar=` and the baseline together) and `candor-intake-maint.timer` (daily 21:00 UTC). Both: `AccuracySec=1s`, `RandomizedDelaySec=0`, `Persistent=false` (a missed run is not replayed at a boot-correlated time). Services are oneshot, `User=candor-imaint` (new sysusers entry) with `SupplementaryGroups=candor-istore` for the socket, `PrivateNetwork=yes`, AF_UNIX only, the full hardening baseline, no output (D-28), AppArmor `candor-intake-maint` (read program and config bundle, PG socket only; no writes, no exec). Exposure 0.4.
+- **Binary contract (store owner).** `/usr/lib/candor/intake-store/candor-intake-maint vacuum` runs plain VACUUM of the intake tables of every tenant database; `... daily` runs `prune_deletion_list(today)`, `reset_statistics()`, `VACUUM FULL` of the source-linkable tables and `CHECKPOINT`, as `candor_intake_maint`. **Superseded (lead decision 2026-10-01, round 3):** `candor_intake_maint` OWNS THE TENANT DATABASE but no table, schema, function or type; PostgreSQL 16 lets the database owner VACUUM / VACUUM FULL every non-shared table, so there is no membership in the schema owner (`candor_intake_migrator`) and no `SET ROLE` (store crate SPEC-NOTES "Database ownership"). Its only membership is `pg_checkpoint` (`WITH INHERIT TRUE, SET FALSE`) for `CHECKPOINT`. `candor-imaint` maps through the single `maint` peer line to `candor_intake_maint` only. `config-check --host --pg-db <db>` verifies this through the running server (`pg.maint_role.*`, see round 3). The store daemon itself no longer needs the owner login at every slot (STO-24 a).
+
+**D-35 config-check round 2 (AUD-RM2-DEP-15..22).**
+- **AppArmor.** Each profile is normalised (comments and blank lines dropped, blanks collapsed; `#include` is an include for the parser and is turned into a never-matching line) and must equal the `aa|` baseline statement by statement. Independently, rule classes are rejected in allow rules: `flags=` other than `attach_disconnected` (complain, unconfined, ...), any exec permission or `->` transition (`ix/px/cx/ux/pux/...`), write/append/link/lock on `/`, `/*`, `/**`, `/{...}` globs, `network` other than `unix <type>` (and `inet stream` where `aa-inet` allows it), `capability` beyond `aa-cap` (empty), `change_profile`, hats, `mount`, `ptrace`, `userns`, `all`, bare `file`, and includes other than `tunables/global`, `abstractions/base`, `abstractions/openssl`. `--host` adds `disable/` and `force-complain/` links, other files in `/etc/apparmor.d` naming a Candor profile or binary, and live: enforce mode and the loaded raw policy (`policy/profiles/*/raw_data`) equal to `apparmor_parser -QTK -S` of the checked file (untested here: no AppArmor in the container kernel). Round 3 (AUD-RM2-DEP-23) replaces the include allow-list: profiles are self-contained and any include fails; see "Fixes for AUD-RM2-DEP round 3".
+- **Sealer syscalls.** Groups come from `systemd-analyze syscall-filter` of the checking host; the first assignment must be allow-list; later lines add or remove in order; `:errno` suffixes are ignored for membership. A systemd upgrade that adds calls to `@system-service` makes the check FAIL until the release re-pins `scf|` (wanted: new kernel surface must not appear silently). The baseline was generated with systemd 255; re-pin on Debian 13's systemd 257 during integration.
+- **Input hygiene.** Every input is refused if it or any path component below the tree / `--root` is a symlink (or `.`/`..`), then copied once with `dd iflag=nofollow` (≤ 1 MiB) into the work directory; only the copy is read. Unit fragments and drop-ins found by systemd get the same component check before the merge reads them. `--root` is resolved once (`realpath`), PG's data directory must have no symlinked component inside it. Work directory: `mktemp -d` under `/run/candor-config-check` (created root 0700, verified not a symlink), removed by an EXIT trap (INT/TERM/HUP exit through it). tor's working copy is 0700/0600 owned by the instance user and reached through a bind mount inside tor's private mount namespace. Residual: a writer racing the checker between the component check and the copy (needs write access to the tree during the run; the copy itself never follows a final symlink).
+- **Output.** Reports carry rule names, counts, line/statement numbers, baseline values and sanitised option/key/user names only (`[A-Za-z0-9_.@:+/-]`, ≤ 48 chars, ≤ 8 names). Found values, unit diagnostics and nft rule text are no longer printed.
+- **Paths outside the unit set.** `--host`: `/etc/ld.so.preload` must not exist; `DefaultEnvironment=`/`ManagerEnvironment=` unset in `system.conf(.d)` and, live, the manager environment only `PATH`/`LANG*`/`LC_*`; `nftables.service` and `systemd-sysctl.service` load from `/usr/lib` with exactly the listed drop-ins, pinned `ExecStart`/`ExecReload`/`Type`, no `ExecStartPre`/`Post`/`Condition`/`Environment*`, no unpinned `Condition*`/`Assert*`, enabled (nftables `.wants` link, sysctl via `sysinit.target.wants`; live `is-enabled`). Offline sysctl precedence is systemd-sysctl's: `cat-config sysctl.d` only (Debian's `99-sysctl.conf` link brings `/etc/sysctl.conf` in at its place).
+- **PostgreSQL.** `pg|` is an allow-list of every key in the shipped file with its value; `pg_hba.conf` and `pg_ident.conf` must equal the release lines in order; a separate class check rejects any non-reject line for `postgres`/`all`. `pgc|` adds `unix_socket_group`, `temp_file_limit`, `idle_in_transaction_session_timeout`, `track_*`, `autovacuum`, `dynamic_library_path`.
+- **Invocation and integrity.** Unknown `--only` names and selections that run no check exit 2. `config-check.manifest` holds the baseline's sha256; the manifest's sha256 is pinned in the script; both are verified before any check and the verified copy is the only one read (mismatch: FAIL `tool.baseline_integrity`, exit 30). The script itself is covered only by package verification (residual 8).
+- **Site sets.** `mon_hosts`/`admin_jump`/`core_relay` reject 0.0.0.0/8, 127/8, 169.254/16, 224/4, 240/4 (incl. broadcast) and octets > 255; RFC 1918 addresses stay allowed (management networks).
+- **Kernel messages (DEP-20).** `debug.exception-trace = 0` stops the `traps:`/`segfault at` lines. OOM-kill lines remain, limited by `kernel.printk = 3 3 3 3` and `dmesg_restrict`, volatile ≤ 24 h: accepted residual per ADR-053(2) (`ReadKMsg=no` would also hide kernel faults the operator needs).
+
+## Open items for integration (Debian 13, systemd 257, real PID 1)
+
+1. Start every unit under its sandbox with real binaries and the AppArmor profiles in enforce mode. Fail on any `apparmor="DENIED"` line (R7 B4).
+2. Confirm that `LoadCredentialEncrypted=` from `/etc/credstore.encrypted` works with TPM2 sealing. The web, tor and PostgreSQL units list that directory in `InaccessiblePaths=`; the sealer and store do not, because they load from it.
+3. Confirm `LogNamespace=` together with `PrivateNetwork=` and socket activation, and `TemporaryFileSystem=/var:ro` together with `BindPaths=`.
+4. Confirm that tor `Type=notify` works with the Platform-Manifest tor build, and confirm the PROXY header on the Unix target (D-04).
+5. Test PoW under load with `CompiledProofOfWorkHash 0` (D-03).
+6. Confirm that tor needs neither AF_NETLINK nor AF_INET6 on an IPv4-only uplink (D-06).
+7. Run `config-check.sh --host` on the installed host (live: `systemctl show` property formats, loaded nft ruleset, `/proc/sys`, AppArmor enforce state). Confirm that `LogLevelMax=emerg` suppresses PID 1's messages about the units in the host journal (D-28), that `InaccessiblePaths=-/var/tmp` wins over `PrivateTmp=`'s `/var/tmp` (AUD-RM2-DEP-12; on systemd ≥ 256 switch to `PrivateTmp=disconnected`), and that tor reaches `http.sock` through its primary group (AUD-RM2-DEP-11) with a real rendezvous.
+8. Enforce-mode runs of the new `candor-tor-intake` and `candor-intake-pg` profiles under load, including tor's `Sandbox 1` start-up and PostgreSQL checkpoints and the maintenance jobs (D-22, D-34).
+9. Re-pin `scf|` and the `hunit|` keys on Debian 13 (systemd 257, Debian's `nftables.service`), confirm the live AppArmor raw-policy comparison (D-35), the `pg_stat` → tmpfs link across PostgreSQL restarts (D-34), and the fd hand-over of staged bundles between sealer and store (D-33).
+
+## Security self-review (OWASP ASVS 5.0 L3 mindset; owner OPSEC bar)
+
+What I checked, reading the diff as an attacker:
+
+- **Round 3 (DEP-23/24, maint role).**
+  - **Profiles.** No profile depends on a distribution file other than the pinned ABI. The isolated compile is the reference for both the `--host` and live comparisons, so a tampered tree changes neither side unnoticed.
+  - **Reader.** It cannot be made to follow a symlink, block on a FIFO, open a device or hard-linked file on purpose, or print content. Its own integrity is pinned, and it runs isolated (`-I -S -B`).
+  - **Role check.** The `--pg-db` query is read-only on catalogs. It runs with `env -i`, `--no-new-privs`, the jobs' own identity and a timeout. Role names in a failure are sanitised.
+  - **Residual risks.** Root can rewrite dpkg digests (residual 11). A database owner keeps `CREATE` on its database (residual 12). python3 is new on the intake host (standard library only).
+
+- **Clearnet exposure.**
+  - **tor.** tor has every `*Port` set to 0 and no TCP listener. Its only service target is a Unix socket.
+  - **Web and PostgreSQL.** The web service and PostgreSQL have no network namespace access at all.
+  - **Relay port.** The only inbound IP port is relay0:7443. It is restricted three times: by `BindToDevice`, by the socket unit's `IPAddressDeny=any` plus the single allowed address, and by nftables `@core_relay`.
+  - **Config check.** config-check evaluates effective configuration (D-31) and rejects 162 mutations (the original 80, all bypasses of AUD-RM2-deploy, and new-artefact cases; 21 of them on a synthetic installed host with `--host --root`), including a SocksPort, ControlPort or MetricsPort, a TCP onion target (also abbreviated), an extra HiddenServicePort, inbound HTTP, an nft include and a PostgreSQL TCP listener.
+- **Egress and no clearnet fallback.**
+  - **ext0.** Only the two tor UIDs may leave ext0, TCP only, and only to public addresses.
+  - **Candor services.** They have `PrivateNetwork=yes` and AF_UNIX only, plus nftables.
+  - **DNS and NTP.** There is no DNS. Public NTP is impossible; only chrony may reach H-MON.
+  - **Firewall failure.** A failed nft load keeps every intake unit stopped (`Requires=nftables.service`).
+- **Logging and metadata.**
+  - **tor.** `SafeLogging 1`, `warn` only, 1 h granularity, no hidden-service statistics, never a file.
+  - **PostgreSQL.** It emits nothing: `log_min_messages = panic` and `StandardError=null` (D-26, AUD-RM2-STO-02). `update_process_title=off`.
+  - **journald.** No service output at all (D-28); the namespace and host journal are volatile, hourly files, ≤ 24 h, `Audit=no`.
+  - **nftables.** No LOG targets.
+  - **Verification.** The PG run confirmed zero bytes of server output, even after errors.
+  - **Process titles and banners.** Process titles carry no role or database. Version banners go to `/dev/null` for tor (D-02).
+- **Secrets.**
+  - **At rest.** Secrets are TPM-sealed credentials, root-only at rest and per-unit at runtime. No `Environment=` or plain `LoadCredential=` is allowed; config-check enforces this.
+  - **Placement.** The manifest catches unlisted keys, copies, symlinks, hard links, wrong modes, a missing key, and a second onion key copy (NET-043).
+- **Privilege.**
+  - **Users.** Every unit runs as its own non-root user.
+  - **Capabilities and privilege escalation.** Capabilities are empty, `NoNewPrivileges=yes` is set, and no `+`/`!` exec prefixes are used.
+  - **Filesystem.** `ProtectSystem=strict`, `NoExecPaths=/` with `ExecPaths=/usr`, and `/var` hidden apart from each unit's own state.
+  - **Syscalls and memory.** Syscalls are filtered from `@system-service` minus 13–14 groups. MDWE is on everywhere. `LimitCORE=0` is set everywhere.
+  - **AppArmor.** Enforce profiles deny exec, IP networking (except the store's inherited TCP), `ptrace` and capabilities, and fail closed if missing.
+  - **Drop-ins.** config-check uses systemd's own drop-in resolution (all locations, prefix/template/type drop-ins) and compares the merged, section-aware result with an exact per-unit allow-list; `--host` adds transient/generator directories and the loaded unit's `DropInPaths`. Tested for each location.
+  - **Kernel.** sysctl baseline (ptrace scope 3, no core dumps, no unprivileged BPF/userns, no TCP timestamps), coredump storage off, swap off (D-30); live values checked by `--host`.
+- **Fail-closed behaviour.**
+  - Empty nft address sets.
+  - Relay socket `IPAddressDeny=any` until the site drop-in exists.
+  - A missing AppArmor profile, missing credential or missing `noswap` support stops the unit.
+  - The checkers exit non-zero on any unreadable input or manifest parse error.
+- **The tools themselves.** They run as root on attacker-influenced input.
+  - **Process.** No `eval`. All variables are quoted. `--` is passed before paths. `umask 077`, `mktemp` and a cleanup trap are used.
+  - **Patterns and paths.** Regexes are built in rather than taken from the manifest. Manifest paths are validated (absolute, no `..`, restricted charset). Unknown or duplicate manifest keys are errors.
+  - **File names.** A newline in a file name is itself a violation.
+  - **Output.** Report output is reduced to printable ASCII to block terminal-escape injection.
+  - **Content.** File contents are never printed.
+
+Residual risks (accepted or out of scope for this slice):
+
+1. **CE-SINGLE.** The hypervisor and the host admin can read all intake RAM: Tier W plaintext, keys and the volatile journal (18 §4.1). This deployment does not change that.
+2. **Live root compromise of H-INTAKE.** It defeats every control here; tor's key is online (16 §10, OI-3).
+3. **Untested sandbox details.** The runtime sandbox interactions in the open items list are untested in this container, which has no systemd as PID 1. They fail closed (the unit does not start), not open.
+4. **Staging tmpfs on restart.** The staging tmpfs survives a store restart until the application clears it (D-10).
+5. **Scan limits.** check-placement does not content-scan files over 1 MiB, ciphertext-only directories, `/run/credentials` or binary key formats. A deliberate insider can hide a key from it, so the check targets accidental misplacement (B-SD-22).
+6. **Crash diagnostics.** PostgreSQL's and every other intake service's output is discarded (D-26, D-28). tor's PoW verifier is interpreted (D-03).
+7. **Spec gaps.** D-04, D-11 (migrations), D-18 and D-19 need owner decisions. Until then the strict choice applies.
+8. **Checker trust.** config-check and its baseline are root-owned files on the host they check; a root attacker can change them (ST-120 detects drift and mistakes, not a live root compromise; see residual 2). The baseline is digest-bound to the script (D-35); the script relies on package verification. The checker runs tor (unprivileged, private mount namespace) and nft (private network namespace) on the configuration under test, and never echoes their error output.
+9. **Health signal (D-27).** Without control access, descriptor-level health values are gone from the intake host; reachability relies on the external C-25 probe and the update-instance self-fetch.
+10. **Kernel OOM lines (ADR-053(2)).** An OOM kill of a source-path process is logged by the kernel with a µs timestamp in the volatile host journal (≤ 24 h). `exception-trace` lines are off (D-35).
+11. **AppArmor abstractions.** Closed in round 3 (AUD-RM2-DEP-23): the profiles are self-contained and include nothing; the only distribution file they reference is `abi/3.0` (digest pinned). Remaining: a rewritten abstraction is detected through the dpkg conffile digests (MD5, what `dpkg --verify` uses), which an attacker with root can rewrite together with the file; that attacker can also load any policy, so this is detection of mistakes and third-party packages, not of root.
+12. **Maintenance owner rights.** Since round 3 the maintenance login is the database owner, not a member of the schema owner (D-34). A database owner still has `CREATE` and `TEMP` on its database and could create a schema or objects, and it can re-grant itself `CONNECT`; it cannot read or change the candor tables (no table privilege, no membership). `pg.maint_role.owns_no_objects` fails if it ever owns an object. The capability sits in two timer-driven oneshot units only.
+
+## Fixes for AUD-RM2-DEP (process/audits/AUD-RM2-deploy.md)
+
+| ID | Sev. | Fix | Where | Test |
+|---|---|---|---|---|
+| DEP-01 | High | Name denylist replaced by an allow-list on **effective** tor configuration: raw text must use full template option names only (no abbreviations, `+`/`/` prefixes, `%include`, repeats); tor itself canonicalises the file in a private mount namespace (`--verify-config`, `--dump-config short/full`) and the short dump must equal the allow-list (DoS tunables in ranges), the full dump must show the required defaults and empty node-restriction options (D-31). | `tools/config-check.sh` (`check_torrc`), `tools/config-check.baseline` (`tor*` lines) | all 7 audit variants plus `HSLayer3Nodes`, `DirAuthority`, `ExcludeNodes`, `Sandbox 0`, control socket re-added (with and without cookie auth), log file |
+| DEP-02 | High | `include`/`define`/`$` rejected before load; the ruleset is loaded with `unshare -n` and the kernel's rules (`nft -j list ruleset`) must equal the template rule by rule, in order; safety drops must precede every UID accept; fixed sets pinned, site sets plain addresses only; `--host` also checks the loaded ruleset (D-31). | `config-check.sh` (`check_nft`, `nft.jq`), baseline `nft-*` lines | include accept-all, `define`, E1 above the safety drops, extra rule, `core_relay` as 0.0.0.0/0 interval, `non_public4` element removed |
+| DEP-03 | High | Units are evaluated as systemd resolves them: fragment + every drop-in (`systemd-analyze verify --root` unit dump: prefix, template, type, `system.control`, `/run`, `/usr/local/lib`, `/usr/lib`), merged section-aware; every key of every section must equal the per-unit baseline (exact `ExecStart`, `Group`, `SupplementaryGroups`, `AppArmorProfile`, `SocketUser/Group`, ...; unknown or extra directives fail); `systemd-analyze verify` clean; `systemd-analyze security` threshold and item list; relay `IPAddressAllow` = `<@core_relay>/32`. `--host`: transient/generator drop-ins rejected, `systemctl show` drop-ins and properties, `NeedDaemonReload=no`, `postgresql.auto.conf` empty and `postgres -C` effective values. | `config-check.sh` (`check_units`, `check_units_live`, `check_pg`), baseline `unit|`, `sec|`, `pgc|`, `show|` | PG `ExecStart -c` override, `Environment=PGOPTIONS`, keys moved to `[Install]`, `ReadWritePaths=/`, `BindReadOnlyPaths`, `SupplementaryGroups`, `DeviceAllow`, `SocketBindAllow`, `Group=` removed, `TemporaryFileSystem` removed, `InaccessiblePaths` removed, wrong `AppArmorProfile`, `SocketUser/SocketGroup=users`, relay `IPAddressAllow=any` and a non-`@core_relay` address, prefix/template/type drop-ins, `ExecStartPre`, sealer filter reset to deny-list, line continuation, unknown key; host-root cases for `system.control`, `/run`, `/usr/lib` prefix, `/usr/local/lib` template, transient and generator drop-ins; `postgresql.auto.conf` (`ALTER SYSTEM`) with `CANDOR_TEST_PG` |
+| DEP-04 | Med | No tor control interface at all; `_candor-torctl` removed; health = unit liveness + onion self-fetch through a SOCKS Unix socket of the client-only `candor-update` instance (NET-045 forbids it on the intake instance); spec amendment requested (D-27). | `intake/torrc`, `sysusers.d`, tor unit, `config-check.sh` | control socket re-added; host: `_candor-torctl` recreated, member in tor's group |
+| DEP-05 | Med | All five source-path units: `StandardOutput=null`, `StandardError=null`, `LogLevelMax=emerg`; namespace `MaxLevelStore=crit`; spec amendment requested (D-28). | 5 units, `journald@candor-intake.conf` | tor/web stderr to journal, namespace storing `warning` |
+| DEP-06 | Med | Host journal `MaxFileSec=1h`, `Audit=no`; `LogLevelMax=emerg` also filters PID 1's messages about the units; effective journald config checked via `cat-config`; `--host`: `systemd-journal`/`adm` groups empty (D-28). | `candor-intake-host.conf`, `config-check.sh` | host journal without `MaxFileSec`, `Audit=yes`; host-root drop-ins setting `Storage=persistent` and namespace forwarding; admin in `systemd-journal` |
+| DEP-07 | Med | `max_wal_size=256MB`, `min_wal_size=32MB`, `wal_recycle=off`, `checkpoint_timeout=5min`; comment corrected (D-29). | `postgresql/candor-intake.conf`, baseline `pg|`/`pgc|` | `max_wal_size 1GB`, `wal_recycle on`; live cluster settings |
+| DEP-08 | Med | Enforce-mode AppArmor profiles `candor-tor-intake` and `candor-intake-pg`, attached without `-` (D-22); `--host` requires all five profiles loaded in enforce mode. | `apparmor/`, tor and PG units | tor profile removed, PG soft-fail `-`, host: profile file missing |
+| DEP-09 | Med | sysctl baseline, coredump `Storage=none`, coredump socket masked, swap none or random-key dm-crypt; static file allow-list, live `/proc/sys` with `--host` (D-30). | `sysctl.d/`, `coredump.conf.d/`, `config-check.sh` (`check_kernel`) | ptrace_scope 1, core_pattern pipe, tcp_timestamps 1, key dropped, extra key, coredump stored; host-root: later sysctl.d and `/etc/sysctl.conf` overrides, `coredump.conf.d` override, socket unmasked, plain swap in fstab |
+| DEP-10 | Low | `[forbidden]` ids enforced, every path component checked for symlinks, onion key must be on dm-crypt (`--host` only), `ED25519-V3:` export pattern (D-32). | `tools/check-placement.sh` | forbidden id, symlinked tor state dir, exported key |
+| DEP-11 | Low | tor runs with `Group=_tor-candor-intake` (its primary group owns the web socket directory); no control group needed any more. Real rendezvous stays an integration item. | tor unit | `Group=_candor-torctl` mutation |
+| DEP-12 | Low | AppArmor validation checks the parser's exit status; PostgreSQL test stops its own postmaster by PID; `InaccessiblePaths=-/var/tmp` on all five units (`PrivateTmp=disconnected` needs systemd ≥ 256; integration item 7). | `tests/validate.sh`, 5 units | `/var/tmp` line removed from tor |
+| DEP-13 | Info | Unchanged: PoW load test with the interpreted verifier remains open item 5. | — | — |
+| DEP-14 | Info | `--host` requires `tor.service` and `tor@default.service` masked; the update instance, chrony and apt `tor+https` remain next-slice work (D-27 adds the health SOCKS socket to that list). | `config-check.sh` (`check_host`), README step 7 | host: `tor@default` unmasked |
+
+**Not done, with reason.** None of the findings was left unfixed. The `--host` live paths cannot be exercised without a real PID 1 and are integration item 7. (Round 2: the sealer's `SystemCallFilter=` is now pinned, DEP-16.)
+
+## Fixes for AUD-RM2-DEP round 2 (process/audits/AUDIT-RM2-deploy.md "Re-test (round 2)"; plus AUD-RM2-SEA-16 and the lead's STO-08/11/23/24 disposition)
+
+| Finding | Sev. | Fix | Where | Negative tests (all exit 30 unless noted) |
+|---|---|---|---|---|
+| DEP-15 | Med | Profiles compared statement by statement with `aa|`; rule-class rejects (flags, exec/transitions, broad write globs, network, capabilities, change_profile, hats, includes); `--host`: disable/force-complain, foreign profiles, live enforce + loaded-policy digest (D-35). | `config-check.sh` (`check_apparmor`, `aa_norm`, `aa_classes`), baseline `aa*` | static: sealer `/** rwlkix` + `network,`, tor `/usr/bin/** ux`, web `flags=(complain)`, pg `capability sys_admin`, store `change_profile`, maint `pux`, `#include <local/…>`, tor `network inet`, deny rule removed; host: complain, `/** rwlkix`, `ux`, `disable/` link, `force-complain/` link, foreign file redefining `candor-sealer` |
+| DEP-16 | Med | `SystemCallFilter=` lines pinned `=`; effective allow-set (systemd group expansion, ordered add/remove) must equal `scf|` (133 calls: sealer README list + `seccomp`, `riscv_hwprobe`); 32 `scf-never|` calls incl. io_uring (D-33, D-35). Unit contents unchanged. | `check_sealer_syscalls`, baseline `scf*` | drop-in re-allowing `io_uring_*` (static and host), deny line without `userfaultfd`, `bpf` added to the re-add line |
+| DEP-17 | Med | Symlinked inputs/components refused and never read; one `dd iflag=nofollow` copy per input; unit/drop-in paths checked; `--root` resolved inside the root (PG data dir too); no file content in reports (names sanitised); work dir `mktemp` under root-owned 0700 `/run/candor-config-check`, EXIT trap; tor copy 0700/0600 via bind mount (D-35). | `snap`, `symlinked_component`, `san_names`, `tor_canon`, all checks | static: torrc, PG conf, pg_hba, AppArmor profile, unit drop-in, sysctl file as symlinks to a marker file; host: torrc symlink, symlinked `etc/tor/instances`, drop-in symlink, `/etc/group` symlink, nftables.conf symlink; PG data dir behind a symlink in `--root`; every report scanned for the marker; work base 0700 and empty after all runs |
+| DEP-18 | Low | `/etc/ld.so.preload` absent; manager `DefaultEnvironment`/`ManagerEnvironment` unset (live: names allow-listed); `nftables.service`/`systemd-sysctl.service` fragment, drop-ins, pinned keys, no unpinned conditions, enabled; offline sysctl = `cat-config sysctl.d` only (D-35). | `check_host`, `check_host_units`, `check_kernel`, baseline `hunit|`/`hdropin|` | host: `DefaultEnvironment=LD_PRELOAD`, `ManagerEnvironment`, `/etc/ld.so.preload`, `sysctl.conf` good + `99-zz` bad, nftables drop-in `/bin/true`, nftables loading another file, nftables not enabled, nftables runtime mask, systemd-sysctl masked, systemd-sysctl condition |
+| DEP-19 | Low | `pg|` is an allow-list of every key; pg_hba/pg_ident exact; no non-reject `postgres`/`all` line; migration and maintenance lines per ADR-052(9) (D-11); `pgc|` extended. | `check_pg`, `pg_exact`, `pg_hba.conf`, `pg_ident.conf`, `sysusers.d` | `local all postgres peer` first, migrator to all DBs, extra ident mapping, unknown key, `unix_socket_group`, `dynamic_library_path` |
+| DEP-20 | Low | `debug.exception-trace = 0`; OOM lines documented as ADR-053(2) residual (residual 10). | `sysctl.d`, baseline | static and host: exception-trace 1 |
+| DEP-21 | Low | Unknown `--only` and empty selections exit 2; baseline sha256 in `config-check.manifest`, manifest sha256 pinned in the script, checked before use (exit 30). | `config-check.sh`, `config-check.manifest` | `--only typo`, `--only tor,typo`, static `--only host` (exit 2); edited baseline; baseline + re-written manifest |
+| DEP-22 | Info | Site sets: unicast host addresses only (D-35). | `nft.jq` (`hostaddr`) | `mon_hosts {0.0.0.0, 255.255.255.255}` (static and host), `admin_jump {127.0.0.1}`, `core_relay {224.0.0.1}` |
+| SEA-16 | Info | Socket `ListenStream`; staging tmpfs owned 0700 by `candor-sealer`, the sealer's only `ReadWritePaths=` (+ AppArmor `rwl`, mount dependency); store loses staging; `MemoryMax` moved to the sealer; credential names fixed (D-33). | sealer/store units and profiles, mount, profiles drop-ins | socket back to SEQPACKET, sealer without staging, store with staging, staging owned by istore, store profile `staging rw`, sealer `MemoryMax=2560M` |
+| STO-08/11/23/24 (lead) | — | `track_counts`/`track_activities`/`autovacuum` off, `temp_file_limit=256MB`, `pg_stat` on tmpfs; fixed-time `candor-intake-vacuum`/`-maint` timers + services + profile, maintenance login `candor-imaint` (D-34). | PG conf/unit/profile, tmpfiles, new units, profile, baseline | `track_counts on`, `track_activities on`, `autovacuum on`, `temp_file_limit -1`, idle timeout 0, stats dir not writable, `pg_stat` a real directory (PG run), vacuum timer hourly, maint timer randomised / catch-up / removed, maint as `candor-istore`, vacuum with network, maint stderr to journal, maint unconfined; host: timer drop-in moving the time |
+
+Checks run for round 2 (2026-10-01, this container): `shellcheck -S style -x` clean; `CANDOR_TEST_PG=1 deploy/tests/validate.sh` 311 PASS, 0 FAIL (863 checks on the shipped tree for base/ce-single/ce-hardened; 238 mutations rejected with exit 30, 45 of them host-root; `systemd-analyze security` web/sealer/store/vacuum/maint 0.4, PostgreSQL 0.5, tor 1.4; `apparmor_parser` 6 profiles exit 0; PG 16 run incl. `postgres -C`). Not run here: live `--host` (no PID 1, no AppArmor in the kernel).
+
+## Fixes for AUD-RM2-DEP round 3 (process/audits/AUDIT-RM2-deploy.md "Re-test (round 3)"; lead decisions 2026-10-01)
+
+| Finding | Sev. | Fix | Where | Negative tests (all exit 30) |
+|---|---|---|---|---|
+| DEP-23 | Med | **Self-contained profiles.** All six profiles (incl. `candor-intake-maint`) contain no `include`/`#include`/`include if exists`. `@{PROC}` and `@{pid}` are defined in the file (Debian's values). The runtime rules of `abstractions/base` are inlined and minimised: `ld.so.cache` r, `/usr/lib/*-linux-gnu*/**.so*` mr, `/dev/null` rw, `/dev/urandom` r, own `maps` r, signals within the profile. Tor and PG keep base's three `unix` rules (behaviour unchanged). Tor gets `/dev/random` and `/etc/ssl/openssl.cnf` (was `abstractions/openssl`). PG gets `/etc/nsswitch.conf` + `/etc/passwd` r (peer authentication calls `getpwuid`; base never granted this, a latent enforce-mode failure), `/usr/lib/locale/**` r and gconv-modules r. Dropped from base: locale for the Rust services, `ld.so.preload`, journal sockets, ptrace, home directories, the `base.d` include. **config-check:** any include is a rule-class failure (`apparmor.<p>.include`), in static and `--host` mode. Variables other than one `@{PROC}=` and one `@{pid}=` outside the profile, any `+=`, an `abi` other than `<abi/3.0>`, and `alias`/`hat` all fail. **`--host`:** (1) `abi/3.0` must equal the pinned sha256 (`aa-abi|`). (2) Isolated compile: the release statements (`aa|` lines) are compiled with `apparmor_parser -QTK -S --base <private dir holding only the verified abi copy> --config-file <empty>`. The installed file is compiled the way the host would (`--base /etc/apparmor.d`, the host's `parser.conf`). The two binaries must be equal (`apparmor.<p>.compiled`). (3) Live, the loaded `raw_data` must equal the isolated compile (no longer a compile against the possibly tampered tree). (4) `abstractions/base.d` and `tunables/global.d` must be empty, and `local/` may hold only empty files and a README (`apparmor.snippet_dirs_empty`). (5) Every present conffile of the installed `apparmor` package under `abi/`, `abstractions/`, `tunables/` must match its dpkg digest, read race-free (`apparmor.dist_conffiles`). | 6 profiles, `config-check.sh` (`aa_classes`, `check_apparmor`, `aa_dist_conffiles`), baseline `aa|`, `aa-abi|` | static: sealer re-includes `abstractions/base`, web `include <tunables/global>`, store `include if exists <local/…>`, tor `#include <abstractions/openssl>`, PG `@{PROC}+=/`, maint extra variable, sealer `abi <abi/4.0>`. host: `abstractions/base.d` snippet (`/** rwlkix, network, capability,`), `tunables/global.d` `@{PROC}+=/`, `local/candor-sealer`, rewritten `abstractions/openssl`, rewritten `abstractions/base`, rewritten `tunables/proc`, rewritten `abi/3.0`, sealer re-including base, `parser.conf` `features-file=` downgrade |
+| DEP-24 | Low | **Race-free reader** `tools/safe-read.py` (Python 3 standard library only; run as `python3 -I -S -B` from a manifest-verified copy under `timeout -k 2 20`). It walks every component from `/` with `openat` and `O_PATH\|O_DIRECTORY\|O_NOFOLLOW`. A FIFO or device is never opened on purpose: `fstatat(AT_SYMLINK_NOFOLLOW)` runs first. The open uses `O_RDONLY\|O_NOFOLLOW\|O_NONBLOCK\|O_NOCTTY`, then `fstat` checks: regular file, same inode as pre-checked, `st_nlink == 1`, owner (host: root; tree: root or the tree's owner, plus the data-dir owner for `postgresql.auto.conf`), no group/world write on a host (tree: no world write), size ≤ 1 MiB (dpkg status 64 MiB). Reads are capped at size + 1. It never prints content; the status code maps to a fixed message. Used by `snap`/`snap_opt` (every input) and `unit_merge` (a refused unit file becomes an unknown directive, so it fails). The static unit-tree copy is re-checked for symlinks/special files after `cp -a`. Unknown and duplicate torrc option names are reported as counts only. The helper's sha256 is in `config-check.manifest` (manifest pin updated). | `safe-read.py`, `config-check.sh` (`safe_copy`, `snap`, `unit_merge`, `units_root`, `check_torrc`, `verify_policy`) | direct: symlinked parent, symlinked leaf, `..`, FIFO (status 12, no block), device, directory, foreign owner, world-writable, hard link, over cap, missing, `--md5` mode. Live races under `timeout`: `postgresql/` swapped between a directory and a symlink to a marker directory for 25 runs (all exit 30, marker never printed); `torrc` swapped between a FIFO and a file for 10 runs (all exit 30, none hung); torrc replaced by a FIFO; unknown torrc option name not echoed |
+| Lead: maint role | — | `candor_intake_maint` = database owner, no schema-owner membership, no `SET ROLE` (D-34 superseded). Unit/profile/pg_hba comments updated; pg_hba/pg_ident/tmpfiles/timers unchanged (one `maint` peer line already). New `--pg-db <candor_intake_*>`: `--host` connects through the configured socket exactly as the jobs do (`candor-imaint` + socket group, `env -i`, `setpriv --no-new-privs`, `timeout`). It checks memberships = `pg_checkpoint` (no ADMIN, INHERIT, no SET) or none, no members, no SUPERUSER/CREATEROLE/CREATEDB/REPLICATION/BYPASSRLS, NOINHERIT, `datdba = candor_intake_maint`, and that it owns no relation/schema/function/type (`pg.maint_role.*`). A running server checked without `--pg-db` fails (with no server and no `--pg-db`: SKIP, e.g. at install step 8). | `config-check.sh` (`pg_maint_role`), units, profile and pg_hba comments, README | PG run: maintenance role made a member of `candor_intake_migrator`; database not owned by `candor_intake_maint`; running server without `--pg-db`; positive: `candor-imaint` logs in only as `candor_intake_maint`, and only with the socket group |
+
+**Implementation decisions (round 3).**
+- **python3 on the intake host (superseded in round 5 by ADR-055(3): compiled reader, no python3).** `config-check.sh` needed `python3` (standard library only, no packages) for `safe-read.py`. **`python3` (Debian `python3-minimal`) must be added to the H-INTAKE Platform Manifest** (17 §4.5). config-check fails closed (`tool.baseline_integrity`, exit 30) without it or without `timeout`. Bash cannot do this safely: it has no `openat`/`O_NOFOLLOW` walk and no `fstat` on an open descriptor.
+- **Rewritten but unincluded abstractions.** No Candor policy can change through them any more (`apparmor.<p>.compiled` proves this per run). They still fail `--host` through the dpkg conffile digests, because the lead's acceptance criterion and the compensating control in the round-3 gate require it.
+- **ABI pin.** `aa-abi|3.0|` is this container's apparmor 4.0.1 file. Re-pin on Debian 13 with the Platform-Manifest apparmor package (integration item 9). The compiled-policy comparison uses the default feature set of the machine running the check for both sides, so it holds offline. Live, the comparison with `raw_data` uses the kernel's.
+- **Enforce-mode verification** of the minimised runtime rules (loader paths on arm64, tor's OpenSSL, PG locale) stays integration item 8.
+
+Checks run for round 3 (2026-10-01, this container): `shellcheck -S style -x` clean; `python3 -m py_compile safe-read.py` ok; `CANDOR_TEST_PG=1 deploy/tests/validate.sh` 351 PASS, 0 FAIL, exit 0 (875 checks on the shipped tree for base/ce-single/ce-hardened; 251 mutations rejected with exit 30, 54 of them host-root; 14 direct reader cases, 2 live race loops, FIFO and torrc-name cases; PG 16 run with the maintenance-role cases). `systemd-analyze security`: web/sealer/store/vacuum/maint 0.4, PostgreSQL 0.5, tor 1.4 (budgets 0.5/0.5/1.5). `apparmor_parser -Q -K -T`: 6 profiles exit 0. Isolated compile equals the system compile for all 6. `/run/candor-config-check` root 0700 and empty. Not run here: live `--host` (no PID 1, no AppArmor in the kernel).
+
+## Fixes for AUD-RM2-DEP round 5 (lead dispositions after round 4; ADR-054, ADR-055)
+
+| Item | Fix | Where | Tests |
+|---|---|---|---|
+| ADR-055(1) memfd | Sealer unit no longer denies `memfd_create`. Re-pinned the `unit|candor-sealer.service` deny line, added `scf|memfd_create` (134 calls), removed `scf-never|memfd_create`. Baseline and manifest re-pinned. | baseline | shipped tree passes; DEP-16 mutations unchanged |
+| DEP-25 (ADR-054) | `pg_hba.conf` names one exact database (`candor_intake_TENANT`, replaced by the installer; no regex). `pg.hba_database`: the peer lines name one and the same database. A release tree may carry the placeholder. A host needs `candor_intake_[a-z0-9_]{1,49}`, equal to `--pg-db` when given. Baseline `hba|` lines use `{DB}`. `pg_maint_role` adds checks over the live catalogs: exactly one database besides `postgres` and templates (`single_database`); `datconnlimit = -1` and `rolconnlimit = -1`; no `pg_db_role_setting` row with `setrole = 0` (`ALTER DATABASE … SET`). Role settings must be per database and on the store's allow-list (`search_path`, `statement_timeout`, `idle_in_transaction_session_timeout`, `temp_file_limit`, `default_transaction_read_only`). | `pg_hba.conf`, `config-check.sh` (`check_pg`, `pg_exact`, `pg_maint_role`), baseline, README step 8 | static: regex database, maint line to another database, database list. PG run: placeholder left on a host, pg_hba naming another database than `--pg-db`, `ALTER DATABASE … SET` and `CONNECTION LIMIT 5` issued by the owner itself, a second database plus a role connection limit; clean again after undo |
+| DEP-26 (ADR-055(3)) | `safe-read.py` replaced by `crates/candor-safe-read` (binary + lib, Apache-2.0 OR MIT, workspace lints, no `unsafe`; deps `rustix =1.1.2` [std, fs], `md-5 =0.11.0` for dpkg digests; both already in Cargo.lock). Same semantics and exit codes (0, 2, 10–15). The parent directory and the leaf are opened with `openat2(RESOLVE_NO_SYMLINKS\|NO_MAGICLINKS\|BENEATH)` from `/` (on `ENOSYS`, an `O_PATH\|O_NOFOLLOW` component walk). `fstatat(AT_SYMLINK_NOFOLLOW)` runs before the open, which uses `O_NOFOLLOW\|O_NONBLOCK\|O_NOCTTY`. `fstat` checks: regular file, same inode, one link, owner, mode. Size cap; reads stop at cap + 1. **Output:** the tool prints nothing at all. Copy mode writes OUT; `--md5` mode writes its report to an OUT file (0600, `O_NOFOLLOW`) instead of stdout. A stdout writer would need a LOG-001 lint exception (`std::io::stdout` is a disallowed method). The file keeps the "no content on any stream" property. **Reproducible build:** `tools/build-safe-read.sh` (pinned toolchain, `--locked`, path remapping, stripped, one codegen unit) puts it at `tools/candor-safe-read`, git-ignored via `deploy/.gitignore`. Two builds in different target directories gave the same sha256 `77625961…`. The manifest pins that digest. config-check copies the binary into its work directory, checks the copy's digest and runs only the copy. python3 removed from all requirements. A justified `safefs-lint: allow` marker covers the reader's own `rustix::fs` use, since it is itself a safe-path reader. | crate, `build-safe-read.sh`, `config-check.sh`, manifest, README | 7 crate tests (copy, symlinked parent/leaf, `..`, FIFO without blocking, device, directory, owner, mode, hard link, cap, missing, MD5 KAT, report file, policy parsing). validate: 14 direct binary cases, the parent-dir and FIFO swap race loops, FIFO torrc, torrc name not echoed, build + digest pin |
+| DEP-27 | `config-check.sh --work-base DIR` (root-owned 0700, not a symlink, absolute). validate.sh creates one per run under its `mktemp` directory, passes it to every config-check call and asserts only on its own base. | `config-check.sh`, `validate.sh` | work-base assertion |
+
+**Implementation decision (round 5).** On H-INTAKE the reader is installed next to `config-check.sh` (`/usr/lib/candor/tools/candor-safe-read`, root 0755). The release package builds it with `build-safe-read.sh`, and the manifest digest must match. Any change to the crate, its dependencies or the toolchain needs a re-pin (`build-safe-read.sh --print-digest`), like the baseline.
+
+Checks run for round 5 (2026-10-01, this container): `shellcheck -S style -x` clean; `cargo fmt --check`, `cargo clippy -p candor-safe-read --all-targets -- -D warnings` clean, `cargo test -p candor-safe-read` 7 passed; `lint-safefs.sh` OK, `lint-logging.sh` ok; `CANDOR_TEST_PG=1 deploy/tests/validate.sh` 362 PASS, 0 FAIL, exit 0 (876 checks on the shipped tree; 254 mutations rejected with exit 30; `systemd-analyze security` 0.4/0.5/1.4 within budget; reproducible reader build equals the manifest pin).
+
+## Fixes for AUD-RM2-DEP round 6 (DEP-29, DEP-30)
+
+| Item | Fix | Tests |
+|---|---|---|
+| DEP-29 | `vm.memfd_noexec = 2` in `sysctl.d/90-candor-intake.conf`. The baseline line `sysctl\|vm.memfd_noexec\|2` is checked statically, against later `sysctl.d` files on a host, and live under `/proc/sys` with `--host` without `--root`. The sealer's `MFD_NOEXEC_SEAL` belongs to the sealer builder. | static: value 0, line removed; host: a later `sysctl.d` lowers it to 1 |
+| DEP-30 | `--work-base`: every ancestor up to `/` must be a root-owned directory, not a symlink, with no group/world write and no sticky bit (so `/tmp` and `/var/tmp` are refused); no `.`/`..` components; otherwise exit 2. config-check opens `$WORK` once (`exec {WORKFD}<`) and passes it to the reader as fd 3. OUT is a relative name created with `openat2(O_WRONLY\|O_CREAT\|O_EXCL\|O_NOFOLLOW\|O_NONBLOCK\|O_NOCTTY, RESOLVE_BENEATH\|NO_SYMLINKS\|NO_MAGICLINKS)`, mode 0600. The fd-3 directory must be private (no group/other bits); it is re-opened through `/proc/self/fd/3` because safe Rust cannot adopt a raw fd. config-check removes OUT before each call. validate.sh keeps its work base under `/run`. Reader re-pinned; two builds in different target directories gave sha256 `58b2bb3a…eccbbf6`. `deploy/.build/` (the build cache) is git-ignored. | crate: existing file, symlink, symlinked directory, FIFO (no block), absolute/`..`/empty names, non-private directory (8 tests). validate: the same cases through the binary, plus no fd 3; `--work-base` refused under sticky `/var/tmp`, a `nobody`-owned ancestor, a group-writable ancestor, a symlinked ancestor and `..`; a root 0755 chain accepted |
+
+Checks run for round 6: `shellcheck -S style -x` clean; `cargo clippy -p candor-safe-read --all-targets -- -D warnings` clean; `cargo test -p candor-safe-read` 8 passed; `CANDOR_TEST_PG=1 validate.sh` 381 PASS, 0 FAIL, exit 0 (877 static checks OK).
+
+### Sealer memory rule (lead decision after round 5)
+
+The sealer unit sets `CANDOR_SEALER_MEMORY_BUDGET_MIB=3840`, `CANDOR_SEALER_SESSION_UPLOAD_MIB=768` and `CANDOR_SEALER_UPLOAD_SLOTS=64`. The `Environment=` allow-list admits only these three variables. config-check (`check_sealer_memory`) works on the effective merged unit, so each profile is checked against its own `MemoryMax` and mount size. It requires:
+- budget ≤ `MemoryMax` − 1024 MiB;
+- staging tmpfs `size=` ≥ budget;
+- per-draft quota present and ≤ budget / 2;
+- slots present, an integer in 16..4096.
+
+Any violation exits 30. The per-draft quota must be set explicitly so the half-budget rule cannot pass when the variable is missing.
+
+**Two fail-open bugs found and fixed in config-check:**
+- mawk panics (exit 100) on some `{m,n}` regexes inside repeated groups. Such a panic used to drop a unit's whole allow-list evaluation without any FAIL. A failed evaluation now reports FAIL.
+- The new rule's results were first piped into `report_lines`, a subshell, so FAILs were printed but not counted. It now uses a here-string.
+
+validate.sh adds 21 cases: 18 must exit 30 and name their rule, and 3 must be accepted. They cover the base tree, ce-single and ce-hardened. `CANDOR_TEST_PG=1 validate.sh`: 402 PASS, 0 FAIL; 882 static checks OK.
+
+### ADR-056 sessions, kernel floor, DEP-31, DEP-32
+
+| Item | Fix | Tests |
+|---|---|---|
+| ADR-056 | The sealer unit sets `CANDOR_SEALER_MAX_SESSIONS=512` and `CANDOR_SEALER_UPLOAD_SLOTS=512`. config-check requires MAX_SESSIONS 16..65536, UPLOAD_SLOTS ≥ MAX_SESSIONS, and a guaranteed slice (budget / 2) / UPLOAD_SLOTS ≥ 1 MiB. | missing, 15, 65537, slots < sessions, slice < 1 MiB; accepted at exactly 1 MiB |
+| Kernel floor | H-INTAKE needs Linux ≥ 6.3 for `memfd_noexec`, `MFD_NOEXEC_SEAL` and `F_SEAL_EXEC`. This is recorded in 17 (Distribution row, Platform Manifest) and in README step 1. `host.kernel_floor`: `uname -r` on a live host; with `--root`, `$ROOT/proc/sys/kernel/osrelease` read with the safe reader (SKIP if absent). Anything below 6.3 or unparseable exits 30. | synthetic host: 6.1, 6.2.16, unparseable |
+| DEP-31 | config-check runs `set -o pipefail`; it runs no helper scripts, only the compiled reader. Before any check, a self-test of sort, uniq, comm, cut, tr, sed, awk, grep and wc exits 2 on failure. Every comparison substitution checks its status (`tool_err` reports FAIL "comparison failed"). This covers the manifest, tor keys and duplicates, pg duplicates and allow-list, pg_hba databases, unit security items, the syscall set and never-list, sysctl keys, host and live drop-ins, and resolv. Every "FAIL if it matches" test goes through `nomatch` (only exit 1 means no match): tor control interface, nft include/define, pg include, and the four pg_hba awk tests. `\| grep -q` on a pipeline is replaced by here-strings, so an early-exiting grep cannot make a SIGPIPE in the writer read as "no match" under pipefail. `grep -v '^$'` stages whose status is now checked became `sed '/^$/d'`. | `comm` and `uniq` shims: one always exits 2 (exit 2 from the self-test); one fails after the self-test (exit 30, "comparison failed"), on a tree with `cluster_name = 'x'` |
+| DEP-32 | No persistent `{WORKFD}`. Each reader call opens `3<"$WORK"` for that child only. The path is safe to reopen because of DEP-30's ancestor rule. | a `tr` shim logs its inherited fds; no work-directory descriptor appears |

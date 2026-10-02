@@ -1,0 +1,55 @@
+error[E0603]: function `redaction_set_hash` is private
+  --> tests/ui/forge_tombstone.rs:22:33
+   |
+22 |     let _h = candor_log::chain::redaction_set_hash(&[(0, [0u8; 32])]);
+   |                                 ^^^^^^^^^^^^^^^^^^ private function
+   |
+note: the function `redaction_set_hash` is defined here
+  --> src/chain.rs
+   |
+   | pub(crate) fn redaction_set_hash(entries: &[(u64, [u8; 32])]) -> [u8; 32] {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0559]: variant `AuditEvent::CaseDisposed` has no field named `case`
+  --> tests/ui/forge_tombstone.rs:11:9
+   |
+11 |         case: c,
+   |         ^^^^ `AuditEvent::CaseDisposed` does not have this field
+   |
+   = note: available fields are: `disposal`
+
+error[E0559]: variant `AuditEvent::CaseDisposed` has no field named `receipt_id`
+  --> tests/ui/forge_tombstone.rs:12:9
+   |
+12 |         receipt_id: ReceiptId::generate().unwrap(),
+   |         ^^^^^^^^^^ `AuditEvent::CaseDisposed` does not have this field
+   |
+   = note: available fields are: `disposal`
+
+error[E0559]: variant `AuditEvent::CaseDisposed` has no field named `removed_event_count`
+  --> tests/ui/forge_tombstone.rs:13:9
+   |
+13 |         removed_event_count: 1,
+   |         ^^^^^^^^^^^^^^^^^^^ `AuditEvent::CaseDisposed` does not have this field
+   |
+   = note: available fields are: `disposal`
+
+error[E0559]: variant `AuditEvent::CaseDisposed` has no field named `redacted_set`
+  --> tests/ui/forge_tombstone.rs:14:9
+   |
+14 |         redacted_set: [0u8; 32],
+   |         ^^^^^^^^^^^^ `AuditEvent::CaseDisposed` does not have this field
+   |
+   = note: available fields are: `disposal`
+
+error: cannot construct `CaseDisposal` with struct literal syntax due to private fields
+  --> tests/ui/forge_tombstone.rs:17:19
+   |
+17 |         disposal: CaseDisposal {
+   |                   ^^^^^^^^^^^^
+18 |             case: c,
+   |             ------- private field
+19 |             receipt: ReceiptId::generate().unwrap(),
+   |             --------------------------------------- private field
+   |
+   = note: ...and other private fields `sets` and `approvals` that were not provided

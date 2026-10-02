@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+[package]
+name = "candor-core"
+version = "0.1.0"
+description = "Candor shared cryptographic library (C-11): suites, HKDF label registry, source passphrases, sealed objects, recipient slots, wrap stanzas, STREAM, encrypted records"
+license = "Apache-2.0 OR MIT"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Every dependency is justified in SPEC-NOTES.md ("Dependencies").
+[dependencies]
+hpke = { version = "=0.14.1", default-features = false, features = ["alloc", "mlkem", "x25519", "hkdfsha2", "chacha"] }
+chacha20poly1305 = { version = "=0.11.0", default-features = false, features = ["alloc", "zeroize"] }
+hkdf = { version = "=0.13.0", default-features = false }
+hmac = { version = "=0.13.0", default-features = false }
+sha2 = { version = "=0.11.0", default-features = false, features = ["zeroize"] }
+blake3 = { version = "=1.8.2", default-features = false, features = ["zeroize"] }
+ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["zeroize", "fast"] }
+argon2 = { version = "=0.6.0", default-features = false, features = ["alloc", "zeroize"] }
+getrandom = { version = "=0.4.3", default-features = false }
+rand_chacha = { version = "=0.10.0", default-features = false }
+subtle = { version = "=2.6.1", default-features = false }
+zeroize = { version = "=1.8.2", default-features = false, features = ["alloc", "zeroize_derive"] }
+unicode-normalization = { version = "=0.1.24", default-features = false }
+
+[dev-dependencies]
+chacha20 = { version = "=0.10.2", default-features = false, features = ["cipher"] }
+proptest = { version = "=1.11.0", default-features = false, features = ["std"] }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = { version = "=1.0.149" }
+hex = { version = "=0.4.3", features = ["serde"] }
+x25519-dalek = { version = "=3.0.0", default-features = false }

@@ -1,0 +1,100 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# PostgreSQL 16 cluster of the intake store (C-08; 09 §10; 07 §4.1: OS user postgres, Unix
+# socket only). Dedicated cluster started directly (not via pg_ctlcluster) so the full
+# sandbox applies. Config: /etc/candor/intake/postgresql/candor-intake.conf (wal_level=minimal,
+# no archiving, no replication, track_commit_timestamp=off, logging minimised; ADR-046(1),
+# DB-021, LOG-008). Data directory on the LUKS2 volume (09 §10 Storage).
+[Unit]
+Description=Candor intake PostgreSQL (C-08 store, Unix socket only)
+Requires=nftables.service
+After=nftables.service systemd-tmpfiles-setup.service
+RequiresMountsFor=/var/lib/postgresql/16/candor-intake
+StartLimitIntervalSec=60s
+StartLimitBurst=5
+
+[Service]
+Type=notify
+User=postgres
+Group=postgres
+# MAC layer (AUD-RM2-DEP-08; 17 §5.2, R7 SI-B-04). No '-' prefix: fail closed.
+AppArmorProfile=candor-intake-pg
+# Socket group candor-istore (unix_socket_group): only members may connect (candor-istore; the
+# maintenance and migration units add it per unit); pg_hba allows only the peer maps
+# candor-istore -> candor_istore, candor-imaint -> candor_intake_maint and candor-migrate ->
+# candor_intake_migrator (ADR-052(9)).
+SupplementaryGroups=candor-istore
+ExecStart=/usr/lib/postgresql/16/bin/postgres -c config_file=/etc/candor/intake/postgresql/candor-intake.conf
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=mixed
+KillSignal=SIGINT
+TimeoutStartSec=300
+TimeoutStopSec=300
+Restart=on-failure
+RestartSec=5s
+OOMScoreAdjust=-900
+# Socket directory, and the RAM-only statistics directory behind data_directory/pg_stat
+# (AUD-RM2-STO-11: cumulative statistics are never persisted to disk).
+ReadWritePaths=/run/candor/intake-pg /run/candor/intake-pg-stat
+MemorySwapMax=0
+TasksMax=128
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+# ---- 07 §4.2 / R7 SI-B-01 hardening (do not weaken; config-check.sh) ----
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateIPC=yes
+PrivateMounts=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# jit = off in the config, so no W+X mappings are needed.
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+UMask=0077
+CapabilityBoundingSet=
+AmbientCapabilities=
+KeyringMode=private
+DevicePolicy=closed
+SystemCallArchitectures=native
+SystemCallErrorNumber=EPERM
+LimitCORE=0
+NoExecPaths=/
+ExecPaths=/usr
+IPAddressDeny=any
+SocketBindDeny=any
+SystemCallFilter=@system-service
+# @chown stays allowed: postgres chowns its socket to unix_socket_group.
+SystemCallFilter=~@privileged @resources @mount @debug @cpu-emulation @obsolete @raw-io @reboot @swap @module @clock @setuid @keyring process_vm_readv process_vm_writev
+SystemCallFilter=fchown fchownat chown
+TemporaryFileSystem=/var:ro
+BindPaths=/var/lib/postgresql/16/candor-intake
+# /var/tmp: PrivateTmp's /var/tmp is disk-backed on the host; nothing may be written there
+# (AUD-RM2-DEP-12).
+InaccessiblePaths=-/var/tmp
+InaccessiblePaths=-/run/tor-instances -/run/candor/source-web -/run/candor/sealer -/run/candor/istore -/run/candor/staging -/run/credentials/candor-intake-store.service -/run/credentials/candor-sealer.service -/etc/credstore.encrypted -/etc/tor -/boot
+# ---- Logging (AUD-RM2-STO-02, AUD-RM2-DEP-05/06, DB-021, LOG-004/008, ADR-016) ----
+# PostgreSQL output is discarded entirely: even with log_min_messages = panic nothing it
+# writes may reach any journal, because every server log line carries a precise timestamp
+# that can coincide with a source action. Liveness is visible through the unit state only.
+# LogLevelMax=emerg also suppresses the service manager's own messages about this unit.
+StandardInput=null
+StandardOutput=null
+StandardError=null
+LogNamespace=candor-intake
+LogLevelMax=emerg
+SyslogIdentifier=candor-intake-pg
+
+[Install]
+WantedBy=multi-user.target

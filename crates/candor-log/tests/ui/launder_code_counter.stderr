@@ -1,0 +1,87 @@
+error[E0435]: attempt to use a non-constant value in a constant
+  --> tests/ui/launder_code_counter.rs:11:38
+   |
+11 |     let _b = Code::<ConfigKey>::of::<port>();
+   |                                      ^^^^ non-constant value
+   |
+help: consider using `const` instead of `let`
+   |
+ 9 -     let port: u16 = std::env::args().count() as u16;
+ 9 +     const port: u16 = std::env::args().count() as u16;
+   |
+
+error[E0423]: expected function, tuple struct or tuple variant, found struct `Seq`
+  --> tests/ui/launder_code_counter.rs:13:14
+   |
+13 |     let _d = Seq(1);
+   |              ^^^^^^
+   |
+  ::: src/field.rs
+   |
+   | pub struct Seq {
+   | -------------- `Seq` defined here
+   |
+help: you might have meant to use an associated function to build this type
+   |
+13 -     let _d = Seq(1);
+13 +     let _d = Seq::bound(_, _, _);
+   |
+13 -     let _d = Seq(1);
+13 +     let _d = Seq::of_failure(_);
+   |
+help: consider importing this unit variant instead
+   |
+ 4 + use serde::de::Unexpected::Seq;
+   |
+
+error[E0599]: no function or associated item named `new` found for struct `Code<S>` in the current scope
+  --> tests/ui/launder_code_counter.rs:10:33
+   |
+10 |     let _a = Code::<ConfigKey>::new(port);
+   |                                 ^^^ function or associated item not found in `Code<ConfigKey>`
+   |
+note: if you're trying to build a new `Code<ConfigKey>`, consider using `Code::<S>::of` which returns `Code<_>`
+  --> src/codes.rs
+   |
+   |     pub const fn of<const N: u16>() -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: there is a method `ne` with a similar name
+   |
+10 -     let _a = Code::<ConfigKey>::new(port);
+10 +     let _a = Code::<ConfigKey>::ne(port);
+   |
+
+error[E0747]: unresolved item provided when a constant was expected
+  --> tests/ui/launder_code_counter.rs:11:38
+   |
+11 |     let _b = Code::<ConfigKey>::of::<port>();
+   |                                      ^^^^
+   |
+help: if this generic argument was intended as a const parameter, surround it with braces
+   |
+11 |     let _b = Code::<ConfigKey>::of::<{ port }>();
+   |                                      +      +
+
+error[E0423]: cannot initialize a tuple struct which contains private fields
+  --> tests/ui/launder_code_counter.rs:12:14
+   |
+12 |     let _c = Count(4096);
+   |              ^^^^^
+   |
+note: constructor is not visible here due to private fields
+  --> src/field.rs
+   |
+   | pub struct Count(u32);
+   |                  ^^^ private field
+
+error[E0423]: cannot initialize a tuple struct which contains private fields
+  --> tests/ui/launder_code_counter.rs:14:14
+   |
+14 |     let _e = StaffTimer(UtcMillis(1));
+   |              ^^^^^^^^^^
+   |
+note: constructor is not visible here due to private fields
+  --> src/field.rs
+   |
+   | pub struct StaffTimer(UtcMillis);
+   |                       ^^^^^^^^^ private field

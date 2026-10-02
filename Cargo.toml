@@ -1,0 +1,36 @@
+# Candor Community Edition — Cargo workspace (RM-0).
+# Trust-path crates are AGPL-3.0-or-later except candor-core and candor-safefs (Apache-2.0 OR MIT, ADR-031).
+# Dependencies are declared per crate with exact versions ("=x.y.z"); Cargo.lock is committed (28-SUPPLY-CHAIN.md).
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.94"
+repository = "https://github.com/djshellshoxxx/leaks"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "warn"
+arithmetic_side_effects = "warn"
+
+[profile.release]
+# Reproducible, hardened builds (28 / 33): single codegen unit, overflow checks kept on.
+codegen-units = 1
+lto = "fat"
+overflow-checks = true
+panic = "abort"
+strip = "symbols"
+debug = false
+incremental = false
+
+[profile.test]
+overflow-checks = true

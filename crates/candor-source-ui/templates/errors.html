@@ -1,0 +1,20 @@
+{#- SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{#- Error summary (11 §5.7): first element after <h1>; focused via autofocus. -#}
+{%- if p.has_error_summary() %}
+<div class="error-summary" tabindex="-1" autofocus aria-labelledby="err-title">
+<h2 id="err-title">{{ p.t("sui-error-summary") }}</h2>
+{%- if let Some(m) = p.vm.ctx.page_error %}
+<p>{{ p.msg(m) }}</p>
+{%- endif %}
+{%- if !p.errors().is_empty() %}
+<ul>
+{%- for e in p.errors() %}
+<li><a href="#f-{{ e.field }}">{{ p.msg(e.message) }}</a></li>
+{%- endfor %}
+</ul>
+{%- endif %}
+{%- if p.vm.ctx.text_kept %}
+<p>{{ p.t("sui-error-kept") }}</p>
+{%- endif %}
+</div>
+{%- endif %}

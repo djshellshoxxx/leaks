@@ -1,0 +1,10 @@
+{#- SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{#- One guidance card (05 §6): <details>, heading inside <summary>, higher risk nested. -#}
+<details id="{{ c.anchor() }}"><summary><h3>{{ p.t(c.title) }}</h3></summary>
+{%- for b in c.normal %}{{ p.block_html(b)|safe }}{% endfor %}
+{%- if !c.high.is_empty() %}
+<details><summary>{{ p.t("sops-high-summary") }}</summary>
+{%- for b in c.high %}{{ p.block_html(b)|safe }}{% endfor %}
+</details>
+{%- endif %}
+</details>

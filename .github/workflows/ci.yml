@@ -1,0 +1,456 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Candor CI — PR/push gate subset (RM-0, 38; 27 §13; 28 §6–§8).
+#
+# Hardening (28 §7, ST-133):
+#  * every external action pinned by full commit SHA with a version comment;
+#  * workflow-level permissions are empty; each job requests contents: read only;
+#  * pull_request_target is never used; fork PRs get a read-only token, no secrets;
+#  * checkout never persists credentials;
+#  * tools installed with cargo install --locked --version =x.y.z (no downloaded
+#    binaries, no piped install scripts);
+#  * no caches (release jobs must never consume PR-written caches);
+#  * no github.event values are interpolated into run blocks (passed via env).
+#
+# Gate mapping: fmt/clippy -> SG-03 (clippy deny set, ST-007); test -> SG-06/SG-08
+# (as suites land); test-nonroot -> same suite as a fresh no-sudo account (ST-086);
+# deny/vet -> SG-05 (ST-010/ST-011; PR vet policy = safe-to-deploy only, ADR-052(8):
+# candor-crypto-reviewed is enforced by release-gate.yml / scripts/vet-release.sh); docs-lint -> SG-25 (ST-167);
+# reproducibility -> SG-13 smoke (single-host build-twice; the 2-builder comparison is
+# the release pipeline's job); sbom -> SG-14 (CycloneDX; signing happens at release);
+# workflow-lint -> ST-133 (+ CODEOWNERS resolution, gate self-tests); dco -> OSG-003;
+# secret-scan -> INF-08; supply-chain-scheduled -> online zizmor + cargo-audit.
+#
+# Tool pins (bump only via reviewed PR; 14-day cooling, 28 §5.1):
+#   cargo-deny =0.20.2, cargo-vet =0.10.2, cargo-cyclonedx =0.5.9, zizmor =1.26.1,
+#   cargo-audit =0.22.1
+
+name: ci
+
+on:
+  push:
+    branches: [main, "release/**"]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Daily advisory re-check against the RustSec DB (28 §6).
+    - cron: "17 4 * * *"
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  fmt:
+    name: fmt (rustfmt --check)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy (-D warnings)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: clippy
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  test:
+    name: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt
+      - name: cargo test --workspace (with the production memlock limit)
+        # The sealer's hardening test asserts mlockall succeeds (fail closed
+        # otherwise); production grants LimitMEMLOCK=2G (candor-sealer.service).
+        run: |
+          set -euo pipefail
+          sudo prlimit --pid "$$" --memlock=2147483648:2147483648
+          cargo test --workspace --all-features --locked --no-fail-fast
+
+  test-nonroot:
+    # Runs the suite as a fresh unprivileged account (no sudo, no runner
+    # environment, no tokens) so owner/mode checks such as candor-safefs'
+    # foreign-owner refusal (ST-086) are exercised as they would be in
+    # production, and so test code never runs with the runner's privileges.
+    # The toolchain is installed root-owned and read-only for that account;
+    # the account owns only its own copy of the checkout and its CARGO_HOME.
+    name: test (unprivileged user)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      TEST_USER: candor-test
+      RUST_PREFIX: /opt/candor-rust
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Create unprivileged test user
+        run: |
+          set -euo pipefail
+          sudo useradd --create-home --user-group --shell /usr/sbin/nologin "$TEST_USER"
+          uid=$(id -u "$TEST_USER")
+          if [ "$uid" -eq 0 ]; then echo "test user must not be uid 0" >&2; exit 1; fi
+          # Fail closed if the account could escalate (sudo/adm/docker membership or sudoers).
+          if id -nG "$TEST_USER" | tr ' ' '\n' | grep -Eqx 'sudo|adm|admin|wheel|docker|lxd|root'; then
+            echo "test user is in a privileged group" >&2; exit 1
+          fi
+          if sudo -u "$TEST_USER" -- sudo -n true 2>/dev/null; then
+            echo "test user can sudo" >&2; exit 1
+          fi
+          sudo chmod 0700 "/home/$TEST_USER"
+      - name: Install pinned toolchain (root-owned, read-only for the test user)
+        run: |
+          set -euo pipefail
+          tc=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          if [ -z "$tc" ]; then echo "no channel in rust-toolchain.toml" >&2; exit 1; fi
+          rustup_bin=$(command -v rustup)
+          # Download as the runner user (no root for network I/O), then hand
+          # the tree to root so the test user can read but never modify it.
+          sudo install -d -m 0755 -o "$(id -u)" -g "$(id -g)" "$RUST_PREFIX"
+          install -d -m 0755 "$RUST_PREFIX/cargo/bin" "$RUST_PREFIX/rustup"
+          install -m 0755 "$rustup_bin" "$RUST_PREFIX/cargo/bin/rustup"
+          for p in cargo rustc rustdoc; do
+            ln -s rustup "$RUST_PREFIX/cargo/bin/$p"
+          done
+          # rustup verifies the upstream-signed channel manifest hashes.
+          env -i PATH=/usr/bin:/bin HOME="$HOME" \
+            RUSTUP_HOME="$RUST_PREFIX/rustup" CARGO_HOME="$RUST_PREFIX/cargo" \
+            "$RUST_PREFIX/cargo/bin/rustup" toolchain install "$tc" \
+            --profile minimal --component rustfmt,clippy --no-self-update
+          sudo chown -R root:root "$RUST_PREFIX"
+          sudo chmod -R go-w "$RUST_PREFIX"
+      - name: Copy checkout into the test user's home
+        run: |
+          set -euo pipefail
+          sudo cp -a -- "$GITHUB_WORKSPACE" "/home/$TEST_USER/src"
+          sudo rm -rf -- "/home/$TEST_USER/src/target"
+          sudo chown -R -- "$TEST_USER:$TEST_USER" "/home/$TEST_USER/src"
+      - name: cargo test --workspace as the unprivileged user
+        run: |
+          set -euo pipefail
+          # Production memlock limit (LimitMEMLOCK=2G, candor-sealer.service) so the
+          # sealer hardening test can mlockall; setpriv drops to the test user
+          # without PAM, so the raised limit is inherited unchanged.
+          sudo prlimit --memlock=2147483648:2147483648 -- \
+            setpriv --reuid="$TEST_USER" --regid="$TEST_USER" --init-groups -- env -i \
+            -C "/home/$TEST_USER/src" \
+            HOME="/home/$TEST_USER" \
+            PATH="$RUST_PREFIX/cargo/bin:/usr/bin:/bin" \
+            RUSTUP_HOME="$RUST_PREFIX/rustup" \
+            CARGO_HOME="/home/$TEST_USER/.cargo" \
+            CARGO_TERM_COLOR=always CARGO_INCREMENTAL=0 RUST_BACKTRACE=1 \
+            cargo test --workspace --all-features --locked --no-fail-fast
+      - name: Kill processes left by the unprivileged user
+        if: always()
+        run: sudo pkill -KILL -u "$TEST_USER" || true
+
+  cargo-deny:
+    name: cargo-deny (advisories, bans, licenses, sources)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt
+      - uses: ./.github/actions/cargo-install
+        with:
+          crate: cargo-deny
+          version: 0.20.2
+      - run: cargo deny --locked check advisories bans licenses sources
+
+  cargo-vet:
+    # PR stage of ADR-052(8): committed policy requires safe-to-deploy only. The
+    # crypto-reviewed release gate runs in release-gate.yml (tags/dispatch), never here.
+    name: cargo-vet (PR policy, safe-to-deploy)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt
+      - uses: ./.github/actions/cargo-install
+        with:
+          crate: cargo-vet
+          version: 0.10.2
+      - name: Vet policy lint (staging, no crypto-reviewed exemptions, expiries, crypto-set coverage, import approvals)
+        run: python3 scripts/check-vet-policy.py
+      - run: cargo vet --locked
+
+  docs-lint:
+    name: docs-lint (traceability + SG-25 constants lint)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Traceability matrix + lint
+        run: python3 tools/traceability.py
+      - name: Spec-constant consistency lint (ST-167, SG-25)
+        run: python3 tools/constants_lint.py
+      - name: Generated traceability matrix is committed and current
+        run: git diff --exit-code -- specs/39-REQUIREMENTS-TRACEABILITY.md
+
+  workflow-lint:
+    name: workflow-lint (SHA pins, zizmor)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: SHA-pin / trigger / remote-script check (+ self-tests)
+        run: |
+          set -euo pipefail
+          sh scripts/tests/test-check-actions-pinned.sh
+          sh scripts/check-actions-pinned.sh
+      - name: CODEOWNERS resolution (crypto paths -> Crypto Reviewers)
+        run: |
+          set -euo pipefail
+          python3 scripts/check-codeowners.py --self-test
+          python3 scripts/check-codeowners.py
+      - name: DCO checker self-tests (malicious-PR fixtures)
+        run: sh scripts/tests/test-check-dco.sh
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt
+      - name: Reproducibility gate self-tests (vacuous-pass fixtures)
+        run: sh scripts/tests/test-repro-check.sh
+      - uses: ./.github/actions/cargo-install
+        with:
+          crate: zizmor
+          version: 1.26.1
+      - name: zizmor (offline audits)
+        run: zizmor --offline --persona=auditor .github
+
+  dco:
+    name: dco (Signed-off-by)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Check DCO sign-off on every PR commit (checker and epoch from BASE)
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        # AUD-RM0-INF-03: the checker is taken from the base revision, never from
+        # the PR tree, and it reads .dco-epoch from the base revision itself.
+        run: |
+          set -euo pipefail
+          if git cat-file -e "$BASE_SHA:scripts/check-dco.sh" 2>/dev/null; then
+            git show "$BASE_SHA:scripts/check-dco.sh" > "$RUNNER_TEMP/check-dco.sh"
+            sh "$RUNNER_TEMP/check-dco.sh" "$BASE_SHA" "$HEAD_SHA"
+          else
+            # Bootstrap (policy-introducing PR only): the base predates the DCO
+            # policy, so there is no base checker or epoch to trust. Commits after
+            # the epoch named by this PR must all be signed off; the epoch must be
+            # an ancestor of HEAD and a descendant of BASE. Once the policy is on the
+            # base branch this path can never run again.
+            EPOCH=$(git show "$HEAD_SHA:.dco-epoch" | grep -v '^[[:space:]]*#' | grep -v '^[[:space:]]*$' | head -n 1 | tr -d '[:space:]')
+            printf '%s\n' "$EPOCH" | grep -Eqx '[0-9a-f]{40}'
+            git merge-base --is-ancestor "$EPOCH" "$HEAD_SHA"
+            git merge-base --is-ancestor "$BASE_SHA" "$EPOCH"
+            echo "DCO bootstrap: base has no DCO policy; checking $EPOCH..$HEAD_SHA"
+            git show "$HEAD_SHA:scripts/check-dco.sh" > "$RUNNER_TEMP/check-dco.sh"
+            sh "$RUNNER_TEMP/check-dco.sh" "$EPOCH" "$HEAD_SHA"
+          fi
+
+  reproducibility:
+    name: reproducibility (build twice, compare sha256)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt
+      - name: Build twice in clean target dirs and compare
+        env:
+          REPRO_SUMS_OUT: ${{ runner.temp }}/SHA256SUMS
+        run: |
+          set -euo pipefail
+          SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+          export SOURCE_DATE_EPOCH
+          sh scripts/repro-check.sh "$RUNNER_TEMP/repro"
+          # AUD-RM0-INF-04: never publish an empty sums file as evidence.
+          if [ ! -s "$REPRO_SUMS_OUT" ]; then
+            echo "repro-check produced no SHA256SUMS" >&2; exit 1
+          fi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: repro-sha256sums
+          path: ${{ runner.temp }}/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30
+
+  sbom:
+    name: sbom (CycloneDX)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt
+      - uses: ./.github/actions/cargo-install
+        with:
+          crate: cargo-cyclonedx
+          version: 0.5.9
+      - name: Generate CycloneDX SBOMs
+        env:
+          SBOM_OUT: ${{ runner.temp }}/sbom
+        run: |
+          set -euo pipefail
+          SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+          export SOURCE_DATE_EPOCH
+          sh scripts/sbom.sh "$SBOM_OUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom-cyclonedx
+          path: ${{ runner.temp }}/sbom
+          if-no-files-found: ignore
+          retention-days: 90
+
+  secret-scan:
+    # AUD-RM0-INF-08: committed key material (PEM/OpenSSH/OpenPGP private keys,
+    # age identities, GitHub/AWS tokens). Tracked tree on every run; full history
+    # on the schedule. Findings print path:line only, never the matched text.
+    name: secret-scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Scan tracked files
+        run: python3 scripts/check-secrets.py
+      - name: Scan full history (scheduled / manual)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: python3 scripts/check-secrets.py --history
+
+  supply-chain-scheduled:
+    # AUD-RM0-INF-06/07: second RustSec reader (cargo-audit) and zizmor's online
+    # audits (impostor commits, ref confusion, known-vulnerable actions), which
+    # need the GitHub API. Runs only on schedule / manual dispatch, never on PR
+    # code, with a read-only token.
+    name: supply-chain (scheduled cargo-audit, online zizmor)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt
+      - uses: ./.github/actions/cargo-install
+        with:
+          crate: cargo-audit
+          version: 0.22.1
+      - name: cargo audit (second advisory reader)
+        run: cargo audit --deny warnings
+      - uses: ./.github/actions/cargo-install
+        with:
+          crate: zizmor
+          version: 1.26.1
+      - name: zizmor (online audits)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: zizmor --persona=auditor .github
+
+  repo-lints:
+    # AUD-RM1-SFS-01 / AUD-RM1-LOG-09: the ADR-027 safe-path lint and the
+    # LOG-001 free-text-logging lint run on the real workspace (the clippy
+    # job enforces the workspace clippy.toml disallowed-* bans; these cover
+    # renamed/table-form dependencies, opt-outs and crate-local clippy.toml).
+    # Both fail closed (exit 2) if a tool they need errors.
+    name: repo-lints (safefs-lint, deny-free-text-logging)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt
+      - name: safefs-lint (ST-005, ADR-027)
+        run: bash crates/candor-safefs/scripts/lint-safefs.sh
+      - name: deny-free-text-logging (LOG-001)
+        run: bash crates/candor-log/scripts/lint-logging.sh

@@ -1,0 +1,5 @@
+# Pinned toolchain: no "latest" in production builds (28-SUPPLY-CHAIN.md).
+[toolchain]
+channel = "1.94.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

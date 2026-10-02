@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Organisations whose cargo-vet audit sets Candor imports (28-SUPPLY-CHAIN.md §5.2).
+# Each entry must be approved by the Security Lead and re-reviewed yearly; the URL
+# must match the [imports.*] entry in supply-chain/config.toml exactly.
+# Imported audits never satisfy `candor-crypto-reviewed` (that criterion is only
+# granted by Candor Crypto Reviewers in supply-chain/audits.toml).
+
+[importer.bytecode-alliance]
+url = "https://raw.githubusercontent.com/bytecodealliance/wasmtime/main/supply-chain/audits.toml"
+approved-by = "TODO: Security Lead"
+approved = "TODO: YYYY-MM-DD"
+review-due = "TODO: approved + 1 year"
+
+[importer.google]
+url = "https://raw.githubusercontent.com/google/supply-chain/main/audits.toml"
+approved-by = "TODO: Security Lead"
+approved = "TODO: YYYY-MM-DD"
+review-due = "TODO: approved + 1 year"
+
+[importer.mozilla]
+url = "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
+approved-by = "TODO: Security Lead"
+approved = "TODO: YYYY-MM-DD"
+review-due = "TODO: approved + 1 year"
+
+[importer.zcash]
+url = "https://raw.githubusercontent.com/zcash/rust-ecosystem/main/supply-chain/audits.toml"
+approved-by = "TODO: Security Lead"
+approved = "TODO: YYYY-MM-DD"
+review-due = "TODO: approved + 1 year"
