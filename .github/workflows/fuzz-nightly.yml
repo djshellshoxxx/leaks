@@ -50,8 +50,11 @@ jobs:
           set -euo pipefail
           rustup set auto-self-update disable || true
           rustup toolchain install "$FUZZ_TOOLCHAIN" --profile minimal --no-self-update
-      - name: Install cargo-fuzz
-        run: cargo +"$FUZZ_TOOLCHAIN" install cargo-fuzz --locked --version =0.13.1
+      - name: Install cargo-fuzz (built with stable, not the fuzz nightly)
+        # cargo-fuzz 0.13.1 pins rustix 0.36.5, which uses the `rustc_attrs` cfg that
+        # current nightlies reject (all 18 jobs failed to build it). Stable compiles it;
+        # the pinned nightly is still the toolchain that builds and runs the fuzz targets.
+        run: cargo +stable install cargo-fuzz --locked --version =0.13.1
       - name: Fuzz (seeds read-only, scratch corpus)
         working-directory: crates/${{ matrix.crate }}
         run: |

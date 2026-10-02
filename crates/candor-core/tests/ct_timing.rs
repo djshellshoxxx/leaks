@@ -49,8 +49,13 @@ impl Sched {
 }
 
 /// Measure `samples` timings of `reps` calls of `f(class)` in random class order.
-fn measure(samples: usize, reps: usize, mut f: impl FnMut(bool)) -> (Vec<f64>, Vec<f64>) {
-    let mut s = Sched(0x9E37_79B9_7F4A_7C15);
+fn measure(
+    samples: usize,
+    reps: usize,
+    seed: u64,
+    mut f: impl FnMut(bool),
+) -> (Vec<f64>, Vec<f64>) {
+    let mut s = Sched(0x9E37_79B9_7F4A_7C15 ^ seed.wrapping_mul(0xA24B_AED4_963E_E407) | 1);
     let (mut a, mut b) = (Vec::with_capacity(samples), Vec::with_capacity(samples));
     // Warm-up.
     for i in 0..(samples / 10).max(4) {
@@ -103,17 +108,39 @@ fn max_t(a: &[f64], b: &[f64]) -> f64 {
         .fold(0.0, f64::max)
 }
 
+/// A timing difference is only reported when it reproduces in every one of this many
+/// independent measurements (dudect practice: confirm before concluding). A genuine
+/// data-dependent timing difference is stable and exceeds the threshold every time;
+/// scheduler or co-tenant noise on a shared runner (one run of `kdf::ct_eq` reached
+/// |t| = 18 on a GitHub runner although earlier and later runs were clean) does not.
+const CONFIRM_RUNS: usize = 3;
+
+/// Runs up to `CONFIRM_RUNS` independent measurements. Returns `(confirmed_leak, last_t)`;
+/// stops at the first clean measurement.
+fn confirmed_leak(name: &str, samples: usize, reps: usize, mut f: impl FnMut(bool)) -> (bool, f64) {
+    let mut last = 0.0;
+    for attempt in 0..CONFIRM_RUNS {
+        let (a, b) = measure(samples, reps, attempt as u64, &mut f);
+        let t = max_t(&a, &b);
+        println!(
+            "ct_timing {name}: run {}/{CONFIRM_RUNS} max |t| = {t:.2} ({} + {} samples)",
+            attempt + 1,
+            a.len(),
+            b.len()
+        );
+        if t < T_FAIL {
+            return (false, t);
+        }
+        last = t;
+    }
+    (true, last)
+}
+
 fn check_ct(name: &str, samples: usize, reps: usize, f: impl FnMut(bool)) {
-    let (a, b) = measure(samples, reps, f);
-    let t = max_t(&a, &b);
-    println!(
-        "ct_timing {name}: max |t| = {t:.2} ({} + {} samples)",
-        a.len(),
-        b.len()
-    );
+    let (leak, t) = confirmed_leak(name, samples, reps, f);
     assert!(
-        t < T_FAIL,
-        "{name}: timing depends on secret data (|t| = {t:.2})"
+        !leak,
+        "{name}: timing depends on secret data (|t| >= {T_FAIL} in all {CONFIRM_RUNS} independent runs; last |t| = {t:.2})"
     );
 }
 
@@ -131,7 +158,7 @@ fn constant_time_comparisons() {
     y_first[0] ^= 1;
     let mut y_last = x.clone();
     y_last[4095] ^= 1;
-    let (a, b) = measure(2000, 16, |c| {
+    let (a, b) = measure(2000, 16, 0, |c| {
         let y = if c { &y_first } else { &y_last };
         black_box(black_box(&x[..]) == black_box(&y[..]));
     });
@@ -140,6 +167,17 @@ fn constant_time_comparisons() {
     assert!(
         t > T_CONTROL,
         "harness failed to detect a leaky comparison (|t| = {t:.2})"
+    );
+
+    // The confirmation procedure must still flag a real leak: the short-circuiting
+    // comparison reproduces |t| > T_FAIL in every one of the independent runs.
+    let (leak, t) = confirmed_leak("leaky == (must be flagged)", 2000, 16, |c| {
+        let y = if c { &y_first } else { &y_last };
+        black_box(black_box(&x[..]) == black_box(&y[..]));
+    });
+    assert!(
+        leak,
+        "confirmation procedure failed to flag a real leak (last |t| = {t:.2})"
     );
 
     // kdf::ct_eq (MACs, tags, bound hashes, slots): mismatch at the first vs last byte.
