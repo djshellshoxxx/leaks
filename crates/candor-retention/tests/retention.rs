@@ -14,9 +14,15 @@ fn due_set_uses_day_granularity_and_excludes_legal_holds() {
 #[test]
 fn disposal_requires_tombstone_then_key_destruction() {
     let mut worker = RetentionWorker::new(vec![RetentionItem::new(ItemId(1), 100, false)]);
-    assert_eq!(worker.mark_disposed(ItemId(1)), Err(RetentionError::InvalidOrder));
+    assert_eq!(
+        worker.mark_disposed(ItemId(1)),
+        Err(RetentionError::InvalidOrder)
+    );
     assert_eq!(worker.mark_tombstoned(ItemId(1)), Ok(()));
-    assert_eq!(worker.mark_disposed(ItemId(1)), Err(RetentionError::InvalidOrder));
+    assert_eq!(
+        worker.mark_disposed(ItemId(1)),
+        Err(RetentionError::InvalidOrder)
+    );
     assert_eq!(worker.mark_key_destroyed(ItemId(1)), Ok(()));
     assert_eq!(worker.mark_disposed(ItemId(1)), Ok(()));
     assert_eq!(worker.state(ItemId(1)), Ok(RetentionState::Disposed));

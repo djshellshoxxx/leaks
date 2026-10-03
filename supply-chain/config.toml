@@ -1264,3 +1264,21 @@ notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 version = "1.0.23"
 criteria = "safe-to-deploy"
 notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[policy.candor-authz]
+criteria = "safe-to-deploy"
+
+[policy.candor-case]
+criteria = "safe-to-deploy"
+
+[policy.candor-ekv]
+criteria = "safe-to-deploy"
+
+[policy.candor-notify]
+criteria = "safe-to-deploy"
+
+[policy.candor-relay]
+criteria = "safe-to-deploy"
+
+[policy.candor-retention]
+criteria = "safe-to-deploy"

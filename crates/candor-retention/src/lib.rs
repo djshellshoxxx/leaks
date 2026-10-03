@@ -29,7 +29,12 @@ pub struct RetentionItem {
 impl RetentionItem {
     #[must_use]
     pub const fn new(id: ItemId, due_day: u32, legal_hold: bool) -> Self {
-        Self { id, due_day, legal_hold, state: RetentionState::Pending }
+        Self {
+            id,
+            due_day,
+            legal_hold,
+            state: RetentionState::Pending,
+        }
     }
 }
 
@@ -40,26 +45,36 @@ pub struct RetentionWorker {
 
 impl RetentionWorker {
     #[must_use]
-    pub const fn new(items: Vec<RetentionItem>) -> Self { Self { items } }
+    pub const fn new(items: Vec<RetentionItem>) -> Self {
+        Self { items }
+    }
 
     #[must_use]
     pub fn due(&self, today: u32) -> Vec<ItemId> {
         self.items
             .iter()
-            .filter(|item| !item.legal_hold && item.due_day <= today && item.state != RetentionState::Disposed)
+            .filter(|item| {
+                !item.legal_hold && item.due_day <= today && item.state != RetentionState::Disposed
+            })
             .map(|item| item.id)
             .collect()
     }
 
     pub fn state(&self, id: ItemId) -> Result<RetentionState, RetentionError> {
-        self.items.iter().find(|item| item.id == id).map(|item| item.state).ok_or(RetentionError::NotFound)
+        self.items
+            .iter()
+            .find(|item| item.id == id)
+            .map(|item| item.state)
+            .ok_or(RetentionError::NotFound)
     }
 
     pub fn mark_tombstoned(&mut self, id: ItemId) -> Result<(), RetentionError> {
         let item = self.item_mut(id)?;
         match item.state {
             RetentionState::Pending => item.state = RetentionState::Tombstoned,
-            RetentionState::Tombstoned | RetentionState::KeyDestroyed | RetentionState::Disposed => {}
+            RetentionState::Tombstoned
+            | RetentionState::KeyDestroyed
+            | RetentionState::Disposed => {}
         }
         Ok(())
     }
@@ -79,12 +94,17 @@ impl RetentionWorker {
         match item.state {
             RetentionState::KeyDestroyed => item.state = RetentionState::Disposed,
             RetentionState::Disposed => {}
-            RetentionState::Pending | RetentionState::Tombstoned => return Err(RetentionError::InvalidOrder),
+            RetentionState::Pending | RetentionState::Tombstoned => {
+                return Err(RetentionError::InvalidOrder);
+            }
         }
         Ok(())
     }
 
     fn item_mut(&mut self, id: ItemId) -> Result<&mut RetentionItem, RetentionError> {
-        self.items.iter_mut().find(|item| item.id == id).ok_or(RetentionError::NotFound)
+        self.items
+            .iter_mut()
+            .find(|item| item.id == id)
+            .ok_or(RetentionError::NotFound)
     }
 }

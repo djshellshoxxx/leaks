@@ -46,27 +46,59 @@ impl Default for ErasureVault {
 impl ErasureVault {
     #[must_use]
     pub const fn new() -> Self {
-        Self { entries: Vec::new(), next_handle: 1 }
+        Self {
+            entries: Vec::new(),
+            next_handle: 1,
+        }
     }
 
     pub fn create(&mut self, key: [u8; 32]) -> Result<KeyHandle, VaultError> {
         let handle = KeyHandle(self.next_handle);
-        self.next_handle = self.next_handle.checked_add(1).ok_or(VaultError::Exhausted)?;
-        self.entries.push(Entry { handle, key, approvals: [None, None], destroyed: false });
+        self.next_handle = self
+            .next_handle
+            .checked_add(1)
+            .ok_or(VaultError::Exhausted)?;
+        self.entries.push(Entry {
+            handle,
+            key,
+            approvals: [None, None],
+            destroyed: false,
+        });
         Ok(handle)
     }
 
     pub fn key(&self, handle: KeyHandle) -> Result<[u8; 32], VaultError> {
-        let entry = self.entries.iter().find(|entry| entry.handle == handle).ok_or(VaultError::NotFound)?;
-        if entry.destroyed { return Err(VaultError::Destroyed); }
+        let entry = self
+            .entries
+            .iter()
+            .find(|entry| entry.handle == handle)
+            .ok_or(VaultError::NotFound)?;
+        if entry.destroyed {
+            return Err(VaultError::Destroyed);
+        }
         Ok(entry.key)
     }
 
     /// Record a destruction approval. Returns true once destruction has completed.
-    pub fn approve_destroy(&mut self, handle: KeyHandle, approver: ApproverId) -> Result<bool, VaultError> {
-        let entry = self.entries.iter_mut().find(|entry| entry.handle == handle).ok_or(VaultError::NotFound)?;
-        if entry.destroyed { return Ok(true); }
-        if entry.approvals.iter().flatten().any(|existing| *existing == approver) {
+    pub fn approve_destroy(
+        &mut self,
+        handle: KeyHandle,
+        approver: ApproverId,
+    ) -> Result<bool, VaultError> {
+        let entry = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.handle == handle)
+            .ok_or(VaultError::NotFound)?;
+        if entry.destroyed {
+            return Ok(true);
+        }
+        if entry
+            .approvals
+            .iter()
+            .flatten()
+            .any(|existing| *existing == approver)
+        {
             return Err(VaultError::DuplicateApprover);
         }
         if entry.approvals[0].is_none() {

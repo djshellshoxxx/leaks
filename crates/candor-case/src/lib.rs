@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #![forbid(unsafe_code)]
 
-use candor_authz::{authorize, Action, CaseId, CaseResource, Decision, Principal, TenantId, UserId};
+use candor_authz::{
+    Action, CaseId, CaseResource, Decision, Principal, TenantId, UserId, authorize,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CaseError {

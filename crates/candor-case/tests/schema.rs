@@ -8,7 +8,11 @@ fn every_core_table_has_forced_rls_and_tenant_policy() {
         assert!(MIGRATION.contains(&format!("ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;")));
         assert!(MIGRATION.contains(&format!("ALTER TABLE {table} FORCE ROW LEVEL SECURITY;")));
     }
-    assert!(MIGRATION.contains("USING (tenant_id = candor.tenant()) WITH CHECK (tenant_id = candor.tenant())"));
+    assert!(
+        MIGRATION.contains(
+            "USING (tenant_id = candor.tenant()) WITH CHECK (tenant_id = candor.tenant())"
+        )
+    );
     assert!(!MIGRATION.to_ascii_uppercase().contains("BYPASSRLS"));
 }
 

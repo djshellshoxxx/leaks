@@ -26,7 +26,10 @@ fn zero_counter_is_never_accepted() {
 fn exhausted_counter_fails_closed() {
     let mut guard = RelayGuard::new(INTAKE, 50_000);
     assert_eq!(guard.accept_counter(u64::MAX), Ok(()));
-    assert_eq!(guard.accept_counter(u64::MAX), Err(RelayError::CounterExhausted));
+    assert_eq!(
+        guard.accept_counter(u64::MAX),
+        Err(RelayError::CounterExhausted)
+    );
 }
 
 #[test]
@@ -41,9 +44,21 @@ fn import_backpressure_stops_claiming() {
 fn transport_policy_only_allows_configured_intake_endpoint() {
     let guard = RelayGuard::new(INTAKE, 50_000);
     assert_eq!(guard.allow_outbound(INTAKE), Ok(()));
-    let other_port = IntakeEndpoint { port: 443, ..INTAKE };
-    assert_eq!(guard.allow_outbound(other_port), Err(RelayError::DestinationDenied));
-    let other_host = IntakeEndpoint { address: [1; 16], port: 7443 };
-    assert_eq!(guard.allow_outbound(other_host), Err(RelayError::DestinationDenied));
+    let other_port = IntakeEndpoint {
+        port: 443,
+        ..INTAKE
+    };
+    assert_eq!(
+        guard.allow_outbound(other_port),
+        Err(RelayError::DestinationDenied)
+    );
+    let other_host = IntakeEndpoint {
+        address: [1; 16],
+        port: 7443,
+    };
+    assert_eq!(
+        guard.allow_outbound(other_host),
+        Err(RelayError::DestinationDenied)
+    );
     assert_eq!(guard.allow_inbound(), Err(RelayError::InboundDenied));
 }

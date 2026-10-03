@@ -22,14 +22,24 @@ pub struct Notification {
 impl Notification {
     #[must_use]
     pub const fn new(destination: Destination, kind: NotificationKind, dedup_key: u128) -> Self {
-        Self { destination, kind, dedup_key }
+        Self {
+            destination,
+            kind,
+            dedup_key,
+        }
     }
     #[must_use]
-    pub const fn destination(self) -> Destination { self.destination }
+    pub const fn destination(self) -> Destination {
+        self.destination
+    }
     #[must_use]
-    pub const fn kind(self) -> NotificationKind { self.kind }
+    pub const fn kind(self) -> NotificationKind {
+        self.kind
+    }
     #[must_use]
-    pub const fn dedup_key(self) -> u128 { self.dedup_key }
+    pub const fn dedup_key(self) -> u128 {
+        self.dedup_key
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,21 +57,35 @@ pub struct NotifyQueue {
 impl NotifyQueue {
     #[must_use]
     pub const fn new(max_retries: u8) -> Self {
-        Self { entries: Vec::new(), max_retries }
+        Self {
+            entries: Vec::new(),
+            max_retries,
+        }
     }
 
     /// Returns false when an equivalent pending notification already exists.
     pub fn enqueue(&mut self, notification: Notification) -> bool {
-        if self.entries.iter().any(|entry| entry.notification == notification) {
+        if self
+            .entries
+            .iter()
+            .any(|entry| entry.notification == notification)
+        {
             return false;
         }
-        self.entries.push(Queued { notification, failures: 0 });
+        self.entries.push(Queued {
+            notification,
+            failures: 0,
+        });
         true
     }
 
     /// Records a failed delivery. Returns true when another retry remains.
     pub fn record_failure(&mut self, notification: Notification) -> bool {
-        let Some(index) = self.entries.iter().position(|entry| entry.notification == notification) else {
+        let Some(index) = self
+            .entries
+            .iter()
+            .position(|entry| entry.notification == notification)
+        else {
             return false;
         };
         let next = self.entries[index].failures.saturating_add(1);
@@ -74,8 +98,12 @@ impl NotifyQueue {
     }
 
     #[must_use]
-    pub fn len(&self) -> usize { self.entries.len() }
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
 
     #[must_use]
-    pub fn is_empty(&self) -> bool { self.entries.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
