@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+[package]
+name = "candor-relay"
+version = "0.1.0"
+description = "Candor one-way relay pull state machine and transport policy"
+license = "AGPL-3.0-or-later"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
