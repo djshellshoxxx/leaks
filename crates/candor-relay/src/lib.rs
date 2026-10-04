@@ -71,7 +71,7 @@ impl RelayGuard {
     }
 
     /// The relay link may only target the single configured intake export endpoint.
-    pub const fn allow_outbound(&self, destination: IntakeEndpoint) -> Result<(), RelayError> {
+    pub fn allow_outbound(&self, destination: IntakeEndpoint) -> Result<(), RelayError> {
         if destination.port != self.intake.port || destination.address != self.intake.address {
             return Err(RelayError::DestinationDenied);
         }
