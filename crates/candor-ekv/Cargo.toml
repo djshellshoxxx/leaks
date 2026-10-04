@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+[package]
+name = "candor-ekv"
+version = "0.1.0"
+description = "Candor Erasure Key Vault (ADR-033): per-case erasure keys and outer wrapping"
+license = "AGPL-3.0-or-later"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+chacha20poly1305 = { version = "=0.11.0", default-features = false, features = ["alloc", "getrandom", "zeroize"] }
+getrandom = { version = "=0.4.3", default-features = false }
+zeroize = { version = "=1.8.2", default-features = false, features = ["alloc"] }
