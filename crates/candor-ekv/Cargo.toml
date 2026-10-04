@@ -2,7 +2,7 @@
 [package]
 name = "candor-ekv"
 version = "0.1.0"
-description = "Candor RM-3 erasure-key vault state machine"
+description = "Candor RM-3 erasure-key vault: per-case keys, authenticated outer wrapping, and crypto erasure"
 license = "AGPL-3.0-or-later"
 edition.workspace = true
 rust-version.workspace = true
@@ -11,3 +11,8 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+chacha20poly1305 = { version = "=0.11.0", default-features = false, features = ["alloc", "zeroize"] }
+getrandom = { version = "=0.4.3", default-features = false }
+zeroize = { version = "=1.8.2", default-features = false }
