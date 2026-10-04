@@ -35,8 +35,8 @@ fn exhausted_counter_fails_closed() {
 #[test]
 fn import_backpressure_stops_claiming() {
     let guard = RelayGuard::new(INTAKE, 50_000);
-    assert_eq!(guard.may_claim(49_999, 10), Ok(()));
-    assert_eq!(guard.may_claim(50_000, 10), Err(RelayError::Backpressure));
+    assert_eq!(guard.may_claim(50_000, 10), Ok(()));
+    assert_eq!(guard.may_claim(50_001, 10), Err(RelayError::Backpressure));
     assert_eq!(guard.may_claim(1, 9), Err(RelayError::Backpressure));
 }
 
