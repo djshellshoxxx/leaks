@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Temporary RM-3 integration helper. Read-only: previews exactly what the pinned
+# toolchain would generate for rustfmt and Cargo.lock; removed before merge.
+name: rm3-generate-preview
+
+on:
+  pull_request:
+
+permissions: {}
+
+jobs:
+  preview:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt
+      - name: Generate canonical formatting and lockfile diff
+        run: |
+          set -euo pipefail
+          cargo fmt --all
+          cargo generate-lockfile
+          echo '===== BEGIN GENERATED DIFF ====='
+          git diff -- Cargo.lock crates/candor-authz crates/candor-case crates/candor-ekv crates/candor-notify crates/candor-relay crates/candor-retention
+          echo '===== END GENERATED DIFF ====='
