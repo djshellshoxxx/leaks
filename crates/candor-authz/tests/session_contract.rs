@@ -16,34 +16,52 @@ fn st_rm3_staff_token_is_256_bit_opaque_and_redacted() {
 #[test]
 fn st_rm3_cross_audience_replay_is_rejected() {
     let mut session = Session::new(token(1), StaffClass::Recipient, Audience::DeskApi, 1_000);
-    assert_eq!(session.validate(Audience::AdminApi, 1_001), Err(SessionError::Audience));
+    assert_eq!(
+        session.validate(Audience::AdminApi, 1_001),
+        Err(SessionError::Audience)
+    );
 }
 
 #[test]
 fn st_rm3_recipient_session_enforces_idle_and_absolute_limits() {
     let mut idle = Session::new(token(2), StaffClass::Recipient, Audience::DeskApi, 1_000);
     assert_eq!(idle.validate(Audience::DeskApi, 1_899), Ok(()));
-    assert_eq!(idle.validate(Audience::DeskApi, 2_800), Err(SessionError::IdleExpired));
+    assert_eq!(
+        idle.validate(Audience::DeskApi, 2_800),
+        Err(SessionError::IdleExpired)
+    );
 
     let mut absolute = Session::new(token(3), StaffClass::Recipient, Audience::DeskApi, 1_000);
     assert_eq!(absolute.validate(Audience::DeskApi, 29_800), Ok(()));
-    assert_eq!(absolute.validate(Audience::DeskApi, 29_801), Err(SessionError::AbsoluteExpired));
+    assert_eq!(
+        absolute.validate(Audience::DeskApi, 29_801),
+        Err(SessionError::AbsoluteExpired)
+    );
 }
 
 #[test]
 fn st_rm3_admin_session_enforces_stricter_limits() {
     let mut idle = Session::new(token(4), StaffClass::Admin, Audience::AdminApi, 1_000);
     assert_eq!(idle.validate(Audience::AdminApi, 1_599), Ok(()));
-    assert_eq!(idle.validate(Audience::AdminApi, 2_200), Err(SessionError::IdleExpired));
+    assert_eq!(
+        idle.validate(Audience::AdminApi, 2_200),
+        Err(SessionError::IdleExpired)
+    );
 
     let mut absolute = Session::new(token(5), StaffClass::Admin, Audience::AdminApi, 1_000);
     assert_eq!(absolute.validate(Audience::AdminApi, 8_200), Ok(()));
-    assert_eq!(absolute.validate(Audience::AdminApi, 8_201), Err(SessionError::AbsoluteExpired));
+    assert_eq!(
+        absolute.validate(Audience::AdminApi, 8_201),
+        Err(SessionError::AbsoluteExpired)
+    );
 }
 
 #[test]
 fn st_rm3_revocation_is_synchronous() {
     let mut session = Session::new(token(6), StaffClass::Recipient, Audience::DeskApi, 1_000);
     session.revoke();
-    assert_eq!(session.validate(Audience::DeskApi, 1_001), Err(SessionError::Revoked));
+    assert_eq!(
+        session.validate(Audience::DeskApi, 1_001),
+        Err(SessionError::Revoked)
+    );
 }

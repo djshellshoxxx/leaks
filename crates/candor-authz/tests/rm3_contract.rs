@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 use candor_authz::{
-    authorize_case, validate_wrap_recipients, AccountState, AuthzPrincipal, CasePolicyResource,
-    DenyCode, Obligation, PolicyAction, PolicyDecision, Role, TenantId, UserId, WrapCandidate,
-    WrapError,
+    AccountState, AuthzPrincipal, CasePolicyResource, DenyCode, Obligation, PolicyAction,
+    PolicyDecision, Role, TenantId, UserId, WrapCandidate, WrapError, authorize_case,
+    validate_wrap_recipients,
 };
 
 fn principal(role: Role) -> AuthzPrincipal {
@@ -35,7 +35,11 @@ fn st_rm3_explicit_denies_precede_role_and_relation() {
     let mut excluded = resource();
     excluded.coi_excluded = true;
     assert_eq!(
-        authorize_case(principal(Role::Investigator), PolicyAction::ReadContent, excluded),
+        authorize_case(
+            principal(Role::Investigator),
+            PolicyAction::ReadContent,
+            excluded
+        ),
         PolicyDecision::Deny(DenyCode::NoRelation)
     );
 }
@@ -45,11 +49,19 @@ fn st_rm3_cross_tenant_and_sysadmin_content_access_are_denied() {
     let mut other_tenant = resource();
     other_tenant.tenant = TenantId(2);
     assert_eq!(
-        authorize_case(principal(Role::Investigator), PolicyAction::ReadContent, other_tenant),
+        authorize_case(
+            principal(Role::Investigator),
+            PolicyAction::ReadContent,
+            other_tenant
+        ),
         PolicyDecision::Deny(DenyCode::Tenant)
     );
     assert_eq!(
-        authorize_case(principal(Role::SystemAdmin), PolicyAction::ReadContent, resource()),
+        authorize_case(
+            principal(Role::SystemAdmin),
+            PolicyAction::ReadContent,
+            resource()
+        ),
         PolicyDecision::Deny(DenyCode::Role)
     );
 }
@@ -57,7 +69,11 @@ fn st_rm3_cross_tenant_and_sysadmin_content_access_are_denied() {
 #[test]
 fn st_rm3_original_export_carries_dual_control_and_step_up_obligations() {
     assert_eq!(
-        authorize_case(principal(Role::Investigator), PolicyAction::ExportOriginal, resource()),
+        authorize_case(
+            principal(Role::Investigator),
+            PolicyAction::ExportOriginal,
+            resource()
+        ),
         PolicyDecision::Permit(vec![
             Obligation::RequireStepUp,
             Obligation::RequireSecondApprover,
@@ -68,10 +84,26 @@ fn st_rm3_original_export_carries_dual_control_and_step_up_obligations() {
 #[test]
 fn st_rm3_wrap_recipients_are_exact_current_eligible_subset() {
     let candidates = [
-        WrapCandidate { key_id: 1, current: true, excluded: false },
-        WrapCandidate { key_id: 2, current: true, excluded: false },
-        WrapCandidate { key_id: 3, current: true, excluded: true },
-        WrapCandidate { key_id: 4, current: false, excluded: false },
+        WrapCandidate {
+            key_id: 1,
+            current: true,
+            excluded: false,
+        },
+        WrapCandidate {
+            key_id: 2,
+            current: true,
+            excluded: false,
+        },
+        WrapCandidate {
+            key_id: 3,
+            current: true,
+            excluded: true,
+        },
+        WrapCandidate {
+            key_id: 4,
+            current: false,
+            excluded: false,
+        },
     ];
 
     assert_eq!(validate_wrap_recipients(&[1, 2], &candidates, 2), Ok(()));

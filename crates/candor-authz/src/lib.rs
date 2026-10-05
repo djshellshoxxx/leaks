@@ -211,7 +211,10 @@ pub fn validate_wrap_recipients(
         if key_ids[..index].contains(key_id) {
             return Err(WrapError::DuplicateRecipient);
         }
-        let Some(candidate) = candidates.iter().find(|candidate| candidate.key_id == *key_id) else {
+        let Some(candidate) = candidates
+            .iter()
+            .find(|candidate| candidate.key_id == *key_id)
+        else {
             return Err(WrapError::NotCandidate);
         };
         if candidate.excluded {

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 use candor_relay::{
-    ImportObject, ImportValidator, RelayError, RelayGuard, RelaySchedule, ValidationError,
-    IntakeEndpoint, DEFAULT_MAX_PENDING_IMPORTS,
+    DEFAULT_MAX_PENDING_IMPORTS, ImportObject, ImportValidator, IntakeEndpoint, RelayError,
+    RelayGuard, RelaySchedule, ValidationError,
 };
 
 fn endpoint() -> IntakeEndpoint {
@@ -35,7 +35,10 @@ fn st_rm3_relay_validates_hostile_intake_metadata_before_import() {
 
     let mut wrong_channel = valid.clone();
     wrong_channel.channel_id = 99;
-    assert_eq!(validator.validate(&wrong_channel), Err(ValidationError::Channel));
+    assert_eq!(
+        validator.validate(&wrong_channel),
+        Err(ValidationError::Channel)
+    );
 
     let mut old_epoch = valid.clone();
     old_epoch.epoch_index = 16;
@@ -43,23 +46,38 @@ fn st_rm3_relay_validates_hostile_intake_metadata_before_import() {
 
     let mut wrong_slots = valid.clone();
     wrong_slots.header_slot_count = 15;
-    assert_eq!(validator.validate(&wrong_slots), Err(ValidationError::HeaderSlots));
+    assert_eq!(
+        validator.validate(&wrong_slots),
+        Err(ValidationError::HeaderSlots)
+    );
 
     let mut header_too_large = valid.clone();
     header_too_large.header_ct_len = 8_193;
-    assert_eq!(validator.validate(&header_too_large), Err(ValidationError::HeaderSize));
+    assert_eq!(
+        validator.validate(&header_too_large),
+        Err(ValidationError::HeaderSize)
+    );
 
     let mut manifest_too_large = valid.clone();
     manifest_too_large.manifest_ct_len = 65_537;
-    assert_eq!(validator.validate(&manifest_too_large), Err(ValidationError::ManifestSize));
+    assert_eq!(
+        validator.validate(&manifest_too_large),
+        Err(ValidationError::ManifestSize)
+    );
 
     let mut too_many_parts = valid.clone();
     too_many_parts.part_padded_sizes = vec![65_536; 33];
-    assert_eq!(validator.validate(&too_many_parts), Err(ValidationError::PartCount));
+    assert_eq!(
+        validator.validate(&too_many_parts),
+        Err(ValidationError::PartCount)
+    );
 
     let mut non_bucket = valid;
     non_bucket.part_padded_sizes = vec![123_456];
-    assert_eq!(validator.validate(&non_bucket), Err(ValidationError::PartBucket));
+    assert_eq!(
+        validator.validate(&non_bucket),
+        Err(ValidationError::PartBucket)
+    );
 }
 
 #[test]

@@ -18,7 +18,10 @@ fn st_rm3_ekv_generates_per_case_key_and_seals_inner_wrap() {
     let ctx = context(1, 10, 99);
     let outer = vault.seal(handle, ctx, b"inner-wrap").unwrap();
     assert_ne!(outer.as_slice(), b"inner-wrap");
-    assert_eq!(vault.unseal(handle, ctx, &outer), Ok(b"inner-wrap".to_vec()));
+    assert_eq!(
+        vault.unseal(handle, ctx, &outer),
+        Ok(b"inner-wrap".to_vec())
+    );
 }
 
 #[test]
@@ -61,7 +64,10 @@ fn st_rm3_destroy_makes_old_outer_wraps_unreadable() {
 
     assert_eq!(vault.approve_destroy(handle, ApproverId(1)), Ok(false));
     assert_eq!(vault.approve_destroy(handle, ApproverId(2)), Ok(true));
-    assert_eq!(vault.unseal(handle, ctx, &outer), Err(VaultError::Destroyed));
+    assert_eq!(
+        vault.unseal(handle, ctx, &outer),
+        Err(VaultError::Destroyed)
+    );
     assert_eq!(vault.seal(handle, ctx, b"new"), Err(VaultError::Destroyed));
 }
 
@@ -73,7 +79,10 @@ fn st_rm3_restore_rekey_never_revives_old_ciphertext() {
     let old_outer = vault.seal(handle, ctx, b"old").unwrap();
 
     vault.mark_missing_for_restore(handle).unwrap();
-    assert_eq!(vault.unseal(handle, ctx, &old_outer), Err(VaultError::Missing));
+    assert_eq!(
+        vault.unseal(handle, ctx, &old_outer),
+        Err(VaultError::Missing)
+    );
     vault.rekey_missing(handle).unwrap();
     assert_eq!(
         vault.unseal(handle, ctx, &old_outer),
