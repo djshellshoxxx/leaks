@@ -179,3 +179,74 @@ Gate: **PASS 2026-10-07 c098fa6** for `crates/candor-memlock` and the W1-D `depl
 - **MEM-01, MEM-02, MEM-03, DEP-34, DEP-35: fix** (real single-thread check via /proc/self/task; no BorrowedFd for fd 3 before it is known open; Miri ignores on socket tests; stale blobrate file swept every run; monotonic clock source).
 - **DEP-36: fix.** The blob-rate test runs at install, on operator demand and at most once a day outside import/hand-over slots; the write-volume budget is documented.
 - **DEP-37, MEM-04, MEM-05 (Info): fix where trivial, otherwise documented.**
+
+---
+
+## Re-test (round 2)
+
+| Field | Value |
+|---|---|
+| Date | 2026-10-07 |
+| Revision | HEAD `2c00f6f` (W1-D audit fixes; D-38); working tree equals HEAD for the in-scope files |
+| Scratch | `scratchpad/audit-w1d/` (PoC crate, HEAD archives, `/var/tmp/aud-w1d-vol`, `/run/aud-w1d2-wb`), removed afterwards |
+
+### Tools
+
+| Check | Result |
+|---|---|
+| `cargo test -p candor-memlock` | 8 unit + 3 `seccomp_runtime` + `activation` (harness-less) all pass; clippy `-D warnings` clean |
+| Miri `nightly-2026-09-28` `--lib` | 5 passed, 3 ignored (`#[cfg_attr(miri, ignore)]` on the socket and `/proc` tests) |
+| cargo-careful | 8 + 3 + activation pass |
+| cargo-geiger | candor-memlock 462/468 expressions safe: 6 unsafe expressions in **2 blocks** (`remove_var`, `from_raw_fd`); `borrow_raw` gone |
+| `cargo deny --offline check`, `cargo vet --locked` | ok (one pre-existing unmatched licence allowance warning); vet succeeds with the `seccompiler 0.5.0` exemption |
+| safefs lint | the memlock marker passes; the one violation reported is `candor-intake-store/src/server/mod.rs:651`, another agent's uncommitted edit, out of scope |
+| shellcheck `-S style` `deploy/**/*.sh` | clean |
+| config-check static, base / ce-single / ce-hardened | 889 OK each, exit 0; `sha256sum -c config-check.manifest` OK; `MANIFEST_SHA256` `c6bc7ef3…` equals the manifest digest |
+| `apparmor_parser -QTK` | 6/6 |
+| `systemd-analyze security --offline` | web 0.4, sealer 0.4, store 0.4 |
+| Allow-sets | sealer 136, web 124, store 135, never 30; `socketpair` in all three sets and off `scf-never`; web ⊂ store ⊂ sealer unchanged otherwise |
+| `CANDOR_TEST_PG=1 validate.sh` | VALIDATE3_RESULT |
+
+### Status of round-1 findings
+
+| ID | Status | Evidence (original PoC re-run on HEAD, plus variants) |
+|---|---|---|
+| MEM-01 | **Fixed** | `sys::thread_count()` counts `/proc/self/task` (`openat` `O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC`, `Dir::read_from`), checked after the main-thread test and **before** any environment access; `None` (unreadable `/proc`) fails closed. The round-1 PoC (4 worker threads hammering libc `getenv`, LISTEN_* set, listener at fd 3) now gives `threads=5 result=Err(NotSingleThreaded) env_untouched=true fd3_open=true`. The `activation` test covers the same case plus the retry for a lingering joined task entry. `strace` shows exactly one `openat("/proc/self/task")` and one `newfstatat("/proc/self/fd/3", AT_SYMLINK_NOFOLLOW)` per call |
+| MEM-02 | **Fixed** | `fd3_is_open()` = `statat(CWD, "/proc/self/fd/3", SYMLINK_NOFOLLOW)`; no `BorrowedFd` is constructed. Variants: fd 3 closed → `BadFd`, environment scrubbed, nothing adopted; fd 3 = `/dev/null` → `NotSocket`, fd 3 closed by the failed adoption. The remaining two SAFETY comments state the invariants that are actually checked (thread count + main thread; `fd3_is_open` in a single-threaded process + `ADOPTED` swap). Both `/proc` reads are constant paths of the process's own tables, marked for the safefs lint and the `disallowed_methods` allow is scoped to the two functions |
+| MEM-03 | **Fixed** | `#[cfg_attr(miri, ignore)]` on the two socket tests and the new `/proc` test; Miri 5/5 passes; SPEC-NOTES now records the Miri run |
+| MEM-04 | **Fixed** | abstract names carry 8 random bytes from `getrandom` (`rustix` `rand` feature, dev only) |
+| MEM-05 | **Fixed** (verified in the test file) | the off-main-thread unit test is unchanged in behaviour; the thread-count guard now also protects the environment in the libtest process, which removes the hazard the note described |
+| DEP-33 | **Fixed** | `socketpair` allowed in the three units and removed from `scf-never`; baseline re-pinned (sealer 136, web 124, store 135); validate asserts the start-up calls are in every set and off the never-list and that two mutations (drop-in `~socketpair`, deny line re-adding it) FAIL; `tests/seccomp_runtime.rs` applies each baseline set as an in-process seccomp filter with `EPERM` semantics and builds a 2-worker tokio runtime with the `signal` feature under each (the first build makes the socketpair), and the control without `socketpair` gets `EPERM` from `socketpair(2)`. The sets stay tight: the only addition is `socketpair`, which `RestrictAddressFamilies=AF_UNIX` confines. **seccompiler 0.5.0**: dev-dependency only, one dependency (`libc`), no build script, 5 `unsafe` sites (the `prctl`/`seccomp` FFI); the crate's own `unsafe_code = deny` is unaffected. Acceptable. Nit: the vet exemption grants `safe-to-deploy` where a dev-dependency only needs `safe-to-run`; `safe-to-run` would be the honest claim |
+| DEP-34 | **Fixed** | fixed name `rate-check.tmp`; a stale regular file, a stale symlink to `/dev/null` (removed with `unlink`, never followed) are swept and the run measures; a stale *directory* of that name fails closed ("cannot remove a stale test file"); the measurement runs under `trap 'rm -f -- "$f"; exit 2' INT TERM HUP`. Round-1 PoC (SIGINT to the script and to `timeout` during a 1 GiB write) → script exits, `selftest` is empty |
+| DEP-35 | **Fixed** | `t0`/`t1` from `/proc/uptime` via the `read` builtin (`CLOCK_BOOTTIME`, 10 ms ticks; `10#` guard; sub-tick elapsed fails with "raise --blob-mib"). Round-1 `date` shim → `FAIL 209 MB/s … below the 100000 MB/s floor` (honest measurement, no false OK) |
+| DEP-36 | **Fixed** (documented) | README "Host self-tests": the 5-minute live subset runs **except `blobrate`**; blobrate at install, on demand, and from the daily self-test at most once per day in the 21:00 UTC maintenance window; SPEC-NOTES D-38 records the ≤ 256 MiB/day budget and the `IOSchedulingClass` request for C-25 |
+| DEP-37 | **Fixed** | `strace`: `openat(…/rate-check.tmp, O_WRONLY|O_CREAT|O_EXCL|O_TRUNC|O_NOFOLLOW, 0666)` under `umask 077` (`dd conv=excl,fsync oflag=nofollow`); bash `noclobber` is no longer used |
+
+### Delta review of the fixes
+
+Read every changed line (`sys.rs`, `lib.rs`, `activation.rs`, `seccomp_runtime.rs`, `check_blob_rate`, validate additions). Notes, none a finding: `thread_count` returns `None` on any `readdir` error, which the caller maps to `NotSingleThreaded` (fail closed); the `seccomp_runtime` filter resolves only the x86_64 names it knows (`filter_map`), so it is at most *narrower* than the unit filter, which is the safe direction for a "can it start" test; the `activation` retry loop (400 × 5 ms) only retries on `NotSingleThreaded` after a joined thread, which cannot occur in a daemon that calls first in `main`.
+
+### New finding
+
+#### AUD-RM2-DEP-38 — `candor-safe-read` is not reproducible once `rust-src` is installed for the pinned toolchain; the sysroot is not remapped and the binary then carries `/root/.rustup/...`
+- Severity: Low
+- Location: `deploy/tools/build-safe-read.sh:20` (`RUSTFLAGS` remap list), `scripts/repro-check.sh:142` (same gap for the release build); `deploy/tests/validate.sh:63-68` (commit 2c00f6f)
+- Category: B1.10 / B11 (reproducible builds; CWE-1104 build-path leakage)
+- Description: a clean-archive build of `candor-safe-read` (both `c098fa6` and HEAD, with and without my environment variables, `env -i`) yields sha256 `f622bf56…`, not the pinned `58b2bb3a…`. The binaries differ only in path strings: the pinned one has `/rustc/e408947b…/library/alloc/src/str.rs`, the fresh one `/root/.rustup/toolchains/1.94.1-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/str.rs`. rustc rewrites the `/rustc/<hash>` prefix to the local `rust-src` directory when that component is present, and `rust-src` was added to the 1.94.1 toolchain today (`lib/rustlib/src/rust` dated 2026-10-07; the pin dates from 2026-10-01). The remap flags cover `$CARGO_HOME`, the repo and the target directory, but not the sysroot. Consequences: (a) a builder with `rust-src` (any host that also runs Miri/cargo-careful on the same toolchain) cannot reproduce the pin, and config-check then refuses to run (`tool.baseline_integrity`, exit 30: fail closed, but the release cannot be re-verified); (b) the builder's home path leaks into the shipped binary (B1.10); (c) validate's "reproducible build" check passes in the working tree only because `deploy/.build/safe-read` still holds the 2026-10-01 artefacts and cargo reuses them (nothing is recompiled), so the check does not demonstrate reproducibility. My round-2 validate on a clean HEAD archive therefore failed every check downstream of the integrity gate (390 PASS, 60 FAIL, all the same cause); the run with the pinned binary and cargo off `PATH` is the one tabulated above.
+- Exploit scenario: none directly; a reproducibility and metadata-hygiene defect in the release path.
+- Fix recommendation: add `--remap-path-prefix=$(rustc --print sysroot)=/sysroot` (and, belt and braces, `--remap-path-prefix=${RUSTUP_HOME:-$HOME/.rustup}=/rustup`) to both scripts; rebuild from a clean checkout **with** `rust-src` installed and re-pin `config-check.manifest` and `MANIFEST_SHA256`; make validate build in a fresh directory (or `cargo clean` first) so the check recompiles; add `strings | grep -E '/root|/home|\.rustup'` to validate as a negative check on the produced binary.
+- Status: Open
+
+### Round-2 gate
+
+| Severity | Open | IDs |
+|---|---|---|
+| Critical | 0 | — |
+| High | 0 | — |
+| Medium | 0 | — |
+| Low | 1 | DEP-38 |
+| Info | 0 | — |
+
+All eleven round-1 findings are fixed and re-tested with the original PoCs. DEP-38 is Low (fail closed on the host; a release-process defect) and tracked.
+
+GATE2_LINE

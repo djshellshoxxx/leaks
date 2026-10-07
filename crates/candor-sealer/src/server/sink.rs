@@ -128,6 +128,33 @@ impl core::fmt::Debug for AccountUpsert {
     }
 }
 
+/// Why an account write failed (ADR-057(4)): a store refusal is final for
+/// that operation and must never block the queue; `Stale` is a replacement
+/// whose old account the store no longer has (e.g. after an intake restore
+/// or a completed deletion) and is dropped at once; `Unavailable` is a
+/// transport failure or deadline, retried at the next flush.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpsertError {
+    /// The store refused the write (invalid, conflicting).
+    Refused,
+    /// A replacement of an account the store does not have.
+    Stale,
+    /// The store could not be reached or did not answer in time.
+    Unavailable,
+}
+
+/// Outcome of a confirmed account deletion request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteOutcome {
+    /// The store committed the deletion; `entries` K31-signed entries appended.
+    Deleted {
+        /// Deletion-list entries appended.
+        entries: u32,
+    },
+    /// None of the tags resolved to an account.
+    NotFound,
+}
+
 /// Sink failure. The sealer reports `INTERNAL` and treats nothing as committed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SinkError;
@@ -162,7 +189,9 @@ pub trait EnvelopeSink: Send + Sync {
     ) -> Result<(), SinkError>;
 
     /// Create or replace an account (separate store operation, ADR-052(2)).
-    fn upsert_account(&self, op: AccountUpsert) -> Result<(), SinkError>;
+    /// A refusal must be reported as such ([`UpsertError::Refused`] /
+    /// [`UpsertError::Stale`]), distinct from [`UpsertError::Unavailable`].
+    fn upsert_account(&self, op: AccountUpsert) -> Result<(), UpsertError>;
 
     /// Whether the store is reachable right now (e.g. its connection is open,
     /// [`crate::server::handover::StoreConnection::is_open`]). Checked before a
@@ -181,16 +210,15 @@ pub trait EnvelopeSink: Send + Sync {
         Err(SinkError)
     }
 
-    /// SW-15: ask the store to delete the account with `lookup_tag`, its
-    /// replies and its mailboxes, appending `mailbox` and `account` entries.
-    /// An account the store no longer has is a success (idempotent retry).
-    /// Default: unsupported (fail closed).
-    fn delete_account(
-        &self,
-        lookup_tag: [u8; 32],
-        mailbox_ids: &[[u8; 32]],
-    ) -> Result<(), SinkError> {
-        let _ = (lookup_tag, mailbox_ids);
+    /// SW-15: ask the store to delete every account one of `lookup_tags`
+    /// resolves to (the current tag and, after a just-flushed rotation, the
+    /// previous one; ADR-057(3)), with its mailboxes (`mailbox_account`) and
+    /// replies, appending `mailbox` and `account` entries in one transaction.
+    /// `Ok(DeleteOutcome::NotFound)` when nothing resolved: the caller decides
+    /// whether that is a completed earlier deletion. Default: unsupported
+    /// (fail closed).
+    fn delete_account(&self, lookup_tags: &[[u8; 32]]) -> Result<DeleteOutcome, SinkError> {
+        let _ = lookup_tags;
         Err(SinkError)
     }
 }

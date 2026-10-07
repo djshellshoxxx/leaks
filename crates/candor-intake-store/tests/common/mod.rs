@@ -211,6 +211,14 @@ pub async fn account<S: Store>(s: &S, tag: u8) -> AccountId {
     s.create_account(new_account(tag), TODAY).await.unwrap()
 }
 
+/// An account without mailboxes (its deletion appends one entry), for the
+/// DR tests that count deletion-list entries.
+pub async fn account_plain<S: Store>(s: &S, tag: u8) -> AccountId {
+    let mut a = new_account(tag);
+    a.mailbox_ids = Vec::new();
+    s.create_account(a, TODAY).await.unwrap()
+}
+
 /// All entry bodies of the current published set.
 pub async fn published<S: Store>(s: &S) -> Vec<Vec<u8>> {
     let idx = s.reply_index().await.unwrap();
@@ -875,6 +883,121 @@ pub async fn rewrap<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Output = S>>(m
     );
 }
 
+/// ADR-057(2) `mailbox_account`: create/update set the mapping, RL-05 routes
+/// an unresolved reply through it, a listed mailbox drops later replies,
+/// `delete_mailbox` removes the mapping, `delete_account` cascades it, and a
+/// mailbox cannot belong to two accounts.
+pub async fn mailbox_account<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Output = S>>(mk: F) {
+    let s = fresh(&mk).await;
+    let sg = signer();
+    let acct = account(&s, 5).await;
+    let mb = MailboxId([5; 32]);
+    assert_eq!(s.mailbox_owner(&mb).await.unwrap(), Some(acct));
+    assert_eq!(s.mailbox_owner(&MailboxId([6; 32])).await.unwrap(), None);
+    // Another account cannot claim the same mailbox.
+    let mut dup = new_account(6);
+    dup.mailbox_ids = vec![mb];
+    assert!(matches!(
+        s.create_account(dup, TODAY).await,
+        Err(StoreError::InvalidInput(_))
+    ));
+    // Routing: `account: None` + a mapped mailbox lands in the account's mailbox.
+    let mut r = reply(None, 5, 40);
+    r.mailbox_id = Some(mb);
+    let res = s.apply_replies(TODAY, vec![r]).await.unwrap();
+    assert_eq!(res.accepted, 1);
+    let list = s.mailbox_list(acct).await.unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(
+        s.reply(acct, list[0].reply_ref).await.unwrap().as_ref(),
+        Some(&list[0])
+    );
+    assert_eq!(s.reply(acct, ReplyRef([9; 16])).await.unwrap(), None);
+    let other = account(&s, 7).await;
+    assert_eq!(s.reply(other, list[0].reply_ref).await.unwrap(), None);
+    // Rotation replaces the set.
+    let mut rot = new_account(8);
+    rot.mailbox_ids = vec![MailboxId([8; 32]), MailboxId([9; 32])];
+    s.update_account(acct, rot).await.unwrap();
+    assert_eq!(s.mailbox_owner(&mb).await.unwrap(), None);
+    assert_eq!(s.mailbox_owner(&MailboxId([9; 32])).await.unwrap(), Some(acct));
+    let a = s.lookup_account(&LookupTag([8; 32])).await.unwrap().unwrap();
+    assert_eq!(a.mailbox_ids, vec![MailboxId([8; 32]), MailboxId([9; 32])]);
+    // Closing one mailbox: entry, mapping gone, later replies to it dropped.
+    let refs: Vec<ReplyRef> = list.iter().map(|r| r.reply_ref).collect();
+    s.delete_mailbox(acct, &MailboxId([9; 32]), &refs, TODAY, &sg)
+        .await
+        .unwrap();
+    assert_eq!(s.mailbox_owner(&MailboxId([9; 32])).await.unwrap(), None);
+    let mut r = reply(None, 9, 40);
+    r.mailbox_id = Some(MailboxId([9; 32]));
+    let res = s.apply_replies(TODAY, vec![r]).await.unwrap();
+    assert_eq!(res.accepted, 1);
+    assert!(s.mailbox_list(acct).await.unwrap().is_empty());
+    // Deleting the account: one `mailbox` entry per remaining mailbox, then
+    // the `account` entry, mapping cascaded.
+    s.delete_account(acct, TODAY, &sg).await.unwrap();
+    assert_eq!(s.mailbox_owner(&MailboxId([8; 32])).await.unwrap(), None);
+    let dl = s.deletion_list_after(0, 100).await.unwrap();
+    let kinds: Vec<DeletionKind> = dl.iter().map(|e| e.kind).collect();
+    assert_eq!(
+        kinds,
+        vec![DeletionKind::Mailbox, DeletionKind::Mailbox, DeletionKind::Account]
+    );
+    assert_eq!(dl[1].del_hash, deletion::mailbox_del_hash(&TENANT, &MailboxId([8; 32])));
+    assert_eq!(dl[2].del_hash, deletion::account_del_hash(&TENANT, &acct));
+    // Backups carry the mapping.
+    let b = s.export_backup().await.unwrap();
+    let o = b.accounts.iter().find(|a| a.account_id == other).unwrap();
+    assert_eq!(o.mailbox_ids, vec![MailboxId([7; 32])]);
+}
+
+/// AUD-RM2-IPC-04 (ADR-057(1)): a restore from a backup that predates a
+/// passphrase rotation, followed by the RL-12 push of the deletion list,
+/// does not resurrect an account deleted after the rotation; its mailbox
+/// is closed too, so a re-pushed reply is dropped.
+pub async fn restore_after_rotation<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Output = S>>(
+    mk: F,
+) {
+    let s = fresh(&mk).await;
+    let sg = signer();
+    let acct = account(&s, 20).await;
+    let backup = s.export_backup().await.unwrap();
+    // Rotation after the backup, then SW-15 deletion.
+    s.update_account(acct, new_account(21)).await.unwrap();
+    s.delete_account(acct, TODAY, &sg).await.unwrap();
+    let entries = s.deletion_list_after(0, 100).await.unwrap();
+    let head = zhead(entries.last());
+    // DR: restore the older backup into a fresh store, push the list.
+    let b = fresh(&mk).await;
+    b.restore_backup(backup).await.unwrap();
+    assert!(!b.serving_allowed().await.unwrap());
+    assert!(
+        b.lookup_account(&LookupTag([20; 32]))
+            .await
+            .is_err_and(|e| e == StoreError::RestorePending)
+    );
+    b.apply_pushed_deletion_list(
+        &entries,
+        &head,
+        &core_pk(),
+        &sg.verifying_key(),
+        &PrefixHasher,
+        TODAY,
+    )
+    .await
+    .unwrap();
+    assert!(b.serving_allowed().await.unwrap());
+    assert_eq!(b.lookup_account(&LookupTag([20; 32])).await.unwrap(), None);
+    assert_eq!(b.lookup_account(&LookupTag([21; 32])).await.unwrap(), None);
+    assert_eq!(b.mailbox_owner(&MailboxId([20; 32])).await.unwrap(), None);
+    let mut r = reply(None, 20, 40);
+    r.mailbox_id = Some(MailboxId([20; 32]));
+    let res = b.apply_replies(TODAY, vec![r]).await.unwrap();
+    assert_eq!(res.accepted, 1);
+    assert!(b.reply_index().await.is_ok());
+}
+
 pub async fn reply_rules<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Output = S>>(mk: F) {
     let s = fresh(&mk).await;
     let sg = signer();
@@ -1010,7 +1133,9 @@ pub async fn reply_rules<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Output = 
 pub async fn deletion_list<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Output = S>>(mk: F) {
     let s = fresh(&mk).await;
     let sg = signer();
-    let acct = account(&s, 7).await;
+    // Mailbox-less here so the entry numbers below stay 1, 2, 3; the mailbox
+    // entries of `delete_account` are covered by `mailbox_account`.
+    let acct = account_plain(&s, 7).await;
     s.apply_replies(TODAY, vec![reply(Some(acct), 7, 100)])
         .await
         .unwrap();
@@ -1041,10 +1166,8 @@ pub async fn deletion_list<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Output 
         (e.seq, e.kind, e.del_day, e.relayed),
         (1, DeletionKind::Account, TODAY, false)
     );
-    assert_eq!(
-        e.del_hash,
-        deletion::account_del_hash(&TENANT, &LookupTag([7; 32]))
-    );
+    // The subject is the stable account id (ADR-057(1)).
+    assert_eq!(e.del_hash, deletion::account_del_hash(&TENANT, &acct));
     verify_chain(&list, &sg.verifying_key(), None).unwrap();
     // Nothing was acknowledged, so nothing can be pruned.
     assert_eq!(
@@ -1171,7 +1294,7 @@ pub async fn deletion_list<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Output 
         0
     );
     // The chain continues from the kept head.
-    let a9 = account(&s, 9).await;
+    let a9 = account_plain(&s, 9).await;
     s.delete_account(a9, TODAY.plus(100).unwrap(), &sg)
         .await
         .unwrap();
@@ -1466,7 +1589,7 @@ pub async fn backup_restore<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Output
     let pk = sg.verifying_key();
     let a = fresh(&mk).await;
     for t in [20u8, 21, 22, 23, 24] {
-        account(&a, t).await;
+        account_plain(&a, t).await;
     }
     a.install_directory_snapshot(snap(4, 400, 20720, 0), TODAY)
         .await
@@ -1702,7 +1825,7 @@ pub async fn head_replay_after_restore<
     let cpk = core_pk();
     let a = fresh(&mk).await;
     for t in [30u8, 31, 32, 33] {
-        account(&a, t).await;
+        account_plain(&a, t).await;
     }
     let id = |t: u8| {
         let a = &a;
@@ -1816,6 +1939,8 @@ macro_rules! conformance_tests {
             conf_reply_backlog => reply_backlog,
             conf_reply_rules => reply_rules,
             conf_rewrap => rewrap,
+            conf_mailbox_account => mailbox_account,
+            conf_restore_after_rotation => restore_after_rotation,
             conf_deletion_list => deletion_list,
             conf_kd_snapshots => kd_snapshots,
             conf_counters => counters,

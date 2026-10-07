@@ -93,7 +93,8 @@ impl Env {
         cfg.idle_timeout = Duration::from_secs(2);
         cfg.io_timeout = T;
         cfg.op_deadline = Duration::from_secs(5);
-        cfg.max_connections = 4;
+        cfg.max_connections_web = 4;
+        cfg.max_connections_sealer = 4;
         let rx = StagedReceiver::new(root, sealer, 8 << 20)
             .unwrap()
             .with_timeout(T);
@@ -382,9 +383,19 @@ async fn wrong_role_reserved_and_malformed_requests_close() {
     assert!(closed(&c));
     // The connection survives ordinary errors (NotFound) and keeps serving.
     let mut c = env.conn();
+    assert!(c.call(&Request::MailboxList { account: [1; 16] }).is_ok());
     assert!(matches!(
         c.call(&Request::MailboxRead {
             account: [1; 16],
+            reply: [2; 16]
+        }),
+        Err(ClientError::Store(ErrorCode::Busy))
+    ));
+    let (acct, _) = account_with_replies(&env, 7, 1).await;
+    assert!(c.call(&Request::MailboxList { account: acct.0 }).is_ok());
+    assert!(matches!(
+        c.call(&Request::MailboxRead {
+            account: acct.0,
             reply: [2; 16]
         }),
         Err(ClientError::Store(ErrorCode::NotFound))
@@ -458,12 +469,16 @@ async fn connection_cap_answers_busy_and_distinct_uids_are_required() {
         assert!(c.call(&Request::ServingAllowed).is_ok());
         held.push(c);
     }
+    // Over the role cap: closed before a thread is spawned or a byte is
+    // read (ADR-057(5)); the client sees a transport failure.
     let mut c = env.conn();
-    assert_eq!(
-        c.call(&Request::ServingAllowed),
-        Err(ClientError::Store(ErrorCode::Busy))
-    );
+    assert_eq!(c.call(&Request::ServingAllowed), Err(ClientError::Transport));
+    assert_eq!(env.server.refused(), 1);
     drop(held);
+    assert!(c.call(&Request::ServingAllowed).is_ok());
+    let mut bad = ServerConfig::new(1, 2, Some(3));
+    bad.max_connections_sealer = 0;
+    assert!(bad.validate().is_err());
     assert!(ServerConfig::new(1, 1, None).validate().is_err());
     assert!(ServerConfig::new(1, 2, Some(2)).validate().is_err());
     let mut cfg = ServerConfig::new(1, 2, Some(3));
@@ -676,12 +691,13 @@ async fn deletions_append_k31_entries_and_are_idempotent() {
     });
     assert!(matches!(c.call(&d), Ok(Response::Deleted(1))));
     assert!(s.mailbox_list(acct).await.unwrap().is_empty());
-    // SW-15: mailbox entries then the account entry; the account is gone.
+    // SW-15: the account's `mailbox_account` mailbox entry then the account
+    // entry (hash of the stable account id, ADR-057(1)) in one transaction;
+    // a stale previous tag beside the current one is ignored (ADR-057(3)).
     let d = Request::Delete(Delete::Account {
-        lookup_tag: tag,
-        mailbox_ids: vec![[0x33; 32], [0x34; 32]],
+        lookup_tags: vec![[0xEE; 32], tag],
     });
-    assert!(matches!(c.call(&d), Ok(Response::Deleted(3))));
+    assert!(matches!(c.call(&d), Ok(Response::Deleted(2))));
     assert!(s.lookup_account(&LookupTag(tag)).await.unwrap().is_none());
     let list = s.deletion_list_after(0, 100).await.unwrap();
     let kinds: Vec<DeletionKind> = list.iter().map(|e| e.kind).collect();
@@ -691,19 +707,21 @@ async fn deletions_append_k31_entries_and_are_idempotent() {
             DeletionKind::Reply,
             DeletionKind::Mailbox,
             DeletionKind::Mailbox,
-            DeletionKind::Mailbox,
             DeletionKind::Account
         ]
     );
     assert_eq!(
-        list[4].del_hash,
-        deletion::account_del_hash(&common::TENANT, &LookupTag(tag))
+        list[2].del_hash,
+        deletion::mailbox_del_hash(&common::TENANT, &MailboxId([5; 32]))
+    );
+    assert_eq!(
+        list[3].del_hash,
+        deletion::account_del_hash(&common::TENANT, &acct)
     );
     deletion::verify_chain(&list, &common::signer().verifying_key(), None).unwrap();
-    // Retry after the account is gone: uniform NotFound (the caller treats
-    // it as done); nothing is appended.
+    // Retry after the account is gone: uniform NotFound; nothing appended.
     assert_eq!(c.call(&d), Err(ClientError::Store(ErrorCode::NotFound)));
-    assert_eq!(s.deletion_list_after(0, 100).await.unwrap().len(), 5);
+    assert_eq!(s.deletion_list_after(0, 100).await.unwrap().len(), 4);
     // Restore pending: deletions refuse (AUD-RM2-STO-09).
     s.mark_restore_pending().await.unwrap();
     let d = Request::Delete(Delete::Mailbox {
@@ -728,4 +746,51 @@ async fn idle_timeout_closes_and_client_reconnects() {
     assert!(!c.is_open());
     assert!(c.call(&Request::ServingAllowed).is_ok());
     assert!(c.is_open());
+}
+
+/// AUD-RM2-IPC-07: `MAILBOX_READ` is a single-row read whose budget is
+/// granted by `MAILBOX_LIST` (at most the listed replies per list); reads
+/// beyond it answer `BUSY` without touching the store.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mailbox_read_is_budgeted_by_the_list() {
+    let env = Env::new(Role::Web).await;
+    let (acct, _) = account_with_replies(&env, 5, 2).await;
+    let mut c = env.conn();
+    let mb = env.store().mailbox_list(acct).await.unwrap();
+    let read = |c: &mut Conn, r: [u8; 16]| {
+        c.call(&Request::MailboxRead {
+            account: acct.0,
+            reply: r,
+        })
+    };
+    // No list yet: no budget.
+    assert_eq!(
+        read(&mut c, mb[0].reply_ref.0),
+        Err(ClientError::Store(ErrorCode::Busy))
+    );
+    assert!(matches!(
+        c.call(&Request::MailboxList { account: acct.0 }),
+        Ok(Response::MailboxList(v)) if v.len() == 2
+    ));
+    assert!(
+        matches!(read(&mut c, mb[0].reply_ref.0), Ok(Response::ReplyCt(ct)) if ct == mb[0].reply_ct)
+    );
+    // An unknown ref costs budget too and is NotFound.
+    assert_eq!(
+        read(&mut c, [9; 16]),
+        Err(ClientError::Store(ErrorCode::NotFound))
+    );
+    assert_eq!(
+        read(&mut c, mb[1].reply_ref.0),
+        Err(ClientError::Store(ErrorCode::Busy))
+    );
+    assert!(c.is_open());
+    // A foreign account's reply is NotFound even with budget.
+    let (other, _) = account_with_replies(&env, 6, 1).await;
+    let omb = env.store().mailbox_list(other).await.unwrap();
+    assert!(c.call(&Request::MailboxList { account: acct.0 }).is_ok());
+    assert_eq!(
+        read(&mut c, omb[0].reply_ref.0),
+        Err(ClientError::Store(ErrorCode::NotFound))
+    );
 }

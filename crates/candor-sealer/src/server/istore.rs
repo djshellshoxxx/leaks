@@ -32,7 +32,9 @@ use super::handover::{
     ACK_COMMITTED, ACK_COPIED, ACK_TIMEOUT, COPY_DEADLINE_BASE, MAX_BUNDLE_LEN, await_ack_within,
     copy_deadline_with, send,
 };
-use super::sink::{AccountUpsert, Blob, EnvelopeGroup, EnvelopeSink, SinkError};
+use super::sink::{
+    AccountUpsert, Blob, DeleteOutcome, EnvelopeGroup, EnvelopeSink, SinkError, UpsertError,
+};
 
 /// Default per-call deadline of the request/response exchanges.
 pub const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -198,7 +200,7 @@ impl EnvelopeSink for IstoreSink {
         self.retrying(|conn| Self::commit_once(conn, &req, &bundle, copy_base, ack_timeout))
     }
 
-    fn upsert_account(&self, op: AccountUpsert) -> Result<(), SinkError> {
+    fn upsert_account(&self, op: AccountUpsert) -> Result<(), UpsertError> {
         let req = ip::Request::AccountUpsert(Box::new(ip::AccountUpsert {
             replaces: op.replaces,
             lookup_tag: op.account.lookup_tag,
@@ -208,11 +210,24 @@ impl EnvelopeSink for IstoreSink {
             mailbox_ids: op.account.mailbox_ids.clone(),
             rewrapped: op.rewrapped_replies.clone(),
         }));
-        ip::encode_request(0, &req).map_err(|_| SinkError)?;
-        self.retrying(|conn| match conn.call(&req)? {
-            ip::Response::Empty => Ok(()),
-            _ => Err(Attempt::Transport),
-        })
+        ip::encode_request(0, &req).map_err(|_| UpsertError::Refused)?;
+        // Transport failures are retried once here and again at the next
+        // flush (`Unavailable`); a store refusal is final for this write.
+        let mut conn = self.lock();
+        let attempt = |conn: &mut Conn| match conn.call(&req) {
+            Ok(ip::Response::Empty) => Ok(()),
+            Ok(_) => Err(UpsertError::Unavailable),
+            Err(ClientError::Transport) => Err(UpsertError::Unavailable),
+            Err(ClientError::Store(ip::ErrorCode::NotFound)) => Err(UpsertError::Stale),
+            Err(ClientError::Store(_)) => Err(UpsertError::Refused),
+        };
+        match attempt(&mut conn) {
+            Err(UpsertError::Unavailable) => {
+                conn.close();
+                attempt(&mut conn)
+            }
+            r => r,
+        }
     }
 
     fn is_available(&self) -> bool {
@@ -231,20 +246,14 @@ impl EnvelopeSink for IstoreSink {
         })
     }
 
-    fn delete_account(
-        &self,
-        lookup_tag: [u8; 32],
-        mailbox_ids: &[[u8; 32]],
-    ) -> Result<(), SinkError> {
+    fn delete_account(&self, lookup_tags: &[[u8; 32]]) -> Result<DeleteOutcome, SinkError> {
         let req = ip::Request::Delete(ip::Delete::Account {
-            lookup_tag,
-            mailbox_ids: mailbox_ids.to_vec(),
+            lookup_tags: lookup_tags.to_vec(),
         });
         ip::encode_request(0, &req).map_err(|_| SinkError)?;
         self.retrying(|conn| match conn.call(&req) {
-            Ok(ip::Response::Deleted(_)) => Ok(()),
-            // Already gone (an earlier attempt landed): done.
-            Err(ClientError::Store(ip::ErrorCode::NotFound)) => Ok(()),
+            Ok(ip::Response::Deleted(entries)) => Ok(DeleteOutcome::Deleted { entries }),
+            Err(ClientError::Store(ip::ErrorCode::NotFound)) => Ok(DeleteOutcome::NotFound),
             Err(e) => Err(Attempt::from(e)),
             Ok(_) => Err(Attempt::Transport),
         })

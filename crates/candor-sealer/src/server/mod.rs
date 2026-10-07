@@ -59,7 +59,7 @@ use hardening::InsecureDevMode;
 use inner::{MessageKind, Prefs, ReportPrefs};
 use select::{Choice, SelectError, Selection};
 use session::{PendingPhrase, Phase, Purpose, Session, StagedPart, Upload};
-use sink::{AccountRecord, AccountUpsert, EnvelopeGroup, EnvelopeSink};
+use sink::{AccountRecord, AccountUpsert, DeleteOutcome, EnvelopeGroup, EnvelopeSink, UpsertError};
 
 /// `prefs_ct` record key version and AAD `prefs_version` (04 §9.9).
 const PREFS_VERSION: u32 = 1;
@@ -190,6 +190,12 @@ pub struct ChaffConfig {
     /// lifecycle as real ones (SEA-21). Set by policy to the published share
     /// of real rotations; provisional default 50.
     pub dummy_rotation_permille: u16,
+    /// Share of chaff envelopes shaped like a signal (ADR-057(5),
+    /// AUD-RM2-IPC-06): a mailbox-closed offset U{3..21} (half of them) or a
+    /// C4 offset U{1,2,3}, with the MEK epoch of the release day, so a
+    /// seized store cannot tell signal envelopes from chaff. Set it to the
+    /// observed share of signals; provisional default 30.
+    pub signal_share_permille: u16,
 }
 
 impl Default for ChaffConfig {
@@ -202,6 +208,7 @@ impl Default for ChaffConfig {
             buckets: ChaffBuckets::default(),
             account_flush_interval: Duration::from_secs(15 * 60),
             dummy_rotation_permille: 50,
+            signal_share_permille: 30,
         }
     }
 }
@@ -281,6 +288,8 @@ const MAX_DUMMY_TAGS: usize = 1024;
 #[derive(Default)]
 struct AccountQueue {
     pending: Vec<AccountUpsert>,
+    /// Store refusals per queued new tag (bounded retries, ADR-057(4)).
+    refusals: HashMap<[u8; 32], u8>,
     /// Old lookup tags replaced by the batch being written right now.
     inflight_replaced: Vec<[u8; 32]>,
     /// Current lookup tags of dummy accounts (synthetic rotations pick one).
@@ -384,6 +393,63 @@ pub(crate) struct State {
     /// Serialises flushes (a batch completes before the next starts).
     flush_lock: Mutex<()>,
     accept_errors: Arc<AtomicU64>,
+    /// Per-source serialisation of close / deletion (ADR-057(3)), keyed by
+    /// the report's mailbox id (stable across rotations).
+    sources: Mutex<HashMap<[u8; 32], Arc<tokio::sync::Mutex<SourceState>>>>,
+    /// Sources whose deletion the store confirmed (key, signal offset), so a
+    /// second session's close coalesces into the same outcome.
+    recently_deleted: Mutex<std::collections::VecDeque<([u8; 32], u8)>>,
+    /// Account writes dropped after store refusals (dead letters).
+    dead_letters: AtomicU64,
+    health: RwLock<Option<Arc<dyn HealthSink>>>,
+}
+
+/// Per-source close state (ADR-057(3)).
+#[derive(Default)]
+struct SourceState {
+    /// The mailbox-closed signal is committed with this offset.
+    closing: Option<u8>,
+    /// A deletion request was sent whose outcome is unknown (transport
+    /// failure): a later `NotFound` then means it landed.
+    delete_sent: bool,
+}
+
+/// Bounded memory of confirmed deletions.
+const MAX_RECENTLY_DELETED: usize = 4096;
+/// Store refusals tolerated per account write before it is dead-lettered.
+pub const MAX_UPSERT_REFUSALS: u8 = 3;
+
+/// Where the sealer reports a dead-lettered account write (ADR-057(4)); the
+/// integrator wires it to `candor-log` (`sys.health`, service `sealer`,
+/// `DEGRADED`, check `QUEUE_BACKLOG`) through [`AuditHealthSink`].
+pub trait HealthSink: Send + Sync {
+    /// An account write was dropped after store refusals.
+    fn account_write_dropped(&self);
+}
+
+/// [`HealthSink`] over a `candor-log` audit log.
+pub struct AuditHealthSink<S, C>(pub Mutex<candor_log::AuditLog<S, C>>)
+where
+    S: candor_log::chain::CheckpointSigner,
+    C: candor_log::chain::AuditClock;
+
+impl<S, C> HealthSink for AuditHealthSink<S, C>
+where
+    S: candor_log::chain::CheckpointSigner + Send,
+    C: candor_log::chain::AuditClock + Send,
+{
+    fn account_write_dropped(&self) {
+        use candor_log::codes::{HealthCheck, HealthStatus, Service};
+        let mut log = lock(&self.0);
+        let _ = log.emit(
+            candor_log::EventContext::system(Service::Sealer),
+            candor_log::AuditEvent::SysHealth {
+                service: Service::Sealer,
+                status: HealthStatus::Degraded,
+                check_code: HealthCheck::QueueBacklog,
+            },
+        );
+    }
 }
 
 /// The sealer.
@@ -651,8 +717,30 @@ impl Sealer {
                 slice,
                 flush_lock: Mutex::new(()),
                 accept_errors: Arc::new(AtomicU64::new(0)),
+                sources: Mutex::new(HashMap::new()),
+                recently_deleted: Mutex::new(std::collections::VecDeque::new()),
+                dead_letters: AtomicU64::new(0),
+                health: RwLock::new(None),
             }),
         })
+    }
+
+    /// Install the health sink for dead-lettered account writes
+    /// (ADR-057(4)); without one only [`Sealer::dead_letters`] counts them.
+    pub fn set_health_sink(&self, sink: Arc<dyn HealthSink>) {
+        *self
+            .st
+            .health
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(sink);
+    }
+
+    /// Account writes dropped after repeated store refusals (health).
+    #[must_use]
+    pub fn dead_letters(&self) -> u64 {
+        self.st
+            .dead_letters
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub(crate) fn limits(&self) -> &Limits {
@@ -1581,8 +1669,63 @@ impl Sealer {
         resp
     }
 
+    /// The per-source lock (ADR-057(3)), keyed by the report's mailbox id.
+    fn source_lock(&self, key: [u8; 32]) -> Arc<tokio::sync::Mutex<SourceState>> {
+        let mut m = lock(&self.st.sources);
+        Arc::clone(
+            m.entry(key)
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(SourceState::default()))),
+        )
+    }
+
+    /// Flush this source's queued account writes synchronously, under the
+    /// batch lock (no batch is in flight meanwhile), so that the store holds
+    /// the account under the tag the session knows before a deletion is
+    /// requested (ADR-057(3); AUD-RM2-IPC-01). Returns every tag the store
+    /// may hold the account under: the session's tag and, for a flushed
+    /// replacement, its previous and new tags. A stale or refused write is
+    /// dropped; a transport failure requeues and fails.
+    fn flush_source(&self, tag: [u8; 32]) -> Result<Vec<[u8; 32]>, ErrorCode> {
+        let _serial = lock(&self.st.flush_lock);
+        let mine: Vec<AccountUpsert> = {
+            let mut q = lock(&self.st.accounts);
+            let (mine, rest): (Vec<_>, Vec<_>) = core::mem::take(&mut q.pending)
+                .into_iter()
+                .partition(|a| {
+                    ct_eq(&a.account.lookup_tag, &tag)
+                        || a.replaces.as_ref().is_some_and(|o| ct_eq(o, &tag))
+                });
+            q.pending = rest;
+            mine
+        };
+        let mut tags = vec![tag];
+        let mut it = mine.into_iter();
+        while let Some(a) = it.next() {
+            match self.st.sink.upsert_account(a.clone()) {
+                Ok(()) | Err(UpsertError::Stale) | Err(UpsertError::Refused) => {
+                    if let Some(old) = a.replaces
+                        && !tags.iter().any(|t| ct_eq(t, &old))
+                    {
+                        tags.push(old);
+                    }
+                    if !tags.iter().any(|t| ct_eq(t, &a.account.lookup_tag)) {
+                        tags.push(a.account.lookup_tag);
+                    }
+                }
+                Err(UpsertError::Unavailable) => {
+                    let mut rest = vec![a];
+                    rest.extend(it);
+                    requeue(&self.st, rest);
+                    return Err(ErrorCode::Internal);
+                }
+            }
+        }
+        Ok(tags)
+    }
+
     /// `DELETE_REPLIES` (SW-14): the store deletes the listed replies of the
-    /// session's account and appends K31-signed `reply` entries.
+    /// session's account and appends K31-signed `reply` entries. Under the
+    /// per-source lock, after this source's queued account write is flushed.
     async fn delete_replies(&self, sess: SessionHandle, replies: Vec<[u8; 16]>) -> Response {
         let g = match self.locked(&sess).await {
             Ok(g) => g,
@@ -1591,83 +1734,137 @@ impl Sealer {
         if g.phase != Phase::Authenticated || g.pending.is_some() {
             return err(ErrorCode::BadState);
         }
-        let Some(tag) = g.keys.as_ref().map(SourceKeys::lookup_tag) else {
+        let (Some(tag), Some(key)) = (
+            g.keys.as_ref().map(SourceKeys::lookup_tag),
+            g.prefs
+                .as_ref()
+                .and_then(|p| p.reports.first())
+                .map(|r| r.mailbox_id),
+        ) else {
             return err(ErrorCode::BadState);
         };
         drop(g);
+        let source = self.source_lock(key);
+        let _source = source.lock().await;
         let st = self.st.clone();
-        let r = blocking(move || st.sink.delete_replies(tag, &replies)).await;
+        let me = self.clone();
+        let r = blocking(move || {
+            me.flush_source(tag)?;
+            st.sink
+                .delete_replies(tag, &replies)
+                .map_err(|_| ErrorCode::Internal)
+        })
+        .await;
         match r {
             Ok(Ok(count)) => Response::Deleted { count },
-            _ => err(ErrorCode::Internal),
+            Ok(Err(code)) => err(code),
+            Err(()) => err(ErrorCode::Internal),
         }
     }
 
-    /// `CLOSE_MAILBOX` (SW-15, API-055): seal the mailbox-closed signal first,
-    /// then ask the store for the K31-signed account and mailbox deletion;
-    /// the session ends on success. A failed deletion keeps the session with
-    /// the signal marked committed, so a retry deletes without sealing a
-    /// second signal; nothing is ever half-deleted (the store's deletion is
-    /// one transaction per entry kind and idempotent).
+    /// `CLOSE_MAILBOX` (SW-15, API-055; ADR-057(3)). Under the per-source
+    /// lock: (1) flush this source's queued account write, so the store holds
+    /// the account; (2) seal the mailbox-closed signal exactly once per source
+    /// (concurrent and retried closes coalesce on the recorded offset);
+    /// (3) ask the store to delete by the previous and the current tag;
+    /// (4) only after the store confirmed the committed deletion, forget the
+    /// source and end the session. `NotFound` is success only when an earlier
+    /// request of this close may have landed (transport failure) or another
+    /// session of this source completed it; otherwise it is an error and the
+    /// source retries. Nothing is ever half-deleted: the store's deletion is
+    /// one transaction.
     async fn close_mailbox(&self, sess: SessionHandle) -> Response {
-        let mut g = match self.locked(&sess).await {
+        let g = match self.locked(&sess).await {
             Ok(g) => g,
             Err(e) => return e,
         };
         if g.phase != Phase::Authenticated || g.pending.is_some() || g.upload.is_some() {
             return err(ErrorCode::BadState);
         }
-        let (Some(tag), Some(prefs)) = (
+        let (Some(tag), Some(report)) = (
             g.keys.as_ref().map(SourceKeys::lookup_tag),
-            g.prefs.as_ref(),
+            g.prefs.as_ref().and_then(|p| p.reports.first()),
         ) else {
             return err(ErrorCode::BadState);
         };
-        let mailbox_ids: Vec<[u8; 32]> = prefs.reports.iter().map(|r| r.mailbox_id).collect();
-        let channel_id = prefs.reports.first().map(|r| r.channel_id);
-        let offset = match g.closing {
+        let key = report.mailbox_id;
+        let channel_id = report.channel_id;
+        drop(g);
+        // Coalesce with a deletion this source already completed.
+        if let Some(offset) = lock(&self.st.recently_deleted)
+            .iter()
+            .find(|(k, _)| ct_eq(k, &key))
+            .map(|(_, o)| *o)
+        {
+            self.remove_session(&sess);
+            return Response::Sealed {
+                release_offset_days: offset,
+            };
+        }
+        let source = self.source_lock(key);
+        let mut state = source.lock().await;
+        // (1) The store must hold the account before anything is deleted.
+        let me = self.clone();
+        let tags = match blocking(move || me.flush_source(tag)).await {
+            Ok(Ok(t)) => t,
+            Ok(Err(code)) => return err(code),
+            Err(()) => return err(ErrorCode::Internal),
+        };
+        // (2) One signal per source.
+        let offset = match state.closing {
             Some(o) => o,
             None => {
+                let g = match self.locked(&sess).await {
+                    Ok(g) => g,
+                    Err(e) => return e,
+                };
                 let job = match self.signal_job(&g, SignalKind::MailboxClosed) {
                     Ok(j) => j,
                     Err(e) => return e,
                 };
                 let offset = job.release_offset_days;
                 let st = self.st.clone();
-                let r = blocking(move || signal_blocking(&g, &st, job, SignalKind::MailboxClosed))
-                    .await;
+                let r =
+                    blocking(move || signal_blocking(&g, &st, job, SignalKind::MailboxClosed))
+                        .await;
                 let resp = r.unwrap_or_else(|_| err(ErrorCode::Internal));
                 if !matches!(resp, Response::Sealed { .. }) {
                     return resp;
                 }
-                g = match self.locked(&sess).await {
-                    Ok(g) => g,
-                    Err(e) => return e,
-                };
-                g.closing = Some(offset);
+                state.closing = Some(offset);
                 offset
             }
         };
-        drop(g);
-        // An account create or replacement still queued for this tag must
-        // not be written after the deletion (SEA-21 batching).
-        {
-            let mut q = lock(&self.st.accounts);
-            q.pending.retain(|a| !ct_eq(&a.account.lookup_tag, &tag));
-        }
+        // (3) Delete by every tag the store may hold the account under.
         let st = self.st.clone();
-        let r = blocking(move || st.sink.delete_account(tag, &mailbox_ids)).await;
-        match r {
-            Ok(Ok(())) => {
-                self.remove_session(&sess);
-                if let Some(c) = channel_id {
-                    self.cancel_next_chaff(c);
-                }
-                Response::Sealed {
-                    release_offset_days: offset,
-                }
+        let sent_before = state.delete_sent;
+        let r = blocking(move || st.sink.delete_account(&tags)).await;
+        let done = match r {
+            Ok(Ok(DeleteOutcome::Deleted { .. })) => true,
+            Ok(Ok(DeleteOutcome::NotFound)) => sent_before,
+            Ok(Err(_)) | Err(()) => {
+                // Outcome unknown: a retry treats NotFound as landed.
+                state.delete_sent = true;
+                false
             }
-            _ => err(ErrorCode::Internal),
+        };
+        if !done {
+            return err(ErrorCode::Internal);
+        }
+        // (4) Confirmed by the store.
+        {
+            let mut rd = lock(&self.st.recently_deleted);
+            if rd.len() >= MAX_RECENTLY_DELETED {
+                rd.pop_front();
+            }
+            rd.push_back((key, offset));
+        }
+        drop(state);
+        lock(&self.st.sources).remove(&key);
+        self.remove_session(&sess);
+        self.cancel_next_chaff(channel_id);
+        Response::Sealed {
+            release_offset_days: offset,
         }
     }
 
@@ -1870,12 +2067,32 @@ impl Sealer {
         let chaff = &self.st.cfg.chaff;
         let followup = rand::bernoulli_permille(chaff.followup_share_permille)
             .map_err(|_| ErrorCode::Internal)?;
-        let delay = if rand::bernoulli_permille(chaff.delayed_share_permille)
+        // ADR-057(5): a share of chaff is shaped like a signal envelope
+        // (mailbox-closed or C4 offset, MEK epoch of the release day), the
+        // rest like a submission or follow-up (delayed share, today's epoch).
+        let signal_shaped = rand::bernoulli_permille(chaff.signal_share_permille)
+            .map_err(|_| ErrorCode::Internal)?;
+        let delay = if signal_shaped {
+            if rand::bernoulli_permille(500).map_err(|_| ErrorCode::Internal)? {
+                rand::mailbox_closed_offset().map_err(|_| ErrorCode::Internal)?
+            } else {
+                rand::release_offset().map_err(|_| ErrorCode::Internal)?
+            }
+        } else if rand::bernoulli_permille(chaff.delayed_share_permille)
             .map_err(|_| ErrorCode::Internal)?
         {
             rand::release_offset().map_err(|_| ErrorCode::Internal)?
         } else {
             0
+        };
+        let epoch = if signal_shaped {
+            let release_day = today
+                .checked_add(u32::from(delay))
+                .ok_or(ErrorCode::Internal)?;
+            snap.epoch_for_day(release_day)
+                .ok_or(ErrorCode::Unavailable)?
+        } else {
+            epoch
         };
         let st = self.st.clone();
         let r = blocking(move || {
@@ -1946,6 +2163,12 @@ impl Sealer {
         r
     }
 
+    /// Write one shuffled batch. A transport failure requeues the rest for
+    /// the next flush. A store refusal never blocks the queue (ADR-057(4)):
+    /// a stale replacement (the old account is gone, e.g. after an intake
+    /// restore) is dropped at once, any other refusal is retried at the next
+    /// flushes up to [`MAX_UPSERT_REFUSALS`] times and then dead-lettered
+    /// with a health event; a refused dummy rotation leaves the dummy set.
     fn write_batch(&self, batch: Vec<AccountUpsert>) -> Result<usize, sink::SinkError> {
         let batch = match shuffle_batch(batch.clone()) {
             Ok(b) => b,
@@ -1954,17 +2177,68 @@ impl Sealer {
                 return Err(sink::SinkError);
             }
         };
-        let total = batch.len();
+        let mut written = 0usize;
+        let mut later: Vec<AccountUpsert> = Vec::new();
         let mut it = batch.into_iter();
         while let Some(a) = it.next() {
-            if self.st.sink.upsert_account(a.clone()).is_err() {
-                let mut rest = vec![a];
-                rest.extend(it);
-                requeue(&self.st, rest);
-                return Err(sink::SinkError);
+            match self.st.sink.upsert_account(a.clone()) {
+                Ok(()) => {
+                    lock(&self.st.accounts)
+                        .refusals
+                        .remove(&a.account.lookup_tag);
+                    written = written.saturating_add(1);
+                }
+                Err(UpsertError::Unavailable) => {
+                    let mut rest = vec![a];
+                    rest.extend(it);
+                    rest.extend(later);
+                    requeue(&self.st, rest);
+                    return Err(sink::SinkError);
+                }
+                Err(UpsertError::Stale) => self.dead_letter(&a),
+                Err(UpsertError::Refused) => {
+                    let n = {
+                        let mut q = lock(&self.st.accounts);
+                        let n = q.refusals.entry(a.account.lookup_tag).or_insert(0);
+                        *n = n.saturating_add(1);
+                        *n
+                    };
+                    if n >= MAX_UPSERT_REFUSALS {
+                        self.dead_letter(&a);
+                    } else {
+                        later.push(a);
+                    }
+                }
             }
         }
-        Ok(total)
+        if !later.is_empty() {
+            lock(&self.st.accounts).pending.extend(later);
+        }
+        Ok(written)
+    }
+
+    /// Drop a refused account write: count it, report it, and forget a dummy
+    /// whose rotation was refused.
+    fn dead_letter(&self, a: &AccountUpsert) {
+        {
+            let mut q = lock(&self.st.accounts);
+            q.refusals.remove(&a.account.lookup_tag);
+            if a.replaces.is_some() {
+                q.dummies.retain(|d| !ct_eq(d, &a.account.lookup_tag));
+            }
+        }
+        self.st
+            .dead_letters
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let sink = self
+            .st
+            .health
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(h) = sink {
+            h.account_write_dropped();
+        }
     }
 
     /// Graceful-shutdown flush (SEA-28(c)): queue 1–4 dummy account creates

@@ -325,10 +325,15 @@ mod tests {
     /// DB-007/DB-008, 09 §8 L1–L4, L11–L13: the shipped migrations pass.
     #[test]
     fn migrations_pass_static_lint() {
-        for (_, sql) in crate::pg::MIGRATIONS {
-            let v = check_sql(sql);
-            assert!(v.is_empty(), "{v:?}");
-        }
+        // The expected-column table covers the whole schema: lint the
+        // concatenated forward-only migrations.
+        let all: String = crate::pg::MIGRATIONS
+            .iter()
+            .map(|(_, sql)| *sql)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let v = check_sql(&all);
+        assert!(v.is_empty(), "{v:?}");
     }
 
     #[test]
