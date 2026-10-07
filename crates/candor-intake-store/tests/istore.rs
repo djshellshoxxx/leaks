@@ -472,7 +472,10 @@ async fn connection_cap_answers_busy_and_distinct_uids_are_required() {
     // Over the role cap: closed before a thread is spawned or a byte is
     // read (ADR-057(5)); the client sees a transport failure.
     let mut c = env.conn();
-    assert_eq!(c.call(&Request::ServingAllowed), Err(ClientError::Transport));
+    assert_eq!(
+        c.call(&Request::ServingAllowed),
+        Err(ClientError::Transport)
+    );
     assert_eq!(env.server.refused(), 1);
     drop(held);
     assert!(c.call(&Request::ServingAllowed).is_ok());

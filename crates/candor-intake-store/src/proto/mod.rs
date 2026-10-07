@@ -1213,7 +1213,12 @@ mod tests {
         b[REQUEST_HEADER_LEN + 1] = 1;
         assert_eq!(decode_request(&b), Err(ProtoError::Field));
         // An account deletion needs at least one tag.
-        let b = encode_request(1, &Request::Delete(Delete::Account { lookup_tags: vec![] }));
+        let b = encode_request(
+            1,
+            &Request::Delete(Delete::Account {
+                lookup_tags: vec![],
+            }),
+        );
         assert!(b.is_err());
         let mut b = encode_request(
             1,

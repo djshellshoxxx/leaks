@@ -606,7 +606,10 @@ impl IntakeStore for MemoryStore {
                 (None, Some(mb)) => owner_of(&st, mb),
                 (a, _) => a,
             };
-            let r = IncomingReply { account: routed, ..r };
+            let r = IncomingReply {
+                account: routed,
+                ..r
+            };
             let dropped =
                 st.listed(
                     DeletionKind::Reply,

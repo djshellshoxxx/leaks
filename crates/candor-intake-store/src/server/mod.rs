@@ -243,7 +243,11 @@ impl<S: IntakeStore + 'static> IstoreServer<S> {
             clock,
             cfg,
             rt,
-            connections: [AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0)],
+            connections: [
+                AtomicUsize::new(0),
+                AtomicUsize::new(0),
+                AtomicUsize::new(0),
+            ],
             accept_errors: AtomicU64::new(0),
             refused: AtomicU64::new(0),
         })
@@ -444,10 +448,10 @@ impl<S: IntakeStore + 'static> IstoreServer<S> {
                         *read_budget = u32::try_from(v.len()).unwrap_or(u32::MAX);
                         Response::MailboxList(
                             v.iter()
-                            .map(|r| crate::proto::ReplyHeader {
-                                reply_ref: r.reply_ref.0,
-                                slot: r.slot,
-                                size_bucket: r.size_bucket,
+                                .map(|r| crate::proto::ReplyHeader {
+                                    reply_ref: r.reply_ref.0,
+                                    slot: r.slot,
+                                    size_bucket: r.size_bucket,
                                     available_day: r.available_day.0,
                                 })
                                 .collect(),
@@ -648,7 +652,7 @@ impl<S: IntakeStore + 'static> IstoreServer<S> {
                     {
                         let entries = u32::try_from(a.mailbox_ids.len().saturating_add(1))
                             .unwrap_or(u32::MAX);
-                        targets.push((a.account_id, entries));
+                        targets.push((a.account_id, entries)); // safefs-lint: allow(Vec::push of an id tuple, no path)
                     }
                 }
                 if targets.is_empty() {

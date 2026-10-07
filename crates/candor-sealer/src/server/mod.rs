@@ -1699,9 +1699,8 @@ impl Sealer {
         let _serial = lock(&self.st.flush_lock);
         let mine: Vec<AccountUpsert> = {
             let mut q = lock(&self.st.accounts);
-            let (mine, rest): (Vec<_>, Vec<_>) = core::mem::take(&mut q.pending)
-                .into_iter()
-                .partition(|a| {
+            let (mine, rest): (Vec<_>, Vec<_>) =
+                core::mem::take(&mut q.pending).into_iter().partition(|a| {
                     ct_eq(&a.account.lookup_tag, &tag)
                         || a.replaces.as_ref().is_some_and(|o| ct_eq(o, &tag))
                 });
@@ -1846,9 +1845,8 @@ impl Sealer {
                 };
                 let offset = job.release_offset_days;
                 let st = self.st.clone();
-                let r =
-                    blocking(move || signal_blocking(&g, &st, job, SignalKind::MailboxClosed))
-                        .await;
+                let r = blocking(move || signal_blocking(&g, &st, job, SignalKind::MailboxClosed))
+                    .await;
                 let resp = r.unwrap_or_else(|_| err(ErrorCode::Internal));
                 if !matches!(resp, Response::Sealed { .. }) {
                     return resp;

@@ -920,8 +920,15 @@ pub async fn mailbox_account<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Outpu
     rot.mailbox_ids = vec![MailboxId([8; 32]), MailboxId([9; 32])];
     s.update_account(acct, rot).await.unwrap();
     assert_eq!(s.mailbox_owner(&mb).await.unwrap(), None);
-    assert_eq!(s.mailbox_owner(&MailboxId([9; 32])).await.unwrap(), Some(acct));
-    let a = s.lookup_account(&LookupTag([8; 32])).await.unwrap().unwrap();
+    assert_eq!(
+        s.mailbox_owner(&MailboxId([9; 32])).await.unwrap(),
+        Some(acct)
+    );
+    let a = s
+        .lookup_account(&LookupTag([8; 32]))
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(a.mailbox_ids, vec![MailboxId([8; 32]), MailboxId([9; 32])]);
     // Closing one mailbox: entry, mapping gone, later replies to it dropped.
     let refs: Vec<ReplyRef> = list.iter().map(|r| r.reply_ref).collect();
@@ -942,9 +949,16 @@ pub async fn mailbox_account<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Outpu
     let kinds: Vec<DeletionKind> = dl.iter().map(|e| e.kind).collect();
     assert_eq!(
         kinds,
-        vec![DeletionKind::Mailbox, DeletionKind::Mailbox, DeletionKind::Account]
+        vec![
+            DeletionKind::Mailbox,
+            DeletionKind::Mailbox,
+            DeletionKind::Account
+        ]
     );
-    assert_eq!(dl[1].del_hash, deletion::mailbox_del_hash(&TENANT, &MailboxId([8; 32])));
+    assert_eq!(
+        dl[1].del_hash,
+        deletion::mailbox_del_hash(&TENANT, &MailboxId([8; 32]))
+    );
     assert_eq!(dl[2].del_hash, deletion::account_del_hash(&TENANT, &acct));
     // Backups carry the mapping.
     let b = s.export_backup().await.unwrap();

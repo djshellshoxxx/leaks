@@ -77,10 +77,13 @@ let reads = IstoreClient::new(Arc::new(|| connect_istore_sock()), 8, Duration::f
 // Sealer process: `candor_sealer::server::istore::IstoreSink` (commit + hand-over, accounts, deletions).
 ```
 
-Ops: `SERVING_ALLOWED`, `ACCOUNT_LOOKUP`, `MAILBOX_LIST`, `MAILBOX_READ` (web); `COMMIT_GROUP`
-(followed by the staged bundle hand-over on the same socket; an already committed group is
-acknowledged without a second commit), `ACCOUNT_UPSERT`, `DELETE` (account / mailbox / replies,
-K31-signed deletion-list entries) (sealer). See SPEC-NOTES "`istore` IPC".
+Ops: `SERVING_ALLOWED`, `ACCOUNT_LOOKUP`, `MAILBOX_LIST`, `MAILBOX_READ` (one row; budget granted
+by the list) (web); `COMMIT_GROUP` (followed by the staged bundle hand-over on the same socket;
+an already committed group is acknowledged without a second commit), `ACCOUNT_UPSERT` (keys,
+`prefs_ct`, `mailbox_account` rows, re-wrapped stanzas), `DELETE` (account by its current and
+previous tag, mailbox, replies; K31-signed entries, the `account` entry over the stable
+`account_id`, ADR-057) (sealer). Peer credentials and per-role connection caps are checked
+before a thread is spawned. See SPEC-NOTES "`istore` IPC" and "Fixes for AUD-RM2-IPC".
 
 ## Tests
 

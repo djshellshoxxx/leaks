@@ -570,7 +570,10 @@ async fn not_found_is_success_only_after_an_unknown_outcome() {
     assert_eq!(r, Response::error(ErrorCode::Internal));
     assert!(f.sink.deleted_accounts.lock().unwrap().is_empty());
     // Session kept; the signal was sealed once.
-    assert_eq!(ok(&f.sealer, Request::Touch { sess: l }).await, Response::Empty);
+    assert_eq!(
+        ok(&f.sealer, Request::Touch { sess: l }).await,
+        Response::Empty
+    );
     let envs = f.sink.envelopes().len();
     // A transport failure makes the outcome unknown; the next NotFound is
     // then taken as "landed".
@@ -624,7 +627,11 @@ async fn refused_account_write_never_blocks_the_queue() {
     assert_eq!(f.sealer.queued_accounts(), 1, "refused write retried later");
     assert_eq!(f.sealer.flush_accounts(), Ok(0));
     assert_eq!(f.sealer.flush_accounts(), Ok(0));
-    assert_eq!(f.sealer.queued_accounts(), 0, "dead-lettered after bounded retries");
+    assert_eq!(
+        f.sealer.queued_accounts(),
+        0,
+        "dead-lettered after bounded retries"
+    );
     assert_eq!(f.sealer.dead_letters(), 1);
     assert_eq!(health.0.load(Ordering::SeqCst), 1);
 }
@@ -656,7 +663,11 @@ async fn stale_dummy_rotation_after_restore_is_dropped() {
         assert_eq!(f.sealer.flush_accounts(), Ok(0));
         assert_eq!(f.sealer.queued_accounts(), 0, "queue never wedges");
     }
-    assert_eq!(f.sealer.dead_letters(), n as u64, "every stale rotation dropped");
+    assert_eq!(
+        f.sealer.dead_letters(),
+        n as u64,
+        "every stale rotation dropped"
+    );
     // The dummy set is empty now: further events rotate nothing and nothing
     // is dead-lettered any more.
     f.sealer.chaff_event(CHANNEL).await.unwrap();
@@ -733,9 +744,8 @@ async fn signal_and_chaff_envelopes_share_their_structure() {
     let chaff_shapes: std::collections::HashSet<_> = chaff.iter().map(shape).collect();
     // Bundle sizes come from the chaff distribution; compare the fixed parts
     // (main and identity sizes, slot blocks, disposition) exactly.
-    let fixed = |t: &(Vec<(usize, usize)>, usize, [u8; 16], u32)| {
-        (t.0[0], t.0[1].1, t.0[2], t.1, t.2, t.3)
-    };
+    let fixed =
+        |t: &(Vec<(usize, usize)>, usize, [u8; 16], u32)| (t.0[0], t.0[1].1, t.0[2], t.1, t.2, t.3);
     let rf: std::collections::HashSet<_> = real_shapes.iter().map(fixed).collect();
     let cf: std::collections::HashSet<_> = chaff_shapes.iter().map(fixed).collect();
     assert_eq!(rf, cf, "fixed structure differs");

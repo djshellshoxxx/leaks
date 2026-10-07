@@ -244,14 +244,14 @@ const SQL_ACCOUNT_BY_TAG: &str = "SELECT a.account_id, a.locator_hash, a.auth_pk
      COALESCE((SELECT pg_catalog.array_agg(m.mailbox_id ORDER BY m.mailbox_id) \
        FROM candor.mailbox_account m WHERE m.account_id = a.account_id), '{}'::bytea[]) \
      FROM candor.source_account a WHERE a.locator_hash = $1";
-const SQL_MAILBOX_INSERT: &str =
-    "INSERT INTO candor.mailbox_account (mailbox_id, account_id) VALUES ($1, $2) ON CONFLICT DO NOTHING";
+const SQL_MAILBOX_INSERT: &str = "INSERT INTO candor.mailbox_account (mailbox_id, account_id) VALUES ($1, $2) ON CONFLICT DO NOTHING";
 const SQL_MAILBOXES_CLEAR: &str = "DELETE FROM candor.mailbox_account WHERE account_id = $1";
 const SQL_MAILBOX_DELETE: &str =
     "DELETE FROM candor.mailbox_account WHERE mailbox_id = $1 AND account_id = $2";
 const SQL_MAILBOXES_OF: &str =
     "SELECT mailbox_id FROM candor.mailbox_account WHERE account_id = $1 ORDER BY mailbox_id";
-const SQL_MAILBOX_OWNER: &str = "SELECT account_id FROM candor.mailbox_account WHERE mailbox_id = $1";
+const SQL_MAILBOX_OWNER: &str =
+    "SELECT account_id FROM candor.mailbox_account WHERE mailbox_id = $1";
 const SQL_MAILBOXES_ALL: &str =
     "SELECT mailbox_id, account_id FROM candor.mailbox_account ORDER BY mailbox_id";
 const SQL_REPLIES_OF_ACCOUNT: &str = "DELETE FROM candor.reply WHERE source_account_id = $1";
@@ -1224,7 +1224,9 @@ async fn mailbox_owner_tx(tx: &mut PgConnection, mailbox: &MailboxId) -> Result<
         .fetch_optional(&mut *tx)
         .await
         .map_err(db)?;
-    row.as_ref().map(|r| get_id(r, 0).map(AccountId)).transpose()
+    row.as_ref()
+        .map(|r| get_id(r, 0).map(AccountId))
+        .transpose()
 }
 
 fn entry_from_row(r: &PgRow) -> Result<DeletionEntry> {
@@ -1775,7 +1777,10 @@ impl IntakeStore for PgIntakeStore {
                 (None, Some(mb)) => mailbox_owner_tx(&mut tx, mb).await?,
                 (a, _) => a,
             };
-            let r = IncomingReply { account: routed, ..r };
+            let r = IncomingReply {
+                account: routed,
+                ..r
+            };
             let rh = reply_del_hash(&m.tenant, &r.object_hash);
             let mh = r
                 .mailbox_id

@@ -38,7 +38,8 @@ use candor_sealer::server::directory::{DirectoryTrust, SnapshotBundle};
 pub mod kdlog;
 use candor_sealer::server::hardening::InsecureDevMode;
 use candor_sealer::server::sink::{
-    AccountUpsert, Blob, EnvelopeGroup, EnvelopeObject, EnvelopeSink, SinkError, StagedBundle, DeleteOutcome, UpsertError,
+    AccountUpsert, Blob, DeleteOutcome, EnvelopeGroup, EnvelopeObject, EnvelopeSink, SinkError,
+    StagedBundle, UpsertError,
 };
 use candor_sealer::server::{ChaffConfig, Limits, Sealer, SealerConfig, SnapshotError};
 pub use kdlog::*;

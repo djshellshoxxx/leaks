@@ -55,7 +55,7 @@ fn requests() -> Vec<Request> {
             mailbox_ids: vec![],
             rewrapped: vec![],
         })),
-        Request::Delete(Delete::Account { lookup_tag: [1; 32], mailbox_ids: vec![[2; 32]] }),
+        Request::Delete(Delete::Account { lookup_tags: vec![[1; 32], [2; 32]] }),
         Request::Delete(Delete::Mailbox { lookup_tag: [1; 32], mailbox_id: [2; 32] }),
         Request::Delete(Delete::Replies { lookup_tag: [1; 32], replies: vec![[3; 16], [4; 16]] }),
         Request::Relay(Op::RelayClaim),

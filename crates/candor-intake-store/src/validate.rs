@@ -8,12 +8,12 @@ use subtle::ConstantTimeEq;
 
 use crate::deletion::{DeletionEntry, SignedDeletionHead, verify_chain};
 use crate::error::{Result, StoreError};
-use crate::types::{MAX_MAILBOXES_PER_ACCOUNT, 
+use crate::types::{
     BackupSnapshot, ClaimLimits, CommitEnvelope, CounterDelta, DISPOSITION_CT_LEN_STD, Day,
     GROUP_OBJECTS, IncomingReply, InstallOutcome, KdHighWater, MAX_CLAIM_BYTES, MAX_CLAIM_OBJECTS,
-    MAX_PART_PADDED_SIZE, MAX_PREFS_CT, MAX_PUSHED_DELETION_LIST, MAX_RELEASE_OFFSET_DAYS,
-    MAX_REPLY_CT, MAX_SNAPSHOT_BODY, MAX_SNAPSHOT_SIGNATURES, NewAccount, SLOT_BLOCK_LEN_STD,
-    TenantId, VerifiedSnapshot, XWING_PK_LEN, reply_bucket_of_len,
+    MAX_MAILBOXES_PER_ACCOUNT, MAX_PART_PADDED_SIZE, MAX_PREFS_CT, MAX_PUSHED_DELETION_LIST,
+    MAX_RELEASE_OFFSET_DAYS, MAX_REPLY_CT, MAX_SNAPSHOT_BODY, MAX_SNAPSHOT_SIGNATURES, NewAccount,
+    SLOT_BLOCK_LEN_STD, TenantId, VerifiedSnapshot, XWING_PK_LEN, reply_bucket_of_len,
 };
 
 pub(crate) fn has_duplicates<T: PartialEq>(v: &[T]) -> bool {
