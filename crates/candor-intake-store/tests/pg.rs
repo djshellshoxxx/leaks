@@ -572,7 +572,7 @@ async fn pg_durability_and_guards() {
         s.init(common::TENANT, common::SALT).await.unwrap();
         s.commit_envelope(common::envelope(0)).await.unwrap();
         for t in [2u8, 3, 4] {
-            let a = common::account(&s, t).await;
+            let a = common::account_plain(&s, t).await;
             s.delete_account(a, common::TODAY, &sg).await.unwrap();
         }
         s.install_directory_snapshot(common::snap(1, 10, 20700, 0), common::TODAY)
@@ -985,7 +985,7 @@ async fn pg_deletion_list_append_guard() {
     s.init(common::TENANT, common::SALT).await.unwrap();
     let sg = common::signer();
     for t in [2u8, 3, 4] {
-        let a = common::account(&s, t).await;
+        let a = common::account_plain(&s, t).await;
         s.delete_account(a, common::TODAY, &sg).await.unwrap();
     }
     let app = "candor_istore";
@@ -1278,7 +1278,7 @@ async fn pg_uniform_rewrite_toast() {
     .iter()
     .map(|r| (r.get(0), r.get(1)))
     .collect();
-    assert_eq!(rels.len(), 8);
+    assert_eq!(rels.len(), 9);
     let (_, distinct) = distinct_xmin(&mut c).await;
     assert_eq!(distinct, 1);
     let slot_xmin: String = sqlx::query("SELECT xmin::text FROM candor.intake_meta")

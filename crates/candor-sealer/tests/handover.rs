@@ -93,7 +93,10 @@ fn reply(sock: &OwnedFd, b: &[u8], with_fd: Option<&OwnedFd>) {
         fds = [fd.as_fd()];
         assert!(control.push(rustix::net::SendAncillaryMessage::ScmRights(&fds)));
     }
-    rustix::net::sendmsg(sock, &[IoSlice::new(b)], &mut control, SendFlags::NOSIGNAL).unwrap();
+    // The sealer side may already have closed (deadline elapsed under load):
+    // the mock's late reply then fails with EPIPE, which is not the property
+    // under test (the sealer's fail-closed result is asserted by the caller).
+    let _ = rustix::net::sendmsg(sock, &[IoSlice::new(b)], &mut control, SendFlags::NOSIGNAL);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

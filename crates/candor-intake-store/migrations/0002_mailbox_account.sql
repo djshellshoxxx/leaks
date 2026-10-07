@@ -3,7 +3,9 @@
 -- Maps each per-report mailbox to its owning account so that account and
 -- mailbox deletion is complete, restorable and idempotent, and RL-05 can route
 -- a pushed reply. No time-typed column, no read marker, no history (ADR-010,
--- ADR-039). RLS and the grant matrix follow source_account.
+-- ADR-039). RLS and the grant matrix follow source_account. Owned by the
+-- schema owner like every table (migration 0001 bootstrapped the roles).
+SET LOCAL ROLE candor_intake_migrator;
 CREATE TABLE candor.mailbox_account (
   mailbox_id bytea PRIMARY KEY CHECK (octet_length(mailbox_id) = 32),
   account_id uuid  NOT NULL REFERENCES candor.source_account (account_id) ON DELETE CASCADE
