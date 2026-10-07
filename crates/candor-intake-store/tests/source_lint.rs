@@ -19,6 +19,11 @@ const SOURCES: &[(&str, &str)] = &[
     ("store.rs", include_str!("../src/store.rs")),
     ("types.rs", include_str!("../src/types.rs")),
     ("validate.rs", include_str!("../src/validate.rs")),
+    ("client.rs", include_str!("../src/client/mod.rs")),
+    ("proto.rs", include_str!("../src/proto/mod.rs")),
+    ("reads.rs", include_str!("../src/reads.rs")),
+    ("server.rs", include_str!("../src/server/mod.rs")),
+    ("sockio.rs", include_str!("../src/sockio.rs")),
 ];
 
 fn sources() -> Vec<(String, String)> {
