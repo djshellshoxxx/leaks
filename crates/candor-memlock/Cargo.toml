@@ -12,7 +12,9 @@ publish.workspace = true
 [dependencies]
 # Safe wrappers for getpid/gettid (main-thread guard), fcntl CLOEXEC and the SO_DOMAIN /
 # SO_TYPE / SO_ACCEPTCONN checks on the adopted descriptor. Already in Cargo.lock.
-rustix = { version = "=1.1.2", default-features = false, features = ["std", "net", "process", "thread"] }
+# `fs` only for two /proc reads (thread count, fd-3 probe) through fd-based or constant-path
+# calls (SPEC-NOTES decisions 2 and 7).
+rustix = { version = "=1.1.2", default-features = false, features = ["std", "fs", "net", "process", "thread"] }
 
 [[test]]
 # Runs on the main thread of its own process (no libtest harness): the only way to exercise
@@ -38,5 +40,12 @@ undocumented_unsafe_blocks = "deny"
 multiple_unsafe_ops_per_block = "deny"
 
 [dev-dependencies]
-# A pipe is the simplest descriptor that is open but not a socket (negative tests).
-rustix = { version = "=1.1.2", default-features = false, features = ["pipe"] }
+# A pipe is the simplest descriptor that is open but not a socket (negative tests); `rand` for
+# unpredictable abstract socket names (AUD-RM2-MEM-04).
+rustix = { version = "=1.1.2", default-features = false, features = ["pipe", "rand"] }
+# tests/seccomp_runtime.rs (AUD-RM2-DEP-33): a tokio multi-thread runtime with the `signal`
+# feature must start under the exact deploy allow-sets. seccompiler builds the BPF from a
+# syscall-number allow-list without unsafe; libc supplies the SYS_* numbers.
+tokio = { version = "=1.48.0", default-features = false, features = ["rt", "rt-multi-thread", "net", "signal", "time"] }
+seccompiler = { version = "=0.5.0", default-features = false }
+libc = { version = "=0.2.189", default-features = false }

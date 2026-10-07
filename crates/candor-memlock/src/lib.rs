@@ -43,6 +43,9 @@ pub enum AdoptError {
     /// Called from a thread other than the main thread (the environment may only be edited
     /// while the process is single-threaded; daemons call this first in `main`).
     NotMainThread,
+    /// The process already has more than one thread, or `/proc/self/task` could not be read
+    /// (fail closed): the environment cannot be edited safely.
+    NotSingleThreaded,
     /// `LISTEN_PID` is absent: the process was not socket-activated.
     NotActivated,
     /// `LISTEN_PID` is not this process (a descriptor meant for a parent or another process).
@@ -73,6 +76,7 @@ impl fmt::Display for AdoptError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::NotMainThread => "socket activation must be adopted on the main thread",
+            Self::NotSingleThreaded => "socket activation must be adopted before any thread exists",
             Self::NotActivated => "not socket-activated (LISTEN_PID absent)",
             Self::PidMismatch => "LISTEN_PID is not this process",
             Self::FdCount => "LISTEN_FDS is not exactly 1",
@@ -139,7 +143,7 @@ impl AsFd for AdoptedListener {
 
 /// Adopts the one Unix listening socket systemd passed to this process.
 ///
-/// Checks, in order: main thread; `LISTEN_PID == getpid()`; `LISTEN_FDS == 1`;
+/// Checks, in order: main thread; exactly one thread in `/proc/self/task`; `LISTEN_PID == getpid()`; `LISTEN_FDS == 1`;
 /// `LISTEN_FDNAMES == expected_name`; fd 3 open, `FD_CLOEXEC` set; `AF_UNIX`; `SOCK_STREAM`
 /// or `SOCK_SEQPACKET`; listening. The three `LISTEN_*` variables are removed from the
 /// environment as soon as the main-thread check passes, on every path, so a child process or
@@ -150,6 +154,9 @@ impl AsFd for AdoptedListener {
 pub fn systemd_unix_listener(expected_name: &str) -> Result<AdoptedListener, AdoptError> {
     if !sys::on_main_thread() {
         return Err(AdoptError::NotMainThread);
+    }
+    if sys::thread_count() != Some(1) {
+        return Err(AdoptError::NotSingleThreaded);
     }
     let pid = std::env::var_os("LISTEN_PID");
     let fds = std::env::var_os("LISTEN_FDS");
@@ -347,9 +354,17 @@ mod tests {
         assert_eq!(parse_decimal("٤".as_bytes()), Err(AdoptError::InvalidValue));
     }
 
+    fn abstract_name(tag: &str) -> String {
+        // Unpredictable, so no other process can pre-bind or guess it (AUD-RM2-MEM-04).
+        let mut r = [0u8; 8];
+        rustix::rand::getrandom(&mut r, rustix::rand::GetRandomFlags::empty()).unwrap();
+        let hex: String = r.iter().map(|b| format!("{b:02x}")).collect();
+        format!("candor-memlock-test-{}-{hex}-{tag}", std::process::id())
+    }
+
     fn abstract_listener(kind: SocketType, tag: &str) -> OwnedFd {
         let fd = socket_with(AddressFamily::UNIX, kind, SocketFlags::CLOEXEC, None).unwrap();
-        let name = format!("candor-memlock-test-{}-{tag}", std::process::id());
+        let name = abstract_name(tag);
         bind(
             &fd,
             &SocketAddrUnix::new_abstract_name(name.as_bytes()).unwrap(),
@@ -360,6 +375,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // sockets are unsupported under Miri isolation
     fn listening_unix_sockets_of_both_types_pass_and_get_cloexec() {
         let s = abstract_listener(SocketType::STREAM, "stream");
         assert_eq!(check_listener_fd(s.as_fd()), Ok(SocketKind::Stream));
@@ -375,10 +391,7 @@ mod tests {
         .unwrap();
         bind(
             &plain,
-            &SocketAddrUnix::new_abstract_name(
-                format!("candor-memlock-test-{}-plain", std::process::id()).as_bytes(),
-            )
-            .unwrap(),
+            &SocketAddrUnix::new_abstract_name(abstract_name("plain").as_bytes()).unwrap(),
         )
         .unwrap();
         listen(&plain, 1).unwrap();
@@ -396,6 +409,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // sockets are unsupported under Miri isolation
     fn wrong_descriptors_are_refused() {
         // Connected (not listening) pair.
         let (a, _b) = socketpair(
@@ -440,6 +454,18 @@ mod tests {
             systemd_unix_listener("http").err(),
             Some(AdoptError::NotMainThread)
         );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // reads /proc/self/task
+    fn thread_count_sees_spawned_threads() {
+        let before = sys::thread_count().unwrap();
+        assert!(before >= 1);
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let h = std::thread::spawn(move || rx.recv().ok());
+        assert!(sys::thread_count().unwrap() > before);
+        tx.send(()).unwrap();
+        h.join().unwrap();
     }
 
     #[test]

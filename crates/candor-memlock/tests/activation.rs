@@ -65,9 +65,18 @@ fn at_fd3(fd: OwnedFd) -> OwnedFd {
     moved
 }
 
-fn abstract_listener(kind: SocketType, tag: &str) -> OwnedFd {
+fn abstract_name(tag: &str) -> String {
+    let mut r = [0u8; 8];
+    rustix::rand::getrandom(&mut r, rustix::rand::GetRandomFlags::empty()).unwrap();
+    let hex: String = r.iter().map(|b| format!("{b:02x}")).collect();
+    format!(
+        "candor-memlock-activation-{}-{hex}-{tag}",
+        std::process::id()
+    )
+}
+
+fn abstract_listener(kind: SocketType, name: &str) -> OwnedFd {
     let fd = socket_with(AddressFamily::UNIX, kind, SocketFlags::empty(), None).unwrap();
-    let name = format!("candor-memlock-activation-{}-{tag}", std::process::id());
     bind(
         &fd,
         &SocketAddrUnix::new_abstract_name(name.as_bytes()).unwrap(),
@@ -184,8 +193,29 @@ fn main() {
     set_env(p, f, n);
     expect_err("not a socket", Some(notsock), "http", AdoptError::NotSocket);
 
+    // A second thread exists: refused before the environment is touched (AUD-RM2-MEM-01).
+    let name = abstract_name("ok");
+    let lst = at_fd3(abstract_listener(SocketType::STREAM, &name));
+    set_env(p, f, n);
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let parked = std::thread::spawn(move || rx.recv().ok());
+    assert_eq!(
+        systemd_unix_listener("http").err(),
+        Some(AdoptError::NotSingleThreaded)
+    );
+    assert!(
+        !env_is_clear(),
+        "environment must be untouched while multi-threaded"
+    );
+    tx.send(()).unwrap();
+    parked.join().unwrap();
+    assert_eq!(
+        rustix::io::fcntl_getfd(lst.as_fd()).map(|_| ()),
+        Ok(()),
+        "fd 3 still open"
+    );
+
     // Success: a listening SOCK_STREAM at fd 3, environment scrubbed, CLOEXEC set, usable.
-    let lst = at_fd3(abstract_listener(SocketType::STREAM, "ok"));
     let _ = std::os::fd::IntoRawFd::into_raw_fd(lst); // ownership passes to the adoption
     set_env(p, f, n);
     let adopted = systemd_unix_listener("http").expect("adoption");
@@ -208,7 +238,6 @@ fn main() {
 
     // The adopted listener accepts a connection and carries bytes.
     let listener = adopted.into_stream_listener().expect("stream");
-    let name = format!("candor-memlock-activation-{}-ok", std::process::id());
     let addr = SocketAddrUnix::new_abstract_name(name.as_bytes()).unwrap();
     let client = socket_with(
         AddressFamily::UNIX,

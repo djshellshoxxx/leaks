@@ -125,6 +125,15 @@ Readers for all intake tables: the `candor_istore` PG role (used only by `candor
 
 WITHDRAWN (ADR-034): columns `state` and `created_day`. Accounts are never stored in a pending state.
 
+**`mailbox_account`** (ADR-057(2); AUD-RM2-IPC-09) — SS — Retention: deleted with its account (SW-15) or its mailbox (SW-15 close mailbox); never outlives either. It maps each per-report mailbox to its owning account so that account and mailbox deletion is complete, restorable and idempotent. It cannot be backfilled later, so it exists from the first intake release.
+
+| Column | Type | Ct | Class | Notes |
+|---|---|---|---|---|
+| mailbox_id | bytea(32) PK | | SS | The per-report mailbox identifier used in `prefs_ct` and in `deletion_list` kind `mailbox` hashes |
+| account_id | uuid FK → source_account ON DELETE CASCADE | | SS | Never leaves Z-INTAKE (06 §14) |
+
+No time-typed column, no read/fetch marker and no per-mailbox history exists (ADR-010, ADR-039). RLS and the grant matrix follow `source_account`.
+
 **`draft_part`** — WITHDRAWN (ADR-034). No draft state exists in the intake database. Tier W draft text and the identity block live only in C-07 mlocked RAM. Attachment parts uploaded during a Tier W session are encrypted under a per-session key held only in C-07 RAM and written as ciphertext to the tmpfs staging area `/run/candor/staging/` (owned by `candor-istore`, `nosuid,nodev,noexec`, size-capped, swap disabled on the host). Staged parts are deleted at session end (logout, 20-min idle, 2-h absolute), on discard, and are lost on restart. There is no per-draft time value anywhere (07-BACKEND.md §5.3).
 
 **`upload`** (Tier V; protocol canonical in 08-API.md §5.1, ADR-046(4)) — SS/SEC — Retention: until commit (then deleted, chunks re-parented to `envelope_part`), or 24 h after creation as tracked by `candor-intake-store` in RAM (monotonic clock; no time stored), or `candor-intake-store` restart (no cross-session resume). Backstop: the daily `upload_gc` deletes every upload whose `created_day` < today − 1.
