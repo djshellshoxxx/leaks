@@ -27,6 +27,7 @@ LC_ALL=C
 export LC_ALL
 HERE=$(cd "$(dirname "$0")" && pwd)
 DEPLOY=$(cd "$HERE/.." && pwd)
+REPO=$(cd "$DEPLOY/.." && pwd)
 INTAKE="$DEPLOY/intake"
 TOOLS="$DEPLOY/tools"
 T=$(mktemp -d /var/tmp/candor-validate.XXXXXX) || exit 1
@@ -59,8 +60,33 @@ for s in "$TOOLS"/*.sh "$HERE"/*.sh; do bash -n "$s" || bad "bash -n $s"; done
 
 # ------------------------------------------------------------------------- 2. config-check
 # The compiled reader (ADR-055(3)); its digest is pinned in config-check.manifest.
+# AUD-RM2-DEP-38: the build runs from a fresh copy of the sources (another checkout path, an
+# empty target directory, another HOME) so no cache can hide a path leak, and the binary is
+# scanned for absolute build-host paths. A second copy built with the remaps disabled must
+# differ from the pin and show the leak (the negative case).
+srccopy() { # dir -> copy of the workspace sources (no target/, fuzz/, .build/)
+  mkdir -p "$1/deploy/tools"; cp "$REPO/Cargo.toml" "$REPO/Cargo.lock" "$REPO/clippy.toml" "$REPO/rust-toolchain.toml" "$1/"
+  cp "$TOOLS/build-safe-read.sh" "$1/deploy/tools/"
+  tar -C "$REPO" --exclude=target --exclude=fuzz --exclude=.build -cf - crates | tar -C "$1" -xf -
+}
 if have cargo; then
-  if "$TOOLS/build-safe-read.sh" >/dev/null 2>"$T/build.err"; then pass "candor-safe-read reproducible build"; else bad "build-safe-read.sh: $(head -c 300 "$T/build.err")"; fi
+  PIN=$(awk '$2=="candor-safe-read" {print $1}' "$TOOLS/config-check.manifest")
+  srccopy "$T/src-copy"; install -d -m 0700 "$T/home2"; ln -s "${CARGO_HOME:-$HOME/.cargo}" "$T/home2/.cargo"; ln -s "${RUSTUP_HOME:-$HOME/.rustup}" "$T/home2/.rustup"
+  if HOME="$T/home2" CARGO_HOME="$T/home2/.cargo" RUSTUP_HOME="$T/home2/.rustup" bash "$T/src-copy/deploy/tools/build-safe-read.sh" >/dev/null 2>"$T/build.err"; then
+    got=$(sha256sum < "$T/src-copy/deploy/tools/candor-safe-read" | cut -c1-64)
+    if [ "$got" = "$PIN" ]; then pass "candor-safe-read reproducible build (fresh checkout path, empty target dir, other HOME; digest equals the pin)"
+    else bad "candor-safe-read built from a fresh copy differs from the pin ($got vs $PIN)"; fi
+    if strings -n 8 "$T/src-copy/deploy/tools/candor-safe-read" | grep -qE '^/(root|home|tmp|var)|\.rustup|\.cargo|rustc-sysroot'; then bad "candor-safe-read carries a build-host path"
+    else pass "candor-safe-read carries no build-host path"; fi
+    install -m 0755 "$T/src-copy/deploy/tools/candor-safe-read" "$TOOLS/candor-safe-read"
+  else bad "build-safe-read.sh (fresh copy): $(head -c 300 "$T/build.err")"; fi
+  srccopy "$T/src-noremap"
+  if BUILD_SAFE_READ_REMAP=off bash "$T/src-noremap/deploy/tools/build-safe-read.sh" >/dev/null 2>"$T/build.err" &&
+     [ "$(sha256sum < "$T/src-noremap/deploy/tools/candor-safe-read" | cut -c1-64)" != "$PIN" ] &&
+     strings -n 8 "$T/src-noremap/deploy/tools/candor-safe-read" | grep -qE '^/(root|home|tmp|var)|\.rustup|\.cargo'; then
+    pass "candor-safe-read without remaps differs from the pin and leaks a build-host path (negative case)"
+  else bad "candor-safe-read negative case: a build without remaps was not detected"; fi
+  rm -rf "$T/src-copy" "$T/src-noremap"
 elif [ -x "$TOOLS/candor-safe-read" ]; then skip "cargo missing: using the existing candor-safe-read"
 else bad "cargo missing and no candor-safe-read binary"; fi
 if [ -x "$TOOLS/candor-safe-read" ] && [ "$(sha256sum < "$TOOLS/candor-safe-read" | cut -c1-64)" = "$(awk '$2=="candor-safe-read" {print $1}' "$TOOLS/config-check.manifest")" ]; then

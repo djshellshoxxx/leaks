@@ -135,6 +135,7 @@ and with the users from `sysusers.d` created.
 | Check | Result (2026-10-07, this container: systemd 255, tor 0.4.9.11, nft 1.0.9, jq 1.7, AppArmor 4 parser, PG 16.13) |
 |---|---|
 | shellcheck (tools, tests) | clean |
+| `candor-safe-read` reproducible build (DEP-38) | fresh source copy under another checkout path, empty target directory and another HOME reproduces the pinned digest `58b2bb3a…` with and without `rust-src`; the binary holds no build-host path; a build with the remaps disabled differs and leaks (negative case) |
 | `config-check.sh` on the shipped tree (base, `--profile ce-single`, `--profile ce-hardened`) | 889 checks OK, exit 0 (three pinned syscall sets: sealer 136, web 124, store 135 calls) |
 | `config-check.sh --host --root` on a synthetic installed host (CE-SINGLE layout) | exit 0 (live-only checks reported as SKIP) |
 | `config-check.sh` on 273 deliberately broken copies (every AUD-RM2-deploy round-1, round-2 and round-3 bypass, SEA-16, the STO-08/11/23/24 settings and timers, the D-36 syscall-set and `LimitMEMLOCK` weakenings, the D-38 `socketpair` denials; 58 of them host-root cases; symlinked inputs point at a marker file that must never appear in a report) | every copy rejected with exit 30, no marker printed |

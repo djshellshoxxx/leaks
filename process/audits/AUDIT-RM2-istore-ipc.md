@@ -97,3 +97,83 @@ STO-27 (peer uid, SEQPACKET, seals, size in `receive`), STO-28 (`blob_referenced
 
 ## Gate
 **Gate: FAIL** (2026-10-07, `b21bed52`). Open: IPC-01 (High), IPC-02 (High), IPC-04 (Medium, needs a lead decision), IPC-03/05/06/07 (Low), IPC-08/09 (Info). Re-test after fixes with the four PoCs and the regression tests named above; the delta re-audit covers `close_mailbox`, `delete_replies`, `write_batch`/`retrying`, `delete_account` and the deletion-entry subject.
+
+---
+
+# Round 2 — delta re-test of the ADR-057 fixes (2026-10-07, commit `6f9b027a`)
+
+- Delta reviewed line by line: `git diff b21bed5..6f9b027` on `crates/candor-intake-store/src/{server,proto,pg,memory,store,deletion,types,validate}.rs`, `migrations/0002_mailbox_account.sql`, `crates/candor-sealer/src/server/{mod,istore,sink,session}.rs`, specs 04 §18.6 / 09 `mailbox_account` / ADR-057, both SPEC-NOTES fix tables, the new tests in `tests/signal.rs`, `tests/istore.rs` (both crates), store `tests/common`.
+- Tools (same pins as round 1): `cargo test -p candor-sealer --test signal --test istore --test chaff --test shape` (12 + 2 + 8 + 1 pass); `cargo test -p candor-intake-store --test istore --test memory --test staged` (10 + 21 + 23 pass); `scripts/pg-test.sh` full suite (38 unit + 10 istore + 21 memory + **40 PG** + 6 lint + 23 staged, all pass; migration 0002 applied on a fresh cluster); `fuzz_istore_frame` (scratch, regenerated seeds): 12,607,489 runs in 121 s, cov 810 / ft 1270, no crash/leak/OOM/timeout; round-1 PoCs re-run (adapted to the new `delete_account(&tags)` / `DeleteOutcome` API) plus four new PoCs, in the scratchpad (`audit-w1a/poc`, deleted afterwards).
+
+## Re-test of round-1 findings
+
+| ID | Status | Evidence |
+|---|---|---|
+| IPC-01 | **Fixed** (`6f9b027`; tests `close_after_queued_rotation_deletes_the_account`, `rotate_then_close_race_across_two_sessions`, `not_found_is_success_only_after_an_unknown_outcome`) | Original PoC now: `CloseMailbox` after a queued rotation → `Sealed`, both tags gone, list `[Mailbox, Account]`, queue empty. Code: per-source lock keyed by the report's mailbox id; `flush_source` writes queued entries matched by new tag **or** `replaces`; deletion by every tag; `NotFound` accepted only when `delete_sent` (unknown outcome) or `recently_deleted`; session removed only after `DeleteOutcome::Deleted`. Lock order checked (session lock is always released before the source lock is taken; `flush_lock` → `accounts` only): no inversion, no starvation across sources. |
+| IPC-02 | **Fixed** (tests `refused_account_write_never_blocks_the_queue`, `stale_dummy_rotation_after_restore_is_dropped`) | Two-session PoC: close in S2 no longer wedges; B's rotation lands (`flush = Ok(1)`, `dead_letters = 0`). `write_batch` continues past `Stale`/`Refused`; refusals bounded (3) then dead-lettered with a health event; dummy tag removed. **But the new classification regresses on transient outages → IPC-10/11 below.** |
+| IPC-03 | **Fixed** (`concurrent_closes_seal_one_signal`) | `tokio::join!` of two closes: 1 signal envelope, both `Sealed` with the same offset (`SourceState::closing` set under the source lock; `recently_deleted` re-checked after taking it). |
+| IPC-04 | **Fixed** (`conf_restore_after_rotation`, memory + PG) | PoC: backup → rotation → delete → restore + RL-12: account absent; the `account` entry hashes `account_id` (04 §18.6 amended, ADR-057(1)); restore matches by id in both stores. Variant (mailbox entry of a rotated account restored onto a pre-rotation backup): mapping removed (`mailbox_owner` = `None`) and the owner's replies deleted. |
+| IPC-05 | **Fixed** | `IstoreServer::admit` (peercred + per-role cap, defaults 64/16/4) runs in the accept loop before the thread is spawned; slot released on spawn failure; `serve_connection` (test path) uses the same `admit`. Tests `connection_cap_…`, `unknown_uid_…` pass. |
+| IPC-06 | **Partially fixed → Low stays open** (see IPC-12) | Signal-shaped chaff (`signal_share_permille`, release-epoch rule) exists and the builder's structure test passes, but it pins `followup_share_permille: 1000`; with the production default (300) 70 % of signal-shaped chaff carries a SUBMISSION header and 40 % a non-empty bundle, neither of which a real signal ever has. |
+| IPC-07 | **Fixed** | `IntakeStore::reply` (PG: `WHERE reply_ref = $1 AND source_account_id = $2`, one indexed row; memory: account-bound); per-connection read budget granted by `MAILBOX_LIST` (`BUSY` without budget, no store access). Test `mailbox_read_is_budgeted_by_the_list`. Unused budget carries over on a pooled connection (harmless, ≤ 32). |
+| IPC-08 | **Fixed** | One transaction per account deletion (`mailbox` entries from `mailbox_account`, then `account`, then the row with cascade); a retry finds nothing and answers `NOT_FOUND`, no duplicate entries. `Deleted(0)` on a replies replay remains (display only). |
+| IPC-09 | **Resolved** (ADR-057(2), migration 0002, 09 amended) | `mailbox_account` (bytea(32) PK → account uuid FK ON DELETE CASCADE, index, autovacuum off, RLS enabled+forced with the same `p_tenant` policy, grants app RW / backup SELECT, maintenance none; `EXPECTED_POLICIES` 9; VACUUM lists, `uniform_rewrite`, schema lint, backups and restore cover it; `set_mailboxes` replaces the set atomically with the account write; "mailbox taken" refused). RL-05 routes `account: None` replies through the mapping; a listed mailbox on restore drops the mapping and the owner's replies. `mailbox_owner` reads without the serving check (used only by the relay path, which is refused while restoring). **Upgrade path: see IPC-13.** |
+
+## New findings (round 2)
+
+### AUD-RM2-IPC-10 — A store `UNAVAILABLE`/`BUSY` answer is classified `Refused`: a transient outage dead-letters real account creates and rotations
+- Severity: **High** (regression introduced by the IPC-02 fix)
+- Location: `crates/candor-sealer/src/server/istore.rs` `upsert_account` (`Err(ClientError::Store(NotFound)) => Stale`, `Err(ClientError::Store(_)) => Refused`; only `ClientError::Transport` is `Unavailable`); `mod.rs` `write_batch` (`Refused` → `MAX_UPSERT_REFUSALS` = 3 then `dead_letter`).
+- Description: the store answers `UNAVAILABLE` (code 5) while restore-pending (every process start of the PG store until RL-12 confirms the head, up to one control cycle), on backend errors and on the op deadline, and `BUSY` (6) on capacity. All of these are known transient conditions with nothing applied, yet the sink reports them as a final refusal. After three flushes (45 min at the default interval, 3 min at the minimum) every queued write — real account creates of new sources, real rotations, dummy writes — is dropped. The source was told "received" and holds a passphrase that will never log in; a rotating source is locked out (old tag blocked by SEA-28(a), new tag never written) and the case already uses the new key. Nothing distinguishes this from IPC-02's wedge for the affected sources, except that it is now silent and permanent per write (a health event only says `QUEUE_BACKLOG`).
+- PoC (`poc.rs::r2_new_unavailable_store_dead_letters_real_accounts`, real sealer + `IstoreServer` + `MemoryStore`): submit → `mark_restore_pending()` → three `flush_accounts()` (`Ok(0)`, `Ok(0)`, `Ok(0)` with `dead_letters = 1` after the third) → restore cleared → `flush_accounts() = Ok(0)` → `LoginDerive` of the passphrase: no account in the store.
+- Fix: map `ErrorCode::Unavailable | Busy | Internal` (and any undecodable reply) to `UpsertError::Unavailable` (requeue, keep order); treat only `Invalid`/`Forbidden`/`BadFrame` as `Refused` and `NotFound`-on-replacement as `Stale`. Regression test: the PoC (expect the account to exist after the outage and `dead_letters = 0`); a unit test of the mapping table.
+
+### AUD-RM2-IPC-11 — `flush_source` drops a refused write without a dead letter; with IPC-10 a close or reply deletion during an outage silently loses the source's queued account
+- Severity: **High** (same root cause as IPC-10; independent fix needed in `flush_source`)
+- Location: `crates/candor-sealer/src/server/mod.rs` `flush_source`: `Ok(()) | Err(Stale) | Err(Refused) => { collect tags }` — the entry is removed from the queue and neither requeued, dead-lettered nor counted.
+- Description: `DELETE_REPLIES` and `CLOSE_MAILBOX` first take the source's queued writes out of the queue and write them synchronously. A `Refused` (today: any `UNAVAILABLE`/`BUSY`) result is treated as "written": the create or rotation vanishes without trace, the operation then fails `INTERNAL`, and the source retries against an account the store will never hold. A source that submits and, in the same visit, deletes a reply or closes the mailbox while the store is restore-pending loses its account for good; the health counter stays at 0.
+- PoC (`poc.rs::r2_new_delete_replies_during_outage_loses_queued_create`): submit (create queued) → `mark_restore_pending()` → `DeleteReplies { replies: [] }` = `INTERNAL` → restore cleared → `flush_accounts() = Ok(0)` → login: no account; `dead_letters = 0`.
+- Fix: in `flush_source`, `Unavailable` (after IPC-10's mapping) requeues and fails (as now); `Refused` should go through `dead_letter` (counted, health event) and `Stale` likewise; neither should be silently discarded. Regression test: the PoC; assert the create is written once the store serves again.
+
+### AUD-RM2-IPC-12 — Signal-shaped chaff is only partly signal-shaped (IPC-06 residual)
+- Severity: Low (open; supersedes IPC-06)
+- Location: `mod.rs` `chaff()` (`signal_shaped` drawn independently of `followup`; bundle length from `buckets.bundle`); `tests/signal.rs::signal_and_chaff_envelopes_share_their_structure` pins `followup_share_permille: 1000` and does not compare the object type or the bundle length.
+- Description: a real signal is always a SOURCE_MESSAGE with an empty (256 KiB) bundle. With the production defaults (follow-up share 300, empty-bundle weight 600/1000) only 18 % of the "signal-shaped" chaff has that shape; the other 82 % (SUBMISSION header, or a non-empty bundle, with offset 4..21 or a future epoch) is identifiable as chaff at rest and gives no cover. Real signals stay hidden among the 18 %, so this is thinner cover, not a new distinguisher of real signals.
+- Fix: when `signal_shaped`, force `followup = true` and the empty bundle bucket; extend the structure test to object type and bundle length under production shares.
+
+### AUD-RM2-IPC-13 — No upgrade path for migration 0002: a cluster initialised before it can never be opened by the new build
+- Severity: **Medium** (operability; fail-closed; lead decision on the migration process, BE-050)
+- Location: `crates/candor-intake-store/src/pg.rs` `schema_hash()` (over all `MIGRATIONS`), `open` (`SQL_META_HASH` must equal `schema_hash()`), `migrate` (writes the ledger only); `migrations/0001_intake_schema.sql:132-166` (`intake_meta_monotonic` raises on any change of `schema_hash`).
+- Description: `intake_meta.schema_hash` is written once at `init` with the hash of the migrations compiled into that build. Applying 0002 with `candorctl migrate` records 0002 in the ledger but cannot update `intake_meta.schema_hash` (the guard trigger forbids it for every role, including the migrator), so the new build's `open` fails with `Integrity("schema hash mismatch")` forever; the old build refuses too (`applied.len() != MIGRATIONS.len()`). The only way out is a superuser disabling the trigger, which defeats the immutability guard. The PG suite did not see this because every test migrates a fresh database with both migrations.
+- PoC (`poc3.rs::r2_upgrade_path_schema_hash`, through `pg-test.sh`): fresh DB + `migrate` + `init`; the row's hash replaced by the hash a `[0001]`-only build records (trigger disabled by the superuser for the simulation only; with the trigger enabled the `UPDATE` is refused with `P0001 "intake_meta identity is immutable"`); `migrate` again = no-op; `PgIntakeStore::open` = `Err(Integrity("schema hash mismatch"))`.
+- Fix: define the schema hash as the hash of the *applied ledger* (or let each migration carry the new expected hash and have `migrate` update `intake_meta.schema_hash` in the same transaction, with the trigger allowing exactly that transition as the migrator role); add an upgrade test (init under `MIGRATIONS[..n]`, apply `n+1`, open). No deployment exists yet, so the impact today is the process, not data.
+
+### AUD-RM2-IPC-14 — Per-source lock table grows without bound
+- Severity: Low
+- Location: `mod.rs` `source_lock` (inserts), `delete_replies` (never removes), `close_mailbox` (removes only after a confirmed deletion).
+- Description: every `DELETE_REPLIES` and every failed close leaves a `(mailbox_id → Arc<Mutex<SourceState>>)` entry for the life of the process (~100 B each). A source can create accounts and call `DELETE_REPLIES` with an empty list for each; growth is bounded only by the account count. `recently_deleted` is bounded (4,096).
+- Fix: remove the entry when the lock is released with a default `SourceState`, or bound the table (LRU) and keep `closing`/`delete_sent` only while set.
+
+### Info (no change required)
+- `delete_replies` in a second session after another session's rotation was flushed by `flush_source` requests the deletion by the stale session tag → `INTERNAL`; that session's keys are dead anyway (SEA-28(a)). Using the tags returned by `flush_source` would make it succeed.
+- A session of a deleted source whose `recently_deleted` record was evicted (after 4,096 later deletions, within its 2 h lifetime) could seal a second MAILBOX_CLOSED signal; implausible, but a bounded-by-time record would close it.
+- `SourceState::delete_sent` is also set on a store *refusal* (known outcome, nothing applied), slightly wider than ADR-057(3)'s "unknown outcome"; harmless because the account cannot vanish in between except through another close, which `recently_deleted` covers.
+
+## Variant hunt (bug classes of round 1)
+- "Deleted reported but state survives": none found in the new code (`Sealed` only after `DeleteOutcome::Deleted`; coalescing only from a confirmed record; `delete_account` one transaction; mailbox entries from the table). Account creation after deletion: `flush_source` runs before the delete, `recently_deleted` + session removal after.
+- Restore after rotation: account by stable id, mailbox by stable id, backups carry the mapping: none found.
+- Dead-letter path losing a legitimate rotation: **IPC-10/11** (transient outage), not a wrong `Stale` (a replacement whose old tag is gone is only produced by a completed deletion, a purge or a restore from an older backup, each of which already invalidates that passphrase).
+- Per-source lock: ordering verified, no deadlock; a slow sink call holds a source's own lock only; **IPC-14** growth.
+- Chaff shape: **IPC-12**.
+- Migration 0002: grants/RLS/drift verified in the live PG suite; **IPC-13** upgrade path.
+- New trait methods: `reply` account-bound in both stores; `mailbox_owner` read-only; proto `DELETE Account` takes 1..=2 tags (0 refused, fuzz clean).
+
+## Gate (round 2)
+**Gate: FAIL** (2026-10-07, `6f9b027a`). Round-1 findings IPC-01/02/03/04/05/07/08/09 are fixed and re-tested with the original PoCs; IPC-06 is superseded by IPC-12 (Low). Open: **IPC-10 (High), IPC-11 (High)** — both from the `UpsertError` mapping in `IstoreSink::upsert_account` plus `flush_source`'s silent drop; IPC-13 (Medium, lead decision on the migration process); IPC-12, IPC-14 (Low). Re-test after the fix: the two new PoCs (store restore-pending during three flushes; `DELETE_REPLIES`/`CLOSE_MAILBOX` during restore-pending), a mapping unit test, and a delta review of `istore.rs::upsert_account`, `write_batch`, `flush_source`.
+
+## Lead dispositions after round 2 (2026-10-07)
+- **Gate: FAIL** (IPC-10, IPC-11 High; IPC-13 Medium). Assigned to the builder:
+  - **IPC-10:** precise classification of store answers. UNAVAILABLE/BUSY stay queued with backoff and a health event and never count toward the dead-letter; only definitive refusals do.
+  - **IPC-11:** no silent drop in `flush_source`. A delete during an outage fails as "could not confirm" and is retried; a definitive refusal dead-letters with an event.
+  - **IPC-13:** squash migration 0002 into 0001 now (pre-release, no live database); the first tagged release freezes the schema. A real upgrade mechanism is an RM-5 item (IMPL-RM5 upgrade and rollback orchestration), recorded as an open item.
+  - **IPC-12 and IPC-14 (Low):** fix (production shares for signal-shaped chaff; bounded per-source lock table).
