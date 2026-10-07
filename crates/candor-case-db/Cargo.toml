@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+[package]
+name = "candor-case-db"
+version = "0.1.0"
+description = "Candor Case DB (C-12): schema, roles, RLS, migrations and the TenantTx repository layer"
+license = "AGPL-3.0-or-later"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Every dependency is justified in SPEC-NOTES.md ("Dependencies").
+[dependencies]
+sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "postgres", "uuid"] }
+uuid = { version = "=1.18.1", default-features = false }
+sha2 = { version = "=0.11.0", default-features = false }
+getrandom = { version = "=0.4.3", default-features = false }
+
+[dev-dependencies]
+tokio = { version = "=1.48.0", default-features = false, features = ["rt", "macros", "sync"] }
+proptest = { version = "=1.11.0", default-features = false, features = ["std"] }

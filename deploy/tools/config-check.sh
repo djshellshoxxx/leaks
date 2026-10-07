@@ -15,10 +15,14 @@
 #   --pg-db NAME  a provisioned tenant database (candor_intake_*): --host then checks the
 #                 maintenance role's memberships and ownerships through the running server
 #                 (required whenever the server's socket exists)
-#   --only LIST   comma list of sections: tor,nft,pg,units,journald,kernel,dns,apparmor,host
+#   --only LIST   comma list of sections: tor,nft,pg,units,journald,kernel,dns,apparmor,host,blobrate
 #                 (an unknown name, or a selection that runs no check, is a usage error: exit 2)
+#   --blob-root DIR  (--host, live) root of the blob volume (default /var/lib/candor): section
+#                 blobrate writes and fsyncs --blob-mib MiB (64..1024, default 256) of zeros in
+#                 DIR/selftest and requires >= --blob-min-rate MB/s (default 50, the STO-29
+#                 copy-deadline floor; open item O-6). SKIP with --root (not live)
 #   --emit-baseline   (maintainers) print the effective units/nft/tor/security values of the
-#                     tree as baseline lines for review; performs no check
+#                     tree (and the scf*| syscall sets) as baseline lines for review; performs no check
 #   --work-base DIR  private work base instead of /run/candor-config-check (root-owned 0700,
 #                 not a symlink; validators use one per run, AUD-RM2-DEP-27). Every ancestor
 #                 up to / must be a root-owned directory, not a symlink and not group- or
@@ -101,7 +105,7 @@ BASE="$SCRIPT_DIR/config-check.baseline"
 MANIFEST="$SCRIPT_DIR/config-check.manifest"
 # sha256 of config-check.manifest (release-pinned; update together with the manifest).
 MANIFEST_SHA256=297a77cd8d0bd10310bd18872dad889ddd6f97f1a394f4b4869fd9d4131f45db
-SECTIONS="tor nft pg units journald kernel dns apparmor host"
+SECTIONS="tor nft pg units journald kernel dns apparmor host blobrate"
 MODE=static
 DIR="$SCRIPT_DIR/../intake"
 ROOT=""
@@ -111,6 +115,10 @@ PGDB=""
 WBASE_OPT=""
 QUIET=0
 EMIT=0
+# --host blob volume measurement (O-6, STO-29): root of the blob volume, test size, floor.
+BLOB_ROOT=/var/lib/candor
+BLOB_MIB=256
+BLOB_MIN_RATE=50
 FAILS=0
 CHECKS=0
 SKIPS=0
@@ -128,6 +136,9 @@ while [ $# -gt 0 ]; do
     --profile) [ $# -ge 2 ] || usage; PROFILE=$2; shift 2 ;;
     --only) [ $# -ge 2 ] || usage; ONLY=$2; shift 2 ;;
     --pg-db) [ $# -ge 2 ] || usage; PGDB=$2; shift 2 ;;
+    --blob-root) [ $# -ge 2 ] || usage; BLOB_ROOT=${2%/}; shift 2 ;;
+    --blob-mib) [ $# -ge 2 ] || usage; BLOB_MIB=$2; shift 2 ;;
+    --blob-min-rate) [ $# -ge 2 ] || usage; BLOB_MIN_RATE=$2; shift 2 ;;
     --work-base) [ $# -ge 2 ] || usage; WBASE_OPT=$2; shift 2 ;;
     --emit-baseline) EMIT=1; shift ;;
     -q) QUIET=1; shift ;;
@@ -143,6 +154,12 @@ if [ -n "$ONLY" ]; then
   done
   [ -n "$(printf '%s' "$ONLY" | tr -d ',')" ] || { echo "config-check: empty --only" >&2; exit 2; }
 fi
+case "$BLOB_ROOT" in /*) ;; *) echo "config-check: --blob-root must be absolute" >&2; exit 2 ;; esac
+case "/$BLOB_ROOT/" in *"/../"*|*"/./"*|*"//"*) echo "config-check: invalid --blob-root" >&2; exit 2 ;; esac
+case "$BLOB_MIB" in ""|*[!0-9]*) echo "config-check: --blob-mib must be 64..1024" >&2; exit 2 ;; esac
+if [ "$BLOB_MIB" -lt 64 ] || [ "$BLOB_MIB" -gt 1024 ]; then echo "config-check: --blob-mib must be 64..1024" >&2; exit 2; fi
+case "$BLOB_MIN_RATE" in ""|*[!0-9]*) echo "config-check: --blob-min-rate must be 1..100000" >&2; exit 2 ;; esac
+if [ "$BLOB_MIN_RATE" -lt 1 ] || [ "$BLOB_MIN_RATE" -gt 100000 ]; then echo "config-check: --blob-min-rate must be 1..100000" >&2; exit 2; fi
 case "$PGDB" in "") ;; candor_intake_*) case "$PGDB" in *[!a-z0-9_]*) echo "config-check: invalid --pg-db" >&2; exit 2 ;; esac
   [ "${#PGDB}" -le 63 ] || { echo "config-check: invalid --pg-db" >&2; exit 2; } ;;
   *) echo "config-check: --pg-db must name a candor_intake_* database" >&2; exit 2 ;; esac
@@ -354,6 +371,14 @@ tor_canon() { # snapshot -> $WORK/tor/{verify,short,full}.out ; returns non-zero
   mkdir -m 0700 "$d" && cp -- "$1" "$d/torrc" && chown "$TOR_USER:$g" "$d" "$d/torrc" && chmod 0600 "$d/torrc" || return 1
   # Private mount namespace: tmpfs over /var/lib and /run so the canonicalisation never touches
   # the real tor state, keys or sockets; tor itself runs unprivileged as the instance user.
+  # Effective syscall allow-sets (scf*| kinds) of the three daemons, from the merged units.
+  local k kind
+  for k in candor-sealer.service:scf candor-intake-web.service:scf-web candor-intake-store.service:scf-store; do
+    u=${k%%:*}; kind=${k##*:}
+    mapfile -t f < <(awk -v u="$u" '/^\t-> Unit / {t=($3==u":")} t && /^\t\t(Fragment|DropIn) Path: / {print substr($0, index($0, ": ")+2)}' "$WORK/verify.dbg")
+    unit_merge "${f[@]}" > "$WORK/emit.$u"
+    if scf_effective "$WORK/emit.$u" "$WORK/scf.emit"; then sed "s/^/$kind|/" "$WORK/scf.emit"; else echo "# $kind: syscall set not computable (rc $?)"; fi
+  done
   # shellcheck disable=SC2016 # expanded by the inner shell
   unshare -m --propagation private /bin/sh -c '
     set -e
@@ -893,10 +918,13 @@ check_units() {
     report_lines < "$WORK/rl"
   done
 
-  # Sealer syscall filter (AUD-RM2-DEP-16): the assignment lines are pinned exactly above; here
+  # Syscall filters of the sealer (AUD-RM2-DEP-16), the web service and the store (D-36): the
+  # assignment lines are pinned exactly above; here
   # the EFFECTIVE allow-set (systemd's group expansion, allow-list minus '~' lines plus re-adds,
   # in order) must equal the release set, and the explicitly denied calls must stay denied.
-  [ -f "$WORK/eff/candor-sealer.service" ] && check_sealer_syscalls "$WORK/eff/candor-sealer.service"
+  [ -f "$WORK/eff/candor-sealer.service" ] && check_unit_syscalls candor-sealer.service scf "$WORK/eff/candor-sealer.service"
+  [ -f "$WORK/eff/candor-intake-web.service" ] && check_unit_syscalls candor-intake-web.service scf-web "$WORK/eff/candor-intake-web.service"
+  [ -f "$WORK/eff/candor-intake-store.service" ] && check_unit_syscalls candor-intake-store.service scf-store "$WORK/eff/candor-intake-store.service"
   check_sealer_memory "$WORK/eff/candor-sealer.service" "$WORK/eff/run-candor-staging.mount"
   # Relay socket: an IPAddressAllow drop-in must name exactly the single @core_relay address.
   local allow
@@ -994,20 +1022,18 @@ check_sealer_memory() { # eff-sealer eff-mount
   if [ -z "$res" ]; then fail unit.candor-sealer.memory_budget "effective sealer/staging units not available"; return; fi
   report_lines <<< "$res"
 }
-
-# Effective sealer syscall allow-set (AUD-RM2-DEP-16). systemd semantics: the first non-empty
-# assignment selects the mode (must be allow-list); an empty assignment resets; later plain
-# entries add, '~' entries remove; '@group' names expand recursively; ':errno' suffixes do not
-# change membership. Groups come from this host's systemd (`systemd-analyze syscall-filter`), so
-# a systemd upgrade that grows a group shows up as a FAIL until the release re-pins scf| lines.
-check_sealer_syscalls() { # effective-unit-file
+# Effective syscall allow-set of a unit (AUD-RM2-DEP-16; D-36 for web and store). systemd
+# semantics: the first non-empty assignment selects the mode (must be allow-list); an empty
+# assignment resets; later plain entries add, '~' entries remove; '@group' names expand
+# recursively; ':errno' suffixes do not change membership. Groups come from this host's
+# systemd (`systemd-analyze syscall-filter`), so a systemd upgrade that grows a group shows
+# up as a FAIL until the release re-pins the scf*| lines.
+scf_effective() { # effective-unit-file out-file -> 0 and the sorted set; 1 "no filter", 2 "no groups", 3 "!MODE", 4 "!UNKNOWN"
   local seq
   seq=$(awk -F'|' '$1=="Service" && $2=="SystemCallFilter" {print substr($0, length($1 $2)+3)}' "$1")
-  if [ -z "$seq" ]; then fail unit.candor-sealer.syscall_set "no SystemCallFilter"; return; fi
+  [ -n "$seq" ] || return 1
   if ! systemd-analyze syscall-filter --no-pager 2>/dev/null | tr -cd '\11\12\40-\176' | sed 's/\[[0-9;]*m//g' > "$WORK/scf.groups" ||
-     ! grep -q '^@system-service$' "$WORK/scf.groups"; then
-    fail unit.candor-sealer.syscall_set "cannot expand syscall groups (systemd-analyze syscall-filter)"; return
-  fi
+     ! grep -q '^@system-service$' "$WORK/scf.groups"; then return 2; fi
   printf '%s\n' "$seq" | awk '
     FNR==NR { if ($0 ~ /^@/) { g=$1; next }
               t=$0; gsub(/^[ \t]+|[ \t]+$/, "", t); if (t == "" || t ~ /^#/) next
@@ -1028,18 +1054,30 @@ check_sealer_syscalls() { # effective-unit-file
           delete out; expand(t, 0)
           for (x in out) { if ((mode == "allow") != (inv == 1)) set[x]=1; else delete set[x] } }
       } }
-    END { if (mode != "allow") print "!MODE"; if (unknown) print "!UNKNOWN"; for (x in set) print x }' "$WORK/scf.groups" - | sort > "$WORK/scf.eff"
-  if grep -q '^!MODE$' "$WORK/scf.eff"; then fail unit.candor-sealer.syscall_set "SystemCallFilter is not in allow-list mode"; return; fi
-  if grep -q '^!UNKNOWN$' "$WORK/scf.eff"; then fail unit.candor-sealer.syscall_set "unknown syscall group referenced"; return; fi
+    END { if (mode != "allow") print "!MODE"; if (unknown) print "!UNKNOWN"; for (x in set) print x }' "$WORK/scf.groups" - | sort > "$2"
+  if grep -q '^!MODE$' "$2"; then return 3; fi
+  if grep -q '^!UNKNOWN$' "$2"; then return 4; fi
+  return 0
+}
+check_unit_syscalls() { # unit baseline-kind effective-unit-file
+  local u=$1 kind=$2 rc
+  scf_effective "$3" "$WORK/scf.eff"; rc=$?
+  case "$rc" in
+    0) ;;
+    1) fail "unit.$u.syscall_set" "no SystemCallFilter"; return ;;
+    2) fail "unit.$u.syscall_set" "cannot expand syscall groups (systemd-analyze syscall-filter)"; return ;;
+    3) fail "unit.$u.syscall_set" "SystemCallFilter is not in allow-list mode"; return ;;
+    *) fail "unit.$u.syscall_set" "unknown syscall group referenced"; return ;;
+  esac
   local extra missing never
-  if ! base scf | cut -d'|' -f2 | sort -u > "$WORK/scf.want" || [ ! -s "$WORK/scf.want" ] ||
+  if ! base "$kind" | cut -d'|' -f2 | sort -u > "$WORK/scf.want" || [ ! -s "$WORK/scf.want" ] ||
      ! extra=$(comm -13 "$WORK/scf.want" "$WORK/scf.eff" | san_names) ||
-     ! missing=$(comm -23 "$WORK/scf.want" "$WORK/scf.eff" | san_names); then tool_err unit.candor-sealer.syscall_set
-  elif [ -z "$extra" ] && [ -z "$missing" ]; then ok unit.candor-sealer.syscall_set "$(wc -l < "$WORK/scf.eff") syscalls, equal to the release allow-set"
-  else fail unit.candor-sealer.syscall_set "effective allow-set differs from the release set; extra: [${extra}] missing: [${missing}]"; fi
-  if ! never=$(base scf-never | cut -d'|' -f2 | sort -u | comm -12 - "$WORK/scf.eff" | san_names); then tool_err unit.candor-sealer.syscall_never
-  elif [ -n "$never" ]; then fail unit.candor-sealer.syscall_never "explicitly denied syscall(s) allowed: $never"
-  else ok unit.candor-sealer.syscall_never "$(base scf-never | wc -l) explicitly denied syscalls (io_uring, userfaultfd, ptrace, ...) stay denied"; fi
+     ! missing=$(comm -23 "$WORK/scf.want" "$WORK/scf.eff" | san_names); then tool_err "unit.$u.syscall_set"
+  elif [ -z "$extra" ] && [ -z "$missing" ]; then ok "unit.$u.syscall_set" "$(wc -l < "$WORK/scf.eff") syscalls, equal to the release allow-set"
+  else fail "unit.$u.syscall_set" "effective allow-set differs from the release set; extra: [${extra}] missing: [${missing}]"; fi
+  if ! never=$(base scf-never | cut -d'|' -f2 | sort -u | comm -12 - "$WORK/scf.eff" | san_names); then tool_err "unit.$u.syscall_never"
+  elif [ -n "$never" ]; then fail "unit.$u.syscall_never" "explicitly denied syscall(s) allowed: $never"
+  else ok "unit.$u.syscall_never" "$(base scf-never | wc -l) explicitly denied syscalls (io_uring, userfaultfd, ptrace, ...) stay denied"; fi
 }
 
 # Distribution units the intake's protection depends on (AUD-RM2-DEP-18): nftables.service
@@ -1302,6 +1340,48 @@ check_host() {
   if have systemd-analyze; then check_host_units; else fail host.unit "systemd-analyze missing"; fi
 }
 
+
+# =============================================================================== blob volume throughput (O-6)
+# The sealer's hand-over gives the store `10 s + len / 50 MB/s` to copy a staged bundle into
+# the blob volume and fsync it (AUD-RM2-STO-29, protocol 2; store SPEC-NOTES item 33). That
+# floor is a property of the host, so `--host` measures it: a bounded zero-filled file
+# (BLOB_MIB MiB, 64..1024) is written sequentially and fsynced, the way the store copies, in
+# $BLOB_ROOT/selftest (root 0700, created by tmpfiles.d; on the blob volume, outside the
+# candor-safefs tree so the store's sweep never sees it) and removed again. Zeros are fine on
+# the LUKS2 volume (17 §5.1: dm-crypt makes them incompressible on disk); a filesystem that
+# might compress or deduplicate them is refused. Measures with GNU date (%N) and dd; prints
+# the rate only, never a path it did not already know.
+check_blob_rate() {
+  local r=host.blob_volume_rate d="$BLOB_ROOT/selftest" ref="$BLOB_ROOT/intake/blobs" l p f t0 t1 ns rate rc budget avail
+  if [ "$LIVE" -ne 1 ]; then skip "$r" "offline root: throughput not measured"; return; fi
+  need_tools "$r" dd date stat sync timeout || return
+  for p in "$d" "$ref"; do
+    if l=$(symlinked_component / "$p"); then fail "$r" "refused: symlinked path component $l"; return; fi
+    if [ ! -d "$p" ] || [ -L "$p" ]; then fail "$r" "missing directory ${p#"$BLOB_ROOT"} under the blob root"; return; fi
+  done
+  if [ "$(stat -c '%u %a %F' "$d" 2>/dev/null)" != "0 700 directory" ]; then fail "$r" "selftest directory must be a root-owned 0700 directory"; return; fi
+  if [ "$(stat -c %d "$d" 2>/dev/null)" != "$(stat -c %d "$ref" 2>/dev/null)" ] || [ -z "$(stat -c %d "$d" 2>/dev/null)" ]; then
+    fail "$r" "selftest directory is not on the blob volume (different device)"; return; fi
+  case "$(stat -f -c %T "$d" 2>/dev/null)" in ext2/ext3|ext4|xfs) ;; *) fail "$r" "unsupported filesystem for a zero-fill measurement (ext4 or xfs expected)"; return ;; esac
+  avail=$(( $(stat -f -c %a "$d" 2>/dev/null || echo 0) * $(stat -f -c %S "$d" 2>/dev/null || echo 0) ))
+  if [ "$avail" -lt $(( BLOB_MIB * 1048576 * 2 )) ]; then fail "$r" "insufficient free space for a $BLOB_MIB MiB measurement"; return; fi
+  f="$d/rate-check.$$"
+  if ! ( set -C; : > "$f" ) 2>/dev/null; then fail "$r" "cannot create the test file (a stale one exists?)"; return; fi
+  chmod 0600 "$f" 2>/dev/null || { rm -f -- "$f"; fail "$r" "cannot set the test file mode"; return; }
+  budget=$(( BLOB_MIB / 5 + 30 ))
+  t0=$(date +%s%N)
+  timeout -k 5 "$budget" dd if=/dev/zero of="$f" bs=1048576 count="$BLOB_MIB" conv=fsync,notrunc status=none </dev/null >/dev/null 2>&1; rc=$?
+  t1=$(date +%s%N)
+  rm -f -- "$f"; sync -f "$d" 2>/dev/null || true
+  case "$t0$t1" in *[!0-9]*|"") fail "$r" "monotonic timing unavailable (GNU date %N)"; return ;; esac
+  if [ "$rc" -ne 0 ]; then fail "$r" "write+fsync of $BLOB_MIB MiB failed or exceeded $budget s (below 5 MB/s)"; return; fi
+  ns=$(( t1 - t0 ))
+  if [ "$ns" -le 0 ]; then fail "$r" "timing error"; return; fi
+  rate=$(( BLOB_MIB * 1048576 * 1000 / ns ))
+  if [ "$rate" -ge "$BLOB_MIN_RATE" ]; then ok "$r" "$rate MB/s sequential write+fsync over $BLOB_MIB MiB (floor $BLOB_MIN_RATE MB/s, STO-29 copy deadline)"
+  else fail "$r" "$rate MB/s sequential write+fsync over $BLOB_MIB MiB is below the $BLOB_MIN_RATE MB/s floor the STO-29 copy deadline assumes"; fi
+}
+
 # =============================================================================== AppArmor
 AA_PROFILES="candor-tor-intake candor-web candor-sealer candor-intake-store candor-intake-pg candor-intake-maint"
 # Normalised statements: comments and blank lines dropped, whitespace collapsed. '#include'
@@ -1537,6 +1617,7 @@ want kernel && check_kernel
 want dns && check_resolv
 want apparmor && check_apparmor
 [ "$MODE" = host ] && want host && check_host
+[ "$MODE" = host ] && want blobrate && check_blob_rate
 
 if [ "$CHECKS" -eq "$PRECHECKS" ]; then
   echo "config-check: the selection ran no check (exit=2)" >&2
