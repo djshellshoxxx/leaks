@@ -205,7 +205,7 @@ Gate: **PASS 2026-10-07 c098fa6** for `crates/candor-memlock` and the W1-D `depl
 | `apparmor_parser -QTK` | 6/6 |
 | `systemd-analyze security --offline` | web 0.4, sealer 0.4, store 0.4 |
 | Allow-sets | sealer 136, web 124, store 135, never 30; `socketpair` in all three sets and off `scf-never`; web ⊂ store ⊂ sealer unchanged otherwise |
-| `CANDOR_TEST_PG=1 validate.sh` | VALIDATE3_RESULT |
+| `CANDOR_TEST_PG=1 validate.sh` | **452 PASS, 0 FAIL, 1 SKIP, exit 0** on a clean `git archive HEAD` snapshot run with the pinned `candor-safe-read` and cargo off `PATH` (the SKIP is "cargo missing: using the existing candor-safe-read"; with cargo present the expected 453rd PASS, "reproducible build", cannot be reproduced on this host: DEP-38). All D-38 cases pass: start-up syscalls present in every set and off `scf-never`; both socketpair mutations rejected; blobrate 149 MB/s, stale file and stale symlink swept, interrupted 1 GiB run leaves nothing, `date` shim immune, the 7 layouts and 8 options rejected. Two earlier runs of mine on an un-normalised archive (git's `tar.umask=002` leaves units group-writable) were refused by the reader with status 13, which is DEP-24 working as designed |
 
 ### Status of round-1 findings
 
@@ -249,4 +249,9 @@ Read every changed line (`sys.rs`, `lib.rs`, `activation.rs`, `seccomp_runtime.r
 
 All eleven round-1 findings are fixed and re-tested with the original PoCs. DEP-38 is Low (fail closed on the host; a release-process defect) and tracked.
 
-GATE2_LINE
+Gate: **PASS 2026-10-07 2c00f6f** for `crates/candor-memlock` and the W1-D `deploy/` delta. No Critical, High or Medium findings are open; DEP-38 (Low: sysroot remap and re-pin of `candor-safe-read`, plus a validate check that really recompiles) is tracked and should be fixed before the next release pin.
+
+## Lead dispositions after round 2 (2026-10-07)
+- **Gate: PASS** at 2c00f6f (round 2: all 11 round-1 findings closed).
+- **DEP-38 (Low): fix assigned** (remap the rust sysroot path; the validate rebuild check builds in a fresh target dir under a different checkout path).
+- The test-only dependency `seccompiler 0.5.0` is accepted with its safe-to-deploy exemption (expiry 2027-03-30).
