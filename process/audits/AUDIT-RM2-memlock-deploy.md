@@ -59,7 +59,7 @@ Adversaries from 02 §6 that reach this code: a hostile or mistaken parent/envir
 | shellcheck `-S style` on `deploy/**/*.sh` | clean |
 | `apparmor_parser -QTK` | 6/6 profiles compile |
 | `systemd-analyze security --offline` | web 0.4, sealer 0.4, store 0.4 |
-| `CANDOR_TEST_PG=1 bash deploy/tests/validate.sh` on a full `git archive c098fa6` + `deploy/` snapshot | VALIDATE_RESULT |
+| `CANDOR_TEST_PG=1 bash deploy/tests/validate.sh` on a full `git archive c098fa6` + `deploy/` snapshot | **446 PASS, 0 FAIL, 0 SKIP**, "validate: all executed checks passed", exit 0 (includes the blobrate positive run at 161 MB/s on this container's ext4, the 50 MB/s floor met, "test file removed", the 7 broken layouts, 8 invalid options, static and offline modes, the 11 D-36 mutations, the reader digest `58b2bb3a…` reproduced, the live-PG cases). Note: a first attempt on a `deploy/`-only snapshot failed in `build-safe-read.sh` (needs the repo root), which is a snapshot error of mine, not a defect; the full-archive run is the one counted |
 | Effective allow-sets (`scf-web|`/`scf-store|` vs `scf|`) | web (123) ⊂ store (134) = sealer (135) − {`memfd_create`}; store − web = {`fchmod fchmodat fdatasync fsync linkat mkdirat openat2 renameat2 unlinkat utimensat utimensat_time64`}; no `scf-never` call in any set; `execve`, `clone`/`clone3`, `prctl`, `prlimit64`, `mlock*`, `eventfd2`, `getrandom`, `seccomp`, `landlock_*` present as the daemons need |
 
 PoCs (scratch crate `audit-w1d/poc`, removed): `threads.rs` (MEM-01), `tokio_pair.rs` under `strace -e socketpair` (DEP-33), a `date` shim (DEP-35), a process-group `SIGINT` during `dd` (DEP-34). Each is reproduced in the finding.
@@ -169,4 +169,13 @@ PoCs (scratch crate `audit-w1d/poc`, removed): `threads.rs` (MEM-01), `tokio_pai
 | Low | 6 | MEM-01, MEM-02, MEM-03, DEP-33, DEP-34, DEP-35 |
 | Info | 4 | MEM-04, MEM-05, DEP-36, DEP-37 |
 
-GATE_LINE
+All claims verified: static check 889 OK × 3 profiles, validate 446 PASS / 0 FAIL with `CANDOR_TEST_PG=1`, shellcheck clean, 6 AppArmor profiles compile, exposure 0.4 for the three units. Every §C tool that applies ran on `c098fa6` (Miri with the two socket tests filtered, see MEM-03); every hit is triaged above.
+
+Gate: **PASS 2026-10-07 c098fa6** for `crates/candor-memlock` and the W1-D `deploy/` delta. No Critical, High or Medium findings are open; the six Low and four Info findings are tracked. Conditions the lead should carry into wave 2 (not gate-blocking): DEP-33 must be decided before any daemon binary is started under the units, and MEM-01/MEM-03 should be fixed before the first daemon depends on `candor-memlock`, since both are cheap and the crate is T0 by allow-list.
+
+## Lead dispositions (2026-10-07)
+- **Gate: PASS** (0 Critical / High / Medium) at c098fa6.
+- **DEP-33 (Low, functionally important): fix.** `socketpair` is allowed in the web, store and sealer units (AF_UNIX confinement stays); allow-sets re-derived from a real startup trace; a regression test starts a tokio multi-thread runtime with the signal feature under the exact filter.
+- **MEM-01, MEM-02, MEM-03, DEP-34, DEP-35: fix** (real single-thread check via /proc/self/task; no BorrowedFd for fd 3 before it is known open; Miri ignores on socket tests; stale blobrate file swept every run; monotonic clock source).
+- **DEP-36: fix.** The blob-rate test runs at install, on operator demand and at most once a day outside import/hand-over slots; the write-volume budget is documented.
+- **DEP-37, MEM-04, MEM-05 (Info): fix where trivial, otherwise documented.**
