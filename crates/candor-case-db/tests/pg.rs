@@ -106,6 +106,8 @@ async fn rls_isolation_every_table() {
     let mut tx = ctx(&mut c, ta, ua, "desk").await;
     let sel = sqlx::query("SELECT count(*) FROM core.coi_excl_tag").fetch_one(&mut *tx).await;
     assert_eq!(sqlstate(&sel.unwrap_err()), "42501");
+    tx.rollback().await.unwrap();
+    let mut tx = ctx(&mut c, ta, ua, "desk").await;
     let present: bool = sqlx::query("SELECT acl.coi_tag_present($1, pg_catalog.sha256($1::text::bytea))")
         .bind(ta)
         .fetch_one(&mut *tx)
@@ -249,11 +251,15 @@ async fn grant_matrix() {
             }
         }
     }
-    // L10 / ADR-015: admin and worker never read a ciphertext column; nobody
-    // but the audit roles touches audit tables; the monitor is read-only.
+    // L10 / ADR-015: admin, monitor and notify never read a ciphertext column;
+    // the worker reads none either, except blob references (uuid) where a job
+    // must move or delete blobs (09 §6.5).
     let class = classification::parse_classification(classification::CLASSIFICATION_TSV).unwrap();
     for r in class.iter().filter(|r| r.ciphertext) {
         for role in ["candor_admin", "candor_worker", "candor_monitor", "candor_notify"] {
+            if role == "candor_worker" && r.column == "blob_id" {
+                continue;
+            }
             let t = quote(&format!("{}.{}", r.schema, r.table));
             let has: bool = sqlx::query("SELECT pg_catalog.has_column_privilege($1, $2, $3, 'SELECT')")
                 .bind(role)
@@ -316,7 +322,7 @@ async fn append_only_and_guard_triggers() {
                 "UPDATE audit.audit_event SET state = 'committed'; UPDATE audit.audit_event SET state = 'aborted'",
                 "DELETE FROM audit.audit_checkpoint", "DELETE FROM kd.member_epoch_key",
                 "UPDATE kd.member_epoch_key SET state = 'destroyed'; UPDATE kd.member_epoch_key SET state = 'active'",
-                "UPDATE core.evidence_object SET blob_id = tenant_id",
+                "UPDATE core.evidence_object SET blob_id = pg_catalog.gen_random_uuid()",
                 "UPDATE core.\"case\" SET state = 'x'",
                 "UPDATE core.\"case\" SET state = 'x', version = version + 2",
                 "UPDATE core.role SET name = 'z', built_in = true; UPDATE core.role SET name = 'y'"] {

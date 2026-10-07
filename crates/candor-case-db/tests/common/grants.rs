@@ -22,7 +22,7 @@ pub const TABLE_GRANTS: &[(&str, &[(&str, &str)])] = &[
     ("core.permission", &[("candor_case", "S"), ("candor_admin", "S"), ("candor_relay", "S"), ("candor_worker", "S"), ("candor_notify", "S"), ("candor_kd", "S"), ("candor_auth", "S")]),
     ("core.coi_registry", &[("candor_admin", "SIUD"), ("candor_worker", "S")]),
     ("core.import_envelope", &[("candor_relay", "I"), ("candor_case", "SD"), ("candor_worker", "D")]),
-    ("core.import_envelope_part", &[("candor_relay", "I"), ("candor_case", "S"), ("candor_worker", "SUD")]),
+    ("core.import_envelope_part", &[("candor_relay", "I"), ("candor_case", "SD"), ("candor_worker", "SUD")]),
     ("core.case", &[("candor_case", "SIUD"), ("candor_worker", "D")]),
     ("core.submission", &[("candor_case", "SIUD"), ("candor_worker", "SUD")]),
     ("core.case_member", &[("candor_case", "SIUD"), ("candor_worker", "SUD")]),
