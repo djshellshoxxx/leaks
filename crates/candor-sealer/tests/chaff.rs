@@ -29,6 +29,8 @@ fn chaff_cfg(share: u16, mean: Duration, enabled: bool) -> ChaffConfig {
         followup_share_permille: share,
         // Synthetic dummy rotations are tested separately.
         dummy_rotation_permille: 0,
+        // Signal-shaped chaff is tested in tests/signal.rs.
+        signal_share_permille: 0,
         ..ChaffConfig::default()
     }
 }
@@ -251,6 +253,7 @@ async fn chaff_delay_follows_real_distribution() {
                 enabled: false,
                 followup_share_permille: 1000,
                 delayed_share_permille: share,
+                signal_share_permille: 0,
                 ..ChaffConfig::default()
             },
             Limits::default(),

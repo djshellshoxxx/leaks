@@ -32,7 +32,7 @@ use candor_intake_store::{Day, IntakeStore, LookupTag, MemoryStore, RandomDummyR
 use candor_safefs::{RootPolicy, SafeRoot, SlotTime};
 use candor_sealer::proto::*;
 use candor_sealer::server::istore::IstoreSink;
-use candor_sealer::server::sink::{EnvelopeSink, SinkError};
+use candor_sealer::server::sink::{DeleteOutcome, EnvelopeSink, SinkError};
 use candor_sealer::server::{ChaffConfig, Limits};
 use common::kdlog::MemberEpochKey;
 use common::*;
@@ -428,13 +428,16 @@ async fn unreachable_store_is_unavailable_and_commits_fail_closed() {
     let sink = IstoreSink::new(failing, T);
     assert!(!sink.is_available());
     assert_eq!(sink.delete_replies([1; 32], &[]), Err(SinkError));
-    assert_eq!(sink.delete_account([1; 32], &[]), Err(SinkError));
+    assert_eq!(sink.delete_account(&[[1; 32]]), Err(SinkError));
     // A reachable store: available, and a deletion for an unknown account
     // is a NotFound the account path treats as done, the reply path not.
     let env = Env::new().await;
     let sink = IstoreSink::new(env.connector(), T);
     assert!(sink.is_available());
-    assert_eq!(sink.delete_account([1; 32], &[[2; 32]]), Ok(()));
+    assert_eq!(
+        sink.delete_account(&[[1; 32], [2; 32]]),
+        Ok(DeleteOutcome::NotFound)
+    );
     assert_eq!(sink.delete_replies([1; 32], &[[3; 16]]), Err(SinkError));
     assert_eq!(
         env.store().deletion_list_after(0, 10).await.unwrap().len(),

@@ -433,6 +433,16 @@ where
     S: candor_log::chain::CheckpointSigner,
     C: candor_log::chain::AuditClock;
 
+impl<S, C> core::fmt::Debug for AuditHealthSink<S, C>
+where
+    S: candor_log::chain::CheckpointSigner,
+    C: candor_log::chain::AuditClock,
+{
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("AuditHealthSink")
+    }
+}
+
 impl<S, C> HealthSink for AuditHealthSink<S, C>
 where
     S: candor_log::chain::CheckpointSigner + Send,
@@ -1803,6 +1813,18 @@ impl Sealer {
         }
         let source = self.source_lock(key);
         let mut state = source.lock().await;
+        // A concurrent close of this source completed while we waited.
+        if let Some(offset) = lock(&self.st.recently_deleted)
+            .iter()
+            .find(|(k, _)| ct_eq(k, &key))
+            .map(|(_, o)| *o)
+        {
+            drop(state);
+            self.remove_session(&sess);
+            return Response::Sealed {
+                release_offset_days: offset,
+            };
+        }
         // (1) The store must hold the account before anything is deleted.
         let me = self.clone();
         let tags = match blocking(move || me.flush_source(tag)).await {
@@ -1860,8 +1882,11 @@ impl Sealer {
             rd.push_back((key, offset));
         }
         drop(state);
-        lock(&self.st.sources).remove(&key);
+        // The session goes before the per-source entry, so a close that is
+        // already past the session check still meets this state (or the
+        // `recently_deleted` record), never a fresh one.
         self.remove_session(&sess);
+        lock(&self.st.sources).remove(&key);
         self.cancel_next_chaff(channel_id);
         Response::Sealed {
             release_offset_days: offset,

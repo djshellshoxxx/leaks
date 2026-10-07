@@ -38,7 +38,7 @@ use candor_sealer::server::directory::{DirectoryTrust, SnapshotBundle};
 pub mod kdlog;
 use candor_sealer::server::hardening::InsecureDevMode;
 use candor_sealer::server::sink::{
-    AccountUpsert, Blob, EnvelopeGroup, EnvelopeObject, EnvelopeSink, SinkError, StagedBundle,
+    AccountUpsert, Blob, EnvelopeGroup, EnvelopeObject, EnvelopeSink, SinkError, StagedBundle, DeleteOutcome, UpsertError,
 };
 use candor_sealer::server::{ChaffConfig, Limits, Sealer, SealerConfig, SnapshotError};
 pub use kdlog::*;
@@ -88,8 +88,8 @@ pub struct StoredEnvelope {
 /// Store operations in order: `'A'` account upsert, `'G'` envelope group.
 /// A `delete_replies` call: `(lookup_tag, reply refs)`.
 pub type DeletedReplies = ([u8; 32], Vec<[u8; 16]>);
-/// A `delete_account` call: `(lookup_tag, mailbox ids)`.
-pub type DeletedAccount = ([u8; 32], Vec<[u8; 32]>);
+/// A `delete_account` call: the lookup tags requested.
+pub type DeletedAccount = Vec<[u8; 32]>;
 
 pub struct MemorySink {
     pub staging: &'static SafeRoot,
@@ -109,6 +109,14 @@ pub struct MemorySink {
     pub deleted_accounts: Mutex<Vec<DeletedAccount>>,
     /// Fail only deletions.
     pub fail_delete: AtomicBool,
+    /// Model the store's account rows: tags the "store" holds (creates add,
+    /// replacements swap, deletions remove). With `model_store` set, a
+    /// replacement of an unknown old tag is `Stale` and a deletion of only
+    /// unknown tags is `NotFound`, as the real store answers.
+    pub known_tags: Mutex<Vec<[u8; 32]>>,
+    pub model_store: AtomicBool,
+    /// New tags whose upsert the "store" refuses (`Refused`).
+    pub refuse_tags: Mutex<Vec<[u8; 32]>>,
 }
 
 impl MemorySink {
@@ -171,10 +179,29 @@ impl EnvelopeSink for MemorySink {
         !self.unavailable.load(Ordering::SeqCst)
     }
 
-    fn upsert_account(&self, op: AccountUpsert) -> Result<(), SinkError> {
+    fn upsert_account(&self, op: AccountUpsert) -> Result<(), UpsertError> {
         if self.fail.load(Ordering::SeqCst) || self.fail_accounts.load(Ordering::SeqCst) {
-            return Err(SinkError);
+            return Err(UpsertError::Unavailable);
         }
+        if self
+            .refuse_tags
+            .lock()
+            .unwrap()
+            .contains(&op.account.lookup_tag)
+        {
+            return Err(UpsertError::Refused);
+        }
+        let mut known = self.known_tags.lock().unwrap();
+        if let Some(old) = op.replaces {
+            if self.model_store.load(Ordering::SeqCst) && !known.contains(&old) {
+                return Err(UpsertError::Stale);
+            }
+            known.retain(|t| *t != old);
+        }
+        if !known.contains(&op.account.lookup_tag) {
+            known.push(op.account.lookup_tag);
+        }
+        drop(known);
         self.accounts.lock().unwrap().push(op);
         self.ops.lock().unwrap().push('A');
         Ok(())
@@ -192,20 +219,23 @@ impl EnvelopeSink for MemorySink {
         Ok(replies.len() as u32)
     }
 
-    fn delete_account(
-        &self,
-        lookup_tag: [u8; 32],
-        mailbox_ids: &[[u8; 32]],
-    ) -> Result<(), SinkError> {
+    fn delete_account(&self, lookup_tags: &[[u8; 32]]) -> Result<DeleteOutcome, SinkError> {
         if self.fail.load(Ordering::SeqCst) || self.fail_delete.load(Ordering::SeqCst) {
             return Err(SinkError);
         }
+        let mut known = self.known_tags.lock().unwrap();
+        let hit = lookup_tags.iter().any(|t| known.contains(t));
+        if self.model_store.load(Ordering::SeqCst) && !hit {
+            return Ok(DeleteOutcome::NotFound);
+        }
+        known.retain(|t| !lookup_tags.contains(t));
+        drop(known);
         self.deleted_accounts
             .lock()
             .unwrap()
-            .push((lookup_tag, mailbox_ids.to_vec()));
+            .push(lookup_tags.to_vec());
         self.ops.lock().unwrap().push('X');
-        Ok(())
+        Ok(DeleteOutcome::Deleted { entries: 2 })
     }
 }
 
@@ -426,6 +456,9 @@ pub fn fixture_with_sink(
         deleted_replies: Mutex::new(Vec::new()),
         deleted_accounts: Mutex::new(Vec::new()),
         fail_delete: AtomicBool::new(false),
+        known_tags: Mutex::new(Vec::new()),
+        model_store: AtomicBool::new(false),
+        refuse_tags: Mutex::new(Vec::new()),
     });
     // Triage Set: labels 1 (ombudsman), 2 (audit chair), 3 (counsel); label 4 is
     // a non-triage investigator.

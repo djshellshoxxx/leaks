@@ -40,7 +40,7 @@ use candor_sealer::proto::{
 use candor_sealer::server::clock::{Clock, ClockError};
 use candor_sealer::server::directory::DirectoryTrust;
 use candor_sealer::server::hardening::InsecureDevMode;
-use candor_sealer::server::sink::{AccountUpsert, EnvelopeGroup, EnvelopeSink, SinkError};
+use candor_sealer::server::sink::{AccountUpsert, EnvelopeGroup, EnvelopeSink, SinkError, UpsertError};
 use candor_sealer::server::{ChaffConfig, Limits, Sealer, SealerConfig};
 use libfuzzer_sys::arbitrary::{Result as AResult, Unstructured};
 use libfuzzer_sys::fuzz_target;
@@ -85,7 +85,7 @@ impl EnvelopeSink for NullSink {
         }
         Ok(())
     }
-    fn upsert_account(&self, a: AccountUpsert) -> Result<(), SinkError> {
+    fn upsert_account(&self, a: AccountUpsert) -> Result<(), UpsertError> {
         if let Ok(mut p) = self.prefs_ct.lock() {
             *p = Some(a.account.prefs_ct);
         }
