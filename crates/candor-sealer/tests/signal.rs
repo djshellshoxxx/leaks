@@ -735,7 +735,8 @@ async fn signal_shaped_chaff_follows_the_production_shares() {
     }
     let chaff: Vec<_> = f.sink.envelopes().into_iter().skip(skip).collect();
     assert_eq!(chaff.len(), EVENTS);
-    let epoch_of = |e: &StoredEnvelope| (TODAY + u32::from(e.release_offset_days) - (TODAY - 2)) / 7;
+    let epoch_of =
+        |e: &StoredEnvelope| (TODAY + u32::from(e.release_offset_days) - (TODAY - 2)) / 7;
     // Exactly a signal's resting shape: SOURCE_MESSAGE main, empty bundle,
     // identity at its bucket, offset 1..=21, epoch of the release day.
     let signal_shape = |e: &StoredEnvelope| {
@@ -746,7 +747,10 @@ async fn signal_shaped_chaff_follows_the_production_shares() {
             && (1..=21).contains(&e.release_offset_days)
             && e.epoch_id == epoch_of(e)
     };
-    assert!(real.iter().all(signal_shape), "every real signal has the shape");
+    assert!(
+        real.iter().all(signal_shape),
+        "every real signal has the shape"
+    );
     // Anything a seized store could read as "signal-only" (offset > 3 or an
     // epoch ahead of today's) must have the full signal shape.
     let today_epoch = (TODAY - (TODAY - 2)) / 7;
@@ -803,7 +807,10 @@ async fn source_state_table_does_not_grow() {
     // A failed close keeps exactly one entry (its signal offset), which a
     // successful retry releases.
     f.sink.fail_delete.store(true, Ordering::SeqCst);
-    let r = f.sealer.handle(Request::CloseMailbox { sess: sessions[0] }).await;
+    let r = f
+        .sealer
+        .handle(Request::CloseMailbox { sess: sessions[0] })
+        .await;
     assert_eq!(r, Response::error(ErrorCode::Internal));
     assert_eq!(f.sealer.source_states(), 1);
     f.sink.fail_delete.store(false, Ordering::SeqCst);

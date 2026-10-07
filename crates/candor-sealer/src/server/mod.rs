@@ -1888,7 +1888,9 @@ impl Sealer {
         let Some(source) = self.source_lock(key) else {
             return err(ErrorCode::Busy);
         };
-        let r = self.close_mailbox_locked(sess, tag, key, channel_id, &source).await;
+        let r = self
+            .close_mailbox_locked(sess, tag, key, channel_id, &source)
+            .await;
         self.release_source(key, source);
         r
     }

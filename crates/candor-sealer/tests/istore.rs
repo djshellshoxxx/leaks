@@ -483,7 +483,8 @@ fn reply_ct_for(
 /// Clear restore-pending on the store the way RL-12 does (empty verified push).
 async fn clear_restore(store: &MemoryStore) {
     let core = candor_core::sig::SigningKey::from_seed(&[0x77; 32]);
-    let head = candor_intake_store::SignedDeletionHead::sign(&TENANT_ID, None, Day(TODAY), 1, &core);
+    let head =
+        candor_intake_store::SignedDeletionHead::sign(&TENANT_ID, None, Day(TODAY), 1, &core);
     store
         .apply_pushed_deletion_list(
             &[],
@@ -546,7 +547,10 @@ async fn unavailable_store_keeps_account_writes_queued() {
     assert_eq!(f.sealer.queued_accounts(), 1, "still queued");
     assert_eq!(f.sealer.dead_letters(), 0);
     assert_eq!(health.dropped.load(Ordering::SeqCst), 0);
-    assert!(health.backlog.load(Ordering::SeqCst) >= 2, "backlog reported");
+    assert!(
+        health.backlog.load(Ordering::SeqCst) >= 2,
+        "backlog reported"
+    );
     clear_restore(env.store()).await;
     // Backoff of two skipped flushes after the second failure, then it lands.
     let mut written = 0;
@@ -615,7 +619,11 @@ async fn delete_during_outage_keeps_the_queued_create() {
     assert_eq!(f.sealer.dead_letters(), 0);
     assert_eq!(health.dropped.load(Ordering::SeqCst), 0);
     assert!(health.backlog.load(Ordering::SeqCst) >= 1);
-    assert_eq!(env.store().pending_count().await.unwrap(), 1, "no signal sealed");
+    assert_eq!(
+        env.store().pending_count().await.unwrap(),
+        1,
+        "no signal sealed"
+    );
     clear_restore(env.store()).await;
     assert_eq!(f.sealer.flush_accounts(), Ok(1));
     let Response::Locator { lookup_tag } = ok(

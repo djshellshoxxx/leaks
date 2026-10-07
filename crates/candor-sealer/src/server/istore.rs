@@ -288,18 +288,63 @@ mod tests {
     #[test]
     fn upsert_classification_table() {
         use ip::ErrorCode as C;
-        let cases: Vec<(Result<ip::Response, ClientError>, bool, Result<(), UpsertError>)> = vec![
+        type Case = (
+            Result<ip::Response, ClientError>,
+            bool,
+            Result<(), UpsertError>,
+        );
+        let cases: Vec<Case> = vec![
             (Ok(ip::Response::Empty), false, Ok(())),
-            (Ok(ip::Response::Deleted(1)), false, Err(UpsertError::Unavailable)),
-            (Err(ClientError::Transport), false, Err(UpsertError::Unavailable)),
-            (Err(ClientError::Store(C::Unavailable)), false, Err(UpsertError::Unavailable)),
-            (Err(ClientError::Store(C::Busy)), true, Err(UpsertError::Unavailable)),
-            (Err(ClientError::Store(C::Internal)), true, Err(UpsertError::Unavailable)),
-            (Err(ClientError::Store(C::NotFound)), true, Err(UpsertError::Stale)),
-            (Err(ClientError::Store(C::NotFound)), false, Err(UpsertError::Refused)),
-            (Err(ClientError::Store(C::Invalid)), false, Err(UpsertError::Refused)),
-            (Err(ClientError::Store(C::Forbidden)), true, Err(UpsertError::Refused)),
-            (Err(ClientError::Store(C::BadFrame)), false, Err(UpsertError::Refused)),
+            (
+                Ok(ip::Response::Deleted(1)),
+                false,
+                Err(UpsertError::Unavailable),
+            ),
+            (
+                Err(ClientError::Transport),
+                false,
+                Err(UpsertError::Unavailable),
+            ),
+            (
+                Err(ClientError::Store(C::Unavailable)),
+                false,
+                Err(UpsertError::Unavailable),
+            ),
+            (
+                Err(ClientError::Store(C::Busy)),
+                true,
+                Err(UpsertError::Unavailable),
+            ),
+            (
+                Err(ClientError::Store(C::Internal)),
+                true,
+                Err(UpsertError::Unavailable),
+            ),
+            (
+                Err(ClientError::Store(C::NotFound)),
+                true,
+                Err(UpsertError::Stale),
+            ),
+            (
+                Err(ClientError::Store(C::NotFound)),
+                false,
+                Err(UpsertError::Refused),
+            ),
+            (
+                Err(ClientError::Store(C::Invalid)),
+                false,
+                Err(UpsertError::Refused),
+            ),
+            (
+                Err(ClientError::Store(C::Forbidden)),
+                true,
+                Err(UpsertError::Refused),
+            ),
+            (
+                Err(ClientError::Store(C::BadFrame)),
+                false,
+                Err(UpsertError::Refused),
+            ),
         ];
         for (r, replacement, want) in cases {
             assert_eq!(classify_upsert(r, replacement), want);
