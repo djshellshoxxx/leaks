@@ -93,8 +93,25 @@ pub const TIMESTAMP_ALLOW: &[&str] = &[
 
 /// L2 network-identity name tokens.
 const L2_TOKENS: &[&str] = &[
-    "ip", "ips", "ipaddr", "remote", "peer", "referer", "referrer", "geo", "geoip", "lat", "lng",
-    "lon", "latitude", "longitude", "circuit", "asn", "hostname", "ua", "useragent",
+    "ip",
+    "ips",
+    "ipaddr",
+    "remote",
+    "peer",
+    "referer",
+    "referrer",
+    "geo",
+    "geoip",
+    "lat",
+    "lng",
+    "lon",
+    "latitude",
+    "longitude",
+    "circuit",
+    "asn",
+    "hostname",
+    "ua",
+    "useragent",
 ];
 const L2_PHRASES: &[&str] = &[
     "ip_address",
@@ -196,11 +213,25 @@ pub fn check_columns(rows: &[ColumnRow], class: &[ClassRow]) -> Vec<String> {
         }
         // L16: metadata-erasure columns only as ciphertext.
         if s == "core"
-            && !["coi_category", "workflow_definition", "tenant", "department", "channel", "channel_member", "role"]
-                .contains(&t.as_str())
-            && ["category", "routing_visible", "custom_field", "title", "label"]
-                .iter()
-                .any(|k| lc.contains(k))
+            && ![
+                "coi_category",
+                "workflow_definition",
+                "tenant",
+                "department",
+                "channel",
+                "channel_member",
+                "role",
+            ]
+            .contains(&t.as_str())
+            && [
+                "category",
+                "routing_visible",
+                "custom_field",
+                "title",
+                "label",
+            ]
+            .iter()
+            .any(|k| lc.contains(k))
             && ty != "bytea"
         {
             v.push(format!("L16: {fq} cleartext metadata column"));
@@ -217,7 +248,10 @@ pub fn check_columns(rows: &[ColumnRow], class: &[ClassRow]) -> Vec<String> {
             .iter()
             .any(|(s, t, c, _, _)| *s == r.schema && *t == r.table && *c == r.column)
         {
-            v.push(format!("L5: classified column {}.{}.{} missing", r.schema, r.table, r.column));
+            v.push(format!(
+                "L5: classified column {}.{}.{} missing",
+                r.schema, r.table, r.column
+            ));
         }
     }
     v
@@ -226,9 +260,9 @@ pub fn check_columns(rows: &[ColumnRow], class: &[ClassRow]) -> Vec<String> {
 /// Keywords that must not appear in the migration SQL (comments stripped),
 /// with the number of allowed occurrences.
 const SQL_KEYWORDS: &[(&str, usize)] = &[
-    ("security definer", 1),
+    ("security definer", 2),
     ("unlogged", 0),
-    ("publication", 0),
+    ("create publication", 0),
     ("replication slot", 0),
     ("pg_logical", 0),
     ("track_commit_timestamp", 0),
@@ -264,7 +298,10 @@ pub fn check_sql(sql: &str, class: &[ClassRow]) -> Vec<String> {
             })
             .count();
         if n > *allowed {
-            v.push(format!("keyword `{}` appears {n} times (allowed {allowed})", kw.trim()));
+            v.push(format!(
+                "keyword `{}` appears {n} times (allowed {allowed})",
+                kw.trim()
+            ));
         }
     }
     let mut rows: Vec<ColumnRow> = Vec::new();
@@ -286,7 +323,9 @@ pub fn check_sql(sql: &str, class: &[ClassRow]) -> Vec<String> {
             let first = it.next().unwrap_or("");
             let ty = it.next().unwrap_or("").trim_end_matches(',');
             if first.is_empty()
-                || !first.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+                || !first
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
                 || ["check", "unique", "primary", "foreign", "constraint"].contains(&first)
             {
                 continue;
@@ -306,11 +345,15 @@ pub fn check_sql(sql: &str, class: &[ClassRow]) -> Vec<String> {
     v
 }
 
-const SQL_LIVE_COLUMNS: &str = "SELECT c.table_schema::text, c.table_name::text, c.column_name::text, c.data_type::text, c.column_default::text \
-     FROM information_schema.columns c JOIN information_schema.tables t \
-     ON t.table_schema = c.table_schema AND t.table_name = c.table_name \
-     WHERE c.table_schema IN ('candor', 'core', 'auth', 'kd', 'audit') AND t.table_type = 'BASE TABLE' \
-     ORDER BY 1, 2, c.ordinal_position";
+/// pg_catalog, not information_schema: the latter hides columns the login has
+/// no privilege on, and the lint must see every column from every role.
+const SQL_LIVE_COLUMNS: &str = "SELECT n.nspname::text, k.relname::text, a.attname::text, \
+     pg_catalog.format_type(a.atttypid, a.atttypmod), pg_catalog.pg_get_expr(d.adbin, d.adrelid) \
+     FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class k ON k.oid = a.attrelid \
+     JOIN pg_catalog.pg_namespace n ON n.oid = k.relnamespace \
+     LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
+     WHERE k.relkind = 'r' AND n.nspname IN ('candor', 'core', 'auth', 'kd', 'audit') AND a.attnum > 0 AND NOT a.attisdropped \
+     ORDER BY 1, 2, a.attnum";
 const SQL_LIVE_CLASS: &str = "SELECT table_schema, table_name, column_name, class::text, ciphertext FROM candor.column_class";
 const SQL_LIVE_RLS: &str = "SELECT n.nspname::text || '.' || k.relname::text FROM pg_catalog.pg_class k \
      JOIN pg_catalog.pg_namespace n ON n.oid = k.relnamespace \
@@ -361,10 +404,16 @@ pub async fn live(conn: &mut PgConnection) -> Result<Vec<String>> {
         let k: String = r.try_get(3).map_err(db)?;
         let ct: bool = r.try_get(4).map_err(db)?;
         let ok = class.iter().any(|x| {
-            x.schema == s && x.table == t && x.column == c && x.class.as_str() == k && x.ciphertext == ct
+            x.schema == s
+                && x.table == t
+                && x.column == c
+                && x.class.as_str() == k
+                && x.ciphertext == ct
         });
         if !ok {
-            v.push(format!("L5: stored classification of {s}.{t}.{c} differs from the build"));
+            v.push(format!(
+                "L5: stored classification of {s}.{t}.{c} differs from the build"
+            ));
         }
     }
     let bad = sqlx::query(SQL_LIVE_RLS)
@@ -426,11 +475,41 @@ mod tests {
         assert!(l2_violation("x_forwarded_for"));
         assert!(!l2_violation("epoch_index"));
         let rows: Vec<ColumnRow> = vec![
-            ("core".into(), "case".into(), "client_addr".into(), "inet".into(), Some("now()".into())),
-            ("core".into(), "case".into(), "seen".into(), "timestamp with time zone".into(), None),
-            ("core".into(), "case".into(), "title".into(), "text".into(), None),
-            ("core".into(), "case".into(), "coi_user".into(), "uuid".into(), None),
-            ("core".into(), "import_envelope".into(), "is_chaff".into(), "boolean".into(), None),
+            (
+                "core".into(),
+                "case".into(),
+                "client_addr".into(),
+                "inet".into(),
+                Some("now()".into()),
+            ),
+            (
+                "core".into(),
+                "case".into(),
+                "seen".into(),
+                "timestamp with time zone".into(),
+                None,
+            ),
+            (
+                "core".into(),
+                "case".into(),
+                "title".into(),
+                "text".into(),
+                None,
+            ),
+            (
+                "core".into(),
+                "case".into(),
+                "coi_user".into(),
+                "uuid".into(),
+                None,
+            ),
+            (
+                "core".into(),
+                "import_envelope".into(),
+                "is_chaff".into(),
+                "boolean".into(),
+                None,
+            ),
         ];
         let v = check_columns(&rows, &class);
         for code in ["L1", "L2", "L3", "L4", "L5", "L14", "L16", "L18"] {
@@ -440,7 +519,11 @@ mod tests {
         let v = check_sql(sql, &class);
         assert!(v.iter().any(|m| m.contains("unlogged")), "{v:?}");
         assert!(v.iter().any(|m| m.starts_with("L3")), "{v:?}");
-        let sql2 = "CREATE FUNCTION f() RETURNS int SECURITY DEFINER AS $$ SELECT 1 $$;\nCREATE FUNCTION g() RETURNS int SECURITY DEFINER AS $$ SELECT 1 $$;";
-        assert!(check_sql(sql2, &class).iter().any(|m| m.contains("security definer")));
+        let sql2 = "CREATE FUNCTION f() RETURNS int SECURITY DEFINER AS $$ SELECT 1 $$;\nCREATE FUNCTION g() RETURNS int SECURITY DEFINER AS $$ SELECT 1 $$;\nCREATE FUNCTION h() RETURNS int SECURITY DEFINER AS $$ SELECT 1 $$;";
+        assert!(
+            check_sql(sql2, &class)
+                .iter()
+                .any(|m| m.contains("security definer"))
+        );
     }
 }

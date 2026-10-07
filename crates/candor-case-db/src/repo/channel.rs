@@ -198,7 +198,11 @@ pub async fn create_retention_policy(tx: &mut TenantTx, p: &NewRetentionPolicy) 
         .bind(tx.tenant().uuid())
         .bind(p.id.uuid())
         .bind(i32::from(p.retain_days_after_close))
-        .bind(if p.crypto_erase { "crypto_erase" } else { "review" })
+        .bind(if p.crypto_erase {
+            "crypto_erase"
+        } else {
+            "review"
+        })
         .execute(tx.conn())
         .await
         .map_err(db)?
@@ -228,7 +232,11 @@ pub async fn publish_workflow(
     definition_json: &str,
     published_by: UserId,
 ) -> Result<()> {
-    bounded(definition_json.as_bytes(), MAX_WORKFLOW_JSON, "workflow definition")?;
+    bounded(
+        definition_json.as_bytes(),
+        MAX_WORKFLOW_JSON,
+        "workflow definition",
+    )?;
     if version == 0 {
         return Err(DbError::InvalidInput("workflow version"));
     }
@@ -260,12 +268,18 @@ pub async fn get_workflow(tx: &mut TenantTx, id: WorkflowDefId, version: u32) ->
 
 /// Create a channel (admin).
 pub async fn create(tx: &mut TenantTx, c: &NewChannel) -> Result<()> {
-    bounded(c.public_label_json.as_bytes(), MAX_LABEL_JSON, "channel label")?;
+    bounded(
+        c.public_label_json.as_bytes(),
+        MAX_LABEL_JSON,
+        "channel label",
+    )?;
     if !(1..=16).contains(&c.min_recipients) {
         return Err(DbError::InvalidInput("min_recipients"));
     }
     if c.mode == ChannelMode::Anonymous && c.alternative_channel_id.is_none() {
-        return Err(DbError::InvalidInput("anonymous channel needs an alternative"));
+        return Err(DbError::InvalidInput(
+            "anonymous channel needs an alternative",
+        ));
     }
     let n = sqlx::query(SQL_CH_INSERT)
         .bind(tx.tenant().uuid())
@@ -277,7 +291,11 @@ pub async fn create(tx: &mut TenantTx, c: &NewChannel) -> Result<()> {
         .bind(c.reply_enabled)
         .bind(i16::from(c.min_recipients))
         .bind(c.alternative_channel_id.map(|a| a.uuid()))
-        .bind(if c.independent { "independent" } else { "standard" })
+        .bind(if c.independent {
+            "independent"
+        } else {
+            "standard"
+        })
         .execute(tx.conn())
         .await
         .map_err(db)?
@@ -298,7 +316,11 @@ pub async fn get(tx: &mut TenantTx, id: ChannelId) -> Result<Channel> {
 }
 
 /// Keyset page of channels.
-pub async fn list(tx: &mut TenantTx, after: Option<Cursor>, size: PageSize) -> Result<Page<Channel>> {
+pub async fn list(
+    tx: &mut TenantTx,
+    after: Option<Cursor>,
+    size: PageSize,
+) -> Result<Page<Channel>> {
     let rows = sqlx::query(SQL_CH_LIST)
         .bind(tx.tenant().uuid())
         .bind(after.unwrap_or(Cursor([0; 16])).uuid())
@@ -392,4 +414,3 @@ pub async fn set_member_state(
         .rows_affected();
     one(n, DbError::VersionConflict)
 }
-

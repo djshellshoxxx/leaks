@@ -33,10 +33,12 @@ pub(crate) const SQL_LEDGER_EXISTS: &str =
 const SQL_LEDGER_GET: &str = "SELECT sha256 FROM candor.schema_migration WHERE version = $1";
 pub(crate) const SQL_LEDGER_ALL: &str =
     "SELECT version, sha256 FROM candor.schema_migration ORDER BY version";
-const SQL_LEDGER_PUT: &str = "INSERT INTO candor.schema_migration (version, sha256) VALUES ($1, $2)";
+const SQL_LEDGER_PUT: &str =
+    "INSERT INTO candor.schema_migration (version, sha256) VALUES ($1, $2)";
 const SQL_MIGRATE_TIMEOUTS: &str = "SELECT pg_catalog.set_config('lock_timeout', '10s', true), \
      pg_catalog.set_config('statement_timeout', '10min', true)";
-const SQL_META_PUT: &str = "INSERT INTO candor.schema_meta (singleton, schema_hash) VALUES (true, $1)";
+const SQL_META_PUT: &str =
+    "INSERT INTO candor.schema_meta (singleton, schema_hash) VALUES (true, $1)";
 pub(crate) const SQL_META_GET: &str = "SELECT schema_hash FROM candor.schema_meta";
 const SQL_CLASS_PUT: &str = "INSERT INTO candor.column_class (table_schema, table_name, column_name, class, ciphertext) \
      VALUES ($1, $2, $3, $4::text::candor.data_class, $5)";

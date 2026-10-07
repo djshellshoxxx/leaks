@@ -3,9 +3,14 @@
 //! `core.blob_object` (09 §5.2.4, §5.2.8; ADR-012, ADR-047(2)).
 
 use crate::error::{DbError, Result, db};
-use crate::repo::{get_bool, get_bytes, get_opt_bytes, get_opt_uuid, get_u16, get_u32, get_u64, get_uuid, i32_of, i64_of, one};
+use crate::repo::{
+    get_bool, get_bytes, get_opt_bytes, get_opt_uuid, get_u16, get_u32, get_u64, get_uuid, i32_of,
+    i64_of, one,
+};
 use crate::tx::TenantTx;
-use crate::types::{BlobId, CaseId, Cursor, Day, EvidenceId, ImportEnvelopeId, MessageId, Page, PageSize, bounded};
+use crate::types::{
+    BlobId, CaseId, Cursor, Day, EvidenceId, ImportEnvelopeId, MessageId, Page, PageSize, bounded,
+};
 
 /// `body_ct` bound.
 pub const MAX_BODY_CT: usize = 256 * 1024;
@@ -67,7 +72,8 @@ const SQL_BLOB_INSERT: &str = "INSERT INTO core.blob_object (tenant_id, blob_id,
 const SQL_BLOB_GET: &str = "SELECT store = 's3', padded_size, ct_sha256, refcount FROM core.blob_object WHERE tenant_id = $1 AND blob_id = $2";
 const SQL_BLOB_REF: &str = "UPDATE core.blob_object SET refcount = refcount + $3 WHERE tenant_id = $1 AND blob_id = $2 AND refcount + $3 >= 0";
 const SQL_BLOB_UNREFERENCED: &str = "SELECT blob_id FROM core.blob_object WHERE tenant_id = $1 AND refcount = 0 AND blob_id > $2 ORDER BY blob_id LIMIT $3";
-const SQL_BLOB_DELETE: &str = "DELETE FROM core.blob_object WHERE tenant_id = $1 AND blob_id = $2 AND refcount = 0";
+const SQL_BLOB_DELETE: &str =
+    "DELETE FROM core.blob_object WHERE tenant_id = $1 AND blob_id = $2 AND refcount = 0";
 
 fn msg_row(r: &sqlx::postgres::PgRow) -> Result<Message> {
     Ok(Message {
@@ -107,6 +113,7 @@ fn bucket(b: u8) -> Result<i16> {
 
 /// An imported source message: no day (ADR-047(2)); the envelope DEK is
 /// re-wrapped under the case key.
+#[allow(clippy::too_many_arguments)]
 pub async fn create_from_source(
     tx: &mut TenantTx,
     id: MessageId,
@@ -174,7 +181,12 @@ pub async fn get(tx: &mut TenantTx, id: MessageId) -> Result<Message> {
 }
 
 /// Messages of a case, keyset by id.
-pub async fn list(tx: &mut TenantTx, case: CaseId, after: Option<Cursor>, size: PageSize) -> Result<Page<Message>> {
+pub async fn list(
+    tx: &mut TenantTx,
+    case: CaseId,
+    after: Option<Cursor>,
+    size: PageSize,
+) -> Result<Page<Message>> {
     let rows = sqlx::query(SQL_MSG_LIST)
         .bind(tx.tenant().uuid())
         .bind(case.uuid())
@@ -188,7 +200,12 @@ pub async fn list(tx: &mut TenantTx, case: CaseId, after: Option<Cursor>, size: 
 }
 
 /// Attach evidence to a message at `position`.
-pub async fn attach(tx: &mut TenantTx, message: MessageId, evidence: EvidenceId, position: u8) -> Result<()> {
+pub async fn attach(
+    tx: &mut TenantTx,
+    message: MessageId,
+    evidence: EvidenceId,
+    position: u8,
+) -> Result<()> {
     let n = sqlx::query(SQL_ATT_INSERT)
         .bind(tx.tenant().uuid())
         .bind(message.uuid())
@@ -236,7 +253,11 @@ pub async fn create_evidence(
         .bind(tx.tenant().uuid())
         .bind(id.uuid())
         .bind(case.uuid())
-        .bind(if staff_upload { "staff_upload" } else { "source_attachment" })
+        .bind(if staff_upload {
+            "staff_upload"
+        } else {
+            "source_attachment"
+        })
         .bind(blob.uuid())
         .bind(dek_wrap_ct)
         .bind(meta_ct)
@@ -262,7 +283,12 @@ pub async fn get_evidence(tx: &mut TenantTx, id: EvidenceId) -> Result<Evidence>
 }
 
 /// Evidence of a case, keyset by id.
-pub async fn list_evidence(tx: &mut TenantTx, case: CaseId, after: Option<Cursor>, size: PageSize) -> Result<Page<Evidence>> {
+pub async fn list_evidence(
+    tx: &mut TenantTx,
+    case: CaseId,
+    after: Option<Cursor>,
+    size: PageSize,
+) -> Result<Page<Evidence>> {
     let rows = sqlx::query(SQL_EV_LIST)
         .bind(tx.tenant().uuid())
         .bind(case.uuid())
@@ -288,7 +314,13 @@ pub async fn erase_evidence(tx: &mut TenantTx, id: EvidenceId) -> Result<()> {
 }
 
 /// Register a stored ciphertext blob with refcount 1.
-pub async fn create_blob(tx: &mut TenantTx, id: BlobId, s3: bool, padded_size: u64, ct_sha256: &[u8; 32]) -> Result<()> {
+pub async fn create_blob(
+    tx: &mut TenantTx,
+    id: BlobId,
+    s3: bool,
+    padded_size: u64,
+    ct_sha256: &[u8; 32],
+) -> Result<()> {
     if padded_size == 0 || padded_size > super::import::MAX_PADDED {
         return Err(DbError::InvalidInput("padded size"));
     }
@@ -338,7 +370,11 @@ pub async fn blob_ref(tx: &mut TenantTx, id: BlobId, delta: i32) -> Result<()> {
 
 /// Unreferenced blobs (worker `blob_gc`; the 24 h age is the job's, kept
 /// outside the database so no per-blob time exists).
-pub async fn unreferenced_blobs(tx: &mut TenantTx, after: Option<Cursor>, size: PageSize) -> Result<Page<BlobId>> {
+pub async fn unreferenced_blobs(
+    tx: &mut TenantTx,
+    after: Option<Cursor>,
+    size: PageSize,
+) -> Result<Page<BlobId>> {
     let rows = sqlx::query(SQL_BLOB_UNREFERENCED)
         .bind(tx.tenant().uuid())
         .bind(after.unwrap_or(Cursor([0; 16])).uuid())

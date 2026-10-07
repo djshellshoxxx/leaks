@@ -136,7 +136,9 @@ mod tests {
         assert!(parse_classification("core\tcase\tx\tXX\ttrue\n").is_err());
         assert!(parse_classification("core\tcase\tx\tCT\tyes\n").is_err());
         assert!(parse_classification("Core\tcase\tx\tCT\ttrue\n").is_err());
-        assert!(parse_classification("core\tcase\tx\tCT\ttrue\ncore\tcase\tx\tCT\ttrue\n").is_err());
+        assert!(
+            parse_classification("core\tcase\tx\tCT\ttrue\ncore\tcase\tx\tCT\ttrue\n").is_err()
+        );
         assert!(parse_classification("# only\n").is_err());
         assert!(parse_classification("core\tcase\tx\tCT\ttrue\textra\n").is_err());
     }

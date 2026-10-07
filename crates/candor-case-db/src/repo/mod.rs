@@ -26,7 +26,9 @@ pub(crate) fn get_uuid(r: &PgRow, i: usize) -> Result<[u8; 16]> {
     Ok(*r.try_get::<Uuid, _>(i).map_err(db)?.as_bytes())
 }
 pub(crate) fn get_opt_uuid(r: &PgRow, i: usize) -> Result<Option<[u8; 16]>> {
-    Ok(r.try_get::<Option<Uuid>, _>(i).map_err(db)?.map(|u| *u.as_bytes()))
+    Ok(r.try_get::<Option<Uuid>, _>(i)
+        .map_err(db)?
+        .map(|u| *u.as_bytes()))
 }
 pub(crate) fn get_day(r: &PgRow, i: usize) -> Result<Day> {
     Day::from_i32(r.try_get(i).map_err(db)?)
@@ -66,9 +68,6 @@ pub(crate) fn i64_of(v: u64) -> Result<i64> {
 }
 pub(crate) fn i32_of(v: u32) -> Result<i32> {
     i32::try_from(v).map_err(|_| DbError::InvalidInput("value out of range"))
-}
-pub(crate) fn i16_of(v: u16) -> Result<i16> {
-    i16::try_from(v).map_err(|_| DbError::InvalidInput("value out of range"))
 }
 /// Exactly one row must have been affected, else the lookup was IDOR-safe
 /// filtered or the version moved.

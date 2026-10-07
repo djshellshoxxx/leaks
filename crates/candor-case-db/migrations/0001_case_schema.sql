@@ -15,6 +15,14 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'candor_migrator') THEN
     CREATE ROLE candor_migrator NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS NOREPLICATION;
   END IF;
+  -- Owner of the two SECURITY DEFINER helpers (09 §6.3, §10 allow-list). It
+  -- cannot log in, cannot bypass RLS and may only SELECT case_member and
+  -- coi_excl_tag, so a definer body can do nothing else.
+  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'candor_acl') THEN
+    CREATE ROLE candor_acl NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS NOREPLICATION;
+    -- The migrator transfers the two definer functions to candor_acl.
+    GRANT candor_acl TO candor_migrator WITH INHERIT FALSE, SET TRUE;
+  END IF;
   FOREACH r IN ARRAY ARRAY['candor_case', 'candor_admin', 'candor_relay', 'candor_worker', 'candor_notify',
                            'candor_kd', 'candor_auth', 'candor_audit_w', 'candor_audit_r', 'candor_monitor'] LOOP
     IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = r) THEN
@@ -87,7 +95,7 @@ BEGIN
   END LOOP;
 END
 $schemas$;
-GRANT USAGE ON SCHEMA candor, core TO candor_case, candor_admin, candor_relay, candor_worker, candor_notify, candor_kd, candor_auth, candor_monitor;
+GRANT USAGE ON SCHEMA candor, core TO candor_case, candor_admin, candor_relay, candor_worker, candor_notify, candor_kd, candor_auth, candor_monitor, candor_acl;
 GRANT USAGE ON SCHEMA kd TO candor_case, candor_admin, candor_relay, candor_worker, candor_kd, candor_auth;
 GRANT USAGE ON SCHEMA auth TO candor_auth, candor_admin, candor_case, candor_worker;
 GRANT USAGE ON SCHEMA candor, audit TO candor_audit_w, candor_audit_r;
@@ -127,7 +135,7 @@ END
 $fn$;
 REVOKE ALL ON FUNCTION candor.tenant(), candor.uid(), candor.principal() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION candor.tenant(), candor.uid(), candor.principal() TO candor_case, candor_admin, candor_relay,
-  candor_worker, candor_notify, candor_kd, candor_auth, candor_audit_w, candor_audit_r, candor_monitor;
+  candor_worker, candor_notify, candor_kd, candor_auth, candor_audit_w, candor_audit_r, candor_monitor, candor_acl;
 
 -- Forward-only migration ledger and build identity (BE-050). No time column.
 CREATE TABLE candor.schema_migration (
@@ -1230,25 +1238,41 @@ CREATE TABLE audit.audit_checkpoint (
 CREATE TRIGGER audit_checkpoint_append_only BEFORE UPDATE OR DELETE ON audit.audit_checkpoint FOR EACH ROW EXECUTE FUNCTION candor.append_only();
 
 -- ---------------------------------------------------------------------------
--- Blinded COI membership (09 §6.3): the only SECURITY DEFINER function.
--- Pinned search_path; the caller must be an active member of the case and the
--- function returns nothing but a bool. coi_excl_tag has no SELECT grant.
+-- The SECURITY DEFINER allow-list (09 §6.3, §10): exactly two functions, both
+-- owned by candor_acl (NOLOGIN, NOBYPASSRLS, SELECT on two tables) in its
+-- own schema `acl`, both with a pinned search_path, both returning a bool.
+--   is_case_member(case): the calling principal is an active member of the
+--     case (valid_until_day not passed). Used by the restrictive ACL policies;
+--     running as candor_acl, to which the case_member ACL policy does not
+--     apply, it cannot recurse into itself.
+--   coi_tag_present(case, tag): blind tag check for C-22; the caller must
+--     be an active member. coi_excl_tag has no SELECT grant for any login role.
 -- ---------------------------------------------------------------------------
-CREATE FUNCTION candor.coi_tag_present(p_case uuid, p_tag bytea) RETURNS boolean
-  LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, candor, core AS $fn$
-BEGIN
-  IF p_tag IS NULL OR octet_length(p_tag) <> 32 OR p_case IS NULL THEN
-    RETURN false;
-  END IF;
-  IF NOT EXISTS (SELECT 1 FROM core.case_member m WHERE m.tenant_id = candor.tenant() AND m.case_id = p_case
-                 AND m.user_id = candor.uid() AND m.state = 'active') THEN
-    RETURN false;
-  END IF;
-  RETURN EXISTS (SELECT 1 FROM core.coi_excl_tag t WHERE t.tenant_id = candor.tenant() AND t.case_id = p_case AND t.tag = p_tag);
-END
+GRANT SELECT ON core.case_member, core.coi_excl_tag TO candor_acl;
+-- Schema `acl` is owned by candor_acl, which creates the two functions itself
+-- (no ownership transfer, no CREATE on any other schema).
+CREATE SCHEMA acl AUTHORIZATION candor_acl;
+SET LOCAL ROLE candor_acl;
+REVOKE ALL ON SCHEMA acl FROM PUBLIC;
+-- candor_case calls the helpers; the migrator (table owner, under FORCE RLS)
+-- must resolve them to create and, if it ever queries, evaluate the policies.
+GRANT USAGE ON SCHEMA acl TO candor_case, candor_migrator;
+CREATE FUNCTION acl.is_case_member(p_case uuid) RETURNS boolean
+  LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, candor, core AS $fn$
+  SELECT EXISTS (SELECT 1 FROM core.case_member m WHERE m.tenant_id = candor.tenant() AND m.case_id = p_case
+                 AND m.user_id = candor.uid() AND m.state = 'active'
+                 AND (m.valid_until_day IS NULL OR m.valid_until_day >= (pg_catalog.now() AT TIME ZONE 'UTC')::date))
 $fn$;
-REVOKE ALL ON FUNCTION candor.coi_tag_present(uuid, bytea) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION candor.coi_tag_present(uuid, bytea) TO candor_case;
+REVOKE ALL ON FUNCTION acl.is_case_member(uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION acl.is_case_member(uuid) TO candor_case, candor_migrator;
+CREATE FUNCTION acl.coi_tag_present(p_case uuid, p_tag bytea) RETURNS boolean
+  LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, candor, core, acl AS $fn$
+  SELECT p_tag IS NOT NULL AND octet_length(p_tag) = 32 AND acl.is_case_member(p_case)
+    AND EXISTS (SELECT 1 FROM core.coi_excl_tag t WHERE t.tenant_id = candor.tenant() AND t.case_id = p_case AND t.tag = p_tag)
+$fn$;
+REVOKE ALL ON FUNCTION acl.coi_tag_present(uuid, bytea) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION acl.coi_tag_present(uuid, bytea) TO candor_case;
+SET LOCAL ROLE candor_migrator;
 
 -- ---------------------------------------------------------------------------
 -- Row-level security (09 §6.2): every table of core/auth/kd/audit except the
@@ -1291,29 +1315,25 @@ DECLARE r text;
 BEGIN
   FOREACH r IN ARRAY ARRAY['case', 'case_record', 'message', 'evidence_object', 'evidence_derivative', 'submission',
                            'sla_timer', 'case_state_history', 'legal_hold', 'export_package', 'case_meta',
-                           'deletion_request', 'wrap_deletion_request', 'breakglass_request', 'identity_unseal_request'] LOOP
-    EXECUTE pg_catalog.format('CREATE POLICY p_case_acl ON core.%I AS RESTRICTIVE FOR ALL TO candor_case USING (EXISTS (SELECT 1 FROM core.case_member m WHERE m.tenant_id = candor.tenant() AND m.case_id = %I.case_id AND m.user_id = candor.uid() AND m.state = ''active'' AND (m.valid_until_day IS NULL OR m.valid_until_day >= (pg_catalog.now() AT TIME ZONE ''UTC'')::date)))', r, r);
+                           'deletion_request', 'wrap_deletion_request', 'breakglass_request', 'identity_unseal_request',
+                           'case_member'] LOOP
+    EXECUTE pg_catalog.format('CREATE POLICY p_case_acl ON core.%I AS RESTRICTIVE FOR ALL TO candor_case USING (acl.is_case_member(%I.case_id)) WITH CHECK (acl.is_case_member(%I.case_id))', r, r, r);
   END LOOP;
 END
 $acl$;
--- A member sees the case_member rows of their own cases (and inserts into them
--- on case creation: the creator's own row first, then co-members).
+-- The creator inserts their own membership row first (case creation).
+DROP POLICY p_case_acl ON core.case_member;
 CREATE POLICY p_case_acl ON core.case_member AS RESTRICTIVE FOR ALL TO candor_case
-  USING (EXISTS (SELECT 1 FROM core.case_member m WHERE m.tenant_id = candor.tenant() AND m.case_id = case_member.case_id
-                 AND m.user_id = candor.uid() AND m.state = 'active'))
-  WITH CHECK (user_id = candor.uid() OR EXISTS (SELECT 1 FROM core.case_member m WHERE m.tenant_id = candor.tenant()
-                 AND m.case_id = case_member.case_id AND m.user_id = candor.uid() AND m.state = 'active'));
+  USING (acl.is_case_member(case_member.case_id))
+  WITH CHECK (user_id = candor.uid() OR acl.is_case_member(case_member.case_id));
 CREATE POLICY p_case_acl ON core.attachment AS RESTRICTIVE FOR ALL TO candor_case
-  USING (EXISTS (SELECT 1 FROM core.message g JOIN core.case_member m ON m.tenant_id = g.tenant_id AND m.case_id = g.case_id
-                 WHERE g.tenant_id = candor.tenant() AND g.message_id = attachment.message_id
-                 AND m.user_id = candor.uid() AND m.state = 'active'))
-  WITH CHECK (EXISTS (SELECT 1 FROM core.message g JOIN core.case_member m ON m.tenant_id = g.tenant_id AND m.case_id = g.case_id
-                 WHERE g.tenant_id = candor.tenant() AND g.message_id = attachment.message_id
-                 AND m.user_id = candor.uid() AND m.state = 'active'));
+  USING (EXISTS (SELECT 1 FROM core.message g WHERE g.tenant_id = candor.tenant() AND g.message_id = attachment.message_id
+                 AND acl.is_case_member(g.case_id)))
+  WITH CHECK (EXISTS (SELECT 1 FROM core.message g WHERE g.tenant_id = candor.tenant() AND g.message_id = attachment.message_id
+                 AND acl.is_case_member(g.case_id)));
 CREATE POLICY p_case_acl ON core.export_approval AS RESTRICTIVE FOR ALL TO candor_case
-  USING (EXISTS (SELECT 1 FROM core.export_package p JOIN core.case_member m ON m.tenant_id = p.tenant_id AND m.case_id = p.case_id
-                 WHERE p.tenant_id = candor.tenant() AND p.export_id = export_approval.export_id
-                 AND m.user_id = candor.uid() AND m.state = 'active'))
+  USING (EXISTS (SELECT 1 FROM core.export_package p WHERE p.tenant_id = candor.tenant() AND p.export_id = export_approval.export_id
+                 AND acl.is_case_member(p.case_id)))
   WITH CHECK (approver_id = candor.uid());
 -- Own wrap only.
 CREATE POLICY p_own_wrap ON core.case_key_wrap AS RESTRICTIVE FOR SELECT TO candor_case

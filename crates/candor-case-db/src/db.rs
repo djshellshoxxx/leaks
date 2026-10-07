@@ -129,14 +129,14 @@ const SQL_GUARD_CHECK: &str = "WITH t AS (SELECT k.oid, n.nspname, k.relname, k.
        (SELECT count(*) FROM pg_catalog.pg_trigger g JOIN t ON t.oid = g.tgrelid WHERE NOT g.tgisinternal AND g.tgenabled <> 'O'), \
        (SELECT count(*) FROM t), \
        (SELECT count(*) FROM pg_catalog.pg_proc f JOIN pg_catalog.pg_namespace n ON n.oid = f.pronamespace \
-        WHERE n.nspname IN ('candor', 'core', 'auth', 'kd', 'audit') AND f.prosecdef), \
+        WHERE n.nspname IN ('candor', 'core', 'auth', 'kd', 'audit', 'acl') AND f.prosecdef), \
        (SELECT count(*) FROM pg_catalog.pg_extension e WHERE e.extname <> 'plpgsql')";
 /// Restrictive policies created by the migration (lint::EXPECTED_RESTRICTIVE).
 pub(crate) const EXPECTED_RESTRICTIVE: i64 = 40;
 /// Named guard triggers plus the version guards.
 pub(crate) const EXPECTED_TRIGGERS: i64 = 27;
-/// SECURITY DEFINER allow-list size: `candor.coi_tag_present` only.
-const EXPECTED_DEFINERS: i64 = 1;
+/// SECURITY DEFINER allow-list: `acl.is_case_member`, `acl.coi_tag_present`.
+const EXPECTED_DEFINERS: i64 = 2;
 
 /// Session hardening check, on every new connection. A role can `ALTER ROLE`
 /// its own defaults, so stored defaults are restricted to the migration's
@@ -183,9 +183,10 @@ fn session_options(role: Role) -> [(&'static str, &'static str); 7] {
 async fn session_ok(conn: &mut PgConnection, role: Role) -> std::result::Result<bool, sqlx::Error> {
     let row = sqlx::query(SQL_SESSION_CHECK).fetch_one(conn).await?;
     let stored: Vec<String> = row.try_get(0)?;
-    if !stored.iter().all(|e| {
-        ALLOWED_ROLE_SETTINGS.contains(&e.as_str()) || e.starts_with("temp_file_limit=")
-    }) {
+    if !stored
+        .iter()
+        .all(|e| ALLOWED_ROLE_SETTINGS.contains(&e.as_str()) || e.starts_with("temp_file_limit="))
+    {
         return Ok(false);
     }
     let expected: [&str; 13] = [
@@ -243,7 +244,9 @@ impl CaseDb {
         let owner_member: bool = row.try_get(3).map_err(db)?;
         let db_owner: bool = row.try_get(4).map_err(db)?;
         if !is_role || privileged || other_member || owner_member || db_owner {
-            return Err(DbError::Integrity("login is not the plain application role"));
+            return Err(DbError::Integrity(
+                "login is not the plain application role",
+            ));
         }
         let g = sqlx::query(SQL_GUARD_CHECK)
             .fetch_one(&mut conn)

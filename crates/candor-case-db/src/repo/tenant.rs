@@ -47,15 +47,19 @@ pub struct Tenant {
 
 const SQL_INSERT: &str = "INSERT INTO core.tenant (tenant_id, label, risk_class, state) \
      VALUES ($1, $2, $3::text::core.risk_class, 'active') ON CONFLICT DO NOTHING";
-const SQL_GET: &str =
-    "SELECT tenant_id, label, risk_class::text, state = 'suspended', version FROM core.tenant WHERE tenant_id = $1";
+const SQL_GET: &str = "SELECT tenant_id, label, risk_class::text, state = 'suspended', version FROM core.tenant WHERE tenant_id = $1";
 const SQL_SET_STATE: &str = "UPDATE core.tenant SET state = $3::text::core.tenant_state, version = $2 + 1 \
      WHERE tenant_id = $1 AND version = $2";
 
 /// Create the tenant row (admin pool only; the one transaction that skips the
 /// visibility check because the row does not exist yet). Returns false when
 /// the tenant already exists.
-pub async fn bootstrap(pool: &CaseDb, tenant: TenantId, label: &str, risk: RiskClass) -> Result<bool> {
+pub async fn bootstrap(
+    pool: &CaseDb,
+    tenant: TenantId,
+    label: &str,
+    risk: RiskClass,
+) -> Result<bool> {
     if pool.role() != Role::Admin {
         return Err(DbError::PrincipalMismatch);
     }

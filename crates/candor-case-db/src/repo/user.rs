@@ -68,7 +68,12 @@ fn row(r: &sqlx::postgres::PgRow) -> Result<User> {
 }
 
 /// Create an invited user (admin). `AlreadyExists` on a taken id or username.
-pub async fn create(tx: &mut TenantTx, user: UserId, username: &str, display_name: &str) -> Result<()> {
+pub async fn create(
+    tx: &mut TenantTx,
+    user: UserId,
+    username: &str,
+    display_name: &str,
+) -> Result<()> {
     let username = bounded_text(username, 128, "username")?;
     let display_name = bounded_text(display_name, 128, "display name")?;
     let n = sqlx::query(SQL_INSERT)
@@ -122,7 +127,12 @@ pub async fn list(tx: &mut TenantTx, after: Option<Cursor>, size: PageSize) -> R
 }
 
 /// Change the account state, optimistic on `version`.
-pub async fn set_state(tx: &mut TenantTx, user: UserId, version: u64, state: UserState) -> Result<()> {
+pub async fn set_state(
+    tx: &mut TenantTx,
+    user: UserId,
+    version: u64,
+    state: UserState,
+) -> Result<()> {
     let n = sqlx::query(SQL_SET_STATE)
         .bind(tx.tenant().uuid())
         .bind(user.uuid())

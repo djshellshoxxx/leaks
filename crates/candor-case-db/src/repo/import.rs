@@ -4,9 +4,14 @@
 //! id and the fixed-slot date; no intake reference or arrival time is stored.
 
 use crate::error::{DbError, Result, db};
-use crate::repo::{get_bytes, get_opt_bytes, get_opt_day, get_string, get_u16, get_u32, get_u64, get_uuid, i32_of, i64_of, one};
+use crate::repo::{
+    get_bytes, get_opt_bytes, get_opt_day, get_string, get_u16, get_u32, get_u64, get_uuid, i32_of,
+    i64_of, one,
+};
 use crate::tx::TenantTx;
-use crate::types::{BlobId, CaseId, ChannelId, Cursor, Day, ImportEnvelopeId, Page, PageSize, UserId, bounded};
+use crate::types::{
+    BlobId, CaseId, ChannelId, Cursor, Day, ImportEnvelopeId, Page, PageSize, UserId, bounded,
+};
 
 /// `header_ct` bound (07 §5.4).
 pub const MAX_HEADER_CT: usize = 8 * 1024;
@@ -80,8 +85,7 @@ const SQL_INSERT: &str = "INSERT INTO core.import_envelope (tenant_id, import_en
      VALUES ($1, $2, $3, $4, $5, $6, DATE '1970-01-01' + $7::int4, $8, $9, $10, 'pending') ON CONFLICT DO NOTHING";
 const SQL_PART_INSERT: &str = "INSERT INTO core.import_envelope_part (tenant_id, import_envelope_id, part_no, blob_id, padded_size) \
      VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING";
-const SQL_DIGEST_EXISTS: &str =
-    "SELECT EXISTS (SELECT 1 FROM core.import_envelope WHERE tenant_id = $1 AND header_digest = $2)";
+const SQL_DIGEST_EXISTS: &str = "SELECT EXISTS (SELECT 1 FROM core.import_envelope WHERE tenant_id = $1 AND header_digest = $2)";
 const SQL_GET: &str = "SELECT import_envelope_id, channel_id, (import_date - DATE '1970-01-01')::int4, epoch_index, import_batch_no, state::text, \
      (escalated_date - DATE '1970-01-01')::int4 FROM core.import_envelope WHERE tenant_id = $1 AND import_envelope_id = $2";
 const SQL_LIST_PENDING: &str = "SELECT import_envelope_id, channel_id, (import_date - DATE '1970-01-01')::int4, epoch_index, import_batch_no, state::text, \
@@ -105,8 +109,10 @@ const SQL_ESCALATE: &str = "UPDATE core.import_envelope SET escalated_date = DAT
      WHERE tenant_id = $1 AND import_envelope_id = $2 AND state = 'pending' AND escalated_date IS NULL";
 const SQL_NULL_DIGESTS: &str = "UPDATE core.import_envelope SET header_digest = NULL \
      WHERE tenant_id = $1 AND header_digest IS NOT NULL AND import_batch_no < $2";
-const SQL_DELETE: &str = "DELETE FROM core.import_envelope WHERE tenant_id = $1 AND import_envelope_id = $2";
-const SQL_PENDING_COUNT: &str = "SELECT count(*) FROM core.import_envelope WHERE tenant_id = $1 AND state = 'pending'";
+const SQL_DELETE: &str =
+    "DELETE FROM core.import_envelope WHERE tenant_id = $1 AND import_envelope_id = $2";
+const SQL_PENDING_COUNT: &str =
+    "SELECT count(*) FROM core.import_envelope WHERE tenant_id = $1 AND state = 'pending'";
 
 fn row(r: &sqlx::postgres::PgRow) -> Result<ImportEnvelope> {
     Ok(ImportEnvelope {
@@ -129,7 +135,10 @@ pub async fn stage(tx: &mut TenantTx, e: &NewImportEnvelope) -> Result<bool> {
     if e.parts.is_empty() || e.parts.len() > MAX_PARTS || e.import_batch_no == 0 {
         return Err(DbError::InvalidInput("envelope shape"));
     }
-    if e.parts.iter().any(|p| p.padded_size == 0 || p.padded_size > MAX_PADDED) {
+    if e.parts
+        .iter()
+        .any(|p| p.padded_size == 0 || p.padded_size > MAX_PADDED)
+    {
         return Err(DbError::InvalidInput("padded size"));
     }
     let dup = sqlx::query(SQL_DIGEST_EXISTS)
@@ -187,7 +196,12 @@ pub async fn get(tx: &mut TenantTx, id: ImportEnvelopeId) -> Result<ImportEnvelo
 }
 
 /// Pending envelopes of a channel, keyset by id.
-pub async fn list_pending(tx: &mut TenantTx, channel: ChannelId, after: Option<Cursor>, size: PageSize) -> Result<Page<ImportEnvelope>> {
+pub async fn list_pending(
+    tx: &mut TenantTx,
+    channel: ChannelId,
+    after: Option<Cursor>,
+    size: PageSize,
+) -> Result<Page<ImportEnvelope>> {
     let rows = sqlx::query(SQL_LIST_PENDING)
         .bind(tx.tenant().uuid())
         .bind(channel.uuid())
@@ -201,7 +215,10 @@ pub async fn list_pending(tx: &mut TenantTx, channel: ChannelId, after: Option<C
 }
 
 /// `(header_ct, manifest_ct, disposition_ct)` of an envelope.
-pub async fn ciphertexts(tx: &mut TenantTx, id: ImportEnvelopeId) -> Result<(Vec<u8>, Vec<u8>, Option<Vec<u8>>)> {
+pub async fn ciphertexts(
+    tx: &mut TenantTx,
+    id: ImportEnvelopeId,
+) -> Result<(Vec<u8>, Vec<u8>, Option<Vec<u8>>)> {
     let r = sqlx::query(SQL_CT)
         .bind(tx.tenant().uuid())
         .bind(id.uuid())
@@ -221,16 +238,29 @@ pub async fn parts(tx: &mut TenantTx, id: ImportEnvelopeId) -> Result<Vec<(u16, 
         .await
         .map_err(db)?;
     rows.iter()
-        .map(|r| Ok((get_u16(r, 0)?, BlobId::from_bytes(get_uuid(r, 1)?), get_u64(r, 2)?)))
+        .map(|r| {
+            Ok((
+                get_u16(r, 0)?,
+                BlobId::from_bytes(get_uuid(r, 1)?),
+                get_u64(r, 2)?,
+            ))
+        })
         .collect()
 }
 
 /// Link a pending envelope to a case: nulls `import_date` and
 /// `disposition_ct`, adds the submission row and bumps the case's
 /// `last_import_month` (optimistic on the case version).
-pub async fn link_to_case(tx: &mut TenantTx, id: ImportEnvelopeId, case: CaseId, case_version: u64) -> Result<()> {
+pub async fn link_to_case(
+    tx: &mut TenantTx,
+    id: ImportEnvelopeId,
+    case: CaseId,
+    case_version: u64,
+) -> Result<()> {
     let e = get(tx, id).await?;
-    let slot = e.import_date.ok_or(DbError::Guard("envelope not pending"))?;
+    let slot = e
+        .import_date
+        .ok_or(DbError::Guard("envelope not pending"))?;
     let r = sqlx::query(SQL_LINK)
         .bind(tx.tenant().uuid())
         .bind(id.uuid())

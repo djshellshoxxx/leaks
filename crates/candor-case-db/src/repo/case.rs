@@ -4,8 +4,8 @@
 
 use crate::error::{DbError, Result, db};
 use crate::repo::{
-    get_bool, get_bytes, get_day, get_opt_day, get_string, get_u16, get_u32, get_u64,
-    get_uuid, i32_of, i64_of, one,
+    get_bool, get_bytes, get_day, get_opt_day, get_string, get_u16, get_u32, get_u64, get_uuid,
+    i32_of, i64_of, one,
 };
 use crate::tx::TenantTx;
 use crate::types::{
@@ -158,7 +158,8 @@ const SQL_LIST: &str = "SELECT case_id, display_ref, channel_id, workflow_def_id
      (opened_day - DATE '1970-01-01')::int4, (closed_day - DATE '1970-01-01')::int4, key_epoch, retention_policy_id, \
      (deletion_due_day - DATE '1970-01-01')::int4, legal_hold, ek_missing, version \
      FROM core.\"case\" WHERE tenant_id = $1 AND case_id > $2 ORDER BY case_id LIMIT $3";
-const SQL_RECORD: &str = "SELECT record_ct FROM core.\"case\" WHERE tenant_id = $1 AND case_id = $2";
+const SQL_RECORD: &str =
+    "SELECT record_ct FROM core.\"case\" WHERE tenant_id = $1 AND case_id = $2";
 const SQL_SET_RECORD: &str = "UPDATE core.\"case\" SET record_ct = $4, version = $3 + 1 \
      WHERE tenant_id = $1 AND case_id = $2 AND version = $3";
 const SQL_TRANSITION: &str = "UPDATE core.\"case\" SET state = $4, version = $3 + 1 \
@@ -172,7 +173,8 @@ const SQL_SET_EK_MISSING: &str = "UPDATE core.\"case\" SET ek_missing = $4, vers
      WHERE tenant_id = $1 AND case_id = $2 AND version = $3";
 const SQL_DUE: &str = "SELECT case_id FROM core.\"case\" WHERE tenant_id = $1 AND deletion_due_day <= DATE '1970-01-01' + $2::int4 \
      AND NOT legal_hold AND case_id > $3 ORDER BY case_id LIMIT $4";
-const SQL_DELETE: &str = "DELETE FROM core.\"case\" WHERE tenant_id = $1 AND case_id = $2 AND NOT legal_hold";
+const SQL_DELETE: &str =
+    "DELETE FROM core.\"case\" WHERE tenant_id = $1 AND case_id = $2 AND NOT legal_hold";
 const SQL_MEMBER_INSERT: &str = "INSERT INTO core.case_member (tenant_id, case_id, user_id, access_level, via, grant_ref, valid_until_day, state) \
      VALUES ($1, $2, $3, $4::text::core.access_level, $5::text::core.member_via, $6, DATE '1970-01-01' + $7::int4, 'active') \
      ON CONFLICT DO NOTHING";
@@ -186,11 +188,11 @@ const SQL_WRAP_OWN: &str = "SELECT key_epoch, recipient_key_id, wrap_ct FROM cor
      WHERE tenant_id = $1 AND case_id = $2 AND recipient_user_id = $3 ORDER BY key_epoch DESC, recipient_key_id";
 const SQL_WRAP_HOLDERS: &str = "SELECT count(DISTINCT recipient_user_id) FROM core.case_key_wrap \
      WHERE tenant_id = $1 AND case_id = $2 AND key_epoch = $3 AND recipient_user_id IS NOT NULL";
-const SQL_WRAP_DELETE_ALL: &str = "DELETE FROM core.case_key_wrap WHERE tenant_id = $1 AND case_id = $2";
-const SQL_WRAP_DELETE_USER: &str =
-    "DELETE FROM core.case_key_wrap WHERE tenant_id = $1 AND case_id = $2 AND recipient_user_id = $3";
+const SQL_WRAP_DELETE_ALL: &str =
+    "DELETE FROM core.case_key_wrap WHERE tenant_id = $1 AND case_id = $2";
+const SQL_WRAP_DELETE_USER: &str = "DELETE FROM core.case_key_wrap WHERE tenant_id = $1 AND case_id = $2 AND recipient_user_id = $3";
 const SQL_TAG_INSERT: &str = "INSERT INTO core.coi_excl_tag (tenant_id, case_id, tag) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING";
-const SQL_TAG_PRESENT: &str = "SELECT candor.coi_tag_present($1, $2)";
+const SQL_TAG_PRESENT: &str = "SELECT acl.coi_tag_present($1, $2)";
 
 fn case_row(r: &sqlx::postgres::PgRow) -> Result<Case> {
     Ok(Case {
@@ -225,7 +227,7 @@ pub fn random_display_ref() -> Result<String> {
 }
 
 fn check_tags(tags: &[[u8; 32]]) -> Result<()> {
-    if tags.is_empty() || tags.len() > MAX_COI_TAGS || tags.len() % COI_TAG_GROUP != 0 {
+    if tags.is_empty() || tags.len() > MAX_COI_TAGS || !tags.len().is_multiple_of(COI_TAG_GROUP) {
         return Err(DbError::InvalidInput("coi tag count"));
     }
     Ok(())
@@ -346,7 +348,12 @@ pub async fn record_ct(tx: &mut TenantTx, id: CaseId) -> Result<Vec<u8>> {
 }
 
 /// Replace the encrypted case record, optimistic on `version`.
-pub async fn set_record_ct(tx: &mut TenantTx, id: CaseId, version: u64, record_ct: &[u8]) -> Result<()> {
+pub async fn set_record_ct(
+    tx: &mut TenantTx,
+    id: CaseId,
+    version: u64,
+    record_ct: &[u8],
+) -> Result<()> {
     bounded(record_ct, MAX_RECORD_CT, "record_ct")?;
     let n = sqlx::query(SQL_SET_RECORD)
         .bind(tx.tenant().uuid())
@@ -423,7 +430,12 @@ pub async fn close(tx: &mut TenantTx, id: CaseId, version: u64, closed_day: Day)
 }
 
 /// Mark the Erasure Key missing/restored after a vault incident (ADR-047(7)).
-pub async fn set_ek_missing(tx: &mut TenantTx, id: CaseId, version: u64, missing: bool) -> Result<()> {
+pub async fn set_ek_missing(
+    tx: &mut TenantTx,
+    id: CaseId,
+    version: u64,
+    missing: bool,
+) -> Result<()> {
     let n = sqlx::query(SQL_SET_EK_MISSING)
         .bind(tx.tenant().uuid())
         .bind(id.uuid())
@@ -438,7 +450,12 @@ pub async fn set_ek_missing(tx: &mut TenantTx, id: CaseId, version: u64, missing
 
 /// Cases whose deletion is due on or before `today` and not on legal hold
 /// (worker `retention_evaluate`).
-pub async fn deletion_due(tx: &mut TenantTx, today: Day, after: Option<Cursor>, size: PageSize) -> Result<Page<CaseId>> {
+pub async fn deletion_due(
+    tx: &mut TenantTx,
+    today: Day,
+    after: Option<Cursor>,
+    size: PageSize,
+) -> Result<Page<CaseId>> {
     let rows = sqlx::query(SQL_DUE)
         .bind(tx.tenant().uuid())
         .bind(today.i32()?)
