@@ -348,6 +348,9 @@ async fn chaff_fails_closed_without_time_or_directory() {
     f.sink
         .fail_accounts
         .store(false, std::sync::atomic::Ordering::SeqCst);
+    // AUD-RM2-IPC-10: after an unavailable store the next scheduled flush is
+    // skipped (bounded backoff); the batch then lands intact.
+    assert_eq!(f.sealer.flush_accounts(), Ok(0));
     assert_eq!(f.sealer.flush_accounts(), Ok(queued));
     assert_eq!(f.sink.accounts().len(), queued);
     assert!(read_all_files(&f.staging_path).is_empty());

@@ -379,3 +379,6 @@ Lead request: a dedicated `HealthCheck` code (e.g. `ACCOUNT_WRITE_DROPPED`) in c
 | IPC-13 | Store-side (migration squashed); the sealer is unaffected. | — |
 
 Info items of round 2: `DELETE_REPLIES` now deletes by the newest flushed tag (second-session case works); `delete_sent` is set only on a transport failure or sink error (not on a definitive refusal, which cannot happen for `DELETE Account`: its only refusal is `NOT_FOUND`, returned as an outcome).
+
+### Check results (round 2, 2026-10-07)
+All 25 sealer test binaries green after the round-2 changes (`tests/chaff.rs::chaff_fails_closed_without_time_or_directory` now expects the one skipped flush of the IPC-10 backoff before the batch lands); clippy/fmt clean; store-side checks as in the store SPEC-NOTES.

@@ -1276,7 +1276,8 @@ BEGIN
     EXECUTE pg_catalog.format('CREATE POLICY p_tenant ON %I.%I AS PERMISSIVE FOR ALL USING (tenant_id = candor.tenant()) WITH CHECK (tenant_id = candor.tenant())', t.s, t.r);
     IF EXISTS (SELECT 1 FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
                JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-               WHERE n.nspname = t.s AND c.relname = t.r AND a.attname = 'version' AND a.atttypid = 'int8'::regtype) THEN
+               WHERE n.nspname = t.s AND c.relname = t.r AND a.attname = 'version' AND a.atttypid = 'int8'::regtype)
+       AND NOT (t.s = 'core' AND t.r = 'config_bundle') THEN
       EXECUTE pg_catalog.format('CREATE TRIGGER version_guard BEFORE UPDATE ON %I.%I FOR EACH ROW EXECUTE FUNCTION candor.version_guard()', t.s, t.r);
     END IF;
   END LOOP;

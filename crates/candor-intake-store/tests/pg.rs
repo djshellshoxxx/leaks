@@ -436,16 +436,6 @@ async fn pg_roles_and_grants() {
     ] {
         assert!(!try_as(&b, &db, "candor_istore", q).await, "{q}");
     }
-    assert!(
-        !try_as(
-            &b,
-            &db,
-            "candor_intake_migrator",
-            "UPDATE candor.intake_meta SET schema_hash = decode('0000000000000000000000000000000000000000000000000000000000000000', 'hex')"
-        )
-        .await,
-        "migrator cannot correct the schema hash either"
-    );
 }
 
 /// The store refuses a superuser, a member of an owning role, and a schema whose
@@ -584,6 +574,36 @@ async fn pg_durability_and_guards() {
     {
         let s = open(&b, &db, common::TENANT).await;
         s.init(common::TENANT, common::SALT).await.unwrap();
+        // The schema owner (NOLOGIN; reached as the migrations reach it; AUD-RM2-IPC-13) is
+        // refused by the guard trigger as well.
+        {
+            let mut c = su(&b, &db).await;
+            let mut tx = c.begin().await.unwrap();
+            sqlx::raw_sql("SET LOCAL ROLE candor_intake_migrator")
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            // Tenant scope (RLS), as every intake connection sets it.
+            sqlx::query("SELECT pg_catalog.set_config('candor.tenant_id', $1, true)")
+                .bind("11111111-1111-1111-1111-111111111111")
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            let visible: i64 = sqlx::query("SELECT count(*) FROM candor.intake_meta")
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(visible, 1, "the row is in scope for the owner");
+            let r = sqlx::raw_sql(
+            "UPDATE candor.intake_meta SET schema_hash = decode('0000000000000000000000000000000000000000000000000000000000000000', 'hex')",
+        )
+        .execute(&mut *tx)
+        .await;
+            assert!(r.is_err(), "migrator cannot correct the schema hash either");
+            tx.rollback().await.unwrap();
+        }
+
         s.commit_envelope(common::envelope(0)).await.unwrap();
         for t in [2u8, 3, 4] {
             let a = common::account_plain(&s, t).await;
