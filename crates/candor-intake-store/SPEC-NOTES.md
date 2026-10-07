@@ -433,3 +433,6 @@ No new crate. `tokio` gains `rt`/`time` under the `server` feature and `rt` unde
 Wire-format change: `DELETE Account` body is `u8 kind=1 ‖ u8 n (1..=2) ‖ n × tag`; `mailbox_ids` left the request (the store table is authoritative). Fuzz seeds regenerated (22), 120 s run clean.
 
 Lead requests (ADR-057): a dedicated `candor-log` `HealthCheck` code for dead-lettered account writes would be clearer than `QUEUE_BACKLOG` (used now, see sealer notes); `candorctl migrate` must apply migration 0002 on existing intake clusters before the new binaries start (the drift check refuses otherwise).
+
+### Check results (ADR-057 fixes, 2026-10-07)
+fmt clean; clippy `--all-targets --all-features -D warnings` clean for both crates; `cargo test -p candor-intake-store`: 38 unit + 10 istore + 21 memory + 6 source_lint + 23 staged; `scripts/pg-test.sh`: 40 PG tests (migration 0002 applied as the schema owner; `conf_mailbox_account`, `conf_restore_after_rotation` on PostgreSQL); `fuzz_istore_frame` 121 s, 9,891,687 runs, no crash/OOM/leak/timeout (seeds regenerated, 22); `lint-safefs.sh` OK; candor-log `lint_logging` 5/5; `cargo deny check` exit 0; `cargo vet --locked` succeeded; `cargo check -p candor-intake-web` passes.

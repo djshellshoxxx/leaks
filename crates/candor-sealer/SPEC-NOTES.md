@@ -364,3 +364,6 @@ Security self-review (W1-A): the signal path reuses the audited `seal_source_mes
 | IPC-04 | Store-side (account id hashed); the sealer is unaffected. | — |
 
 Lead request: a dedicated `HealthCheck` code (e.g. `ACCOUNT_WRITE_DROPPED`) in candor-log instead of `QUEUE_BACKLOG` for the dead-letter event; the sealer switches when it exists.
+
+### Check results (ADR-057 fixes, 2026-10-07)
+`cargo test -p candor-sealer --no-fail-fast`: all 25 binaries green (`signal` 12 incl. the four auditor PoCs red→green and the IPC-06 structure test; `istore` 2; `chaff`/`shape` with `signal_share_permille: 0` pinned where offsets are asserted). `tests/handover.rs` mock made tolerant of a late reply (EPIPE under load; the sealer's fail-closed result is what is asserted). clippy/fmt clean; `fuzz_sealer_ipc` sources unchanged in wire format (seeds as before).
