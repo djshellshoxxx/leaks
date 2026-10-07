@@ -155,7 +155,7 @@ if [ -n "$ONLY" ]; then
   [ -n "$(printf '%s' "$ONLY" | tr -d ',')" ] || { echo "config-check: empty --only" >&2; exit 2; }
 fi
 case "$BLOB_ROOT" in /*) ;; *) echo "config-check: --blob-root must be absolute" >&2; exit 2 ;; esac
-case "/$BLOB_ROOT/" in *"/../"*|*"/./"*|*"//"*) echo "config-check: invalid --blob-root" >&2; exit 2 ;; esac
+case "$BLOB_ROOT/" in *"/../"*|*"/./"*|*"//"*) echo "config-check: invalid --blob-root" >&2; exit 2 ;; esac
 case "$BLOB_MIB" in ""|*[!0-9]*) echo "config-check: --blob-mib must be 64..1024" >&2; exit 2 ;; esac
 if [ "$BLOB_MIB" -lt 64 ] || [ "$BLOB_MIB" -gt 1024 ]; then echo "config-check: --blob-mib must be 64..1024" >&2; exit 2; fi
 case "$BLOB_MIN_RATE" in ""|*[!0-9]*) echo "config-check: --blob-min-rate must be 1..100000" >&2; exit 2 ;; esac
