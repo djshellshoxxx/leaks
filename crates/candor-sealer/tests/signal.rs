@@ -680,18 +680,23 @@ async fn stale_dummy_rotation_after_restore_is_dropped() {
     assert_eq!(f.sealer.flush_accounts(), Ok(1));
 }
 
-/// IPC-06 (ADR-057(5)): signal envelopes and signal-shaped chaff are
-/// indistinguishable at rest: identical byte-level structure (object sizes,
-/// slot blocks, disposition), the same offset ranges and the same release
-/// epoch rule.
+/// IPC-06 / IPC-12 (ADR-057(5)): under the production shares (follow-up
+/// share 300, bundle distribution as shipped) the signal-shaped fraction of
+/// chaff has exactly a real signal's shape — SOURCE_MESSAGE, empty bundle,
+/// signal offset, release-epoch rule — and its share matches the configured
+/// target within tolerance; nothing with a signal-only offset or epoch has a
+/// SUBMISSION header or a non-empty bundle.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn signal_and_chaff_envelopes_share_their_structure() {
+async fn signal_shaped_chaff_follows_the_production_shares() {
+    // 250 ‰ (production: 30 ‰) only for statistical power; the shape logic
+    // does not depend on the share.
+    const SHARE: u16 = 250;
+    const EVENTS: usize = 240;
     let f = fixture_custom(
         ChaffConfig {
             enabled: false,
-            followup_share_permille: 1000,
             dummy_rotation_permille: 0,
-            signal_share_permille: 1000,
+            signal_share_permille: SHARE,
             ..ChaffConfig::default()
         },
         Limits::default(),
@@ -711,10 +716,11 @@ async fn signal_and_chaff_envelopes_share_their_structure() {
             }
         },
     );
+    assert_eq!(ChaffConfig::default().followup_share_permille, 300);
     let (s, l) = (sess(1), sess(2));
     submit_and_login(&f, s, l).await;
     let skip = f.sink.envelopes().len();
-    for i in 0..10 {
+    for i in 0..6 {
         let kind = if i % 2 == 0 {
             SignalKind::NoResponse
         } else {
@@ -724,37 +730,83 @@ async fn signal_and_chaff_envelopes_share_their_structure() {
     }
     let real: Vec<_> = f.sink.envelopes().into_iter().skip(skip).collect();
     let skip = f.sink.envelopes().len();
-    for _ in 0..10 {
+    for _ in 0..EVENTS {
         f.sealer.chaff_event(CHANNEL).await.unwrap();
     }
     let chaff: Vec<_> = f.sink.envelopes().into_iter().skip(skip).collect();
-    // Structure tuple of an envelope as it rests in the store.
-    let shape = |e: &StoredEnvelope| {
-        (
-            e.objects
-                .iter()
-                .map(|o| (o.bytes.len(), o.slot_block.len()))
-                .collect::<Vec<_>>(),
-            e.disposition_ct.len(),
-            e.channel_id,
-            e.received_day,
-        )
+    assert_eq!(chaff.len(), EVENTS);
+    let epoch_of = |e: &StoredEnvelope| (TODAY + u32::from(e.release_offset_days) - (TODAY - 2)) / 7;
+    // Exactly a signal's resting shape: SOURCE_MESSAGE main, empty bundle,
+    // identity at its bucket, offset 1..=21, epoch of the release day.
+    let signal_shape = |e: &StoredEnvelope| {
+        e.objects[0].object_type == candor_core::header::ObjectType::SourceMessage
+            && e.objects[1].bytes.len() == real[0].objects[1].bytes.len()
+            && e.objects[0].bytes.len() == real[0].objects[0].bytes.len()
+            && e.objects[2].bytes.len() == real[0].objects[2].bytes.len()
+            && (1..=21).contains(&e.release_offset_days)
+            && e.epoch_id == epoch_of(e)
     };
-    let real_shapes: std::collections::HashSet<_> = real.iter().map(shape).collect();
-    let chaff_shapes: std::collections::HashSet<_> = chaff.iter().map(shape).collect();
-    // Bundle sizes come from the chaff distribution; compare the fixed parts
-    // (main and identity sizes, slot blocks, disposition) exactly.
-    let fixed =
-        |t: &(Vec<(usize, usize)>, usize, [u8; 16], u32)| (t.0[0], t.0[1].1, t.0[2], t.1, t.2, t.3);
-    let rf: std::collections::HashSet<_> = real_shapes.iter().map(fixed).collect();
-    let cf: std::collections::HashSet<_> = chaff_shapes.iter().map(fixed).collect();
-    assert_eq!(rf, cf, "fixed structure differs");
-    for e in real.iter().chain(chaff.iter()) {
-        assert!((1..=21).contains(&e.release_offset_days));
-        let expected_epoch = (TODAY + u32::from(e.release_offset_days) - (TODAY - 2)) / 7;
-        assert_eq!(e.epoch_id, expected_epoch, "release epoch rule");
+    assert!(real.iter().all(signal_shape), "every real signal has the shape");
+    // Anything a seized store could read as "signal-only" (offset > 3 or an
+    // epoch ahead of today's) must have the full signal shape.
+    let today_epoch = (TODAY - (TODAY - 2)) / 7;
+    for e in &chaff {
+        if e.release_offset_days > 3 || e.epoch_id != today_epoch {
+            assert!(signal_shape(e), "signal-only marker on a non-signal shape");
+        }
     }
-    // Both populations use the mailbox-closed range beyond 3 days.
-    assert!(real.iter().any(|e| e.release_offset_days > 3));
-    assert!(chaff.iter().any(|e| e.release_offset_days > 3));
+    // The share of chaff that is truly signal-shaped matches the target:
+    // SHARE ‰, of which half carry offsets > 3 (mailbox-closed, 18/19 of
+    // them beyond 3) and half offsets 1..=3 (C4). Count the unambiguous
+    // mailbox-closed half and compare with SHARE/2 × 18/19 ± 5 σ.
+    let mc = chaff.iter().filter(|e| e.release_offset_days > 3).count() as f64;
+    let p = f64::from(SHARE) / 1000.0 * 0.5 * (18.0 / 19.0);
+    let n = EVENTS as f64;
+    let sigma = (n * p * (1.0 - p)).sqrt();
+    assert!(
+        (mc - n * p).abs() <= 5.0 * sigma,
+        "mailbox-closed-shaped chaff {mc} vs expected {:.1} ± {:.1}",
+        n * p,
+        5.0 * sigma
+    );
+    // And the C4-shaped half exists too: signal-shaped chaff with offset
+    // 1..=3 is at least as frequent as the delayed follow-ups would make it.
+    let short_signal = chaff
+        .iter()
+        .filter(|e| (1..=3).contains(&e.release_offset_days) && signal_shape(e))
+        .count();
+    assert!(short_signal > 0);
+}
+
+/// AUD-RM2-IPC-14: the per-source state table is bounded: entries exist only
+/// while an operation runs or a failed close keeps its state; a reply
+/// deletion per account leaves nothing behind.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_state_table_does_not_grow() {
+    let f = fixture_epochs();
+    assert_eq!(f.sealer.source_states(), 0);
+    let mut sessions = Vec::new();
+    for i in 0..3u8 {
+        let (s, l) = (sess(10 + i), sess(20 + i));
+        submit_and_login(&f, s, l).await;
+        sessions.push(l);
+        ok(
+            &f.sealer,
+            Request::DeleteReplies {
+                sess: l,
+                replies: vec![[i; 16]],
+            },
+        )
+        .await;
+        assert_eq!(f.sealer.source_states(), 0, "released after the operation");
+    }
+    // A failed close keeps exactly one entry (its signal offset), which a
+    // successful retry releases.
+    f.sink.fail_delete.store(true, Ordering::SeqCst);
+    let r = f.sealer.handle(Request::CloseMailbox { sess: sessions[0] }).await;
+    assert_eq!(r, Response::error(ErrorCode::Internal));
+    assert_eq!(f.sealer.source_states(), 1);
+    f.sink.fail_delete.store(false, Ordering::SeqCst);
+    ok(&f.sealer, Request::CloseMailbox { sess: sessions[0] }).await;
+    assert_eq!(f.sealer.source_states(), 0);
 }

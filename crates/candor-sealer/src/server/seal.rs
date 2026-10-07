@@ -803,6 +803,11 @@ fn chaff_object(
 /// bundle drawn from the configured distribution), the same functions, all 16
 /// slots dummy, zero plaintext, CKs from the RAM chaff seed, chaff-kind
 /// disposition marker.
+/// The empty ATTACHMENT_BUNDLE bucket (04 §13.6 b_0): every real signal and
+/// every attachment-less submission carries a bundle of this size.
+pub const EMPTY_BUNDLE_LEN: u64 = 262_144;
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_chaff(
     ctx: &SealCtx<'_>,
     channel_id: [u8; 16],
@@ -811,6 +816,7 @@ pub(crate) fn build_chaff(
     counter: &mut u64,
     followup: bool,
     buckets: &ChaffBuckets,
+    forced_bundle_len: Option<u64>,
 ) -> Result<EnvelopeGroup, Error> {
     let mut next_ck = || -> Result<ContentKey, Error> {
         let ck = chaff_ck(seed, *counter)?;
@@ -823,7 +829,10 @@ pub(crate) fn build_chaff(
     } else {
         ObjectType::Submission
     };
-    let bundle_len = super::rand::weighted(&buckets.bundle)?;
+    let bundle_len = match forced_bundle_len {
+        Some(n) => n,
+        None => super::rand::weighted(&buckets.bundle)?,
+    };
     let ck = next_ck()?;
     let main = chaff_object(
         ctx,

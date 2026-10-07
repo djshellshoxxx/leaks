@@ -290,6 +290,11 @@ struct AccountQueue {
     pending: Vec<AccountUpsert>,
     /// Store refusals per queued new tag (bounded retries, ADR-057(4)).
     refusals: HashMap<[u8; 32], u8>,
+    /// Scheduled flushes to skip after an unavailable store (bounded
+    /// backoff: 1, 2, 4, up to [`MAX_FLUSH_BACKOFF`]; AUD-RM2-IPC-10).
+    skip_flushes: u8,
+    /// The last backoff applied (doubles until the cap; reset on success).
+    backoff: u8,
     /// Old lookup tags replaced by the batch being written right now.
     inflight_replaced: Vec<[u8; 32]>,
     /// Current lookup tags of dummy accounts (synthetic rotations pick one).
@@ -418,6 +423,11 @@ struct SourceState {
 const MAX_RECENTLY_DELETED: usize = 4096;
 /// Store refusals tolerated per account write before it is dead-lettered.
 pub const MAX_UPSERT_REFUSALS: u8 = 3;
+/// Longest flush backoff (in scheduled flushes) while the store is unavailable.
+pub const MAX_FLUSH_BACKOFF: u8 = 4;
+/// Per-source state entries kept at most (AUD-RM2-IPC-14); entries are
+/// removed as soon as they are idle and default, so this is a hard cap.
+pub const MAX_SOURCE_STATES: usize = 16_384;
 
 /// Where the sealer reports a dead-lettered account write (ADR-057(4)); the
 /// integrator wires it to `candor-log` (`sys.health`, service `sealer`,
@@ -425,6 +435,12 @@ pub const MAX_UPSERT_REFUSALS: u8 = 3;
 pub trait HealthSink: Send + Sync {
     /// An account write was dropped after store refusals.
     fn account_write_dropped(&self);
+    /// The store was unavailable for a flush: `queued` writes stay queued and
+    /// are retried with backoff (AUD-RM2-IPC-10). Raised at every failed
+    /// flush while the backlog persists.
+    fn account_backlog(&self, queued: usize) {
+        let _ = queued;
+    }
 }
 
 /// [`HealthSink`] over a `candor-log` audit log.
@@ -449,6 +465,20 @@ where
     C: candor_log::chain::AuditClock + Send,
 {
     fn account_write_dropped(&self) {
+        self.degraded();
+    }
+
+    fn account_backlog(&self, _queued: usize) {
+        self.degraded();
+    }
+}
+
+impl<S, C> AuditHealthSink<S, C>
+where
+    S: candor_log::chain::CheckpointSigner + Send,
+    C: candor_log::chain::AuditClock + Send,
+{
+    fn degraded(&self) {
         use candor_log::codes::{HealthCheck, HealthStatus, Service};
         let mut log = lock(&self.0);
         let _ = log.emit(
@@ -1680,12 +1710,39 @@ impl Sealer {
     }
 
     /// The per-source lock (ADR-057(3)), keyed by the report's mailbox id.
-    fn source_lock(&self, key: [u8; 32]) -> Arc<tokio::sync::Mutex<SourceState>> {
+    /// The table is bounded (AUD-RM2-IPC-14): entries are released by
+    /// [`Self::release_source`] as soon as they are idle and default, and
+    /// above [`MAX_SOURCE_STATES`] live entries a new source is refused.
+    fn source_lock(&self, key: [u8; 32]) -> Option<Arc<tokio::sync::Mutex<SourceState>>> {
         let mut m = lock(&self.st.sources);
-        Arc::clone(
-            m.entry(key)
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(SourceState::default()))),
-        )
+        if let Some(e) = m.get(&key) {
+            return Some(Arc::clone(e));
+        }
+        if m.len() >= MAX_SOURCE_STATES {
+            return None;
+        }
+        let e = Arc::new(tokio::sync::Mutex::new(SourceState::default()));
+        m.insert(key, Arc::clone(&e));
+        Some(e)
+    }
+
+    /// Drop the table entry when nobody else holds it and nothing is
+    /// recorded in it (a failed close keeps its `closing`/`delete_sent`).
+    fn release_source(&self, key: [u8; 32], entry: Arc<tokio::sync::Mutex<SourceState>>) {
+        let mut m = lock(&self.st.sources);
+        let idle = Arc::strong_count(&entry) == 2
+            && entry
+                .try_lock()
+                .is_ok_and(|s| s.closing.is_none() && !s.delete_sent);
+        if idle {
+            m.remove(&key);
+        }
+    }
+
+    /// Live per-source state entries (tests, health).
+    #[must_use]
+    pub fn source_states(&self) -> usize {
+        lock(&self.st.sources).len()
     }
 
     /// Flush this source's queued account writes synchronously, under the
@@ -1710,8 +1767,14 @@ impl Sealer {
         let mut tags = vec![tag];
         let mut it = mine.into_iter();
         while let Some(a) = it.next() {
-            match self.st.sink.upsert_account(a.clone()) {
+            let r = self.st.sink.upsert_account(a.clone());
+            match r {
                 Ok(()) | Err(UpsertError::Stale) | Err(UpsertError::Refused) => {
+                    if r.is_err() {
+                        // Definitive refusal: counted and reported, never
+                        // silently discarded (AUD-RM2-IPC-11).
+                        self.dead_letter(&a);
+                    }
                     if let Some(old) = a.replaces
                         && !tags.iter().any(|t| ct_eq(t, &old))
                     {
@@ -1722,9 +1785,15 @@ impl Sealer {
                     }
                 }
                 Err(UpsertError::Unavailable) => {
+                    // Store unavailable: the write stays queued and the
+                    // operation fails as "could not confirm" (retryable);
+                    // nothing is deleted and the source is not told so.
                     let mut rest = vec![a];
                     rest.extend(it);
                     requeue(&self.st, rest);
+                    if let Some(h) = self.health() {
+                        h.account_backlog(lock(&self.st.accounts).pending.len());
+                    }
                     return Err(ErrorCode::Internal);
                 }
             }
@@ -1753,17 +1822,23 @@ impl Sealer {
             return err(ErrorCode::BadState);
         };
         drop(g);
-        let source = self.source_lock(key);
-        let _source = source.lock().await;
+        let Some(source) = self.source_lock(key) else {
+            return err(ErrorCode::Busy);
+        };
+        let guard = source.lock().await;
         let st = self.st.clone();
         let me = self.clone();
         let r = blocking(move || {
-            me.flush_source(tag)?;
+            // The store holds the account under the newest flushed tag.
+            let tags = me.flush_source(tag)?;
+            let current = tags.last().copied().unwrap_or(tag);
             st.sink
-                .delete_replies(tag, &replies)
+                .delete_replies(current, &replies)
                 .map_err(|_| ErrorCode::Internal)
         })
         .await;
+        drop(guard);
+        self.release_source(key, source);
         match r {
             Ok(Ok(count)) => Response::Deleted { count },
             Ok(Err(code)) => err(code),
@@ -1810,7 +1885,23 @@ impl Sealer {
                 release_offset_days: offset,
             };
         }
-        let source = self.source_lock(key);
+        let Some(source) = self.source_lock(key) else {
+            return err(ErrorCode::Busy);
+        };
+        let r = self.close_mailbox_locked(sess, tag, key, channel_id, &source).await;
+        self.release_source(key, source);
+        r
+    }
+
+    /// [`Self::close_mailbox`] under the source entry (released by the caller).
+    async fn close_mailbox_locked(
+        &self,
+        sess: SessionHandle,
+        tag: [u8; 32],
+        key: [u8; 32],
+        channel_id: [u8; 16],
+        source: &Arc<tokio::sync::Mutex<SourceState>>,
+    ) -> Response {
         let mut state = source.lock().await;
         // A concurrent close of this source completed while we waited.
         if let Some(offset) = lock(&self.st.recently_deleted)
@@ -2088,13 +2179,18 @@ impl Sealer {
         let disposition = KemPublicKey::from_bytes(snap.suite, &snap.disposition_pk)
             .map_err(|_| ErrorCode::Unavailable)?;
         let chaff = &self.st.cfg.chaff;
-        let followup = rand::bernoulli_permille(chaff.followup_share_permille)
+        let mut followup = rand::bernoulli_permille(chaff.followup_share_permille)
             .map_err(|_| ErrorCode::Internal)?;
         // ADR-057(5): a share of chaff is shaped like a signal envelope
         // (mailbox-closed or C4 offset, MEK epoch of the release day), the
         // rest like a submission or follow-up (delayed share, today's epoch).
         let signal_shaped = rand::bernoulli_permille(chaff.signal_share_permille)
             .map_err(|_| ErrorCode::Internal)?;
+        // A real signal is a SOURCE_MESSAGE with an empty bundle (IPC-12).
+        if signal_shaped {
+            followup = true;
+        }
+        let forced_bundle = signal_shaped.then_some(seal::EMPTY_BUNDLE_LEN);
         let delay = if signal_shaped {
             if rand::bernoulli_permille(500).map_err(|_| ErrorCode::Internal)? {
                 rand::mailbox_closed_offset().map_err(|_| ErrorCode::Internal)?
@@ -2142,6 +2238,7 @@ impl Sealer {
                     &mut counter,
                     followup,
                     &st.cfg.chaff.buckets,
+                    forced_bundle,
                 )
                 .map_err(|_| ErrorCode::Internal)?
             };
@@ -2177,6 +2274,12 @@ impl Sealer {
         let _serial = lock(&self.st.flush_lock);
         let batch = {
             let mut q = lock(&self.st.accounts);
+            if q.skip_flushes > 0 {
+                // Backing off after an unavailable store (IPC-10): nothing
+                // is written this round, nothing is dropped.
+                q.skip_flushes = q.skip_flushes.saturating_sub(1);
+                return Ok(0);
+            }
             let b = core::mem::take(&mut q.pending);
             q.inflight_replaced = b.iter().filter_map(|a| a.replaces).collect();
             b
@@ -2212,10 +2315,21 @@ impl Sealer {
                     written = written.saturating_add(1);
                 }
                 Err(UpsertError::Unavailable) => {
+                    // Transient: keep everything queued (order kept), back
+                    // off, and raise the backlog health event.
                     let mut rest = vec![a];
                     rest.extend(it);
                     rest.extend(later);
                     requeue(&self.st, rest);
+                    let queued = {
+                        let mut q = lock(&self.st.accounts);
+                        q.backoff = q.backoff.saturating_mul(2).clamp(1, MAX_FLUSH_BACKOFF);
+                        q.skip_flushes = q.backoff;
+                        q.pending.len()
+                    };
+                    if let Some(h) = self.health() {
+                        h.account_backlog(queued);
+                    }
                     return Err(sink::SinkError);
                 }
                 Err(UpsertError::Stale) => self.dead_letter(&a),
@@ -2234,10 +2348,20 @@ impl Sealer {
                 }
             }
         }
-        if !later.is_empty() {
-            lock(&self.st.accounts).pending.extend(later);
+        {
+            let mut q = lock(&self.st.accounts);
+            q.pending.extend(later);
+            q.backoff = 0;
         }
         Ok(written)
+    }
+
+    fn health(&self) -> Option<Arc<dyn HealthSink>> {
+        self.st
+            .health
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Drop a refused account write: count it, report it, and forget a dummy
@@ -2253,13 +2377,7 @@ impl Sealer {
         self.st
             .dead_letters
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let sink = self
-            .st
-            .health
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        if let Some(h) = sink {
+        if let Some(h) = self.health() {
             h.account_write_dropped();
         }
     }

@@ -65,6 +65,10 @@ export CARGO_INCREMENTAL=0
 
 CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}
 export CARGO_HOME
+# AUD-RM2-DEP-38: with the rust-src component installed rustc records the local toolchain paths, so the
+# rustup home and the sysroot are remapped like the checkout, target dir and cargo home.
+RUSTUP_HOME_DIR=${RUSTUP_HOME:-$HOME/.rustup}
+SYSROOT_DIR=$(rustc --print sysroot)
 
 HOST=$(rustc -vV | sed -n 's/^host: //p')
 [ -n "$HOST" ] || die "cannot determine host target triple"
@@ -139,7 +143,7 @@ build() {
     tgt="$WORK/target-$n"
     log "build $n: src=$src target=$tgt SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH"
     copy_tree "$src"
-    RUSTFLAGS="$SHARED_FLAGS--remap-path-prefix=$src=/build/candor --remap-path-prefix=$tgt=/build/target --remap-path-prefix=$CARGO_HOME=/cargo" \
+    RUSTFLAGS="$SHARED_FLAGS--remap-path-prefix=$src=/build/candor --remap-path-prefix=$tgt=/build/target --remap-path-prefix=$CARGO_HOME=/cargo --remap-path-prefix=$RUSTUP_HOME_DIR=/rustup --remap-path-prefix=$SYSROOT_DIR=/rustc-sysroot" \
         CARGO_TARGET_DIR="$tgt" \
         "$CARGO" build --manifest-path "$src/Cargo.toml" --target "$HOST" \
             --release --locked --offline --workspace --all-features

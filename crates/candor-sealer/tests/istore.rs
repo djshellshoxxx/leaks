@@ -476,3 +476,174 @@ fn reply_ct_for(
         obj.object_hash,
     )
 }
+
+// ---------------------------------------------------------------------------
+// AUD-RM2-IPC-10/11 (round 2): a store outage never loses an account write.
+
+/// Clear restore-pending on the store the way RL-12 does (empty verified push).
+async fn clear_restore(store: &MemoryStore) {
+    let core = candor_core::sig::SigningKey::from_seed(&[0x77; 32]);
+    let head = candor_intake_store::SignedDeletionHead::sign(&TENANT_ID, None, Day(TODAY), 1, &core);
+    store
+        .apply_pushed_deletion_list(
+            &[],
+            &head,
+            &core.verifying_key_bytes(),
+            &candor_core::sig::SigningKey::from_seed(&[0x31; 32]).verifying_key_bytes(),
+            &candor_intake_store::CoreReplyHasher,
+            Day(TODAY),
+        )
+        .await
+        .unwrap();
+}
+
+struct Counting {
+    dropped: std::sync::atomic::AtomicU64,
+    backlog: std::sync::atomic::AtomicU64,
+}
+impl candor_sealer::server::HealthSink for Counting {
+    fn account_write_dropped(&self) {
+        self.dropped.fetch_add(1, Ordering::SeqCst);
+    }
+    fn account_backlog(&self, _queued: usize) {
+        self.backlog.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// IPC-10 (auditor's PoC, red → green): the store answers `UNAVAILABLE`
+/// (restore-pending) for three flushes; the create stays queued with
+/// backoff and a backlog health event, is never dead-lettered, and lands as
+/// soon as the store serves again: the passphrase logs in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unavailable_store_keeps_account_writes_queued() {
+    let env = Env::new().await;
+    let f = fixture_for(&env);
+    let health = Arc::new(Counting {
+        dropped: std::sync::atomic::AtomicU64::new(0),
+        backlog: std::sync::atomic::AtomicU64::new(0),
+    });
+    f.sealer.set_health_sink(health.clone());
+    let s = sess(1);
+    let phrase = confirmed_phrase(&f, s).await;
+    let Response::Sealed { .. } = ok(
+        &f.sealer,
+        Request::SealFinish {
+            sess: s,
+            delayed_delivery: false,
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    assert_eq!(f.sealer.queued_accounts(), 1);
+    env.store().mark_restore_pending().await.unwrap();
+    // Three scheduled flushes during the outage: the first fails and starts
+    // the backoff, the next is skipped, then another attempt fails.
+    assert_eq!(f.sealer.flush_accounts(), Err(SinkError));
+    assert_eq!(f.sealer.flush_accounts(), Ok(0));
+    assert_eq!(f.sealer.flush_accounts(), Err(SinkError));
+    assert_eq!(f.sealer.queued_accounts(), 1, "still queued");
+    assert_eq!(f.sealer.dead_letters(), 0);
+    assert_eq!(health.dropped.load(Ordering::SeqCst), 0);
+    assert!(health.backlog.load(Ordering::SeqCst) >= 2, "backlog reported");
+    clear_restore(env.store()).await;
+    // Backoff of two skipped flushes after the second failure, then it lands.
+    let mut written = 0;
+    for _ in 0..4 {
+        written += f.sealer.flush_accounts().unwrap();
+    }
+    assert_eq!(written, 1);
+    let Response::Locator { lookup_tag } = ok(
+        &f.sealer,
+        Request::LoginDerive {
+            sess: sess(2),
+            passphrase: SecretBytes::from_slice(phrase.as_bytes()),
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    assert!(
+        env.store()
+            .lookup_account(&LookupTag(lookup_tag))
+            .await
+            .unwrap()
+            .is_some(),
+        "the account exists after the outage"
+    );
+}
+
+/// IPC-11 (auditor's PoC, red → green): `DELETE_REPLIES` while the store is
+/// restore-pending fails as "could not confirm" and leaves the queued create
+/// in the queue (no silent drop, no dead letter); once the store serves, the
+/// create is written and the passphrase logs in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_during_outage_keeps_the_queued_create() {
+    let env = Env::new().await;
+    let f = fixture_for(&env);
+    let health = Arc::new(Counting {
+        dropped: std::sync::atomic::AtomicU64::new(0),
+        backlog: std::sync::atomic::AtomicU64::new(0),
+    });
+    f.sealer.set_health_sink(health.clone());
+    let s = sess(1);
+    let phrase = confirmed_phrase(&f, s).await;
+    ok(
+        &f.sealer,
+        Request::SealFinish {
+            sess: s,
+            delayed_delivery: false,
+        },
+    )
+    .await;
+    env.store().mark_restore_pending().await.unwrap();
+    // The session is AUTHENTICATED after SEAL_FINISH: a reply deletion and a
+    // close both fail without confirming anything.
+    let r = f
+        .sealer
+        .handle(Request::DeleteReplies {
+            sess: s,
+            replies: vec![],
+        })
+        .await;
+    assert_eq!(r, Response::error(ErrorCode::Internal));
+    let r = f.sealer.handle(Request::CloseMailbox { sess: s }).await;
+    assert_eq!(r, Response::error(ErrorCode::Internal));
+    assert_eq!(f.sealer.queued_accounts(), 1, "create still queued");
+    assert_eq!(f.sealer.dead_letters(), 0);
+    assert_eq!(health.dropped.load(Ordering::SeqCst), 0);
+    assert!(health.backlog.load(Ordering::SeqCst) >= 1);
+    assert_eq!(env.store().pending_count().await.unwrap(), 1, "no signal sealed");
+    clear_restore(env.store()).await;
+    assert_eq!(f.sealer.flush_accounts(), Ok(1));
+    let Response::Locator { lookup_tag } = ok(
+        &f.sealer,
+        Request::LoginDerive {
+            sess: sess(2),
+            passphrase: SecretBytes::from_slice(phrase.as_bytes()),
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    assert!(
+        env.store()
+            .lookup_account(&LookupTag(lookup_tag))
+            .await
+            .unwrap()
+            .is_some()
+    );
+    // The close now goes through: flush (nothing left), signal, deletion.
+    let r = ok(&f.sealer, Request::CloseMailbox { sess: s }).await;
+    assert!(matches!(r, Response::Sealed { .. }));
+    assert!(
+        env.store()
+            .lookup_account(&LookupTag(lookup_tag))
+            .await
+            .unwrap()
+            .is_none()
+    );
+}

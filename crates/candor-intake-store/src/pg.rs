@@ -52,10 +52,7 @@ use crate::types::{
 use crate::validate::{self, SnapshotDecision, day_i32, has_duplicates};
 
 /// Embedded forward-only migrations `(version, sql)`.
-pub const MIGRATIONS: &[(i32, &str)] = &[
-    (1, include_str!("../migrations/0001_intake_schema.sql")),
-    (2, include_str!("../migrations/0002_mailbox_account.sql")),
-];
+pub const MIGRATIONS: &[(i32, &str)] = &[(1, include_str!("../migrations/0001_intake_schema.sql"))];
 
 /// Expected `intake_meta.schema_hash` of this build (BE-050):
 /// `SHA-256("candor/v1/intake/schema" ‖ Σ (u32be version ‖ SHA-256(sql)))`.
@@ -186,7 +183,7 @@ const SQL_ROLE_CHECK: &str = "SELECT r.rolsuper, r.rolbypassrls, \
      FROM pg_catalog.pg_roles r WHERE r.rolname = current_user";
 const EXPECTED_GUARD_TRIGGERS: i64 = 4;
 /// One `p_tenant` policy (permissive, all commands, PUBLIC) per data table
-/// (eight of migration 0001 plus `mailbox_account`).
+/// (nine, `mailbox_account` included).
 const EXPECTED_POLICIES: i64 = 9;
 /// Session hardening check, on every new connection (AUD-RM2-STO-08).
 /// PostgreSQL lets an ordinary role `ALTER ROLE` its own defaults, which cannot

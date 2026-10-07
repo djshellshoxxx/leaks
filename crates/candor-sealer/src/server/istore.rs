@@ -143,6 +143,31 @@ impl IstoreSink {
     }
 }
 
+/// Classify the store's answer to `ACCOUNT_UPSERT` (AUD-RM2-IPC-10): transient
+/// conditions with nothing applied (`UNAVAILABLE`: restore-pending, backend,
+/// deadline; `BUSY`; `INTERNAL`; transport failure; an undecodable reply) are
+/// `Unavailable` and stay queued; a definitive refusal (`INVALID`,
+/// `FORBIDDEN`, `BAD_FRAME`) is `Refused`; `NOT_FOUND` for a replacement is
+/// `Stale` (the old account is gone), for a create it cannot occur and is
+/// treated as a refusal.
+pub fn classify_upsert(
+    r: Result<ip::Response, ClientError>,
+    replacement: bool,
+) -> Result<(), UpsertError> {
+    use ip::ErrorCode as C;
+    match r {
+        Ok(ip::Response::Empty) => Ok(()),
+        Ok(_) | Err(ClientError::Transport) => Err(UpsertError::Unavailable),
+        Err(ClientError::Store(C::Unavailable | C::Busy | C::Internal)) => {
+            Err(UpsertError::Unavailable)
+        }
+        Err(ClientError::Store(C::NotFound)) if replacement => Err(UpsertError::Stale),
+        Err(ClientError::Store(C::NotFound | C::Invalid | C::Forbidden | C::BadFrame)) => {
+            Err(UpsertError::Refused)
+        }
+    }
+}
+
 fn inline(o: &super::sink::EnvelopeObject) -> Result<ip::InlineObject, SinkError> {
     match &o.blob {
         Blob::Inline(b) => Ok(ip::InlineObject {
@@ -211,16 +236,11 @@ impl EnvelopeSink for IstoreSink {
             rewrapped: op.rewrapped_replies.clone(),
         }));
         ip::encode_request(0, &req).map_err(|_| UpsertError::Refused)?;
-        // Transport failures are retried once here and again at the next
-        // flush (`Unavailable`); a store refusal is final for this write.
+        // Transient answers are retried once here and again at the next
+        // flush (`Unavailable`); only a definitive refusal is final.
         let mut conn = self.lock();
-        let attempt = |conn: &mut Conn| match conn.call(&req) {
-            Ok(ip::Response::Empty) => Ok(()),
-            Ok(_) => Err(UpsertError::Unavailable),
-            Err(ClientError::Transport) => Err(UpsertError::Unavailable),
-            Err(ClientError::Store(ip::ErrorCode::NotFound)) => Err(UpsertError::Stale),
-            Err(ClientError::Store(_)) => Err(UpsertError::Refused),
-        };
+        let replacement = op.replaces.is_some();
+        let attempt = |conn: &mut Conn| classify_upsert(conn.call(&req), replacement);
         match attempt(&mut conn) {
             Err(UpsertError::Unavailable) => {
                 conn.close();
@@ -257,5 +277,46 @@ impl EnvelopeSink for IstoreSink {
             Err(e) => Err(Attempt::from(e)),
             Ok(_) => Err(Attempt::Transport),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// AUD-RM2-IPC-10: every store code is pinned to its class.
+    #[test]
+    fn upsert_classification_table() {
+        use ip::ErrorCode as C;
+        let cases: Vec<(Result<ip::Response, ClientError>, bool, Result<(), UpsertError>)> = vec![
+            (Ok(ip::Response::Empty), false, Ok(())),
+            (Ok(ip::Response::Deleted(1)), false, Err(UpsertError::Unavailable)),
+            (Err(ClientError::Transport), false, Err(UpsertError::Unavailable)),
+            (Err(ClientError::Store(C::Unavailable)), false, Err(UpsertError::Unavailable)),
+            (Err(ClientError::Store(C::Busy)), true, Err(UpsertError::Unavailable)),
+            (Err(ClientError::Store(C::Internal)), true, Err(UpsertError::Unavailable)),
+            (Err(ClientError::Store(C::NotFound)), true, Err(UpsertError::Stale)),
+            (Err(ClientError::Store(C::NotFound)), false, Err(UpsertError::Refused)),
+            (Err(ClientError::Store(C::Invalid)), false, Err(UpsertError::Refused)),
+            (Err(ClientError::Store(C::Forbidden)), true, Err(UpsertError::Refused)),
+            (Err(ClientError::Store(C::BadFrame)), false, Err(UpsertError::Refused)),
+        ];
+        for (r, replacement, want) in cases {
+            assert_eq!(classify_upsert(r, replacement), want);
+        }
+        // Exhaustive over the code enum: every code is one of the two classes.
+        for c in [
+            C::BadFrame,
+            C::Forbidden,
+            C::NotFound,
+            C::Invalid,
+            C::Unavailable,
+            C::Busy,
+            C::Internal,
+        ] {
+            let got = classify_upsert(Err(ClientError::Store(c)), true);
+            let transient = matches!(c, C::Unavailable | C::Busy | C::Internal);
+            assert_eq!(got == Err(UpsertError::Unavailable), transient, "{c:?}");
+        }
     }
 }

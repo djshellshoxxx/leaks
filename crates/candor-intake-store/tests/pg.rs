@@ -426,12 +426,26 @@ async fn pg_roles_and_grants() {
         "{settings:?}"
     );
     // Column-level: the app may not change identity columns of intake_meta.
+    // AUD-RM2-IPC-13: a schema-hash "correction" is refused for the app role
+    // (column grant) and for every role by the trigger (no upgrade path in
+    // the pre-release schema; RM-5 item).
     for q in [
         "UPDATE candor.intake_meta SET kdf_salt = kdf_salt",
         "UPDATE candor.intake_meta SET schema_hash = schema_hash",
+        "UPDATE candor.intake_meta SET schema_hash = decode('0000000000000000000000000000000000000000000000000000000000000000', 'hex')",
     ] {
         assert!(!try_as(&b, &db, "candor_istore", q).await, "{q}");
     }
+    assert!(
+        !try_as(
+            &b,
+            &db,
+            "candor_intake_migrator",
+            "UPDATE candor.intake_meta SET schema_hash = decode('0000000000000000000000000000000000000000000000000000000000000000', 'hex')"
+        )
+        .await,
+        "migrator cannot correct the schema hash either"
+    );
 }
 
 /// The store refuses a superuser, a member of an owning role, and a schema whose

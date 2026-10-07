@@ -186,6 +186,17 @@ CREATE TABLE candor.source_account (
   activity_month date     NOT NULL CHECK (EXTRACT(DAY FROM activity_month) = 1)
 );
 
+-- mailbox_account (09 §5.1, ADR-057(2); AUD-RM2-IPC-09) — SS. Maps each
+-- per-report mailbox to its owning account so that account and mailbox
+-- deletion is complete, restorable and idempotent, and RL-05 can route a
+-- pushed reply. No time-typed column, no read marker, no history (ADR-010,
+-- ADR-039). Deleted with its account (cascade) or its mailbox (SW-15).
+CREATE TABLE candor.mailbox_account (
+  mailbox_id bytea PRIMARY KEY CHECK (octet_length(mailbox_id) = 32),
+  account_id uuid  NOT NULL REFERENCES candor.source_account (account_id) ON DELETE CASCADE
+);
+CREATE INDEX mailbox_account_account ON candor.mailbox_account (account_id);
+
 -- envelope — CT/SS. One fixed-shape group per row (ADR-052(1): main object,
 -- ATTACHMENT_BUNDLE, IDENTITY). No account reference (ADR-052(2)); real and
 -- chaff rows are identical (ADR-047(3)); no kind, no tier.
@@ -376,6 +387,7 @@ ALTER TABLE candor.deletion_list      SET (autovacuum_enabled = false, toast.aut
 ALTER TABLE candor.counter_month      SET (autovacuum_enabled = false, toast.autovacuum_enabled = false);
 ALTER TABLE candor.directory_snapshot SET (autovacuum_enabled = false, toast.autovacuum_enabled = false);
 ALTER TABLE candor.intake_meta        SET (autovacuum_enabled = false, toast.autovacuum_enabled = false);
+ALTER TABLE candor.mailbox_account    SET (autovacuum_enabled = false, toast.autovacuum_enabled = false);
 
 -- Row-level security (defence in depth; 09 says one DB per tenant needs none, R7
 -- SI-E-03 asks for it): every transaction must SET LOCAL candor.tenant_id to the
@@ -392,6 +404,10 @@ CREATE POLICY p_tenant ON candor.intake_meta
 ALTER TABLE candor.source_account ENABLE ROW LEVEL SECURITY;
 ALTER TABLE candor.source_account FORCE ROW LEVEL SECURITY;
 CREATE POLICY p_tenant ON candor.source_account
+  USING (EXISTS (SELECT 1 FROM candor.intake_meta)) WITH CHECK (EXISTS (SELECT 1 FROM candor.intake_meta));
+ALTER TABLE candor.mailbox_account ENABLE ROW LEVEL SECURITY;
+ALTER TABLE candor.mailbox_account FORCE ROW LEVEL SECURITY;
+CREATE POLICY p_tenant ON candor.mailbox_account
   USING (EXISTS (SELECT 1 FROM candor.intake_meta)) WITH CHECK (EXISTS (SELECT 1 FROM candor.intake_meta));
 ALTER TABLE candor.envelope ENABLE ROW LEVEL SECURITY;
 ALTER TABLE candor.envelope FORCE ROW LEVEL SECURITY;
@@ -430,7 +446,7 @@ GRANT UPDATE (relay_req_counter, last_batch_no, directory_version, kd_tree_size_
 GRANT EXECUTE ON FUNCTION candor.deletion_chain_hash(candor.deletion_list),
   candor.deletion_head_in_chain(bigint, bytea) TO candor_istore;
 GRANT SELECT, INSERT, UPDATE, DELETE ON candor.source_account, candor.envelope, candor.envelope_part,
-  candor.reply, candor.directory_snapshot, candor.counter_month TO candor_istore;
+  candor.reply, candor.directory_snapshot, candor.counter_month, candor.mailbox_account TO candor_istore;
 -- deletion_list: append and unchanged rewrite only; no DELETE (AUD-RM2-STO-03).
 GRANT SELECT, INSERT ON candor.deletion_list TO candor_istore;
 GRANT UPDATE (relayed) ON candor.deletion_list TO candor_istore;
@@ -439,4 +455,5 @@ GRANT SELECT ON candor.intake_meta TO candor_intake_maint;
 GRANT SELECT, DELETE ON candor.deletion_list TO candor_intake_maint;
 GRANT UPDATE (relayed) ON candor.deletion_list TO candor_intake_maint;
 -- Backup role (RL-10 snapshot job): read-only on exactly the snapshot tables.
-GRANT SELECT ON candor.intake_meta, candor.source_account, candor.deletion_list TO candor_intake_backup;
+GRANT SELECT ON candor.intake_meta, candor.source_account, candor.deletion_list, candor.mailbox_account
+  TO candor_intake_backup;
