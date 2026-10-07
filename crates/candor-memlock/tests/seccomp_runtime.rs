@@ -267,12 +267,43 @@ fn runtime_with_signal_feature_starts_under_each_daemon_allow_set() {
 
 #[test]
 fn filter_is_effective_without_socketpair() {
+    // tokio initialises its signal driver globals once per process (the socketpair is made
+    // on the first runtime build only), so the negative control cannot build a second
+    // runtime; it proves the filter bites by calling socketpair directly under the sealer
+    // set minus socketpair, which must fail with EPERM.
     let mut set = allow_set("scf");
     assert!(set.remove("socketpair"));
-    let r = runtime_under(program(&set));
-    assert!(
-        r.is_err(),
-        "runtime built without socketpair: the filter was not applied"
+    let prog = program(&set);
+    let r = std::thread::spawn(move || {
+        seccompiler::apply_filter(&prog).expect("apply seccomp filter");
+        rustix::net::socketpair(
+            rustix::net::AddressFamily::UNIX,
+            rustix::net::SocketType::STREAM,
+            rustix::net::SocketFlags::CLOEXEC,
+            None,
+        )
+        .map(|_| ())
+    })
+    .join()
+    .expect("thread");
+    assert_eq!(
+        r,
+        Err(rustix::io::Errno::PERM),
+        "socketpair must be refused by the filter"
     );
-    assert_eq!(r.err().and_then(|e| e.raw_os_error()), Some(libc::EPERM));
+    // And the same thread model with socketpair present succeeds.
+    let full = program(&allow_set("scf"));
+    let ok = std::thread::spawn(move || {
+        seccompiler::apply_filter(&full).expect("apply seccomp filter");
+        rustix::net::socketpair(
+            rustix::net::AddressFamily::UNIX,
+            rustix::net::SocketType::STREAM,
+            rustix::net::SocketFlags::CLOEXEC,
+            None,
+        )
+        .map(|_| ())
+    })
+    .join()
+    .expect("thread");
+    assert_eq!(ok, Ok(()));
 }

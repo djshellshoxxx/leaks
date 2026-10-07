@@ -64,6 +64,8 @@ pub trait StoreClock: Send + Sync {
 }
 
 /// Server configuration. All uids are explicit; two roles may not share one.
+/// Connection caps are per role (ADR-057(5), AUD-RM2-IPC-05): a flooding web
+/// tier cannot starve the sealer.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     /// UID of the web service (role `web`).
@@ -72,8 +74,12 @@ pub struct ServerConfig {
     pub sealer_uid: u32,
     /// UID of the relay exporter (role `relay`, reserved); `None` = no relay peer.
     pub relay_uid: Option<u32>,
-    /// Connection cap (all roles together).
-    pub max_connections: usize,
+    /// Connection cap of the web role.
+    pub max_connections_web: usize,
+    /// Connection cap of the sealer role.
+    pub max_connections_sealer: usize,
+    /// Connection cap of the relay role.
+    pub max_connections_relay: usize,
     /// Idle time without a request before the connection is closed.
     pub idle_timeout: Duration,
     /// Deadline for one datagram write.
@@ -82,8 +88,13 @@ pub struct ServerConfig {
     pub op_deadline: Duration,
 }
 
-/// Default caps (sealer `Limits` have the same shape).
-pub const DEFAULT_MAX_CONNECTIONS: usize = 128;
+/// Default web connection cap (the web pool is 8 per process; margin for
+/// several web workers).
+pub const DEFAULT_MAX_CONNECTIONS_WEB: usize = 64;
+/// Default sealer connection cap (one sink connection plus retries).
+pub const DEFAULT_MAX_CONNECTIONS_SEALER: usize = 16;
+/// Default relay connection cap.
+pub const DEFAULT_MAX_CONNECTIONS_RELAY: usize = 4;
 /// Default idle deadline.
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// Default write deadline.
@@ -101,7 +112,9 @@ impl ServerConfig {
             web_uid,
             sealer_uid,
             relay_uid,
-            max_connections: DEFAULT_MAX_CONNECTIONS,
+            max_connections_web: DEFAULT_MAX_CONNECTIONS_WEB,
+            max_connections_sealer: DEFAULT_MAX_CONNECTIONS_SEALER,
+            max_connections_relay: DEFAULT_MAX_CONNECTIONS_RELAY,
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
             io_timeout: DEFAULT_IO_TIMEOUT,
             op_deadline: DEFAULT_OP_DEADLINE,
@@ -114,7 +127,9 @@ impl ServerConfig {
         if self.web_uid == self.sealer_uid
             || self.relay_uid == Some(self.web_uid)
             || self.relay_uid == Some(self.sealer_uid)
-            || self.max_connections == 0
+            || self.max_connections_web == 0
+            || self.max_connections_sealer == 0
+            || self.max_connections_relay == 0
             || self.idle_timeout < MIN_TIMEOUT
             || self.io_timeout < MIN_TIMEOUT
             || self.op_deadline < MIN_TIMEOUT
@@ -122,6 +137,14 @@ impl ServerConfig {
             return Err(bad);
         }
         Ok(())
+    }
+
+    fn cap(&self, role: Role) -> usize {
+        match role {
+            Role::Web => self.max_connections_web,
+            Role::Sealer => self.max_connections_sealer,
+            Role::Relay => self.max_connections_relay,
+        }
     }
 
     fn role_of(&self, uid: u32) -> Option<Role> {
@@ -146,9 +169,18 @@ pub struct IstoreServer<S: IntakeStore + 'static> {
     clock: Arc<dyn StoreClock>,
     cfg: ServerConfig,
     rt: tokio::runtime::Handle,
-    connections: AtomicUsize,
+    /// Live connections per role (web, sealer, relay).
+    connections: [AtomicUsize; 3],
     accept_errors: AtomicU64,
     refused: AtomicU64,
+}
+
+fn role_index(role: Role) -> usize {
+    match role {
+        Role::Web => 0,
+        Role::Sealer => 1,
+        Role::Relay => 2,
+    }
 }
 
 impl<S: IntakeStore + 'static> core::fmt::Debug for IstoreServer<S> {
@@ -211,7 +243,7 @@ impl<S: IntakeStore + 'static> IstoreServer<S> {
             clock,
             cfg,
             rt,
-            connections: AtomicUsize::new(0),
+            connections: [AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0)],
             accept_errors: AtomicU64::new(0),
             refused: AtomicU64::new(0),
         })
@@ -229,10 +261,36 @@ impl<S: IntakeStore + 'static> IstoreServer<S> {
         &self.receiver
     }
 
-    /// Connections currently served.
+    /// Connections currently served (all roles).
     #[must_use]
     pub fn connections(&self) -> usize {
-        self.connections.load(Ordering::Relaxed)
+        self.connections
+            .iter()
+            .fold(0usize, |a, c| a.saturating_add(c.load(Ordering::Relaxed)))
+    }
+
+    /// Peer credentials and the role cap, checked before any thread is
+    /// spawned or capacity consumed (ADR-057(5)): an unknown uid or a role
+    /// over its cap is closed without a byte and counted in `refused`. On
+    /// `Some`, the role's slot is taken and must be released with
+    /// [`Self::release`].
+    fn admit(&self, sock: &OwnedFd) -> Option<Role> {
+        let role = socket_peercred(sock)
+            .ok()
+            .and_then(|c| self.cfg.role_of(c.uid.as_raw()))?;
+        let counter = self.connections.get(role_index(role))?;
+        let prev = counter.fetch_add(1, Ordering::AcqRel);
+        if prev >= self.cfg.cap(role) {
+            counter.fetch_sub(1, Ordering::AcqRel);
+            return None;
+        }
+        Some(role)
+    }
+
+    fn release(&self, role: Role) {
+        if let Some(c) = self.connections.get(role_index(role)) {
+            c.fetch_sub(1, Ordering::AcqRel);
+        }
     }
 
     /// `accept()` failures so far (health counter, no detail).
@@ -269,13 +327,19 @@ impl<S: IntakeStore + 'static> IstoreServer<S> {
                     continue;
                 }
             };
+            // Peer check and role cap first: no thread for an unknown uid or
+            // an over-cap peer (AUD-RM2-IPC-05).
+            let Some(role) = self.admit(&sock) else {
+                self.refused.fetch_add(1, Ordering::Relaxed);
+                drop(sock);
+                continue;
+            };
             let me = Arc::clone(self);
-            // A thread per connection, bounded by `max_connections` (checked
-            // inside `serve_connection`, which also refuses unknown uids).
             if std::thread::Builder::new()
-                .spawn(move || me.serve_connection(sock))
+                .spawn(move || me.serve_admitted(sock, role))
                 .is_err()
             {
+                self.release(role);
                 self.accept_errors.fetch_add(1, Ordering::Relaxed);
                 std::thread::sleep(backoff);
                 backoff = backoff.saturating_mul(2).min(BACKOFF_MAX);
@@ -283,38 +347,30 @@ impl<S: IntakeStore + 'static> IstoreServer<S> {
         }
     }
 
-    /// Serve one accepted connection to completion (blocking). Authenticates
-    /// the peer, enforces the cap, then loops over requests.
+    /// Serve one accepted connection to completion (blocking): peer check
+    /// and role cap ([`Self::admit`]), then the request loop.
     pub fn serve_connection(&self, sock: OwnedFd) {
-        let Some(role) = socket_peercred(&sock)
-            .ok()
-            .and_then(|c| self.cfg.role_of(c.uid.as_raw()))
-        else {
+        let Some(role) = self.admit(&sock) else {
             self.refused.fetch_add(1, Ordering::Relaxed);
             return;
         };
-        if set_socket_timeout(&sock, Timeout::Send, Some(self.cfg.io_timeout)).is_err() {
-            return;
+        self.serve_admitted(sock, role);
+    }
+
+    /// The request loop of an admitted connection; releases the role slot.
+    fn serve_admitted(&self, sock: OwnedFd, role: Role) {
+        if set_socket_timeout(&sock, Timeout::Send, Some(self.cfg.io_timeout)).is_ok() {
+            self.connection(&sock, role);
         }
-        let prev = self.connections.fetch_add(1, Ordering::AcqRel);
-        if prev >= self.cfg.max_connections {
-            self.connections.fetch_sub(1, Ordering::AcqRel);
-            self.refused.fetch_add(1, Ordering::Relaxed);
-            // Take the peer's first datagram (bounded wait) so that closing
-            // does not reset the connection before it reads the BUSY.
-            let mut scratch = [0u8; 1];
-            if set_socket_timeout(&sock, Timeout::Recv, Some(self.cfg.io_timeout)).is_ok() {
-                let _ = recv_datagram(sock.as_fd(), &mut scratch);
-            }
-            let _ = send(&sock, Op::ServingAllowed, 0, &err(ErrorCode::Busy));
-            return;
-        }
-        self.connection(&sock, role);
-        self.connections.fetch_sub(1, Ordering::AcqRel);
+        self.release(role);
     }
 
     fn connection(&self, sock: &OwnedFd, role: Role) {
         let mut buf = vec![0u8; MAX_FRAME_LEN.saturating_add(1)];
+        // `MAILBOX_READ` budget, granted by `MAILBOX_LIST`: at most the listed
+        // replies per list, so a page view costs one list plus ≤ 32 single-row
+        // reads (AUD-RM2-IPC-07).
+        let mut read_budget: u32 = 0;
         loop {
             if set_socket_timeout(sock, Timeout::Recv, Some(self.cfg.idle_timeout)).is_err() {
                 return;
@@ -338,7 +394,7 @@ impl<S: IntakeStore + 'static> IstoreServer<S> {
                 let _ = send(sock, op, rid, &err(ErrorCode::Forbidden));
                 return;
             }
-            let (resp, after) = self.handle(req);
+            let (resp, after) = self.handle(req, &mut read_budget);
             if send(sock, op, rid, &resp).is_err() {
                 return;
             }
@@ -362,7 +418,7 @@ impl<S: IntakeStore + 'static> IstoreServer<S> {
             .unwrap_or(Err(StoreError::Timeout))
     }
 
-    fn handle(&self, req: Request) -> (Response, After) {
+    fn handle(&self, req: Request, read_budget: &mut u32) -> (Response, After) {
         match req {
             Request::ServingAllowed => (
                 match self.block(self.store.serving_allowed()) {
@@ -384,30 +440,37 @@ impl<S: IntakeStore + 'static> IstoreServer<S> {
             ),
             Request::MailboxList { account } => (
                 match self.block(self.store.mailbox_list(AccountId(account))) {
-                    Ok(v) => Response::MailboxList(
-                        v.iter()
+                    Ok(v) => {
+                        *read_budget = u32::try_from(v.len()).unwrap_or(u32::MAX);
+                        Response::MailboxList(
+                            v.iter()
                             .map(|r| crate::proto::ReplyHeader {
                                 reply_ref: r.reply_ref.0,
                                 slot: r.slot,
                                 size_bucket: r.size_bucket,
-                                available_day: r.available_day.0,
-                            })
-                            .collect(),
-                    ),
+                                    available_day: r.available_day.0,
+                                })
+                                .collect(),
+                        )
+                    }
                     Err(e) => err(map_err(e)),
                 },
                 After::Keep,
             ),
-            Request::MailboxRead { account, reply } => (
-                match self.block(self.store.mailbox_list(AccountId(account))) {
-                    Ok(v) => match v.into_iter().find(|r| r.reply_ref.0 == reply) {
-                        Some(r) => Response::ReplyCt(r.reply_ct),
-                        None => err(ErrorCode::NotFound),
+            Request::MailboxRead { account, reply } => {
+                if *read_budget == 0 {
+                    return (err(ErrorCode::Busy), After::Keep);
+                }
+                *read_budget = read_budget.saturating_sub(1);
+                (
+                    match self.block(self.store.reply(AccountId(account), ReplyRef(reply))) {
+                        Ok(Some(r)) => Response::ReplyCt(r.reply_ct),
+                        Ok(None) => err(ErrorCode::NotFound),
+                        Err(e) => err(map_err(e)),
                     },
-                    Err(e) => err(map_err(e)),
-                },
-                After::Keep,
-            ),
+                    After::Keep,
+                )
+            }
             Request::CommitGroup(g) => match self.check_group(&g) {
                 Ok(()) => (Response::Empty, After::HandOver(g)),
                 Err(c) => (err(c), After::Keep),
@@ -523,6 +586,7 @@ impl<S: IntakeStore + 'static> IstoreServer<S> {
             auth_pk: a.auth_pk,
             xwing_pk: a.xwing_pk.clone(),
             prefs_ct: a.prefs_ct.clone(),
+            mailbox_ids: a.mailbox_ids.iter().map(|m| MailboxId(*m)).collect(),
         };
         let lookup = |tag: [u8; 32]| self.block(self.store.lookup_account(&LookupTag(tag)));
         let account = match a.replaces {
@@ -571,35 +635,32 @@ impl<S: IntakeStore + 'static> IstoreServer<S> {
                 .ok_or(ErrorCode::NotFound)
         };
         match d {
-            Delete::Account {
-                lookup_tag,
-                mailbox_ids,
-            } => {
-                let account = account_of(lookup_tag)?;
-                let refs: Vec<ReplyRef> = self
-                    .block(self.store.mailbox_list(account))
-                    .map_err(map_err)?
-                    .iter()
-                    .map(|r| r.reply_ref)
-                    .collect();
-                let mut n = 0u32;
-                // One `mailbox` entry per mailbox (replies deleted with the
-                // first; later calls delete nothing more), then `account`.
-                for (i, m) in mailbox_ids.iter().enumerate() {
-                    let rs: &[ReplyRef] = if i == 0 { &refs } else { &[] };
-                    self.block(self.store.delete_mailbox(
-                        account,
-                        &MailboxId(*m),
-                        rs,
-                        today,
-                        signer,
-                    ))
-                    .map_err(map_err)?;
-                    n = n.saturating_add(1);
+            Delete::Account { lookup_tags } => {
+                // Every tag that resolves (current and previous, ADR-057(3));
+                // each account goes in one transaction with its `mailbox`
+                // entries and the `account` entry (ADR-057(1)/(2)).
+                let mut targets: Vec<(AccountId, u32)> = Vec::with_capacity(lookup_tags.len());
+                for t in lookup_tags {
+                    if let Some(a) = self
+                        .block(self.store.lookup_account(&LookupTag(*t)))
+                        .map_err(map_err)?
+                        && !targets.iter().any(|(id, _)| *id == a.account_id)
+                    {
+                        let entries = u32::try_from(a.mailbox_ids.len().saturating_add(1))
+                            .unwrap_or(u32::MAX);
+                        targets.push((a.account_id, entries));
+                    }
                 }
-                self.block(self.store.delete_account(account, today, signer))
-                    .map_err(map_err)?;
-                Ok(n.saturating_add(1))
+                if targets.is_empty() {
+                    return Err(ErrorCode::NotFound);
+                }
+                let mut n = 0u32;
+                for (account, entries) in targets {
+                    self.block(self.store.delete_account(account, today, signer))
+                        .map_err(map_err)?;
+                    n = n.saturating_add(entries);
+                }
+                Ok(n)
             }
             Delete::Mailbox {
                 lookup_tag,

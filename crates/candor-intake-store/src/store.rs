@@ -83,8 +83,10 @@ pub trait IntakeStore: Send + Sync {
     /// Abandoned real accounts and chaff dummy accounts expire alike.
     fn purge_inactive_accounts(&self, today: Day) -> impl Future<Output = Result<u64>> + Send;
 
-    /// Delete an account and its replies, appending a signed `account`
-    /// deletion-list entry in the same transaction (SW-15, BE-074).
+    /// SW-15: delete an account, its mailboxes (`mailbox_account`) and its
+    /// replies, appending one signed `mailbox` entry per mailbox and then the
+    /// `account` entry (hash of the stable `account_id`, ADR-057(1)) in the
+    /// same transaction (BE-074, API-054).
     fn delete_account(
         &self,
         account: AccountId,
@@ -150,9 +152,11 @@ pub trait IntakeStore: Send + Sync {
 
     // ----- replies -----
 
-    /// RL-05: store pushed replies with `available_day = today`; replies whose
-    /// target account is gone, or whose mailbox or reply hash is listed, count as
-    /// accepted and are dropped (ADR-047(9)). Tier W replies get the lowest free
+    /// RL-05: store pushed replies with `available_day = today`; a reply whose
+    /// `account` is `None` is routed through `mailbox_account` when its
+    /// `mailbox_id` is mapped (ADR-057(2)); replies whose target account is
+    /// gone, or whose mailbox or reply hash is listed, count as accepted and
+    /// are dropped (ADR-047(9)). Tier W replies get the lowest free
     /// fixed-mailbox slot; a full mailbox, or a full publication backlog
     /// (`max_pending`, AUD-RM2-STO-07), rejects the reply (the relay retries).
     fn apply_replies(
@@ -168,6 +172,22 @@ pub trait IntakeStore: Send + Sync {
         account: AccountId,
     ) -> impl Future<Output = Result<Vec<StoredReply>>> + Send;
 
+    /// One reply of the account (`MAILBOX_READ`; one indexed row, no read
+    /// amplification: AUD-RM2-IPC-07). `None` for an unknown or foreign
+    /// reply ref; `RestorePending` while restoring.
+    fn reply(
+        &self,
+        account: AccountId,
+        reply: ReplyRef,
+    ) -> impl Future<Output = Result<Option<StoredReply>>> + Send;
+
+    /// The account owning `mailbox` (09 `mailbox_account`, ADR-057(2)); the
+    /// relay's RL-05 routing. Read-only; `None` if unmapped.
+    fn mailbox_owner(
+        &self,
+        mailbox: &MailboxId,
+    ) -> impl Future<Output = Result<Option<AccountId>>> + Send;
+
     /// Source deletes replies of its own account; one signed `reply` entry per
     /// reply (`object_hash` supplied by the caller) in the same transaction.
     /// Account, reply and mailbox deletions return `RestorePending` while
@@ -180,8 +200,9 @@ pub trait IntakeStore: Send + Sync {
         signer: &dyn DeletionSigner,
     ) -> impl Future<Output = Result<u32>> + Send;
 
-    /// `MAILBOX_DELETE`: delete the listed replies of the account and append one
-    /// signed `mailbox` entry (future replies to it are dropped on arrival).
+    /// `MAILBOX_DELETE`: delete the listed replies of the account, remove the
+    /// mailbox's `mailbox_account` row and append one signed `mailbox` entry
+    /// (future replies to it are dropped on arrival).
     fn delete_mailbox(
         &self,
         account: AccountId,

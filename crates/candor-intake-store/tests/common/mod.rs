@@ -159,6 +159,7 @@ pub fn new_account(tag: u8) -> NewAccount {
         auth_pk: [tag; 32],
         xwing_pk: vec![tag; XWING_PK_LEN],
         prefs_ct: vec![tag; 200],
+        mailbox_ids: vec![MailboxId([tag; 32])],
     }
 }
 

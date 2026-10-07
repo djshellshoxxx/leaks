@@ -459,11 +459,12 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)] // reads /proc/self/task
     fn thread_count_sees_spawned_threads() {
-        let before = sys::thread_count().unwrap();
-        assert!(before >= 1);
+        // Other tests run on their own threads concurrently, so only a lower bound is
+        // stable: with the parked thread alive there are at least two threads.
+        assert!(sys::thread_count().unwrap() >= 1);
         let (tx, rx) = std::sync::mpsc::channel::<()>();
         let h = std::thread::spawn(move || rx.recv().ok());
-        assert!(sys::thread_count().unwrap() > before);
+        assert!(sys::thread_count().unwrap() >= 2);
         tx.send(()).unwrap();
         h.join().unwrap();
     }

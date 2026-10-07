@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 use crate::error::{Result, StoreError};
-use crate::types::{Day, LookupTag, MailboxId, TenantId};
+use crate::types::{AccountId, Day, MailboxId, TenantId};
 
 /// Domain label of `del_hash` (04 §18.6).
 pub const DEL_HASH_LABEL: &[u8] = b"candor/v1/intake/del";
@@ -149,10 +149,16 @@ pub fn del_hash(tenant: &TenantId, subject: &[u8; 32]) -> [u8; 32] {
     h.finalize().into()
 }
 
-/// `del_hash` of an account.
+/// `del_hash` of an account: over the stable `account_id` (16 bytes), never
+/// the rotating `lookup_tag` (04 §18.6, ADR-057(1)): a restore from a backup
+/// that predates a passphrase rotation still deletes the account.
 #[must_use]
-pub fn account_del_hash(tenant: &TenantId, tag: &LookupTag) -> [u8; 32] {
-    del_hash(tenant, &tag.0)
+pub fn account_del_hash(tenant: &TenantId, account: &AccountId) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(DEL_HASH_LABEL);
+    h.update(tenant.0);
+    h.update(account.0);
+    h.finalize().into()
 }
 
 /// `del_hash` of a mailbox.

@@ -8,7 +8,7 @@ use subtle::ConstantTimeEq;
 
 use crate::deletion::{DeletionEntry, SignedDeletionHead, verify_chain};
 use crate::error::{Result, StoreError};
-use crate::types::{
+use crate::types::{MAX_MAILBOXES_PER_ACCOUNT, 
     BackupSnapshot, ClaimLimits, CommitEnvelope, CounterDelta, DISPOSITION_CT_LEN_STD, Day,
     GROUP_OBJECTS, IncomingReply, InstallOutcome, KdHighWater, MAX_CLAIM_BYTES, MAX_CLAIM_OBJECTS,
     MAX_PART_PADDED_SIZE, MAX_PREFS_CT, MAX_PUSHED_DELETION_LIST, MAX_RELEASE_OFFSET_DAYS,
@@ -65,6 +65,9 @@ pub(crate) fn new_account(a: &NewAccount) -> Result<()> {
     if a.prefs_ct.is_empty() || a.prefs_ct.len() > MAX_PREFS_CT {
         return Err(StoreError::InvalidInput("prefs_ct size"));
     }
+    if a.mailbox_ids.len() > MAX_MAILBOXES_PER_ACCOUNT || has_duplicates(&a.mailbox_ids) {
+        return Err(StoreError::InvalidInput("mailbox ids"));
+    }
     Ok(())
 }
 
@@ -89,6 +92,7 @@ pub(crate) fn backup(b: &BackupSnapshot) -> Result<()> {
             auth_pk: a.auth_pk,
             xwing_pk: a.xwing_pk.clone(),
             prefs_ct: a.prefs_ct.clone(),
+            mailbox_ids: a.mailbox_ids.clone(),
         })?;
         if !a.activity_month.is_month_start() {
             return Err(StoreError::InvalidInput("activity month"));

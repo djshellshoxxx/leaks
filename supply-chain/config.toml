@@ -773,6 +773,11 @@ version = "0.27.0"
 criteria = "safe-to-run"
 notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
+[[exemptions.seccompiler]]
+version = "0.5.0"
+criteria = "safe-to-deploy"
+notes = "not yet audited; expires 2027-03-30 (28 §5.2); dev-dependency of candor-memlock only (seccomp regression test, AUD-RM2-DEP-33)"
+
 [[exemptions.selectors]]
 version = "0.38.0"
 criteria = "safe-to-run"
@@ -1267,8 +1272,3 @@ notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 version = "1.0.23"
 criteria = "safe-to-deploy"
 notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
-
-[[exemptions.seccompiler]]
-version = "0.5.0"
-criteria = "safe-to-deploy"
-notes = "not yet audited; expires 2027-03-30 (28 §5.2); dev-dependency of candor-memlock only (seccomp regression test, AUD-RM2-DEP-33)"

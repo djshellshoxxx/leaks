@@ -52,7 +52,10 @@ use crate::types::{
 use crate::validate::{self, SnapshotDecision, day_i32, has_duplicates};
 
 /// Embedded forward-only migrations `(version, sql)`.
-pub const MIGRATIONS: &[(i32, &str)] = &[(1, include_str!("../migrations/0001_intake_schema.sql"))];
+pub const MIGRATIONS: &[(i32, &str)] = &[
+    (1, include_str!("../migrations/0001_intake_schema.sql")),
+    (2, include_str!("../migrations/0002_mailbox_account.sql")),
+];
 
 /// Expected `intake_meta.schema_hash` of this build (BE-050):
 /// `SHA-256("candor/v1/intake/schema" ‖ Σ (u32be version ‖ SHA-256(sql)))`.
@@ -182,8 +185,9 @@ const SQL_ROLE_CHECK: &str = "SELECT r.rolsuper, r.rolbypassrls, \
       AND p.polname = 'p_tenant' AND p.polpermissive AND p.polcmd = '*' AND p.polroles = '{0}') \
      FROM pg_catalog.pg_roles r WHERE r.rolname = current_user";
 const EXPECTED_GUARD_TRIGGERS: i64 = 4;
-/// One `p_tenant` policy (permissive, all commands, PUBLIC) per data table.
-const EXPECTED_POLICIES: i64 = 8;
+/// One `p_tenant` policy (permissive, all commands, PUBLIC) per data table
+/// (eight of migration 0001 plus `mailbox_account`).
+const EXPECTED_POLICIES: i64 = 9;
 /// Session hardening check, on every new connection (AUD-RM2-STO-08).
 /// PostgreSQL lets an ordinary role `ALTER ROLE` its own defaults, which cannot
 /// be revoked; so (1) every stored default of the role (cluster-wide and for
@@ -235,8 +239,24 @@ const SQL_COUNTER_BUMP: &str =
 const SQL_SET_PENDING: &str = "UPDATE candor.intake_meta SET restore_pending = true";
 const SQL_CLEAR_RESTORE: &str = "UPDATE candor.intake_meta SET restore_pending = false";
 
-const SQL_ACCOUNT_BY_TAG: &str = "SELECT account_id, locator_hash, auth_pk, xwing_pk, prefs_ct, \
-     (activity_month - DATE '1970-01-01')::int4 FROM candor.source_account WHERE locator_hash = $1";
+const SQL_ACCOUNT_BY_TAG: &str = "SELECT a.account_id, a.locator_hash, a.auth_pk, a.xwing_pk, a.prefs_ct, \
+     (a.activity_month - DATE '1970-01-01')::int4, \
+     COALESCE((SELECT pg_catalog.array_agg(m.mailbox_id ORDER BY m.mailbox_id) \
+       FROM candor.mailbox_account m WHERE m.account_id = a.account_id), '{}'::bytea[]) \
+     FROM candor.source_account a WHERE a.locator_hash = $1";
+const SQL_MAILBOX_INSERT: &str =
+    "INSERT INTO candor.mailbox_account (mailbox_id, account_id) VALUES ($1, $2) ON CONFLICT DO NOTHING";
+const SQL_MAILBOXES_CLEAR: &str = "DELETE FROM candor.mailbox_account WHERE account_id = $1";
+const SQL_MAILBOX_DELETE: &str =
+    "DELETE FROM candor.mailbox_account WHERE mailbox_id = $1 AND account_id = $2";
+const SQL_MAILBOXES_OF: &str =
+    "SELECT mailbox_id FROM candor.mailbox_account WHERE account_id = $1 ORDER BY mailbox_id";
+const SQL_MAILBOX_OWNER: &str = "SELECT account_id FROM candor.mailbox_account WHERE mailbox_id = $1";
+const SQL_MAILBOXES_ALL: &str =
+    "SELECT mailbox_id, account_id FROM candor.mailbox_account ORDER BY mailbox_id";
+const SQL_REPLIES_OF_ACCOUNT: &str = "DELETE FROM candor.reply WHERE source_account_id = $1";
+const SQL_REPLY_ONE: &str = "SELECT reply_ref, slot, reply_ct, size_bucket, (available_day - DATE '1970-01-01')::int4 \
+     FROM candor.reply WHERE reply_ref = $1 AND source_account_id = $2";
 const SQL_ACCOUNT_TAG_LOCK: &str =
     "SELECT locator_hash FROM candor.source_account WHERE account_id = $1 FOR UPDATE";
 const SQL_ACCOUNT_EXISTS: &str =
@@ -252,8 +272,11 @@ const SQL_ACCOUNT_UPDATE: &str = "UPDATE candor.source_account SET locator_hash 
      WHERE o.locator_hash = $2 AND o.account_id <> $1)";
 const SQL_ACCOUNTS_PURGE: &str =
     "DELETE FROM candor.source_account WHERE activity_month <= DATE '1970-01-01' + $1::int4";
-const SQL_ACCOUNTS_ALL: &str = "SELECT account_id, locator_hash, auth_pk, xwing_pk, prefs_ct, \
-     (activity_month - DATE '1970-01-01')::int4 FROM candor.source_account ORDER BY account_id";
+const SQL_ACCOUNTS_ALL: &str = "SELECT a.account_id, a.locator_hash, a.auth_pk, a.xwing_pk, a.prefs_ct, \
+     (a.activity_month - DATE '1970-01-01')::int4, \
+     COALESCE((SELECT pg_catalog.array_agg(m.mailbox_id ORDER BY m.mailbox_id) \
+       FROM candor.mailbox_account m WHERE m.account_id = a.account_id), '{}'::bytea[]) \
+     FROM candor.source_account a ORDER BY a.account_id";
 
 const SQL_ENV_INSERT: &str = "INSERT INTO candor.envelope (envelope_ref, channel_id, group_sha256, \
      disposition_ct, epoch_index, received_date, release_day, batch_no, state) \
@@ -396,6 +419,7 @@ const SQL_REWRITE: &[&str] = &[
     "UPDATE candor.deletion_list SET relayed = relayed",
     "UPDATE candor.counter_month SET value = value",
     "UPDATE candor.intake_meta SET relay_req_counter = relay_req_counter",
+    "UPDATE candor.mailbox_account SET account_id = account_id",
 ];
 /// Rows with out-of-line (TOAST) values (AUD-RM2-STO-18). An UPDATE that leaves
 /// a TOASTed column unchanged keeps the old TOAST tuples (their `xmin` and
@@ -434,7 +458,7 @@ const SQL_VACUUM_ROLE_CHECK: &str = "SELECT r.rolsuper OR r.rolbypassrls \
 /// copy column values (sampled locator hashes, days) outside the rows.
 const SQL_VACUUM: &str = "VACUUM (ANALYZE false) candor.source_account, candor.envelope, \
      candor.envelope_part, candor.reply, candor.deletion_list, candor.counter_month, \
-     candor.directory_snapshot, candor.intake_meta";
+     candor.directory_snapshot, candor.intake_meta, candor.mailbox_account";
 /// Daily maintenance-window rewrite (AUD-RM2-STO-23): writes fresh relation
 /// files for every source-linkable table, its TOAST table and indexes, so no
 /// pre-rewrite tuple image (old `xmin`, old TOAST `chunk_id`) survives in page
@@ -442,7 +466,7 @@ const SQL_VACUUM: &str = "VACUUM (ANALYZE false) candor.source_account, candor.e
 /// checkpoint. ACCESS EXCLUSIVE lock per table (intake serving is paused).
 const SQL_VACUUM_FULL: &str = "VACUUM (FULL, ANALYZE false) candor.source_account, candor.envelope, \
      candor.envelope_part, candor.reply, candor.deletion_list, candor.counter_month, \
-     candor.directory_snapshot, candor.intake_meta";
+     candor.directory_snapshot, candor.intake_meta, candor.mailbox_account";
 const SQL_CHECKPOINT: &str = "CHECKPOINT";
 /// Session limits of the VACUUM connection (a daily VACUUM FULL may take minutes).
 const VACUUM_SESSION_OPTIONS: [(&str, &str); 4] = [
@@ -990,6 +1014,36 @@ impl PgIntakeStore {
         if zhead.seq > 0 && verified.is_none_or(|v| v.counter < zhead.counter) {
             store_acked(&mut tx, zhead).await?;
         }
+        // Listed mailboxes: drop the mapping and the owner's replies.
+        let mbs: HashSet<[u8; 32]> = local
+            .iter()
+            .chain(new.iter())
+            .filter(|e| e.kind == DeletionKind::Mailbox)
+            .map(|e| e.del_hash)
+            .collect();
+        if !mbs.is_empty() {
+            let rows = sqlx::query(SQL_MAILBOXES_ALL)
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(db)?;
+            for r in &rows {
+                let mb = MailboxId(get_arr(r, 0)?);
+                if mbs.contains(&mailbox_del_hash(&m.tenant, &mb)) {
+                    let owner = uuid(&get_id(r, 1)?);
+                    sqlx::query(SQL_MAILBOX_DELETE)
+                        .bind(mb.0.as_slice())
+                        .bind(owner)
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(db)?;
+                    sqlx::query(SQL_REPLIES_OF_ACCOUNT)
+                        .bind(owner)
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(db)?;
+                }
+            }
+        }
         let acct: HashSet<[u8; 32]> = local
             .iter()
             .chain(new.iter())
@@ -1009,7 +1063,7 @@ impl PgIntakeStore {
                 .map_err(db)?;
             for r in &rows {
                 let a = account_from_row(r)?;
-                if acct.contains(&account_del_hash(&m.tenant, &a.lookup_tag)) {
+                if acct.contains(&account_del_hash(&m.tenant, &a.account_id)) {
                     sqlx::query(SQL_ACCOUNT_DELETE)
                         .bind(uuid(&a.account_id.0))
                         .execute(&mut *tx)
@@ -1127,7 +1181,50 @@ fn account_from_row(r: &PgRow) -> Result<SourceAccount> {
         xwing_pk: r.try_get(3).map_err(db)?,
         prefs_ct: r.try_get(4).map_err(db)?,
         activity_month: get_day(r, 5)?,
+        mailbox_ids: {
+            let raw: Vec<Vec<u8>> = r.try_get(6).map_err(db)?;
+            raw.iter()
+                .map(|m| {
+                    m.as_slice()
+                        .try_into()
+                        .map(MailboxId)
+                        .map_err(|_| StoreError::Integrity("mailbox id"))
+                })
+                .collect::<Result<_>>()?
+        },
     })
+}
+
+/// Replace the account's `mailbox_account` rows (ADR-057(2)).
+async fn set_mailboxes(tx: &mut PgConnection, account: AccountId, ids: &[MailboxId]) -> Result<()> {
+    sqlx::query(SQL_MAILBOXES_CLEAR)
+        .bind(uuid(&account.0))
+        .execute(&mut *tx)
+        .await
+        .map_err(db)?;
+    for m in ids {
+        let n = sqlx::query(SQL_MAILBOX_INSERT)
+            .bind(m.0.as_slice())
+            .bind(uuid(&account.0))
+            .execute(&mut *tx)
+            .await
+            .map_err(db_classified)?
+            .rows_affected();
+        if n != 1 {
+            return Err(StoreError::InvalidInput("mailbox taken"));
+        }
+    }
+    Ok(())
+}
+
+/// Owner of a mailbox within a transaction.
+async fn mailbox_owner_tx(tx: &mut PgConnection, mailbox: &MailboxId) -> Result<Option<AccountId>> {
+    let row = sqlx::query(SQL_MAILBOX_OWNER)
+        .bind(mailbox.0.as_slice())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db)?;
+    row.as_ref().map(|r| get_id(r, 0).map(AccountId)).transpose()
 }
 
 fn entry_from_row(r: &PgRow) -> Result<DeletionEntry> {
@@ -1308,12 +1405,31 @@ impl IntakeStore for PgIntakeStore {
             .await
             .map_err(db)?
             .ok_or(StoreError::NotFound)?;
-        let tag = LookupTag(get_arr(&row, 0)?);
-        let h = head(&mut tx).await?;
+        let _tag = LookupTag(get_arr(&row, 0)?);
+        let mailboxes = sqlx::query(SQL_MAILBOXES_OF)
+            .bind(uuid(&account.0))
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(db)?;
+        let mut h = head(&mut tx).await?;
+        // One `mailbox` entry per mailbox, then the `account` entry over the
+        // stable id (ADR-057(1)), all in this transaction.
+        for mb in &mailboxes {
+            let id = MailboxId(get_arr(mb, 0)?);
+            let e = make_entry(
+                h.as_ref(),
+                DeletionKind::Mailbox,
+                mailbox_del_hash(&m.tenant, &id),
+                today,
+                signer,
+            )?;
+            insert_entry(&mut tx, &e).await?;
+            h = Some(e);
+        }
         let e = make_entry(
             h.as_ref(),
             DeletionKind::Account,
-            account_del_hash(&m.tenant, &tag),
+            account_del_hash(&m.tenant, &account),
             today,
             signer,
         )?;
@@ -1346,6 +1462,7 @@ impl IntakeStore for PgIntakeStore {
         if inserted != 1 {
             return Err(StoreError::AccountExists);
         }
+        set_mailboxes(&mut tx, AccountId(id), &account.mailbox_ids).await?;
         tx.commit().await.map_err(db)?;
         Ok(AccountId(id))
     }
@@ -1380,6 +1497,7 @@ impl IntakeStore for PgIntakeStore {
                 StoreError::NotFound
             });
         }
+        set_mailboxes(&mut tx, account, &new.mailbox_ids).await?;
         tx.commit().await.map_err(db)
     }
 
@@ -1651,6 +1769,13 @@ impl IntakeStore for PgIntakeStore {
                 res.rejected.push(idx);
                 continue;
             }
+            // ADR-057(2): route through `mailbox_account` when the caller
+            // did not resolve the account.
+            let routed = match (r.account, &r.mailbox_id) {
+                (None, Some(mb)) => mailbox_owner_tx(&mut tx, mb).await?,
+                (a, _) => a,
+            };
+            let r = IncomingReply { account: routed, ..r };
             let rh = reply_del_hash(&m.tenant, &r.object_hash);
             let mh = r
                 .mailbox_id
@@ -1796,6 +1921,38 @@ impl IntakeStore for PgIntakeStore {
         Ok(n)
     }
 
+    async fn reply(&self, account: AccountId, reply: ReplyRef) -> Result<Option<StoredReply>> {
+        let (mut tx, m) = self.begin(false).await?;
+        m.serving()?;
+        let row = sqlx::query(SQL_REPLY_ONE)
+            .bind(uuid(&reply.0))
+            .bind(uuid(&account.0))
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(db)?;
+        tx.rollback().await.map_err(db)?;
+        row.as_ref()
+            .map(|r| {
+                let slot: i16 = r.try_get(1).map_err(db)?;
+                let sb: i16 = r.try_get(3).map_err(db)?;
+                Ok(StoredReply {
+                    reply_ref: ReplyRef(get_id(r, 0)?),
+                    slot: u8::try_from(slot).map_err(|_| StoreError::Integrity("slot"))?,
+                    reply_ct: r.try_get(2).map_err(db)?,
+                    size_bucket: u8::try_from(sb).map_err(|_| StoreError::Integrity("bucket"))?,
+                    available_day: get_day(r, 4)?,
+                })
+            })
+            .transpose()
+    }
+
+    async fn mailbox_owner(&self, mailbox: &MailboxId) -> Result<Option<AccountId>> {
+        let (mut tx, _) = self.begin(false).await?;
+        let r = mailbox_owner_tx(&mut tx, mailbox).await?;
+        tx.rollback().await.map_err(db)?;
+        Ok(r)
+    }
+
     async fn delete_replies(
         &self,
         account: AccountId,
@@ -1867,6 +2024,12 @@ impl IntakeStore for PgIntakeStore {
         insert_entry(&mut tx, &e).await?;
         sqlx::query(SQL_REPLIES_DELETE)
             .bind(&ids)
+            .bind(uuid(&account.0))
+            .execute(&mut *tx)
+            .await
+            .map_err(db)?;
+        sqlx::query(SQL_MAILBOX_DELETE)
+            .bind(mailbox.0.as_slice())
             .bind(uuid(&account.0))
             .execute(&mut *tx)
             .await
@@ -2334,6 +2497,7 @@ impl IntakeStore for PgIntakeStore {
             if n != 1 {
                 return Err(StoreError::Conflict("duplicate account in backup"));
             }
+            set_mailboxes(&mut tx, a.account_id, &a.mailbox_ids).await?;
         }
         for e in &b.deletion_list {
             insert_entry(&mut tx, e).await?;

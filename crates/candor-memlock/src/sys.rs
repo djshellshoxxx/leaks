@@ -6,6 +6,8 @@
 //! reads here are existence/count probes of this process's own tables, never content.
 
 use std::os::fd::{FromRawFd, OwnedFd};
+
+use rustix::fs::{AtFlags, CWD, Dir, Mode, OFlags, openat, statat}; // safefs-lint: allow(two constant /proc/self probes of this process's own tables: fd-3 existence, thread count; no content, reviewed AUD-RM2-MEM-01/02)
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{AdoptError, SD_LISTEN_FDS_START};
@@ -47,12 +49,7 @@ pub(crate) fn clear_listen_env() {
     reason = "constant /proc/self path, existence probe of our own descriptor table (AUD-RM2-MEM-02); reviewed"
 )]
 fn fd3_is_open() -> bool {
-    rustix::fs::statat(
-        rustix::fs::CWD,
-        "/proc/self/fd/3",
-        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
-    )
-    .is_ok() // safefs-lint: allow(constant /proc path; existence probe of our own descriptor table, no content)
+    statat(CWD, "/proc/self/fd/3", AtFlags::SYMLINK_NOFOLLOW).is_ok()
 }
 
 /// Number of threads of this process: the entries of `/proc/self/task` (one per thread).
@@ -62,18 +59,15 @@ fn fd3_is_open() -> bool {
     reason = "constant /proc/self path, counts this process's own threads (AUD-RM2-MEM-01); reviewed"
 )]
 pub(crate) fn thread_count() -> Option<usize> {
-    let dir = rustix::fs::openat(
-        rustix::fs::CWD,
+    let dir = openat(
+        CWD,
         "/proc/self/task",
-        rustix::fs::OFlags::RDONLY
-            | rustix::fs::OFlags::DIRECTORY
-            | rustix::fs::OFlags::CLOEXEC
-            | rustix::fs::OFlags::NOFOLLOW,
-        rustix::fs::Mode::empty(),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
     )
-    .ok()?; // safefs-lint: allow(constant /proc path; counts our own threads, no content)
+    .ok()?;
     let mut n = 0usize;
-    for entry in rustix::fs::Dir::read_from(&dir).ok()? {
+    for entry in Dir::read_from(&dir).ok()? {
         let entry = entry.ok()?;
         let name = entry.file_name().to_bytes();
         if name != b"." && name != b".." {

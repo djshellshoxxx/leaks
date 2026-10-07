@@ -346,7 +346,7 @@ async fn pg_roles_and_grants() {
     .await
     .unwrap()
     .get(0);
-    assert_eq!(autovac, 8);
+    assert_eq!(autovac, 9);
     let grants: Vec<(String, String, String)> = sqlx::query(
         "SELECT grantee::text, table_name::text, privilege_type::text FROM information_schema.role_table_grants \
          WHERE table_schema = 'candor' AND grantee <> 'candor_intake_migrator' ORDER BY 1, 2, 3",
@@ -376,6 +376,7 @@ async fn pg_roles_and_grants() {
         vec![
             ("deletion_list".into(), "SELECT".into()),
             ("intake_meta".into(), "SELECT".into()),
+            ("mailbox_account".into(), "SELECT".into()),
             ("source_account".into(), "SELECT".into())
         ]
     );

@@ -97,6 +97,7 @@ pub const EXPECTED: &[(&str, &[&str])] = &[
     ),
     ("counter_month", &["month", "channel_id", "name", "value"]),
     ("schema_migration", &["version", "sha256"]),
+    ("mailbox_account", &["mailbox_id", "account_id"]),
 ];
 
 /// L2 network-identity name tokens (09 §8).

@@ -198,6 +198,25 @@ fn fold_activity(st: &mut State, slot_day: Day, active: &HashSet<AccountId>) {
     }
 }
 
+/// Owner of a mailbox (09 `mailbox_account`).
+fn owner_of(st: &State, mailbox: &MailboxId) -> Option<AccountId> {
+    st.accounts
+        .values()
+        .find(|a| a.mailbox_ids.contains(mailbox))
+        .map(|a| a.account_id)
+}
+
+/// Any of `ids` mapped to an account other than `except`.
+fn mailbox_taken(st: &State, ids: &[MailboxId], except: Option<AccountId>) -> bool {
+    ids.iter()
+        .any(|m| owner_of(st, m).is_some_and(|o| Some(o) != except))
+}
+
+fn sorted(mut v: Vec<MailboxId>) -> Vec<MailboxId> {
+    v.sort();
+    v
+}
+
 fn remove_account(st: &mut State, account: AccountId) {
     st.accounts.remove(&account);
     delete_replies_where(st, |r| r.account == Some(account));
@@ -263,17 +282,39 @@ impl IntakeStore for MemoryStore {
         validate::day_i32(today)?;
         let mut st = self.state.lock().await;
         let tenant = st.serving()?.tenant;
-        let tag = st
+        let mailboxes = st
             .accounts
             .get(&account)
             .ok_or(StoreError::NotFound)?
-            .lookup_tag;
-        st.append(
+            .mailbox_ids
+            .clone();
+        // One `mailbox` entry per mailbox, then the `account` entry over the
+        // stable id (ADR-057(1)); staged first so a signer failure changes
+        // nothing (one transaction).
+        let mut staged = Vec::with_capacity(mailboxes.len().saturating_add(1));
+        let mut head = st.head().copied();
+        for mb in &mailboxes {
+            let e = make_entry(
+                head.as_ref(),
+                DeletionKind::Mailbox,
+                mailbox_del_hash(&tenant, mb),
+                today,
+                signer,
+            )?;
+            head = Some(e);
+            staged.push(e);
+        }
+        let e = make_entry(
+            head.as_ref(),
             DeletionKind::Account,
-            account_del_hash(&tenant, &tag),
+            account_del_hash(&tenant, &account),
             today,
             signer,
         )?;
+        staged.push(e);
+        for e in staged {
+            st.deletion.insert(e.seq, e);
+        }
         remove_account(&mut st, account);
         Ok(())
     }
@@ -290,6 +331,9 @@ impl IntakeStore for MemoryStore {
         {
             return Err(StoreError::AccountExists);
         }
+        if mailbox_taken(&st, &account.mailbox_ids, None) {
+            return Err(StoreError::InvalidInput("mailbox taken"));
+        }
         let id = AccountId(random_id16()?);
         st.accounts.insert(
             id,
@@ -300,6 +344,7 @@ impl IntakeStore for MemoryStore {
                 xwing_pk: account.xwing_pk,
                 prefs_ct: account.prefs_ct,
                 activity_month: today.month_start(),
+                mailbox_ids: sorted(account.mailbox_ids),
             },
         );
         Ok(id)
@@ -319,11 +364,15 @@ impl IntakeStore for MemoryStore {
         {
             return Err(StoreError::AccountExists);
         }
+        if mailbox_taken(&st, &new.mailbox_ids, Some(account)) {
+            return Err(StoreError::InvalidInput("mailbox taken"));
+        }
         let a = st.accounts.get_mut(&account).ok_or(StoreError::NotFound)?;
         a.lookup_tag = new.lookup_tag;
         a.auth_pk = new.auth_pk;
         a.xwing_pk = new.xwing_pk;
         a.prefs_ct = new.prefs_ct;
+        a.mailbox_ids = sorted(new.mailbox_ids);
         Ok(())
     }
 
@@ -551,6 +600,13 @@ impl IntakeStore for MemoryStore {
                 res.rejected.push(idx);
                 continue;
             }
+            // ADR-057(2): route through `mailbox_account` when the caller
+            // did not resolve the account.
+            let routed = match (r.account, &r.mailbox_id) {
+                (None, Some(mb)) => owner_of(&st, mb),
+                (a, _) => a,
+            };
+            let r = IncomingReply { account: routed, ..r };
             let dropped =
                 st.listed(
                     DeletionKind::Reply,
@@ -654,6 +710,28 @@ impl IntakeStore for MemoryStore {
         Ok(n)
     }
 
+    async fn reply(&self, account: AccountId, reply: ReplyRef) -> Result<Option<StoredReply>> {
+        let st = self.state.lock().await;
+        st.serving()?;
+        Ok(st
+            .replies
+            .get(&reply)
+            .filter(|r| r.account == Some(account))
+            .map(|r| StoredReply {
+                reply_ref: reply,
+                slot: r.slot.unwrap_or(0),
+                reply_ct: r.reply_ct.clone(),
+                size_bucket: r.size_bucket,
+                available_day: r.available_day,
+            }))
+    }
+
+    async fn mailbox_owner(&self, mailbox: &MailboxId) -> Result<Option<AccountId>> {
+        let st = self.state.lock().await;
+        st.meta()?;
+        Ok(owner_of(&st, mailbox))
+    }
+
     async fn delete_replies(
         &self,
         account: AccountId,
@@ -737,6 +815,9 @@ impl IntakeStore for MemoryStore {
         )?;
         for r in replies {
             st.replies.remove(r);
+        }
+        if let Some(a) = st.accounts.get_mut(&account) {
+            a.mailbox_ids.retain(|m| m != mailbox);
         }
         Ok(u32::try_from(replies.len()).unwrap_or(u32::MAX))
     }
@@ -932,11 +1013,35 @@ impl IntakeStore for MemoryStore {
         let doomed: Vec<AccountId> = st
             .accounts
             .values()
-            .filter(|a| acct.contains(&account_del_hash(&tenant, &a.lookup_tag)))
+            .filter(|a| acct.contains(&account_del_hash(&tenant, &a.account_id)))
             .map(|a| a.account_id)
             .collect();
         for a in &doomed {
             remove_account(&mut st, *a);
+        }
+        // Listed mailboxes: drop the mapping and the owner's replies.
+        let mbs: HashSet<[u8; 32]> = st
+            .deletion
+            .values()
+            .filter(|e| e.kind == DeletionKind::Mailbox)
+            .map(|e| e.del_hash)
+            .collect();
+        let closed: Vec<AccountId> = st
+            .accounts
+            .values()
+            .filter(|a| {
+                a.mailbox_ids
+                    .iter()
+                    .any(|m| mbs.contains(&mailbox_del_hash(&tenant, m)))
+            })
+            .map(|a| a.account_id)
+            .collect();
+        for id in closed {
+            if let Some(a) = st.accounts.get_mut(&id) {
+                a.mailbox_ids
+                    .retain(|m| !mbs.contains(&mailbox_del_hash(&tenant, m)));
+            }
+            delete_replies_where(&mut st, |r| r.account == Some(id));
         }
         delete_replies_where(&mut st, |r| {
             hasher

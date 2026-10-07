@@ -65,6 +65,8 @@ pub const MAX_REWRAPS: usize = 64;
 pub const MAX_STANZA_LEN: usize = 2048;
 /// Replies per mailbox ([`crate::MAILBOX_SLOTS`]).
 pub const MAX_MAILBOX_REPLIES: usize = crate::MAILBOX_SLOTS as usize;
+/// Lookup tags per `DELETE Account` (current and previous).
+pub const MAX_DELETE_TAGS: usize = 2;
 
 /// Peer roles, each bound to one configured UID (no defaults).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -324,13 +326,15 @@ impl fmt::Debug for AccountUpsert {
 /// by the account's `lookup_tag` (the sealer knows no `AccountId`).
 #[derive(Clone, PartialEq, Eq)]
 pub enum Delete {
-    /// SW-15: one `mailbox` entry per listed mailbox, then the `account` entry
-    /// and the account with all its replies.
+    /// SW-15: the account with all its mailboxes (`mailbox_account`) and
+    /// replies; one `mailbox` entry per mailbox, then the `account` entry
+    /// (ADR-057(1)/(2)). Identified by the tags the sealer holds for the
+    /// account — the current one and, after a just-flushed rotation, the
+    /// previous one (ADR-057(3)); 1 ..= [`MAX_DELETE_TAGS`], all resolving
+    /// accounts are deleted.
     Account {
-        /// `lookup_tag`.
-        lookup_tag: [u8; 32],
-        /// The account's mailbox ids (≤ [`MAX_MAILBOX_IDS`]).
-        mailbox_ids: Vec<[u8; 32]>,
+        /// `lookup_tag`s (1 ..= 2).
+        lookup_tags: Vec<[u8; 32]>,
     },
     /// `MAILBOX_DELETE`: one `mailbox` entry; the account's replies are deleted.
     Mailbox {
@@ -506,7 +510,7 @@ const REQ_ACCOUNT_UPSERT: usize = 1
     + 32 * MAX_MAILBOX_IDS
     + 1
     + MAX_REWRAPS * (32 + 2 + MAX_STANZA_LEN);
-const REQ_DELETE: usize = 1 + 32 + 32 + 1 + 32 * MAX_MAILBOX_IDS + 16 * MAX_MAILBOX_REPLIES;
+const REQ_DELETE: usize = 1 + 1 + 32 * MAX_DELETE_TAGS + 32 + 32 + 1 + 16 * MAX_MAILBOX_REPLIES;
 const RESP_ACCOUNT: usize = 1 + 16 + 32 + 2 + crate::MAX_PREFS_CT;
 const RESP_MAILBOX_LIST: usize = 1 + MAX_MAILBOX_REPLIES * (16 + 1 + 1 + 4);
 const RESP_REPLY: usize = 4 + MAX_REPLY_CT;
@@ -742,17 +746,14 @@ pub fn encode_request(rid: u32, req: &Request) -> Result<Vec<u8>, ProtoError> {
             }
         }
         Request::Delete(d) => match d {
-            Delete::Account {
-                lookup_tag,
-                mailbox_ids,
-            } => {
-                if mailbox_ids.len() > MAX_MAILBOX_IDS {
+            Delete::Account { lookup_tags } => {
+                if lookup_tags.is_empty() || lookup_tags.len() > MAX_DELETE_TAGS {
                     return Err(ProtoError::Field);
                 }
-                w.u8(1).fixed(lookup_tag);
-                w.u8(u8::try_from(mailbox_ids.len()).map_err(|_| ProtoError::Field)?);
-                for m in mailbox_ids {
-                    w.fixed(m);
+                w.u8(1);
+                w.u8(u8::try_from(lookup_tags.len()).map_err(|_| ProtoError::Field)?);
+                for t in lookup_tags {
+                    w.fixed(t);
                 }
             }
             Delete::Mailbox {
@@ -874,24 +875,27 @@ pub fn decode_request(bytes: &[u8]) -> Result<(u32, Request), ProtoError> {
         }
         Op::Delete => {
             let kind = r.u8()?;
-            let lookup_tag = r.fixed()?;
             Request::Delete(match kind {
                 1 => {
-                    let n = r.count8(MAX_MAILBOX_IDS)?;
-                    let mut mailbox_ids = Vec::with_capacity(n);
-                    for _ in 0..n {
-                        mailbox_ids.push(r.fixed()?);
+                    let n = r.count8(MAX_DELETE_TAGS)?;
+                    if n == 0 {
+                        return Err(ProtoError::Field);
                     }
-                    Delete::Account {
+                    let mut lookup_tags = Vec::with_capacity(n);
+                    for _ in 0..n {
+                        lookup_tags.push(r.fixed()?);
+                    }
+                    Delete::Account { lookup_tags }
+                }
+                2 => {
+                    let lookup_tag = r.fixed()?;
+                    Delete::Mailbox {
                         lookup_tag,
-                        mailbox_ids,
+                        mailbox_id: r.fixed()?,
                     }
                 }
-                2 => Delete::Mailbox {
-                    lookup_tag,
-                    mailbox_id: r.fixed()?,
-                },
                 3 => {
+                    let lookup_tag = r.fixed()?;
                     let n = r.count8(MAX_MAILBOX_REPLIES)?;
                     let mut replies = Vec::with_capacity(n);
                     for _ in 0..n {
@@ -1096,8 +1100,7 @@ mod tests {
                 rewrapped: vec![],
             })),
             Request::Delete(Delete::Account {
-                lookup_tag: [1; 32],
-                mailbox_ids: vec![[2; 32]],
+                lookup_tags: vec![[1; 32], [2; 32]],
             }),
             Request::Delete(Delete::Mailbox {
                 lookup_tag: [1; 32],
@@ -1208,6 +1211,19 @@ mod tests {
         };
         let mut b = encode_request(1, &Request::AccountUpsert(Box::new(a))).unwrap();
         b[REQUEST_HEADER_LEN + 1] = 1;
+        assert_eq!(decode_request(&b), Err(ProtoError::Field));
+        // An account deletion needs at least one tag.
+        let b = encode_request(1, &Request::Delete(Delete::Account { lookup_tags: vec![] }));
+        assert!(b.is_err());
+        let mut b = encode_request(
+            1,
+            &Request::Delete(Delete::Account {
+                lookup_tags: vec![[1; 32]],
+            }),
+        )
+        .unwrap();
+        b[REQUEST_HEADER_LEN + 1] = 0;
+        b.truncate(REQUEST_HEADER_LEN + 2);
         assert_eq!(decode_request(&b), Err(ProtoError::Field));
         // Unknown delete kind.
         let d = Request::Delete(Delete::Mailbox {

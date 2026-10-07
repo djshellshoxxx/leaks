@@ -340,6 +340,8 @@ mutate "D-36 store drop-in re-allows bind"      systemd/candor-intake-store.serv
 mutate "D-36 web drop-in resets the filter"     systemd/candor-intake-web.service.d/zz.conf $'+[Service]\nSystemCallFilter=\nSystemCallFilter=@system-service'
 mutate "D-36 store LimitMEMLOCK removed"        systemd/candor-intake-store.service '/^LimitMEMLOCK=512M$/d'
 mutate "D-36 store LimitMEMLOCK infinity"       systemd/candor-intake-store.service 's|^LimitMEMLOCK=512M$|LimitMEMLOCK=infinity|'
+mutate "D-38 sealer drop-in denies socketpair"  systemd/candor-sealer.service.d/zz.conf $'+[Service]\nSystemCallFilter=~socketpair'
+mutate "D-38 web deny line re-adds socketpair"  systemd/candor-intake-web.service 's|^SystemCallFilter=~_newselect |SystemCallFilter=~socketpair _newselect |'
 mutate "DEP-16 sealer drop-in re-allows io_uring" systemd/candor-sealer.service.d/zz.conf $'+[Service]\nSystemCallFilter=io_uring_setup io_uring_enter io_uring_register'
 mutate "DEP-16 sealer deny line drops userfaultfd" systemd/candor-sealer.service 's| userfaultfd | |'
 mutate "DEP-16 sealer re-add line widened"  systemd/candor-sealer.service 's|^SystemCallFilter=seccomp landlock_create_ruleset|SystemCallFilter=seccomp bpf landlock_create_ruleset|'
@@ -652,6 +654,19 @@ if is_root; then
   else bad "config-check left work directories behind or the work base is not root 0700"; fi
 fi
 
+# ---- AUD-RM2-DEP-33 / D-38: the three allow-sets must contain what the daemons call at start-up
+# (tokio runtime with the signal feature: socketpair, eventfd2, ...; hardening: mlockall, prlimit64,
+# prctl, seccomp, landlock_*), and none of those may be on the never-list. The in-process seccomp
+# test is crates/candor-memlock/tests/seccomp_runtime.rs.
+BL="$TOOLS/config-check.baseline"
+for need in socketpair eventfd2 epoll_create1 clone3 mlockall prlimit64 prctl seccomp landlock_create_ruleset landlock_add_rule landlock_restrict_self getrandom; do
+  if grep -q "^scf-never|$need\$" "$BL"; then bad "baseline: start-up syscall $need is on scf-never (AUD-RM2-DEP-33)"; fi
+  for k in scf scf-web scf-store; do grep -q "^$k|$need\$" "$BL" || bad "baseline: $k lacks start-up syscall $need"; done
+done
+for k in scf scf-store; do grep -q "^$k|openat2\$" "$BL" || bad "baseline: $k lacks openat2 (candor-safefs)"; done
+grep -q '^scf-web|openat2$' "$BL" && bad "baseline: scf-web allows openat2 (no file writes in the web service)"
+pass "baseline: start-up syscalls present in all three allow-sets, none on scf-never"
+
 # ---- W1-D / O-6: blob volume throughput (config-check --host section blobrate, STO-29 floor)
 # The measurement needs root, a real filesystem (ext4/xfs; $T is on /var/tmp) and a few seconds.
 if is_root; then
@@ -666,6 +681,23 @@ if is_root; then
       if cc -q --host --only blobrate --blob-root "$V" --blob-mib 64 > "$T/br.out" 2>&1; then pass "config-check --host blobrate: this disk meets the shipped 50 MB/s floor"
       else skip "config-check --host blobrate: this CI disk is below the 50 MB/s floor (not a config defect): $(grep -o '[0-9]* MB/s sequential' "$T/br.out" | head -n 1)"; fi
       if [ -z "$(ls -A "$V/selftest")" ]; then pass "blobrate: test file removed"; else bad "blobrate: test file left behind"; fi
+      # DEP-34: a stale file of the tool's name (interrupted run) is swept, the run still measures.
+      dd if=/dev/zero of="$V/selftest/rate-check.tmp" bs=1048576 count=8 status=none
+      if cc -q --host --only blobrate --blob-root "$V" --blob-mib 64 --blob-min-rate 1 > "$T/br.out" 2>&1 && [ ! -e "$V/selftest/rate-check.tmp" ]; then pass "blobrate: stale test file swept before the measurement"
+      else bad "blobrate: stale file case: $(tail -n 1 "$T/br.out")"; fi
+      ln -s /dev/null "$V/selftest/rate-check.tmp"
+      if cc -q --host --only blobrate --blob-root "$V" --blob-mib 64 --blob-min-rate 1 > "$T/br.out" 2>&1 && [ ! -L "$V/selftest/rate-check.tmp" ]; then pass "blobrate: stale symlink of the test name removed, never followed"
+      else bad "blobrate: stale symlink case: $(tail -n 1 "$T/br.out")"; fi
+      # DEP-34: an interrupted run (SIGINT to the script and its children) leaves no file.
+      ( cc -q --host --only blobrate --blob-root "$V" --blob-mib 1024 --blob-min-rate 1 > "$T/br.out" 2>&1 ) & BRP=$!
+      sleep 1; pkill -INT -P "$BRP" 2>/dev/null; kill -INT "$BRP" 2>/dev/null; wait "$BRP" 2>/dev/null || true
+      sleep 1
+      if [ -z "$(ls -A "$V/selftest")" ]; then pass "blobrate: interrupted run leaves no test file"; else bad "blobrate: interrupted run left a test file behind"; rm -f "$V/selftest"/*; fi
+      # DEP-35: a date(1) shim earlier in PATH must not produce a false OK (timing is CLOCK_BOOTTIME).
+      install -d -m 0755 "$T/shim"; printf '#!/bin/sh\necho 1700000000000000000\n' > "$T/shim/date"; chmod 0755 "$T/shim/date"
+      if PATH="$T/shim:$PATH" cc -q --host --only blobrate --blob-root "$V" --blob-mib 64 --blob-min-rate 100000 > "$T/br.out" 2>&1; then bad "blobrate: a date shim produced a false OK (wall clock used)"
+      elif grep -q 'host.blob_volume_rate.*FAIL.*below the 100000 MB/s floor' "$T/br.out"; then pass "blobrate: timing immune to a date(1) shim in PATH"
+      else bad "blobrate: date shim case: $(tail -n 1 "$T/br.out")"; fi
       # Negatives: each must FAIL (exit 30) with the named rule, never write outside selftest.
       brneg() { # name expect-detail args... (on a fresh copy of the volume layout)
         local name=$1 want=$2; shift 2

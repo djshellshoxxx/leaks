@@ -104,7 +104,7 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd -P)
 BASE="$SCRIPT_DIR/config-check.baseline"
 MANIFEST="$SCRIPT_DIR/config-check.manifest"
 # sha256 of config-check.manifest (release-pinned; update together with the manifest).
-MANIFEST_SHA256=4b67f66cfc496a681405483b554bb42d075b414c67b0208b97ea710fa8bf580c
+MANIFEST_SHA256=c6bc7ef3f92ff79d9d7e21e9ed17639de51a7fe0b67e0bd6bfa4b7fb8b1eff32
 SECTIONS="tor nft pg units journald kernel dns apparmor host blobrate"
 MODE=static
 DIR="$SCRIPT_DIR/../intake"
@@ -1341,8 +1341,10 @@ check_host() {
 # $BLOB_ROOT/selftest (root 0700, created by tmpfiles.d; on the blob volume, outside the
 # candor-safefs tree so the store's sweep never sees it) and removed again. Zeros are fine on
 # the LUKS2 volume (17 §5.1: dm-crypt makes them incompressible on disk); a filesystem that
-# might compress or deduplicate them is refused. Measures with GNU date (%N) and dd; prints
-# the rate only, never a path it did not already know.
+# might compress or deduplicate them is refused. Timed with CLOCK_BOOTTIME (/proc/uptime);
+# prints the rate only, never a path it did not already know. Write budget: BLOB_MIB per run;
+# run at install, on demand, and from the daily self-test at most once (D-38), not in the
+# 5-minute health loop (AUD-RM2-DEP-36).
 check_blob_rate() {
   local r=host.blob_volume_rate d="$BLOB_ROOT/selftest" ref="$BLOB_ROOT/intake/blobs" l p f t0 t1 ns rate rc budget avail
   if [ "$LIVE" -ne 1 ]; then skip "$r" "offline root: throughput not measured"; return; fi
@@ -1357,18 +1359,31 @@ check_blob_rate() {
   case "$(stat -f -c %T "$d" 2>/dev/null)" in ext2/ext3|ext4|xfs) ;; *) fail "$r" "unsupported filesystem for a zero-fill measurement (ext4 or xfs expected)"; return ;; esac
   avail=$(( $(stat -f -c %a "$d" 2>/dev/null || echo 0) * $(stat -f -c %S "$d" 2>/dev/null || echo 0) ))
   if [ "$avail" -lt $(( BLOB_MIB * 1048576 * 2 )) ]; then fail "$r" "insufficient free space for a $BLOB_MIB MiB measurement"; return; fi
-  f="$d/rate-check.$$"
-  if ! ( set -C; : > "$f" ) 2>/dev/null; then fail "$r" "cannot create the test file (a stale one exists?)"; return; fi
-  chmod 0600 "$f" 2>/dev/null || { rm -f -- "$f"; fail "$r" "cannot set the test file mode"; return; }
+  # DEP-34: the one fixed name; anything of that name left by an interrupted run is removed
+  # first (unlink never follows a link; the directory was verified root-owned 0700 with no
+  # symlinked component). The measurement runs under its own INT/TERM/HUP trap so the file
+  # never survives a signal; the global trap is restored afterwards.
+  f="$d/rate-check.tmp"
+  if [ -e "$f" ] || [ -L "$f" ]; then rm -f -- "$f" 2>/dev/null || { fail "$r" "cannot remove a stale test file"; return; }; fi
+  trap 'rm -f -- "$f"; exit 2' INT TERM HUP
+  # DEP-35: CLOCK_BOOTTIME from /proc/uptime (centiseconds, read by the shell itself: no PATH
+  # tool can fake it, and a wall-clock step cannot inflate the rate). DEP-37: dd creates the
+  # file itself with O_CREAT|O_EXCL|O_NOFOLLOW (conv=excl, oflag=nofollow), mode 0600 by the
+  # script's umask 077; bash noclobber is not used.
   budget=$(( BLOB_MIB / 5 + 30 ))
-  t0=$(date +%s%N)
-  timeout -k 5 "$budget" dd if=/dev/zero of="$f" bs=1048576 count="$BLOB_MIB" conv=fsync,notrunc status=none </dev/null >/dev/null 2>&1; rc=$?
-  t1=$(date +%s%N)
+  t0=""; t1=""
+  read -r t0 _ < /proc/uptime || t0=""
+  ( umask 077; exec timeout -k 5 "$budget" dd if=/dev/zero of="$f" bs=1048576 count="$BLOB_MIB" conv=excl,fsync oflag=nofollow status=none </dev/null >/dev/null 2>&1 ); rc=$?
+  read -r t1 _ < /proc/uptime || t1=""
   rm -f -- "$f"; sync -f "$d" 2>/dev/null || true
-  case "$t0$t1" in *[!0-9]*|"") fail "$r" "monotonic timing unavailable (GNU date %N)"; return ;; esac
-  if [ "$rc" -ne 0 ]; then fail "$r" "write+fsync of $BLOB_MIB MiB failed or exceeded $budget s (below 5 MB/s)"; return; fi
-  ns=$(( t1 - t0 ))
-  if [ "$ns" -le 0 ]; then fail "$r" "timing error"; return; fi
+  trap 'exit 2' INT TERM HUP
+  case "$t0" in *[!0-9.]*|""|.*|*.) fail "$r" "CLOCK_BOOTTIME unreadable (/proc/uptime)"; return ;; esac
+  case "$t1" in *[!0-9.]*|""|.*|*.) fail "$r" "CLOCK_BOOTTIME unreadable (/proc/uptime)"; return ;; esac
+  if [ "$rc" -ne 0 ]; then fail "$r" "write+fsync of $BLOB_MIB MiB failed or exceeded $budget s (below 5 MB/s), or the test file already existed"; return; fi
+  # seconds.centiseconds -> centiseconds (10# guards against leading zeros)
+  t0=$(( 10#${t0%.*} * 100 + 10#${t0#*.} )); t1=$(( 10#${t1%.*} * 100 + 10#${t1#*.} ))
+  ns=$(( (t1 - t0) * 10000000 ))
+  if [ "$ns" -le 0 ]; then fail "$r" "elapsed time below the 10 ms clock resolution: raise --blob-mib"; return; fi
   rate=$(( BLOB_MIB * 1048576 * 1000 / ns ))
   if [ "$rate" -ge "$BLOB_MIN_RATE" ]; then ok "$r" "$rate MB/s sequential write+fsync over $BLOB_MIB MiB (floor $BLOB_MIN_RATE MB/s, STO-29 copy deadline)"
   else fail "$r" "$rate MB/s sequential write+fsync over $BLOB_MIB MiB is below the $BLOB_MIN_RATE MB/s floor the STO-29 copy deadline assumes"; fi

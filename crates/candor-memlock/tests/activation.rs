@@ -218,7 +218,18 @@ fn main() {
     // Success: a listening SOCK_STREAM at fd 3, environment scrubbed, CLOEXEC set, usable.
     let _ = std::os::fd::IntoRawFd::into_raw_fd(lst); // ownership passes to the adoption
     set_env(p, f, n);
-    let adopted = systemd_unix_listener("http").expect("adoption");
+    // A just-joined thread can linger in /proc/self/task for a moment (the kernel reaps it
+    // after pthread_join returns); the adoption refuses until it is gone, leaving the
+    // environment untouched, so retry briefly.
+    let mut adopted = systemd_unix_listener("http");
+    for _ in 0..400 {
+        if adopted.as_ref().err() != Some(&AdoptError::NotSingleThreaded) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        adopted = systemd_unix_listener("http");
+    }
+    let adopted = adopted.expect("adoption");
     assert!(env_is_clear());
     assert_eq!(adopted.kind(), SocketKind::Stream);
     assert_eq!(adopted.as_fd().as_raw_fd(), SD_LISTEN_FDS_START);

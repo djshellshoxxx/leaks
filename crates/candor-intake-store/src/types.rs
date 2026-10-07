@@ -23,6 +23,8 @@ pub const MAX_PART_PADDED_SIZE: u64 = 16 * 1024 * 1024 * 1024;
 pub const DISPOSITION_CT_LEN_STD: usize = 1120 + 48;
 /// X-Wing public key length (09 §5.1 `xwing_pk bytea(1216)`).
 pub const XWING_PK_LEN: usize = 1216;
+/// Mailboxes per account (one per report; v1 uses one).
+pub const MAX_MAILBOXES_PER_ACCOUNT: usize = 16;
 /// Maximum `prefs_ct` length (09 §5.1).
 pub const MAX_PREFS_CT: usize = 4096;
 /// Largest delayed-delivery / signal release offset in days (07 BE-078: U{3..21}).
@@ -260,6 +262,8 @@ pub struct SourceAccount {
     /// First day of the month of the last stored envelope or reply. Folded in
     /// only at import-slot rewrites, never per action (AUD-RM2-STO-01).
     pub activity_month: Day,
+    /// The account's mailboxes (09 `mailbox_account`, ADR-057(2)), sorted.
+    pub mailbox_ids: Vec<MailboxId>,
 }
 
 impl fmt::Debug for SourceAccount {
@@ -280,6 +284,9 @@ pub struct NewAccount {
     pub xwing_pk: Vec<u8>,
     /// `prefs_ct`.
     pub prefs_ct: Vec<u8>,
+    /// Mailbox ids (≤ [`MAX_MAILBOXES_PER_ACCOUNT`], distinct); a replacement
+    /// sets the whole set (09 `mailbox_account`, ADR-057(2)).
+    pub mailbox_ids: Vec<MailboxId>,
 }
 
 impl fmt::Debug for NewAccount {
