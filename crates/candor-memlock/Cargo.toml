@@ -36,3 +36,7 @@ indexing_slicing = "warn"
 arithmetic_side_effects = "warn"
 undocumented_unsafe_blocks = "deny"
 multiple_unsafe_ops_per_block = "deny"
+
+[dev-dependencies]
+# A pipe is the simplest descriptor that is open but not a socket (negative tests).
+rustix = { version = "=1.1.2", default-features = false, features = ["pipe"] }

@@ -9,13 +9,21 @@
 //! The store never reads a wall clock, never stores a time finer than a day,
 //! never stores network identifiers, and returns content-free errors.
 
+#[cfg(feature = "client")]
+pub mod client;
 pub mod deaddrop;
 pub mod deletion;
 pub mod error;
 pub mod lint;
 pub mod memory;
 pub mod pg;
+pub mod proto;
+pub mod reads;
 mod rng;
+#[cfg(feature = "server")]
+pub mod server;
+#[cfg(any(feature = "server", feature = "client"))]
+mod sockio;
 pub mod staged;
 pub mod store;
 pub mod types;
@@ -31,9 +39,13 @@ pub use deletion::{
 };
 pub use error::{Result, StoreError};
 pub use memory::{MEMORY_DEADDROP_CONFIG, MemoryStore};
+// `reads::StoreReads` is deliberately not re-exported at the root: its blanket
+// impl for every `IntakeStore` would make `store.serving_allowed()` ambiguous
+// for glob importers. Import `candor_intake_store::reads::StoreReads`.
 pub use pg::{
     PgIntakeMaintenance, PgIntakeStore, migrate, schema_hash, vacuum_after_rewrite,
     vacuum_full_daily,
 };
+pub use reads::{AccountView, StoreUnavailable};
 pub use store::{IntakeMaintenance, IntakeStore};
 pub use types::*;

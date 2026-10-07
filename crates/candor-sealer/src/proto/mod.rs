@@ -65,6 +65,31 @@ pub const MAX_PARTS: usize = 32;
 pub const MAX_REPLY_BODY_LEN: usize = 61_440;
 /// Maximum reply role label bytes.
 pub const MAX_ROLE_LABEL_LEN: usize = 255;
+/// Maximum reply refs per `DELETE_REPLIES` (one fixed mailbox, 32 slots).
+pub const MAX_DELETE_REPLIES: usize = 32;
+/// Largest release offset of a signal envelope (mailbox-closed U{3..21}, BE-078).
+pub const MAX_SIGNAL_OFFSET_DAYS: u8 = 21;
+
+/// `SEAL_SIGNAL` kinds (04 §13.4 SOURCE_MESSAGE key 7, kinds 2 and 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum SignalKind {
+    /// C4 "no response" escalation (release U{1,2,3} days).
+    NoResponse = 2,
+    /// Mailbox closed (release U{3..21} days; sealed before SW-15 deletion).
+    MailboxClosed = 3,
+}
+
+impl SignalKind {
+    /// Parse the kind byte.
+    pub fn from_u8(v: u8) -> Result<Self, ProtoError> {
+        match v {
+            2 => Ok(Self::NoResponse),
+            3 => Ok(Self::MailboxClosed),
+            _ => Err(ProtoError::Field),
+        }
+    }
+}
 
 /// Opaque web-session handle (random 128-bit value from C-06). A bearer value:
 /// `Debug` is redacted.
@@ -319,6 +344,12 @@ pub enum Op {
     PartDrop = 0x24,
     /// 0x25
     NoteReal = 0x25,
+    /// 0x26
+    SealSignal = 0x26,
+    /// 0x27
+    DeleteReplies = 0x27,
+    /// 0x28
+    CloseMailbox = 0x28,
     /// 0x30
     OpenReply = 0x30,
     /// 0x40
@@ -353,6 +384,9 @@ impl Op {
             0x23 => Self::SealAbort,
             0x24 => Self::PartDrop,
             0x25 => Self::NoteReal,
+            0x26 => Self::SealSignal,
+            0x27 => Self::DeleteReplies,
+            0x28 => Self::CloseMailbox,
             0x30 => Self::OpenReply,
             0x40 => Self::Zeroize,
             0x41 => Self::Touch,
@@ -468,6 +502,31 @@ pub enum Request {
         /// Session.
         sess: SessionHandle,
     },
+    /// `{1: sess, 2: kind}` → [`Response::Sealed`] (offset 1..=21). Seals a
+    /// signal SOURCE_MESSAGE (kind 2 or 3) for the authenticated account's
+    /// report (07 BE-078). Nothing is deleted.
+    SealSignal {
+        /// Session (AUTHENTICATED).
+        sess: SessionHandle,
+        /// Signal kind.
+        kind: SignalKind,
+    },
+    /// `{1: sess, 2: [reply_ref…]}` → [`Response::Deleted`]. SW-14: the
+    /// sealer asks the store to delete the listed replies of the account and
+    /// append K31-signed `reply` entries.
+    DeleteReplies {
+        /// Session (AUTHENTICATED).
+        sess: SessionHandle,
+        /// Store reply refs (≤ [`MAX_DELETE_REPLIES`]).
+        replies: Vec<[u8; 16]>,
+    },
+    /// `{1: sess}` → [`Response::Sealed`] (offset 3..=21). SW-15: seals the
+    /// mailbox-closed signal, then asks the store to delete the account and
+    /// mailbox (K31-signed entries); the session ends on success.
+    CloseMailbox {
+        /// Session (AUTHENTICATED).
+        sess: SessionHandle,
+    },
     /// `{1: sess, 2: part}` → [`Response::Empty`].
     PartDrop {
         /// Session.
@@ -523,6 +582,9 @@ impl Request {
             Self::PartChunk { .. } => Op::PartChunk,
             Self::SealFinish { .. } => Op::SealFinish,
             Self::SealAbort { .. } => Op::SealAbort,
+            Self::SealSignal { .. } => Op::SealSignal,
+            Self::DeleteReplies { .. } => Op::DeleteReplies,
+            Self::CloseMailbox { .. } => Op::CloseMailbox,
             Self::PartDrop { .. } => Op::PartDrop,
             Self::NoteReal { .. } => Op::NoteReal,
             Self::OpenReply { .. } => Op::OpenReply,
@@ -621,6 +683,11 @@ pub enum Response {
         /// Part id.
         part: [u8; 16],
     },
+    /// `{1: count}`: deletion-list entries appended by `DELETE_REPLIES`.
+    Deleted {
+        /// Entries appended.
+        count: u32,
+    },
     /// `{1: release_offset_days}`: committed and `fsync`ed.
     Sealed {
         /// Delayed-delivery offset in days (0..=3).
@@ -687,6 +754,7 @@ impl core::fmt::Debug for Response {
             Self::Confirm { .. } => "Confirm",
             Self::Part { .. } => "Part",
             Self::Sealed { .. } => "Sealed",
+            Self::Deleted { .. } => "Deleted",
             Self::Disposition { .. } => "Disposition",
             Self::Reply(_) => "Reply",
             Self::Status { .. } => "Status",
@@ -1022,6 +1090,26 @@ pub fn encode_request(rid: u32, req: &Request) -> Result<Zeroizing<Vec<u8>>, Pro
             put_sess(&mut e, sess);
             e.uint(2).bytes(part);
         }
+        Request::SealSignal { sess, kind } => {
+            e.map(2);
+            put_sess(&mut e, sess);
+            e.uint(2).uint(*kind as u64);
+        }
+        Request::DeleteReplies { sess, replies } => {
+            if replies.len() > MAX_DELETE_REPLIES {
+                return Err(ProtoError::Field);
+            }
+            e.map(2);
+            put_sess(&mut e, sess);
+            e.uint(2).array(replies.len());
+            for r in replies {
+                e.bytes(r);
+            }
+        }
+        Request::CloseMailbox { sess } => {
+            e.map(1);
+            put_sess(&mut e, sess);
+        }
         Request::NoteReal {
             channel_id,
             first_object_hash,
@@ -1094,6 +1182,25 @@ pub fn decode_request(bytes: &[u8]) -> Result<(u32, Request), ProtoError> {
         Op::GenAccount => Request::GenAccount { sess: sess(d, m)? },
         Op::RotatePassphrase => Request::RotatePassphrase { sess: sess(d, m)? },
         Op::SealAbort => Request::SealAbort { sess: sess(d, m)? },
+        Op::CloseMailbox => Request::CloseMailbox { sess: sess(d, m)? },
+        Op::SealSignal => {
+            let sess = sess(d, m)?;
+            d.req(m, 2)?;
+            Request::SealSignal {
+                sess,
+                kind: SignalKind::from_u8(d.u8()?)?,
+            }
+        }
+        Op::DeleteReplies => {
+            let sess = sess(d, m)?;
+            d.req(m, 2)?;
+            let n = d.array(MAX_DELETE_REPLIES)?;
+            let mut replies = Vec::with_capacity(n);
+            for _ in 0..n {
+                replies.push(d.bytes_n()?);
+            }
+            Request::DeleteReplies { sess, replies }
+        }
         Op::Zeroize => Request::Zeroize { sess: sess(d, m)? },
         Op::Touch => Request::Touch { sess: sess(d, m)? },
         Op::LoginDerive => {
@@ -1289,6 +1396,9 @@ pub fn encode_response(
         } => {
             e.map(1).uint(1).uint(u64::from(*release_offset_days));
         }
+        Response::Deleted { count } => {
+            e.map(1).uint(1).uint(u64::from(*count));
+        }
         Response::Disposition { disposition_ct } => {
             e.map(1).uint(1).bytes(disposition_ct);
         }
@@ -1450,6 +1560,21 @@ pub fn decode_response(expected: Op, bytes: &[u8]) -> Result<(u32, Response), Pr
                 Response::Sealed {
                     release_offset_days,
                 }
+            }
+            Op::SealSignal | Op::CloseMailbox => {
+                d.req(m, 1)?;
+                let release_offset_days = d.u8()?;
+                let min = if expected == Op::CloseMailbox { 3 } else { 1 };
+                if release_offset_days < min || release_offset_days > MAX_SIGNAL_OFFSET_DAYS {
+                    return Err(ProtoError::Field);
+                }
+                Response::Sealed {
+                    release_offset_days,
+                }
+            }
+            Op::DeleteReplies => {
+                d.req(m, 1)?;
+                Response::Deleted { count: d.u32()? }
             }
             Op::NoteReal => {
                 d.req(m, 1)?;

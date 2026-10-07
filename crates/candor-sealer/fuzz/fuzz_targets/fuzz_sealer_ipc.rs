@@ -34,8 +34,8 @@ use candor_core::sig::SigningKey;
 use candor_safefs::{RootPolicy, SafeRoot};
 use candor_sealer::proto::{
     Coi, DraftSet, MAX_FRAME_LEN, Mode, Op, PendingReply, Request, Response, SecretBytes,
-    SecretText, SecretWords, SessionHandle, decode_request, decode_response, encode_request,
-    frame_len,
+    SecretText, SecretWords, SessionHandle, SignalKind, decode_request, decode_response,
+    encode_request, frame_len,
 };
 use candor_sealer::server::clock::{Clock, ClockError};
 use candor_sealer::server::directory::DirectoryTrust;
@@ -216,7 +216,7 @@ fn harness() -> &'static Harness {
     })
 }
 
-const OPS: [Op; 21] = [
+const OPS: [Op; 24] = [
     Op::Hello,
     Op::SessionOpen,
     Op::DraftSet,
@@ -234,6 +234,9 @@ const OPS: [Op; 21] = [
     Op::SealAbort,
     Op::PartDrop,
     Op::NoteReal,
+    Op::SealSignal,
+    Op::DeleteReplies,
+    Op::CloseMailbox,
     Op::OpenReply,
     Op::Zeroize,
     Op::Touch,
@@ -436,7 +439,19 @@ fn request(h: &Harness, g: &mut Gen, u: &mut Unstructured<'_>) -> AResult<Reques
                 }
             }
         },
-        18 => Request::OpenReply { sess, entry: blob(u, 400)? },
+        18 => match u.int_in_range(0..=3u8)? {
+            0 => Request::OpenReply { sess, entry: blob(u, 400)? },
+            1 => Request::SealSignal {
+                sess,
+                kind: if u.arbitrary()? { SignalKind::NoResponse } else { SignalKind::MailboxClosed },
+            },
+            2 => {
+                let n = u.int_in_range(0..=3usize)?;
+                let replies = (0..n).map(|_| u.arbitrary()).collect::<AResult<_>>()?;
+                Request::DeleteReplies { sess, replies }
+            }
+            _ => Request::CloseMailbox { sess },
+        },
         19 => Request::NoteReal { channel_id: channel, first_object_hash: u.arbitrary()? },
         _ => {
             if u.arbitrary()? {

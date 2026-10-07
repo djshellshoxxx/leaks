@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# cargo-fuzz layout (IMPL-RM2 §2.3; ST-043). Run with:
+#   cargo +nightly fuzz run fuzz_istore_frame -- -max_total_time=600 -rss_limit_mb=2048
+# (from crates/candor-intake-store). Own workspace so the main workspace never
+# builds libFuzzer. Only the seed corpus (seeds/) is committed; corpora and
+# artifacts stay in scratch.
+[package]
+name = "candor-intake-store-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "AGPL-3.0-or-later"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.10"
+candor-intake-store = { path = ".." }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "fuzz_istore_frame"
+path = "fuzz_targets/fuzz_istore_frame.rs"
+test = false
+doc = false
+bench = false
+
+# Writes the seed corpus to fuzz/seeds/fuzz_istore_frame/:
+#   cargo +nightly run --bin gen_seeds
+[[bin]]
+name = "gen_seeds"
+path = "fuzz_targets/gen_seeds.rs"
+test = false
+doc = false
+bench = false

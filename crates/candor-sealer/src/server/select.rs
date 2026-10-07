@@ -56,11 +56,25 @@ pub(crate) struct Choice<'a> {
     pub original_eligible: Option<&'a [[u8; 16]]>,
 }
 
-/// Compute the recipient set.
+/// Compute the recipient set for an envelope released today.
 pub(crate) fn select(
     snap: &DirectorySnapshot,
     channel_id: &[u8; 16],
     today: u32,
+    choice: Choice<'_>,
+) -> Result<Selection, SelectError> {
+    select_at(snap, channel_id, today, today, choice)
+}
+
+/// Compute the recipient set as of `today` (roster, certificates, COI) with
+/// the Member Epoch Keys of the epoch containing `key_day` (the release day
+/// of a signal envelope, 04 §13.4 kinds 2/3: pre-published MEKs, so the
+/// envelope carries a current epoch when it is released).
+pub(crate) fn select_at(
+    snap: &DirectorySnapshot,
+    channel_id: &[u8; 16],
+    today: u32,
+    key_day: u32,
     choice: Choice<'_>,
 ) -> Result<Selection, SelectError> {
     let ch = match snap.channel(channel_id) {
@@ -74,7 +88,7 @@ pub(crate) fn select(
     };
     let alternative = ch.independent_route(today);
     let unavailable = SelectError::Unavailable { alternative };
-    let epoch_id = snap.epoch_for_day(today).ok_or(unavailable)?;
+    let epoch_id = snap.epoch_for_day(key_day).ok_or(unavailable)?;
     // Step 4: Triage Set of the active roster (time-locked loosening entries
     // are not yet active, ADR-036(2)), restricted to members whose role label
     // carries a current independent ROLE_LABEL_CERT (ADR-036(3), §14.4 rule 5).
@@ -147,8 +161,8 @@ pub(crate) fn select(
                 &k.user_id == uid
                     && !k.revoked
                     && k.epoch_id == epoch_id
-                    && k.valid_from_day <= today
-                    && today < k.valid_until_day
+                    && k.valid_from_day <= key_day
+                    && key_day < k.valid_until_day
             })
             .collect();
         // Exactly one valid entry; an ambiguous directory is treated as no key.

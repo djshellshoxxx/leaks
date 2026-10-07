@@ -104,7 +104,7 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd -P)
 BASE="$SCRIPT_DIR/config-check.baseline"
 MANIFEST="$SCRIPT_DIR/config-check.manifest"
 # sha256 of config-check.manifest (release-pinned; update together with the manifest).
-MANIFEST_SHA256=297a77cd8d0bd10310bd18872dad889ddd6f97f1a394f4b4869fd9d4131f45db
+MANIFEST_SHA256=4b67f66cfc496a681405483b554bb42d075b414c67b0208b97ea710fa8bf580c
 SECTIONS="tor nft pg units journald kernel dns apparmor host blobrate"
 MODE=static
 DIR="$SCRIPT_DIR/../intake"
@@ -371,14 +371,6 @@ tor_canon() { # snapshot -> $WORK/tor/{verify,short,full}.out ; returns non-zero
   mkdir -m 0700 "$d" && cp -- "$1" "$d/torrc" && chown "$TOR_USER:$g" "$d" "$d/torrc" && chmod 0600 "$d/torrc" || return 1
   # Private mount namespace: tmpfs over /var/lib and /run so the canonicalisation never touches
   # the real tor state, keys or sockets; tor itself runs unprivileged as the instance user.
-  # Effective syscall allow-sets (scf*| kinds) of the three daemons, from the merged units.
-  local k kind
-  for k in candor-sealer.service:scf candor-intake-web.service:scf-web candor-intake-store.service:scf-store; do
-    u=${k%%:*}; kind=${k##*:}
-    mapfile -t f < <(awk -v u="$u" '/^\t-> Unit / {t=($3==u":")} t && /^\t\t(Fragment|DropIn) Path: / {print substr($0, index($0, ": ")+2)}' "$WORK/verify.dbg")
-    unit_merge "${f[@]}" > "$WORK/emit.$u"
-    if scf_effective "$WORK/emit.$u" "$WORK/scf.emit"; then sed "s/^/$kind|/" "$WORK/scf.emit"; else echo "# $kind: syscall set not computable (rc $?)"; fi
-  done
   # shellcheck disable=SC2016 # expanded by the inner shell
   unshare -m --propagation private /bin/sh -c '
     set -e
@@ -1356,7 +1348,7 @@ check_blob_rate() {
   if [ "$LIVE" -ne 1 ]; then skip "$r" "offline root: throughput not measured"; return; fi
   need_tools "$r" dd date stat sync timeout || return
   for p in "$d" "$ref"; do
-    if l=$(symlinked_component / "$p"); then fail "$r" "refused: symlinked path component $l"; return; fi
+    if l=$(symlinked_component "" "$p"); then fail "$r" "refused: symlinked path component $l"; return; fi
     if [ ! -d "$p" ] || [ -L "$p" ]; then fail "$r" "missing directory ${p#"$BLOB_ROOT"} under the blob root"; return; fi
   done
   if [ "$(stat -c '%u %a %F' "$d" 2>/dev/null)" != "0 700 directory" ]; then fail "$r" "selftest directory must be a root-owned 0700 directory"; return; fi
@@ -1581,6 +1573,14 @@ emit_baseline() { # maintainers only: print effective values of the tree for rev
       printf '%s\n' "$v" | awk -v p="unit|$u|$s|$k|=|" 'BEGIN { RS="\001" } { n=split($0, a, / ;; /); for (i=1; i<=n; i++) { sub(/\n$/, "", a[i]); print p a[i] } }'
     done
   done
+  # Effective syscall allow-sets (scf*| kinds) of the three daemons, from the merged units.
+  local k kind
+  for k in candor-sealer.service:scf candor-intake-web.service:scf-web candor-intake-store.service:scf-store; do
+    u=${k%%:*}; kind=${k##*:}
+    mapfile -t f < <(awk -v u="$u" '/^\t-> Unit / {t=($3==u":")} t && /^\t\t(Fragment|DropIn) Path: / {print substr($0, index($0, ": ")+2)}' "$WORK/verify.dbg")
+    unit_merge "${f[@]}" > "$WORK/emit.$u"
+    if scf_effective "$WORK/emit.$u" "$WORK/scf.emit"; then sed "s/^/$kind|/" "$WORK/scf.emit"; else echo "# $kind: syscall set not computable (rc $?)"; fi
+  done
   # shellcheck disable=SC2016 # expanded by the inner shell
   if unshare -n /bin/sh -c 'nft -f "$1" >/dev/null 2>&1 && nft -j list ruleset' sh "$NFT" > "$WORK/n.json"; then
     UIDMAP=$(nft_uidmap)
@@ -1601,7 +1601,14 @@ emit_baseline() { # maintainers only: print effective values of the tree for rev
   done
 }
 
-if [ "$EMIT" -eq 1 ]; then emit_baseline; exit 0; fi
+if [ "$EMIT" -eq 1 ]; then
+  # Maintainer mode: the reader runs from a copy as in verify_policy, but the manifest pins
+  # are not checked (the emitted lines are what the next pin is made from).
+  if [ -L "$SAFE_READ" ] || ! dd if="$SAFE_READ" of="$WORK/candor-safe-read" iflag=nofollow bs=65536 count=64 status=none 2>/dev/null ||
+     ! chmod 0700 "$WORK/candor-safe-read"; then echo "config-check: candor-safe-read missing (build: tools/build-safe-read.sh)" >&2; exit 2; fi
+  SAFE_READ="$WORK/candor-safe-read"; SAFE_OK=1
+  emit_baseline; exit 0
+fi
 if ! verify_policy; then
   printf 'config-check: policy integrity check FAILED; no check run (exit=30)\n'
   exit 30

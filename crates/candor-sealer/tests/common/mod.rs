@@ -35,7 +35,7 @@ use candor_sealer::proto::{
 use candor_sealer::server::clock::{Clock, ClockError};
 use candor_sealer::server::directory::{DirectoryTrust, SnapshotBundle};
 
-mod kdlog;
+pub mod kdlog;
 use candor_sealer::server::hardening::InsecureDevMode;
 use candor_sealer::server::sink::{
     AccountUpsert, Blob, EnvelopeGroup, EnvelopeObject, EnvelopeSink, SinkError, StagedBundle,
@@ -86,6 +86,11 @@ pub struct StoredEnvelope {
 }
 
 /// Store operations in order: `'A'` account upsert, `'G'` envelope group.
+/// A `delete_replies` call: `(lookup_tag, reply refs)`.
+pub type DeletedReplies = ([u8; 32], Vec<[u8; 16]>);
+/// A `delete_account` call: `(lookup_tag, mailbox ids)`.
+pub type DeletedAccount = ([u8; 32], Vec<[u8; 32]>);
+
 pub struct MemorySink {
     pub staging: &'static SafeRoot,
     pub envelopes: Mutex<Vec<StoredEnvelope>>,
@@ -98,6 +103,12 @@ pub struct MemorySink {
     pub unavailable: AtomicBool,
     /// Sealed bundles as handed over (descriptor kept for hand-over tests).
     pub bundles: Mutex<Vec<StagedBundle>>,
+    /// `delete_replies` calls: `(lookup_tag, reply refs)`.
+    pub deleted_replies: Mutex<Vec<DeletedReplies>>,
+    /// `delete_account` calls: `(lookup_tag, mailbox ids)`.
+    pub deleted_accounts: Mutex<Vec<DeletedAccount>>,
+    /// Fail only deletions.
+    pub fail_delete: AtomicBool,
 }
 
 impl MemorySink {
@@ -166,6 +177,34 @@ impl EnvelopeSink for MemorySink {
         }
         self.accounts.lock().unwrap().push(op);
         self.ops.lock().unwrap().push('A');
+        Ok(())
+    }
+
+    fn delete_replies(&self, lookup_tag: [u8; 32], replies: &[[u8; 16]]) -> Result<u32, SinkError> {
+        if self.fail.load(Ordering::SeqCst) || self.fail_delete.load(Ordering::SeqCst) {
+            return Err(SinkError);
+        }
+        self.deleted_replies
+            .lock()
+            .unwrap()
+            .push((lookup_tag, replies.to_vec()));
+        self.ops.lock().unwrap().push('R');
+        Ok(replies.len() as u32)
+    }
+
+    fn delete_account(
+        &self,
+        lookup_tag: [u8; 32],
+        mailbox_ids: &[[u8; 32]],
+    ) -> Result<(), SinkError> {
+        if self.fail.load(Ordering::SeqCst) || self.fail_delete.load(Ordering::SeqCst) {
+            return Err(SinkError);
+        }
+        self.deleted_accounts
+            .lock()
+            .unwrap()
+            .push((lookup_tag, mailbox_ids.to_vec()));
+        self.ops.lock().unwrap().push('X');
         Ok(())
     }
 }
@@ -356,6 +395,18 @@ pub fn fixture_custom(
     peer_uid: u32,
     adjust: impl FnOnce(&mut DirectorySnapshot),
 ) -> Fixture {
+    fixture_with_sink(chaff, limits, peer_uid, None, adjust)
+}
+
+/// As [`fixture_custom`], with an external `EnvelopeSink` (e.g. the real
+/// `istore` sink); the fixture's `MemorySink` is then unused.
+pub fn fixture_with_sink(
+    chaff: ChaffConfig,
+    limits: Limits,
+    peer_uid: u32,
+    external: Option<Arc<dyn EnvelopeSink>>,
+    adjust: impl FnOnce(&mut DirectorySnapshot),
+) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap(); // safefs-lint: allow(test fixture setup)
     let (staging_path, staging) = staging_root(dir.path());
@@ -372,6 +423,9 @@ pub fn fixture_custom(
         fail_accounts: AtomicBool::new(false),
         bundles: Mutex::new(Vec::new()),
         unavailable: AtomicBool::new(false),
+        deleted_replies: Mutex::new(Vec::new()),
+        deleted_accounts: Mutex::new(Vec::new()),
+        fail_delete: AtomicBool::new(false),
     });
     // Triage Set: labels 1 (ombudsman), 2 (audit chair), 3 (counsel); label 4 is
     // a non-triage investigator.
@@ -385,12 +439,16 @@ pub fn fixture_custom(
     let disposition = KemKeyPair::generate(Suite::CandorStd1).unwrap();
     let k35 = [0x35; 32];
     let cfg = config(chaff, limits, peer_uid);
+    let chosen: Arc<dyn EnvelopeSink> = match external {
+        Some(e) => e,
+        None => sink.clone(),
+    };
     let sealer = Sealer::new(
         cfg,
         SigningKey::from_seed(&k35),
         staging,
         clock.clone(),
-        sink.clone(),
+        chosen,
     )
     .unwrap();
     let mut members = members;

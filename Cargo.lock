@@ -211,6 +211,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
+name = "candor-authz"
+version = "0.1.0"
+dependencies = [
+ "candor-core",
+ "proptest",
+ "serde",
+ "serde_json",
+ "subtle",
+]
+
+[[package]]
+name = "candor-case-db"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.4.3",
+ "proptest",
+ "sha2 0.11.0",
+ "sqlx",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "candor-core"
 version = "0.1.0"
 dependencies = [
@@ -294,6 +317,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "candor-memlock"
+version = "0.1.0"
+dependencies = [
+ "rustix",
+]
+
+[[package]]
 name = "candor-safe-read"
 version = "0.1.0"
 dependencies = [
@@ -325,6 +355,7 @@ name = "candor-sealer"
 version = "0.1.0"
 dependencies = [
  "candor-core",
+ "candor-intake-store",
  "candor-log",
  "candor-safefs",
  "hkdf",

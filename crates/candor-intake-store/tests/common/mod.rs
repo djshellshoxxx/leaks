@@ -778,6 +778,102 @@ pub async fn reply_backlog<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Output 
 }
 
 /// RL-05 rejections and ADR-047(9) drops.
+/// A REPLY with a real candor-core SealedObject (bucket 1) and a stanza of
+/// the fixed HPKE_BASE length, so `CoreReplyHasher` recognises it:
+/// `(incoming reply, object_hash, stanza)`.
+pub fn real_reply(account: AccountId, stanza_byte: u8) -> (IncomingReply, [u8; 32], Vec<u8>) {
+    use candor_core::header::ObjectType;
+    use candor_core::object::{SealRequest, seal_bytes};
+    let req = SealRequest {
+        suite: candor_core::Suite::CandorStd1,
+        object_type: ObjectType::Reply,
+        tenant_id: TENANT.0,
+        channel_id: [0; 16],
+        epoch_id: 0,
+        day_stamp: 0,
+        recipients: None,
+        padded_len: 4096,
+    };
+    let mut pt = vec![0u8; 4096];
+    pt[..8].copy_from_slice(&uniq().to_be_bytes());
+    let (_ck, obj) = seal_bytes(&req, &pt).unwrap();
+    let stanza_len = reply_ct_len(1).unwrap() - obj.bytes.len();
+    let stanza = vec![stanza_byte; stanza_len];
+    let mut ct = obj.bytes.clone();
+    ct.extend_from_slice(&stanza);
+    assert_eq!(ct.len(), reply_ct_len(1).unwrap());
+    (
+        IncomingReply {
+            account: Some(account),
+            mailbox_id: Some(MailboxId([1; 32])),
+            object_hash: obj.object_hash,
+            reply_ct: ct,
+            size_bucket: 1,
+        },
+        obj.object_hash,
+        stanza,
+    )
+}
+
+/// ADR-046(7) rotation: `rewrap_replies` replaces stanza (1) of the matching
+/// replies only, keeps the length and bucket, ignores unknown hashes and
+/// refuses a stanza of another length; unknown account → `NotFound`.
+pub async fn rewrap<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Output = S>>(mk: F) {
+    let s = fresh(&mk).await;
+    let acct = account(&s, 5).await;
+    let other = account(&s, 6).await;
+    let (r1, h1, st1) = real_reply(acct, 0xA1);
+    let (r2, h2, _) = real_reply(acct, 0xA2);
+    let (r3, h3, _) = real_reply(other, 0xA3);
+    let plain = reply(Some(acct), 1, 40);
+    let res = s
+        .apply_replies(TODAY, vec![r1.clone(), r2.clone(), r3, plain])
+        .await
+        .unwrap();
+    assert_eq!(res.accepted, 4);
+    let new1 = vec![0xB1u8; st1.len()];
+    let short = vec![0xB2u8; st1.len() - 1];
+    let n = s
+        .rewrap_replies(
+            acct,
+            &[
+                (h1, new1.clone()),
+                (h2, short),
+                (h3, new1.clone()),
+                ([9; 32], new1.clone()),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+    let mb = s.mailbox_list(acct).await.unwrap();
+    assert_eq!(mb.len(), 3);
+    let sealed_len = r1.reply_ct.len() - st1.len();
+    for r in &mb {
+        if r.reply_ct[..sealed_len] == r1.reply_ct[..sealed_len] {
+            assert_eq!(&r.reply_ct[sealed_len..], &new1[..]);
+        } else if r.reply_ct[..sealed_len] == r2.reply_ct[..sealed_len] {
+            assert_eq!(r.reply_ct, r2.reply_ct, "wrong-length stanza left as is");
+        }
+        assert_eq!(r.reply_ct.len(), reply_ct_len(r.size_bucket).unwrap());
+    }
+    // The other account's reply is untouched.
+    let ob = s.mailbox_list(other).await.unwrap();
+    assert_eq!(ob.len(), 1);
+    assert_eq!(ob[0].reply_ct[sealed_len..], vec![0xA3u8; st1.len()][..]);
+    // Idempotent retry: the same stanza is written again, nothing changes.
+    assert_eq!(
+        s.rewrap_replies(acct, &[(h1, new1.clone())]).await.unwrap(),
+        1
+    );
+    let again = s.mailbox_list(acct).await.unwrap();
+    assert_eq!(again, mb);
+    assert_eq!(
+        s.rewrap_replies(AccountId([0x77; 16]), &[]).await,
+        Err(StoreError::NotFound)
+    );
+}
+
 pub async fn reply_rules<S: Store, F: Fn(TenantId) -> Fut, Fut: Future<Output = S>>(mk: F) {
     let s = fresh(&mk).await;
     let sg = signer();
@@ -1718,6 +1814,7 @@ macro_rules! conformance_tests {
             conf_dead_drop_sizes => dead_drop_sizes,
             conf_reply_backlog => reply_backlog,
             conf_reply_rules => reply_rules,
+            conf_rewrap => rewrap,
             conf_deletion_list => deletion_list,
             conf_kd_snapshots => kd_snapshots,
             conf_counters => counters,

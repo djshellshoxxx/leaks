@@ -12,6 +12,18 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Both on by default so that the integration tests (and the store binary) get
+# them; consumers that only need the protocol or the client set
+# `default-features = false` (the sealer does).
+default = ["server", "client"]
+# `istore` IPC server loop (`server` module): SEQPACKET listener, SO_PEERCRED
+# roles, hand-over receiver, K31 deletion op. Needs a tokio runtime handle.
+server = ["tokio/rt", "tokio/time"]
+# `istore` IPC client (`client` module): `IstoreClient` (web reads) and the
+# sealer-side connection; runs blocking socket calls on `spawn_blocking`.
+client = ["tokio/rt"]
+
 # Every dependency is justified in SPEC-NOTES.md ("Dependencies").
 [dependencies]
 candor-core = { path = "../candor-core" }
@@ -26,6 +38,6 @@ subtle = { version = "=2.6.1", default-features = false }
 zeroize = { version = "=1.8.2", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
-tokio = { version = "=1.48.0", default-features = false, features = ["rt", "macros", "sync"] }
+tokio = { version = "=1.48.0", default-features = false, features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 proptest = { version = "=1.11.0", default-features = false, features = ["std"] }
 tempfile = { version = "=3.23.0", default-features = false }

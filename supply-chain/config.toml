@@ -1264,3 +1264,6 @@ notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 version = "1.0.23"
 criteria = "safe-to-deploy"
 notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[policy.candor-memlock]
+criteria = "safe-to-deploy"

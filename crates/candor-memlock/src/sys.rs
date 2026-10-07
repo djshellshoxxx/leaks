@@ -4,7 +4,7 @@
 //! reachable only from [`crate::systemd_unix_listener`], which establishes the invariants
 //! (main thread, first adoption) before calling here. Nothing in this module reads input.
 
-use std::os::fd::{FromRawFd, OwnedFd};
+use std::os::fd::{BorrowedFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{AdoptError, SD_LISTEN_FDS_START};
@@ -38,18 +38,27 @@ pub(crate) fn clear_listen_env() {
 
 /// Takes ownership of file descriptor `SD_LISTEN_FDS_START` (3), exactly once per process.
 ///
-/// Returns `Err(AdoptError::AlreadyAdopted)` on any later call.
+/// Returns `Err(AdoptError::AlreadyAdopted)` on any later call and `Err(AdoptError::BadFd)`
+/// when fd 3 is not open (an `OwnedFd` of a closed descriptor would abort the process on
+/// drop: the standard library treats `close == EBADF` as an I/O-safety violation).
 pub(crate) fn adopt_fd3() -> Result<OwnedFd, AdoptError> {
     if ADOPTED.swap(true, Ordering::SeqCst) {
         return Err(AdoptError::AlreadyAdopted);
     }
+    // SAFETY: `borrow_raw` requires the descriptor to stay valid for the borrow's lifetime.
+    // The borrow lives for one `fcntl(F_GETFD)` in a single-threaded process (caller's
+    // precondition: main thread, start of `main`), so nothing can close fd 3 meanwhile; if
+    // fd 3 is not open at all, `fcntl` reports `EBADF` and the borrow is never used again.
+    let probe = unsafe { BorrowedFd::borrow_raw(SD_LISTEN_FDS_START) };
+    if rustix::io::fcntl_getfd(probe).is_err() {
+        ADOPTED.store(false, Ordering::SeqCst);
+        return Err(AdoptError::BadFd);
+    }
     // SAFETY: `from_raw_fd` requires that the descriptor is open and that no other owner will
-    // close it. systemd passes the activated socket as fd 3 (`sd_listen_fds(3)`) and nothing
-    // else in the process has adopted it: this function runs at most once (the `ADOPTED`
-    // swap above), before any other descriptor-owning code, and the caller has verified
-    // `LISTEN_PID == getpid()` and `LISTEN_FDS == 1`. If fd 3 is not open after all,
-    // `check_listener_fd` reports `BadFd` and dropping the `OwnedFd` makes one harmless
-    // `close(3) == EBADF`; no other object owns fd 3, so nothing is double-closed.
+    // close it. It is open (probe above). systemd passes the activated socket as fd 3
+    // (`sd_listen_fds(3)`) and nothing else in the process has adopted it: this function runs
+    // at most once (the `ADOPTED` swap above), before any other descriptor-owning code, and
+    // the caller has verified `LISTEN_PID == getpid()` and `LISTEN_FDS == 1`.
     Ok(unsafe { OwnedFd::from_raw_fd(SD_LISTEN_FDS_START) })
 }
 

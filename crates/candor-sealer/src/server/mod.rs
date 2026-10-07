@@ -14,6 +14,7 @@ pub mod clock;
 pub mod directory;
 pub mod handover;
 pub mod hardening;
+pub mod istore;
 pub mod kd;
 pub mod merkle;
 pub mod sink;
@@ -36,12 +37,12 @@ use zeroize::Zeroizing;
 
 use crate::proto::{
     DraftSet, DraftView, ErrorCode, Mode, PROTO_VERSION, PartView, PendingReply, ReplyView,
-    Request, Response, SecretBytes, SecretText, SecretWords, SessionHandle,
+    Request, Response, SecretBytes, SecretText, SecretWords, SessionHandle, SignalKind,
 };
 use candor_core::hash::EvidenceHasher;
 use candor_core::header::ObjectType;
 use candor_core::kdf::ct_eq;
-use candor_core::kem::KemPublicKey;
+use candor_core::kem::{KemKeyPair, KemPublicKey};
 use candor_core::passphrase::{self, SourceKeys, Wordlist};
 use candor_core::record::{RecordAad, open_record, seal_record};
 use candor_core::secret::{AeadKey, Secret32, SessionKey};
@@ -812,6 +813,9 @@ impl Sealer {
                 delayed_delivery,
             } => self.seal_finish(sess, delayed_delivery).await,
             Request::SealAbort { sess } => self.seal_abort(sess).await,
+            Request::SealSignal { sess, kind } => self.seal_signal(sess, kind).await,
+            Request::DeleteReplies { sess, replies } => self.delete_replies(sess, replies).await,
+            Request::CloseMailbox { sess } => self.close_mailbox(sess).await,
             Request::RotateFinish { sess, replies } => self.rotate_finish(sess, replies).await,
             Request::NoteReal {
                 channel_id,
@@ -1510,6 +1514,161 @@ impl Sealer {
             self.cancel_next_chaff(channel_id);
         }
         resp
+    }
+
+    /// Common checks and recipient selection of a signal envelope (07 §5.2
+    /// `SEAL_SIGNAL`, BE-078): an authenticated session with a report, no
+    /// pending confirmation or upload; the release offset is drawn for the
+    /// kind and the MEKs are those of the epoch containing the release day.
+    fn signal_job(&self, sess: &Session, kind: SignalKind) -> Result<SealJob, Response> {
+        if sess.phase != Phase::Authenticated || sess.pending.is_some() || sess.upload.is_some() {
+            return Err(err(ErrorCode::BadState));
+        }
+        let Some(report) = sess.prefs.as_ref().and_then(|p| p.reports.first()) else {
+            return Err(err(ErrorCode::BadState));
+        };
+        let release_offset_days = match kind {
+            SignalKind::NoResponse => rand::release_offset(),
+            SignalKind::MailboxClosed => rand::mailbox_closed_offset(),
+        }
+        .map_err(core_err)?;
+        let (snap, today, custodian, disposition) = self.seal_preconditions(&report.channel_id)?;
+        let release_day = today
+            .checked_add(u32::from(release_offset_days))
+            .ok_or_else(|| err(ErrorCode::Internal))?;
+        // Follow-up rule (ADR-036(4)) within the original eligible set, with
+        // the pre-published MEKs of the release day's epoch.
+        let sel = select::select_at(
+            &snap,
+            &report.channel_id,
+            today,
+            release_day,
+            Choice {
+                flagged_labels: &[],
+                categories: &report.categories,
+                original_eligible: Some(&report.original_eligible),
+            },
+        )
+        .map_err(select_err)?;
+        Ok(SealJob {
+            snap,
+            sel,
+            today,
+            custodian,
+            disposition,
+            release_offset_days,
+            initial: false,
+        })
+    }
+
+    /// `SEAL_SIGNAL`: seal and commit one signal envelope. Nothing is deleted.
+    async fn seal_signal(&self, sess: SessionHandle, kind: SignalKind) -> Response {
+        let g = match self.locked(&sess).await {
+            Ok(g) => g,
+            Err(e) => return e,
+        };
+        let job = match self.signal_job(&g, kind) {
+            Ok(j) => j,
+            Err(e) => return e,
+        };
+        let channel_id = job.sel.channel_id;
+        let st = self.st.clone();
+        let r = blocking(move || signal_blocking(&g, &st, job, kind)).await;
+        let resp = r.unwrap_or_else(|_| err(ErrorCode::Internal));
+        if matches!(resp, Response::Sealed { .. }) {
+            self.cancel_next_chaff(channel_id);
+        }
+        resp
+    }
+
+    /// `DELETE_REPLIES` (SW-14): the store deletes the listed replies of the
+    /// session's account and appends K31-signed `reply` entries.
+    async fn delete_replies(&self, sess: SessionHandle, replies: Vec<[u8; 16]>) -> Response {
+        let g = match self.locked(&sess).await {
+            Ok(g) => g,
+            Err(e) => return e,
+        };
+        if g.phase != Phase::Authenticated || g.pending.is_some() {
+            return err(ErrorCode::BadState);
+        }
+        let Some(tag) = g.keys.as_ref().map(SourceKeys::lookup_tag) else {
+            return err(ErrorCode::BadState);
+        };
+        drop(g);
+        let st = self.st.clone();
+        let r = blocking(move || st.sink.delete_replies(tag, &replies)).await;
+        match r {
+            Ok(Ok(count)) => Response::Deleted { count },
+            _ => err(ErrorCode::Internal),
+        }
+    }
+
+    /// `CLOSE_MAILBOX` (SW-15, API-055): seal the mailbox-closed signal first,
+    /// then ask the store for the K31-signed account and mailbox deletion;
+    /// the session ends on success. A failed deletion keeps the session with
+    /// the signal marked committed, so a retry deletes without sealing a
+    /// second signal; nothing is ever half-deleted (the store's deletion is
+    /// one transaction per entry kind and idempotent).
+    async fn close_mailbox(&self, sess: SessionHandle) -> Response {
+        let mut g = match self.locked(&sess).await {
+            Ok(g) => g,
+            Err(e) => return e,
+        };
+        if g.phase != Phase::Authenticated || g.pending.is_some() || g.upload.is_some() {
+            return err(ErrorCode::BadState);
+        }
+        let (Some(tag), Some(prefs)) = (
+            g.keys.as_ref().map(SourceKeys::lookup_tag),
+            g.prefs.as_ref(),
+        ) else {
+            return err(ErrorCode::BadState);
+        };
+        let mailbox_ids: Vec<[u8; 32]> = prefs.reports.iter().map(|r| r.mailbox_id).collect();
+        let channel_id = prefs.reports.first().map(|r| r.channel_id);
+        let offset = match g.closing {
+            Some(o) => o,
+            None => {
+                let job = match self.signal_job(&g, SignalKind::MailboxClosed) {
+                    Ok(j) => j,
+                    Err(e) => return e,
+                };
+                let offset = job.release_offset_days;
+                let st = self.st.clone();
+                let r = blocking(move || signal_blocking(&g, &st, job, SignalKind::MailboxClosed))
+                    .await;
+                let resp = r.unwrap_or_else(|_| err(ErrorCode::Internal));
+                if !matches!(resp, Response::Sealed { .. }) {
+                    return resp;
+                }
+                g = match self.locked(&sess).await {
+                    Ok(g) => g,
+                    Err(e) => return e,
+                };
+                g.closing = Some(offset);
+                offset
+            }
+        };
+        drop(g);
+        // An account create or replacement still queued for this tag must
+        // not be written after the deletion (SEA-21 batching).
+        {
+            let mut q = lock(&self.st.accounts);
+            q.pending.retain(|a| !ct_eq(&a.account.lookup_tag, &tag));
+        }
+        let st = self.st.clone();
+        let r = blocking(move || st.sink.delete_account(tag, &mailbox_ids)).await;
+        match r {
+            Ok(Ok(())) => {
+                self.remove_session(&sess);
+                if let Some(c) = channel_id {
+                    self.cancel_next_chaff(c);
+                }
+                Response::Sealed {
+                    release_offset_days: offset,
+                }
+            }
+            _ => err(ErrorCode::Internal),
+        }
     }
 
     async fn rotate_finish(&self, sess: SessionHandle, replies: Vec<PendingReply>) -> Response {
@@ -2274,6 +2433,9 @@ fn dummy_account(st: &State) -> Result<AccountUpsert, candor_core::Error> {
     let mut mailbox = [0u8; 32];
     candor_core::fill_random(&mut mailbox)?;
     let auth = SigningKey::generate()?;
+    // A real X-Wing public key, as a real account carries one (never a
+    // constant: the store sees the same shape for real and dummy rows).
+    let xwing_pk = KemKeyPair::generate(st.cfg.suite)?.public.to_bytes();
     let mut k = Zeroizing::new([0u8; 32]);
     candor_core::fill_random(k.as_mut())?;
     let key = AeadKey::from_bytes(*k);
@@ -2293,6 +2455,7 @@ fn dummy_account(st: &State) -> Result<AccountUpsert, candor_core::Error> {
         account: AccountRecord {
             lookup_tag,
             auth_pk: auth.verifying_key_bytes(),
+            xwing_pk,
             prefs_ct,
             mailbox_ids: vec![mailbox],
         },
@@ -2401,6 +2564,7 @@ fn seal_blocking(mut g: OwnedMutexGuard<Session>, st: &State, job: SealJob) -> (
             account: AccountRecord {
                 lookup_tag: keys.lookup_tag(),
                 auth_pk: keys.auth_key().verifying_key_bytes(),
+                xwing_pk: keys.kem_public_key().to_bytes(),
                 prefs_ct: ct,
                 mailbox_ids: vec![mailbox_id],
             },
@@ -2485,6 +2649,57 @@ fn seal_blocking(mut g: OwnedMutexGuard<Session>, st: &State, job: SealJob) -> (
         },
         drop_session,
     )
+}
+
+/// Seal and commit a signal SOURCE_MESSAGE (kind 2/3, empty message, empty
+/// bundle, dummy IDENTITY: the shape of every follow-up, BE-078). The draft,
+/// staged parts and K36 are untouched.
+fn signal_blocking(g: &Session, st: &State, job: SealJob, kind: SignalKind) -> Response {
+    let ctx = seal_ctx(st, &job);
+    let (Some(keys), Some(report)) = (
+        g.keys.as_ref(),
+        g.prefs.as_ref().and_then(|p| p.reports.first()),
+    ) else {
+        return err(ErrorCode::BadState);
+    };
+    let sm = seal::SourceMessageInput {
+        keys,
+        report,
+        kind: match kind {
+            SignalKind::NoResponse => MessageKind::NoResponseEscalation,
+            SignalKind::MailboxClosed => MessageKind::MailboxClosed,
+        },
+        message: "",
+        new_keys: None,
+    };
+    let group = match seal::seal_source_message(&ctx, &job.sel, &sm, &[], &g.k36) {
+        Ok(o) => o,
+        Err(e) => return core_err(e),
+    };
+    let disposition_ct = match seal::disposition_ct(
+        ctx.suite,
+        &ctx.tenant_id,
+        &ctx.disposition_pk,
+        &group.main.object_hash,
+        false,
+    ) {
+        Ok(d) => d,
+        Err(e) => return core_err(e),
+    };
+    let group = group.into_group(job.sel.channel_id, disposition_ct);
+    if let Err(code) = commit_group(
+        st.sink.as_ref(),
+        group,
+        job.sel.epoch_id,
+        job.today,
+        job.release_offset_days,
+    ) {
+        return err(code);
+    }
+    drop(job.snap);
+    Response::Sealed {
+        release_offset_days: job.release_offset_days,
+    }
 }
 
 fn rotate_blocking(
@@ -2578,6 +2793,7 @@ fn rotate_blocking(
         account: AccountRecord {
             lookup_tag: new_keys.lookup_tag(),
             auth_pk: new_keys.auth_key().verifying_key_bytes(),
+            xwing_pk: new_keys.kem_public_key().to_bytes(),
             prefs_ct: ct,
             mailbox_ids: new_prefs.reports.iter().map(|r| r.mailbox_id).collect(),
         },
@@ -2680,6 +2896,7 @@ mod tests {
             account: AccountRecord {
                 lookup_tag: [tag; 32],
                 auth_pk: [0; 32],
+                xwing_pk: vec![],
                 prefs_ct: vec![],
                 mailbox_ids: vec![],
             },

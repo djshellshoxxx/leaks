@@ -61,6 +61,27 @@ vacuum_full_daily(&maint_opts).await?;
 let mem = MemoryStore::new()?;
 ```
 
+## `istore.sock` IPC (07 §5.3)
+
+`proto` (no features) defines the datagram protocol: `SOCK_SEQPACKET`, positional binary
+encoding, per-op maxima, roles `web` / `sealer` / `relay` (reserved) selected by `SO_PEERCRED`.
+
+```rust
+// Store process (feature `server`): blocking accept loop on the systemd socket.
+let server = Arc::new(IstoreServer::new(store, Arc::new(receiver), Arc::new(k31_signer),
+                                        Arc::new(clock), ServerConfig::new(web_uid, sealer_uid, None),
+                                        tokio::runtime::Handle::current())?);
+std::thread::spawn(move || server.serve(listen_fd));   // never returns on EMFILE etc.
+// Web process (feature `client`): `StoreReads` for `Arc<IstoreClient>`.
+let reads = IstoreClient::new(Arc::new(|| connect_istore_sock()), 8, Duration::from_secs(30));
+// Sealer process: `candor_sealer::server::istore::IstoreSink` (commit + hand-over, accounts, deletions).
+```
+
+Ops: `SERVING_ALLOWED`, `ACCOUNT_LOOKUP`, `MAILBOX_LIST`, `MAILBOX_READ` (web); `COMMIT_GROUP`
+(followed by the staged bundle hand-over on the same socket; an already committed group is
+acknowledged without a second commit), `ACCOUNT_UPSERT`, `DELETE` (account / mailbox / replies,
+K31-signed deletion-list entries) (sealer). See SPEC-NOTES "`istore` IPC".
+
 ## Tests
 
 ```sh

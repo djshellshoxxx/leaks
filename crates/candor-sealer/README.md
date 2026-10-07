@@ -38,6 +38,9 @@ The wire format is `u32be(len) ‖ CBOR {"v": 1, "op", "rid", "body"}`, with 1 �
 | 0x30 | OPEN_REPLY | one dead-drop entry → verified reply or `null` |
 | 0x15 / 0x16 | ROTATE_PASSPHRASE / ROTATE_FINISH | new passphrase; re-wrap replies; KEY_ROTATION follow-up |
 | 0x25 | NOTE_REAL | Tier V real `disposition_ct`; cancels the next chaff event |
+| 0x26 | SEAL_SIGNAL | C4 "no response" (kind 2, release U{1,2,3}) or mailbox-closed (kind 3, U{3..21}) signal envelope (BE-078) |
+| 0x27 | DELETE_REPLIES | SW-14: the store deletes the account's listed replies with K31-signed entries |
+| 0x28 | CLOSE_MAILBOX | SW-15: mailbox-closed signal first, then the K31-signed account/mailbox deletion; session ends |
 | 0x40 / 0x41 / 0x7F | ZEROIZE / TOUCH / STATUS | drop a session; reset the idle timer; coarse bands |
 
 ## Use
@@ -67,7 +70,7 @@ rt.block_on(async {
 
 The integrator supplies four things:
 - `Clock` (16 §14.3): the independent day clock, built from the Tor consensus and Roughtime.
-- `EnvelopeSink`: the store client. `commit_envelope_group` (no account reference) hands the sealed bundle (`Blob::Staged`, a sealed memfd) to the store with `handover::StoreConnection::hand_over` (or `hand_over_group_bundle(&EnvelopeGroup)`) over `istore.sock` (`SCM_RIGHTS`, deploy D-33; the connection is closed on any error or timeout) and returns only after the store's commit acknowledgement (hand-over protocol 2, below); `upsert_account` is called from the shuffled account batches (`flush_accounts`, every `account_flush_interval`; ADR-052(2), SEA-21).
+- `EnvelopeSink`: in production `server::istore::IstoreSink::new(connector, timeout)`, where `connector` opens `istore.sock`. It sends the `COMMIT_GROUP` frame (inline objects, slot blocks, disposition; `candor_intake_store::proto`) and hands the sealed bundle (`Blob::Staged`, a sealed memfd) over on the same connection (`SCM_RIGHTS`, deploy D-33, protocol 2 below), returning only after the store's commit acknowledgement; on any error or timeout it closes the socket and repeats the exchange once on a fresh connection (an already committed group is acknowledged, never committed twice; AUD-RM2-SEA-01). `upsert_account` is called from the shuffled account batches (`flush_accounts`, every `account_flush_interval`; ADR-052(2), SEA-21); `delete_replies`/`delete_account` serve `DELETE_REPLIES`/`CLOSE_MAILBOX`.
 - `SnapshotBundle`s (the signed checkpoint, the consistency proof from the high-water mark and **every** SignedKDEntry of the log), refreshed hourly; the pinned `DirectoryTrust` (K01, epoch origin, cosignature floors) in the config. The sealer verifies every entry itself (`kd`, AUD-RM2-SEA-19).
 - K35, loaded from a systemd credential.
 

@@ -28,13 +28,12 @@ use rustix::net::{
 };
 
 fn set(name: &str, value: Option<&str>) {
-    // SAFETY: this test binary is single-threaded (no harness, no runtime, no spawned
-    // thread), so nothing reads the environment concurrently.
-    unsafe {
-        match value {
-            Some(v) => std::env::set_var(name, v),
-            None => std::env::remove_var(name),
-        }
+    match value {
+        // SAFETY: this test binary is single-threaded (no harness, no runtime, no spawned
+        // thread), so nothing reads the environment concurrently.
+        Some(v) => unsafe { std::env::set_var(name, v) },
+        // SAFETY: as above.
+        None => unsafe { std::env::remove_var(name) },
     }
 }
 
@@ -50,8 +49,12 @@ fn env_is_clear() -> bool {
         .all(|k| std::env::var_os(k).is_none())
 }
 
-/// Places `fd` at descriptor 3 (which must be free: every earlier adoption closed it).
+/// Places `fd` at descriptor 3 (which must be free, or be `fd` itself: every earlier
+/// adoption closed it, so the next descriptor the kernel hands out is 3).
 fn at_fd3(fd: OwnedFd) -> OwnedFd {
+    if fd.as_raw_fd() == SD_LISTEN_FDS_START {
+        return fd;
+    }
     let moved = rustix::io::fcntl_dupfd_cloexec(&fd, SD_LISTEN_FDS_START).unwrap();
     assert_eq!(
         moved.as_raw_fd(),
@@ -59,8 +62,6 @@ fn at_fd3(fd: OwnedFd) -> OwnedFd {
         "fd 3 is not free in this test process"
     );
     drop(fd);
-    // The adoption takes ownership of fd 3 itself; forget-free hand-over: keep the OwnedFd
-    // alive only until the call returns, and never close it here after a successful adoption.
     moved
 }
 
@@ -104,9 +105,25 @@ fn expect_err(what: &str, fd3: Option<OwnedFd>, name: &str, want: AdoptError) {
     }
 }
 
+/// Closes an fd 3 inherited from whoever started this binary (a shell may leave one open),
+/// so the kernel hands out 3 next. Under `cargo test` nothing is there.
+fn free_fd3() {
+    // SAFETY: the borrow lives for one `fcntl` in this single-threaded process; nothing can
+    // close fd 3 meanwhile.
+    let probe = unsafe { std::os::fd::BorrowedFd::borrow_raw(SD_LISTEN_FDS_START) };
+    if rustix::io::fcntl_getfd(probe).is_ok() {
+        // SAFETY: fd 3 is open (probe above) and no Rust object in this process owns it (it
+        // was inherited at exec); taking ownership here closes it exactly once.
+        let inherited: OwnedFd =
+            unsafe { std::os::fd::FromRawFd::from_raw_fd(SD_LISTEN_FDS_START) };
+        drop(inherited);
+    }
+}
+
 fn main() {
+    free_fd3();
     let pid = std::process::id().to_string();
-    let good = |n: &str| (Some(pid.as_str()), Some("1"), Some(n));
+    let good = |n: &'static str| (Some(pid.as_str()), Some("1"), Some(n));
     assert_eq!(
         rustix::thread::gettid().as_raw_nonzero(),
         rustix::process::getpid().as_raw_nonzero()
@@ -162,9 +179,10 @@ fn main() {
     .unwrap();
     set_env(p, f, n);
     expect_err("SOCK_DGRAM", Some(dgram), "http", AdoptError::WrongType);
-    let devnull: OwnedFd = std::fs::File::open("/dev/null").unwrap().into(); // safefs-lint: allow(test: constant device path)
+    // A non-socket: the read end of a pipe.
+    let (notsock, _wr) = rustix::pipe::pipe().unwrap();
     set_env(p, f, n);
-    expect_err("not a socket", Some(devnull), "http", AdoptError::NotSocket);
+    expect_err("not a socket", Some(notsock), "http", AdoptError::NotSocket);
 
     // Success: a listening SOCK_STREAM at fd 3, environment scrubbed, CLOEXEC set, usable.
     let lst = at_fd3(abstract_listener(SocketType::STREAM, "ok"));

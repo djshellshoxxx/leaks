@@ -17,9 +17,9 @@ every ambiguity is recorded in [`SPEC-NOTES.md`](SPEC-NOTES.md).
 | `intake/torrc` | `/etc/tor/instances/candor-intake/torrc` (root 0644) | Intake onion service, 16 §7.1. PoW and intro-point DoS defences are on, vanguards-lite only (ADR-049). Logging is `warn` to stderr with SafeLogging (the unit discards stderr, SPEC-NOTES D-28). Sandbox is on. No SocksPort, no TCP listener and no control interface (D-27). |
 | `intake/nftables.conf` | `/etc/nftables.conf` | Default-deny ruleset. Only the two tor UIDs may leave via ext0, and only to public addresses over TCP. Other flows: E3 health push and E4 NTS to H-MON, inbound I1 relay 7443 and optional I2 ssh. There are no LOG targets. The installer fills only the three address sets. |
 | `intake/systemd/tor@candor-intake.service` | `/etc/systemd/system/` | tor runs as `_tor-candor-intake:_tor-candor-intake` (never root) with `--defaults-torrc /dev/null` under the `candor-tor-intake` AppArmor profile. It is fully sandboxed. AF_INET is allowed for tor only, and non-public IP ranges are denied in-kernel. |
-| `intake/systemd/candor-intake-web.{socket,service}` | `/etc/systemd/system/` | C-06. PID 1 creates `/run/candor/source-web/http.sock` (0660 `candor-web:_tor-candor-intake`). The service has `PrivateNetwork=yes` and AF_UNIX only. |
+| `intake/systemd/candor-intake-web.{socket,service}` | `/etc/systemd/system/` | C-06. PID 1 creates `/run/candor/source-web/http.sock` (0660 `candor-web:_tor-candor-intake`). The service has `PrivateNetwork=yes` and AF_UNIX only. Its syscall filter is an explicit allow-list derived like the sealer's (no file writes, no memfd; SPEC-NOTES D-36), pinned by config-check (`scf-web\|`). |
 | `intake/systemd/candor-sealer.{socket,service}` | `/etc/systemd/system/` | C-07. Socket `seal.sock` is `SOCK_STREAM` with u32be length-prefixed frames (0660 `candor-sealer:candor-web`; sealer SPEC-NOTES item 9). The sealer has no network. Its only writable path is the staging tmpfs, which it writes itself through candor-safefs (sealer SPEC-NOTES item 7; AUD-RM2-SEA-16). It locks memory through `LimitMEMLOCK=2G` and has no capabilities. Its secrets arrive as TPM-sealed credentials. The syscall allow-set is pinned exactly by config-check (AUD-RM2-DEP-16). |
-| `intake/systemd/candor-intake-store{,-relay}.socket`, `candor-intake-store.service` | `/etc/systemd/system/` | C-08. It receives the IPC socket and the relay TCP socket (relay0:7443) from PID 1. The process itself is AF_UNIX-only in an empty network namespace, so it can accept the core's pull but can never initiate a connection (ADR-009). |
+| `intake/systemd/candor-intake-store{,-relay}.socket`, `candor-intake-store.service` | `/etc/systemd/system/` | C-08. It receives the IPC socket and the relay TCP socket (relay0:7443) from PID 1. The process itself is AF_UNIX-only in an empty network namespace, so it can accept the core's pull but can never initiate a connection (ADR-009). Explicit syscall allow-list (sealer's minus `memfd_create`; `openat2` for candor-safefs; D-36, pinned as `scf-store\|`), `LimitMEMLOCK=512M` for its keys. |
 | `intake/systemd/run-candor-staging.mount` | `/etc/systemd/system/` | Tier W staging tmpfs `/run/candor/staging`, mode 0700 `candor-sealer`, `noswap`. It is RAM-only (ADR-034). The store has no access; staged bundles reach it as passed file descriptors (D-33). |
 | `intake/systemd/candor-intake-pg.service` | `/etc/systemd/system/` | Dedicated PostgreSQL 16 cluster for the intake store. Unix socket only, `PrivateNetwork=yes`. Cumulative statistics live in RAM (`pg_stat` → `/run/candor/intake-pg-stat`, D-34). |
 | `intake/systemd/candor-intake-{vacuum,maint}.{service,timer}` | `/etc/systemd/system/` | Fixed-time maintenance (D-34; AUD-RM2-STO-11/23/24): plain VACUUM 15 min after each import slot, and a daily window (deletion-list prune, statistics reset, `VACUUM FULL`, `CHECKPOINT`). Both run `candor-intake-maint` as `candor-imaint` (DB role `candor_intake_maint`), sandboxed like the services, under the `candor-intake-maint` profile. Enable the two timers only. |
@@ -31,12 +31,12 @@ every ambiguity is recorded in [`SPEC-NOTES.md`](SPEC-NOTES.md).
 | `intake/sysctl.d/90-candor-intake.conf` | `/etc/sysctl.d/` | Kernel baseline (20 §11.4, 17): ptrace scope 3, no core dumps, restricted dmesg/kptr/bpf/userns, no TCP timestamps, no redirects or forwarding, no `exception-trace` printk lines (D-30, AUD-RM2-DEP-20). |
 | `intake/coredump.conf.d/50-candor-intake.conf` | `/etc/systemd/coredump.conf.d/` | systemd-coredump stores nothing (D-30). |
 | `intake/sysusers.d/candor-intake.conf` | `/usr/lib/sysusers.d/` | One UID per service, plus every UID that nftables names. |
-| `intake/tmpfiles.d/candor-intake.conf` | `/usr/lib/tmpfiles.d/` | Socket and state directories. Each is 0750 with group set to the single permitted client (07 §4.1). |
+| `intake/tmpfiles.d/candor-intake.conf` | `/usr/lib/tmpfiles.d/` | Socket and state directories. Each is 0750 with group set to the single permitted client (07 §4.1). `/var/lib/candor/selftest` (root 0700) holds the blob-volume throughput test file for a few seconds (D-37). |
 | `intake/resolv.conf` | `/etc/resolv.conf` | No DNS (`nameserver 127.0.0.1` with nothing listening). |
 | `intake/profiles/{ce-single,ce-hardened}/` | `/etc/systemd/system/<unit>.d/` | Profile drop-ins. Staging is 4 GiB on CE-SINGLE and 8 GiB on CE-HARDENED. The sealer's `MemoryMax` is 2560M plus the staging size, because tmpfs pages are charged to the writer's cgroup. |
 | `intake/secret-placement.toml` | `/usr/share/candor/manifests/intake.toml` | ADR-028 Secret Placement Manifest for role `intake`. |
 | `tools/check-placement.sh` | `/usr/lib/candor/tools/` | Verifies the manifest on a host: owner, group, mode, parent mode, symlinks and hard links per entry. It also scans for unlisted secret material and checks names in the ciphertext-only directories. |
-| `tools/config-check.sh`, `tools/config-check.baseline`, `tools/config-check.manifest`, `tools/candor-safe-read` (built by `tools/build-safe-read.sh` from `crates/candor-safe-read`) | `/usr/lib/candor/tools/` | The subset of `candorctl check` (18 §14) that covers these files. It checks **effective** configuration against allow-lists: tor's own canonical dump, the nft ruleset as loaded into a throw-away network namespace, units as systemd merges them (all drop-in locations), the sealer's expanded syscall set, `postgres -C`, `systemd-analyze cat-config`, live `/proc/sys`, AppArmor profiles statement by statement (SPEC-NOTES D-31, D-35). It never follows a symlinked input and never prints file content. Every input is read by the compiled `candor-safe-read` (`openat2` `RESOLVE_NO_SYMLINKS|BENEATH`, `O_NOFOLLOW`, `O_NONBLOCK`, fstat checks, size cap; AUD-RM2-DEP-24). Self-contained AppArmor profiles are compared as compiled policy against an isolated compile (AUD-RM2-DEP-23). The baseline and the reader are verified against the manifest, whose digest is pinned in the script. Needs root, `jq`, `tor`, `nft`, `unshare`, `setpriv`, `systemd-analyze`, `sha256sum`, `timeout`, `apparmor_parser` (`--host`). |
+| `tools/config-check.sh`, `tools/config-check.baseline`, `tools/config-check.manifest`, `tools/candor-safe-read` (built by `tools/build-safe-read.sh` from `crates/candor-safe-read`) | `/usr/lib/candor/tools/` | The subset of `candorctl check` (18 §14) that covers these files. It checks **effective** configuration against allow-lists: tor's own canonical dump, the nft ruleset as loaded into a throw-away network namespace, units as systemd merges them (all drop-in locations), the sealer's expanded syscall set, `postgres -C`, `systemd-analyze cat-config`, live `/proc/sys`, AppArmor profiles statement by statement (SPEC-NOTES D-31, D-35). It never follows a symlinked input and never prints file content. Every input is read by the compiled `candor-safe-read` (`openat2` `RESOLVE_NO_SYMLINKS|BENEATH`, `O_NOFOLLOW`, `O_NONBLOCK`, fstat checks, size cap; AUD-RM2-DEP-24). Self-contained AppArmor profiles are compared as compiled policy against an isolated compile (AUD-RM2-DEP-23). The effective syscall allow-sets of the sealer, the web service and the store are each pinned (`scf\|`, `scf-web\|`, `scf-store\|`; D-36). On a live host, section `blobrate` writes and fsyncs 256 MiB (`--blob-mib`) of zeros in `/var/lib/candor/selftest` and requires ≥ 50 MB/s (`--blob-min-rate`), the floor the STO-29 copy deadline assumes (open item O-6, D-37). The baseline and the reader are verified against the manifest, whose digest is pinned in the script. Needs root, `jq`, `tor`, `nft`, `unshare`, `setpriv`, `systemd-analyze`, `sha256sum`, `timeout`, `apparmor_parser` (`--host`). |
 | `tests/validate.sh` | — (CI) | Runs all the checks listed under "Validation" below. |
 
 ## Users, sockets and flows
@@ -79,7 +79,8 @@ every ambiguity is recorded in [`SPEC-NOTES.md`](SPEC-NOTES.md).
    systemd-coredump.socket` (and `swap.target` unless random-key dm-crypt swap is used), turn swap off (`swapoff -a`, remove swap from
    `/etc/fstab`; only random-key dm-crypt swap is tolerated), keep `systemd-journal` and `adm`
    without members.
-8. Run `config-check.sh --host` (must exit 0) and `check-placement.sh --mode full` (must exit 0).
+8. Run `config-check.sh --host` (must exit 0; this includes the blob-volume throughput
+   measurement, section `blobrate`, ≥ 50 MB/s) and `check-placement.sh --mode full` (must exit 0).
    Its race-free input reader is the compiled `candor-safe-read` next to it (no interpreter on
    H-INTAKE, ADR-055(3)); the release manifest pins its digest. Before installing `pg_hba.conf`,
    replace `candor_intake_TENANT` with the site's one intake database name (ADR-054). Once that
@@ -93,7 +94,10 @@ every ambiguity is recorded in [`SPEC-NOTES.md`](SPEC-NOTES.md).
 ## Requirements on the Candor binaries (C-06/C-07/C-08 implementers)
 
 - **Socket activation:** take listeners from `sd_listen_fds` by `FileDescriptorName`:
-  `http` (web), `seal` (sealer), `istore` and `relay` (store). Never `bind()` an IP socket;
+  `http` (web), `seal` (sealer), `istore` and `relay` (store), through
+  `candor_memlock::systemd_unix_listener(<name>)` (`crates/candor-memlock`: exactly one
+  descriptor, pid/count/name checked, `FD_CLOEXEC`, `LISTEN_*` scrubbed; called first in
+  `main`). Never `bind()` an IP socket;
   `SocketBindDeny=any` and `RestrictAddressFamilies=AF_UNIX` enforce this.
 - **Secrets:** read only from `$CREDENTIALS_DIRECTORY/<name>`: `sealer_signing_key` (K35; the
   crate README's `sealer-k35` example name is superseded, D-33), `argon2_salt`, `routing_key`,
@@ -110,19 +114,30 @@ every ambiguity is recorded in [`SPEC-NOTES.md`](SPEC-NOTES.md).
 - **Self-sandboxing:** the systemd filter permits `seccomp` and `landlock_*` so that each binary
   can apply its own seccomp filter (07 §4.3) and Landlock ruleset (R7 SI-B-02/03).
 
+## Host self-tests (ST-120 gate; C-25 health-agent checks on H-INTAKE)
+
+`config-check.sh --host` is the installer's gate; the health agent (07 §5.11) repeats the
+live subset every 5 min. Expected on H-INTAKE: units merged as pinned, syscall sets equal to
+the release (`scf*|`), nft ruleset as loaded, tor effective config, `/proc/sys` baseline,
+journald volatile, no DNS, AppArmor profiles enforced and byte-equal, PostgreSQL effective
+settings and `pg_stat` in RAM, kernel ≥ 6.3, secret placement (`check-placement.sh`), and
+**the blob volume sustaining ≥ 50 MB/s sequential write+fsync** (`blobrate`; SPEC-NOTES D-37
+asks the lead to add this line to 07 §5.11).
+
 ## Validation
 
 Run `deploy/tests/validate.sh`. Set `CANDOR_TEST_PG=1` to include the PostgreSQL run. The script
 runs as root in CI with `shellcheck`, `tor`, `nft`, `apparmor_parser` and PostgreSQL 16 present,
 and with the users from `sysusers.d` created.
 
-| Check | Result (2026-10-01, this container: systemd 255, tor 0.4.9.11, nft 1.0.9, jq 1.7, AppArmor 4 parser, PG 16.13) |
+| Check | Result (2026-10-07, this container: systemd 255, tor 0.4.9.11, nft 1.0.9, jq 1.7, AppArmor 4 parser, PG 16.13) |
 |---|---|
 | shellcheck (tools, tests) | clean |
-| `config-check.sh` on the shipped tree (base, `--profile ce-single`, `--profile ce-hardened`) | 875 checks OK, exit 0 |
+| `config-check.sh` on the shipped tree (base, `--profile ce-single`, `--profile ce-hardened`) | 889 checks OK, exit 0 (three pinned syscall sets: sealer 135, web 123, store 134 calls) |
 | `config-check.sh --host --root` on a synthetic installed host (CE-SINGLE layout) | exit 0 (live-only checks reported as SKIP) |
-| `config-check.sh` on 251 deliberately broken copies (every AUD-RM2-deploy round-1, round-2 and round-3 bypass, SEA-16, the STO-08/11/23/24 settings and timers; 54 of them host-root cases; symlinked inputs point at a marker file that must never appear in a report) | every copy rejected with exit 30, no marker printed |
+| `config-check.sh` on 271 deliberately broken copies (every AUD-RM2-deploy round-1, round-2 and round-3 bypass, SEA-16, the STO-08/11/23/24 settings and timers, the D-36 syscall-set and `LimitMEMLOCK` weakenings; 58 of them host-root cases; symlinked inputs point at a marker file that must never appear in a report) | every copy rejected with exit 30, no marker printed |
 | `config-check.sh` invocation and integrity | `--only typo`, `--only tor,typo`, a selection running no check: exit 2; edited baseline, baseline + re-written manifest: exit 30; work base root 0700 and empty afterwards |
+| `config-check.sh --host --only blobrate` (D-37) | positive run on this container's ext4 `/var/tmp` with a 1 MB/s floor (rate reported), the shipped 50 MB/s floor as a second run (pass or an explicit SKIP naming the measured rate), test file removed; 7 broken layouts (floor unattainable, selftest 0755 / foreign owner / symlink / missing, blobs missing, tmpfs root) exit 30; 8 invalid options exit 2; static `--only blobrate` exit 2; offline `--root` SKIP |
 | `config-check.sh --host --only pg` against a live cluster (`postgres -C`) | clean cluster passes (stats link in place); `pg_stat` as a real directory, a data directory behind a symlink and an `ALTER SYSTEM`-style `postgresql.auto.conf` override are rejected (exit 30) |
 | `systemd-analyze verify --man=no` (14 units) | clean apart from the expected messages below |
 | `systemd-analyze security --offline --threshold` | web 0.4, sealer 0.4, store 0.4, vacuum 0.4, maint 0.4, PostgreSQL 0.5 (budget 0.5); tor 1.4 (budget 1.5, 17 §5.3) |

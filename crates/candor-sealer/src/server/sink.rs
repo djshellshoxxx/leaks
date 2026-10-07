@@ -5,8 +5,8 @@
 //! defines the minimal [`EnvelopeSink`] it needs, shaped after ADR-052(2): an
 //! envelope commit carries **no account reference**, and account creation and
 //! update are a separate operation ([`EnvelopeSink::upsert_account`]) that chaff
-//! performs too, with dummy accounts. Integration: implement `EnvelopeSink` over
-//! the store client (see SPEC-NOTES "Fixes for AUD-RM2-SEA").
+//! performs too, with dummy accounts. The production implementation is
+//! [`crate::server::istore::IstoreSink`] over `istore.sock`.
 //!
 //! Everything handed to a sink is ciphertext or public: sealed objects, slot
 //! blocks, the disposition marker, `lookup_tag`, `auth_pk`, `prefs_ct`
@@ -96,6 +96,8 @@ pub struct AccountRecord {
     pub lookup_tag: [u8; 32],
     /// Ed25519 `auth_pk`.
     pub auth_pk: [u8; 32],
+    /// X-Wing public key `src_pk` (09 §5.1 `xwing_pk`; 1,216 B).
+    pub xwing_pk: Vec<u8>,
     /// `prefs_ct` (AEAD under `K_prefs`).
     pub prefs_ct: Vec<u8>,
     /// Mailbox ids for reply routing (Tier W lookup).
@@ -168,5 +170,27 @@ pub trait EnvelopeSink: Send + Sync {
     /// uniform `INTERNAL` and the draft keeps its attachments. Default `true`.
     fn is_available(&self) -> bool {
         true
+    }
+
+    /// SW-14: ask the store to delete the listed replies of the account with
+    /// `lookup_tag` and append K31-signed `reply` deletion-list entries
+    /// (04 §18.6). Unknown refs are ignored (idempotent). Returns the number
+    /// of entries appended. Default: unsupported (fail closed).
+    fn delete_replies(&self, lookup_tag: [u8; 32], replies: &[[u8; 16]]) -> Result<u32, SinkError> {
+        let _ = (lookup_tag, replies);
+        Err(SinkError)
+    }
+
+    /// SW-15: ask the store to delete the account with `lookup_tag`, its
+    /// replies and its mailboxes, appending `mailbox` and `account` entries.
+    /// An account the store no longer has is a success (idempotent retry).
+    /// Default: unsupported (fail closed).
+    fn delete_account(
+        &self,
+        lookup_tag: [u8; 32],
+        mailbox_ids: &[[u8; 32]],
+    ) -> Result<(), SinkError> {
+        let _ = (lookup_tag, mailbox_ids);
+        Err(SinkError)
     }
 }

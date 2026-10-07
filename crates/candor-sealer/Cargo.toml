@@ -28,6 +28,7 @@ server = [
     "dep:unicode-normalization",
     "dep:landlock",
     "dep:ml-dsa",
+    "dep:candor-intake-store",
 ]
 
 # Every dependency is justified in SPEC-NOTES.md ("Dependencies").
@@ -36,6 +37,9 @@ zeroize = { version = "=1.8.2", default-features = false, features = ["alloc"] }
 candor-core = { path = "../candor-core", optional = true }
 candor-safefs = { path = "../candor-safefs", optional = true }
 candor-log = { path = "../candor-log", optional = true }
+# `server::istore`: the production `EnvelopeSink` over `istore.sock` (store
+# crate client feature only; no new third-party dependency).
+candor-intake-store = { path = "../candor-intake-store", default-features = false, features = ["client"], optional = true }
 tokio = { version = "=1.48.0", default-features = false, features = ["rt", "rt-multi-thread", "net", "sync", "time", "io-util", "signal"], optional = true }
 rustix = { version = "=1.1.2", default-features = false, features = ["std", "fs", "mm", "net", "process", "thread"], optional = true }
 hkdf = { version = "=0.13.0", default-features = false, optional = true }
@@ -46,6 +50,8 @@ landlock = { version = "=0.4.7", default-features = false, optional = true }
 ml-dsa = { version = "=0.1.1", default-features = false, optional = true }
 
 [dev-dependencies]
+# End-to-end tests run the real `istore` server over the in-memory store.
+candor-intake-store = { path = "../candor-intake-store", features = ["server", "client"] }
 tokio = { version = "=1.48.0", default-features = false, features = ["rt", "rt-multi-thread", "net", "sync", "time", "io-util", "macros", "test-util"] }
 proptest = { version = "=1.11.0", default-features = false, features = ["std"] }
 tempfile = { version = "=3.23.0", default-features = false }

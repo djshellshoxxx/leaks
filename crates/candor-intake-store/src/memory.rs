@@ -621,6 +621,39 @@ impl IntakeStore for MemoryStore {
         Ok(v)
     }
 
+    async fn rewrap_replies(
+        &self,
+        account: AccountId,
+        rewraps: &[([u8; 32], Vec<u8>)],
+    ) -> Result<u32> {
+        if rewraps.len() > 64 {
+            return Err(StoreError::InvalidInput("too many rewraps"));
+        }
+        let mut st = self.state.lock().await;
+        st.serving()?;
+        if !st.accounts.contains_key(&account) {
+            return Err(StoreError::NotFound);
+        }
+        let hasher = crate::deletion::CoreReplyHasher;
+        let mut n = 0u32;
+        for r in st
+            .replies
+            .values_mut()
+            .filter(|r| r.account == Some(account))
+        {
+            let Some(h) = hasher.object_hash(&r.reply_ct) else {
+                continue;
+            };
+            if let Some((_, stanza)) = rewraps.iter().find(|(oh, _)| *oh == h)
+                && let Some(ct) = crate::store::rewrap_reply_ct(&r.reply_ct, stanza)
+            {
+                r.reply_ct = ct;
+                n = n.saturating_add(1);
+            }
+        }
+        Ok(n)
+    }
+
     async fn delete_replies(
         &self,
         account: AccountId,

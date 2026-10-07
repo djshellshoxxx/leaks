@@ -312,6 +312,8 @@ const SQL_REPLIES_PURGE: &str = "DELETE FROM candor.reply WHERE available_day < 
      AND (pub_gen IS NULL OR pub_gen <> 0)";
 const SQL_REPLIES_PAGE: &str = "SELECT reply_ref, reply_ct FROM candor.reply WHERE reply_ref > $1 ORDER BY reply_ref LIMIT 256";
 const SQL_REPLY_DELETE_ONE: &str = "DELETE FROM candor.reply WHERE reply_ref = $1";
+const SQL_REPLY_REWRAP: &str = "UPDATE candor.reply SET reply_ct = $1 WHERE reply_ref = $2 \
+     AND source_account_id = $3 AND octet_length(reply_ct) = octet_length($1)";
 
 const SQL_PUB_LAST: &str = "SELECT max(pub_gen) FROM candor.reply WHERE pub_gen > 0";
 const SQL_PUB_PENDING: &str = "SELECT reply_ref FROM candor.reply \
@@ -1748,6 +1750,50 @@ impl IntakeStore for PgIntakeStore {
                 })
             })
             .collect()
+    }
+
+    async fn rewrap_replies(
+        &self,
+        account: AccountId,
+        rewraps: &[([u8; 32], Vec<u8>)],
+    ) -> Result<u32> {
+        if rewraps.len() > 64 {
+            return Err(StoreError::InvalidInput("too many rewraps"));
+        }
+        let (mut tx, m) = self.begin(true).await?;
+        m.serving()?;
+        self.check_owned(&mut tx, account, &[]).await?;
+        let rows = sqlx::query(SQL_MAILBOX)
+            .bind(uuid(&account.0))
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(db)?;
+        let hasher = crate::deletion::CoreReplyHasher;
+        let mut n = 0u32;
+        for r in &rows {
+            let reply_ref = get_id(r, 0)?;
+            let ct: Vec<u8> = r.try_get(2).map_err(db)?;
+            let Some(h) = hasher.object_hash(&ct) else {
+                continue;
+            };
+            let Some((_, stanza)) = rewraps.iter().find(|(oh, _)| *oh == h) else {
+                continue;
+            };
+            let Some(new_ct) = crate::store::rewrap_reply_ct(&ct, stanza) else {
+                continue;
+            };
+            let k = sqlx::query(SQL_REPLY_REWRAP)
+                .bind(new_ct.as_slice())
+                .bind(uuid(&reply_ref))
+                .bind(uuid(&account.0))
+                .execute(&mut *tx)
+                .await
+                .map_err(db)?
+                .rows_affected();
+            n = n.saturating_add(u32::try_from(k).unwrap_or(u32::MAX));
+        }
+        tx.commit().await.map_err(db)?;
+        Ok(n)
     }
 
     async fn delete_replies(

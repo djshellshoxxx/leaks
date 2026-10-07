@@ -125,6 +125,9 @@ pub(crate) struct Session {
     /// the draft is shown again (`DRAFT_GET`), a part is started or the draft
     /// is aborted.
     pub parts_lost: bool,
+    /// `CLOSE_MAILBOX`: the mailbox-closed signal is committed with this
+    /// release offset; a retry after a failed deletion skips the sealing.
+    pub closing: Option<u8>,
 }
 
 impl Session {
@@ -145,6 +148,7 @@ impl Session {
             slot: None,
             shared: None,
             parts_lost: false,
+            closing: None,
         }
     }
 

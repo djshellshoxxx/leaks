@@ -92,6 +92,20 @@ pub trait IntakeStore: Send + Sync {
         signer: &dyn DeletionSigner,
     ) -> impl Future<Output = Result<()>> + Send;
 
+    /// Passphrase rotation (04 §11.7 step 4, ADR-046(7)): replace stanza (1)
+    /// of the account's pending replies. Each pair is `(REPLY object_hash,
+    /// new stanza)`; a reply is matched by the hash of its stored
+    /// `SealedObject` ([`crate::deletion::CoreReplyHasher`]) and its new
+    /// stanza must have the old stanza's length (the bucket is unchanged).
+    /// Pairs that match no reply of the account are ignored (idempotent
+    /// retries); returns the number replaced. `NotFound` for an unknown
+    /// account; `RestorePending` while restoring.
+    fn rewrap_replies(
+        &self,
+        account: AccountId,
+        rewraps: &[([u8; 32], Vec<u8>)],
+    ) -> impl Future<Output = Result<u32>> + Send;
+
     // Quota (BE-064) is held in process RAM by C-06/C-07 and never written to
     // the database (AUD-RM2-STO-01): this trait deliberately has no quota API.
 
@@ -304,6 +318,28 @@ pub trait IntakeStore: Send + Sync {
     /// Restore into an empty store. The KD high-water mark keeps the higher of the
     /// backup and current values; the store is left restore-pending.
     fn restore_backup(&self, backup: BackupSnapshot) -> impl Future<Output = Result<()>> + Send;
+}
+
+/// `reply_ct = SealedObject ‖ stanza(1)` with the stanza replaced by
+/// `new_stanza`, which must have the old stanza's length. `None` when the
+/// ciphertext does not parse or the lengths differ (the reply is left as is).
+#[must_use]
+pub fn rewrap_reply_ct(reply_ct: &[u8], new_stanza: &[u8]) -> Option<Vec<u8>> {
+    use candor_core::header::{CoreHeader, HEADER_LEN, HEADER_MAC_LEN};
+    let hdr = CoreHeader::decode(reply_ct.get(..HEADER_LEN)?).ok()?;
+    let payload = usize::try_from(hdr.expected_payload_len().ok()?).ok()?;
+    let sealed_len = HEADER_LEN
+        .checked_add(HEADER_MAC_LEN)?
+        .checked_add(payload)?;
+    let sealed = reply_ct.get(..sealed_len)?;
+    let old = reply_ct.get(sealed_len..)?;
+    if old.is_empty() || old.len() != new_stanza.len() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(reply_ct.len());
+    out.extend_from_slice(sealed);
+    out.extend_from_slice(new_stanza);
+    Some(out)
 }
 
 /// Operations reserved for the separate maintenance role (`candor_intake_maint`,

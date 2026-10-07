@@ -43,6 +43,10 @@ pub(crate) const PREFS_PADDED_LEN: u64 = 2048;
 pub(crate) enum MessageKind {
     Message = 0,
     KeyRotation = 1,
+    /// C4 "no response" escalation signal (`SEAL_SIGNAL`, BE-078).
+    NoResponseEscalation = 2,
+    /// Mailbox-closed signal (`SEAL_SIGNAL` / `CLOSE_MAILBOX`, RVW-B-26).
+    MailboxClosed = 3,
 }
 
 fn entries_value(entries: &[RecipientListEntry]) -> Value {

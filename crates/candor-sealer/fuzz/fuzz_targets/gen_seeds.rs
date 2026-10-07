@@ -6,7 +6,7 @@
 
 use candor_sealer::proto::{
     Coi, DraftSet, Mode, PendingReply, Request, SecretBytes, SecretText, SecretWords,
-    SessionHandle, encode_request, frame,
+    SessionHandle, SignalKind, encode_request, frame,
 };
 
 fn requests() -> Vec<Request> {
@@ -38,6 +38,9 @@ fn requests() -> Vec<Request> {
         Request::PartDrop { sess: s, part: [9; 16] },
         Request::SealFinish { sess: s, delayed_delivery: true },
         Request::SealAbort { sess: s },
+        Request::SealSignal { sess: s, kind: SignalKind::MailboxClosed },
+        Request::DeleteReplies { sess: s, replies: vec![[4; 16], [5; 16]] },
+        Request::CloseMailbox { sess: s },
         Request::LoginDerive { sess: s, passphrase: SecretBytes::from_slice(b"alpha beta gamma") },
         Request::LoginSign { sess: s, challenge: [7; 32] },
         Request::LoadPrefs { sess: s, prefs_ct: vec![0; 48] },

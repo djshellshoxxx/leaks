@@ -14,7 +14,7 @@ use candor_sealer::proto::*;
 use proptest::prelude::*;
 use zeroize::Zeroizing;
 
-const OPS: [Op; 21] = [
+const OPS: [Op; 24] = [
     Op::Hello,
     Op::SessionOpen,
     Op::DraftSet,
@@ -32,6 +32,9 @@ const OPS: [Op; 21] = [
     Op::SealAbort,
     Op::PartDrop,
     Op::NoteReal,
+    Op::SealSignal,
+    Op::DeleteReplies,
+    Op::CloseMailbox,
     Op::OpenReply,
     Op::Zeroize,
     Op::Touch,
@@ -147,6 +150,20 @@ fn arb_request() -> impl Strategy<Value = Request> {
             sess,
             delayed_delivery
         }),
+        (arb_sess(), any::<bool>()).prop_map(|(sess, closed)| Request::SealSignal {
+            sess,
+            kind: if closed {
+                SignalKind::MailboxClosed
+            } else {
+                SignalKind::NoResponse
+            },
+        }),
+        (
+            arb_sess(),
+            proptest::collection::vec(any::<[u8; 16]>(), 0..=MAX_DELETE_REPLIES)
+        )
+            .prop_map(|(sess, replies)| Request::DeleteReplies { sess, replies }),
+        arb_sess().prop_map(|sess| Request::CloseMailbox { sess }),
         (any::<[u8; 16]>(), any::<[u8; 32]>()).prop_map(|(channel_id, first_object_hash)| {
             Request::NoteReal {
                 channel_id,
@@ -260,6 +277,19 @@ fn responses_round_trip() {
                 disposition_ct: vec![6; 1168],
             },
         ),
+        (
+            Op::SealSignal,
+            Response::Sealed {
+                release_offset_days: 21,
+            },
+        ),
+        (
+            Op::CloseMailbox,
+            Response::Sealed {
+                release_offset_days: 3,
+            },
+        ),
+        (Op::DeleteReplies, Response::Deleted { count: 2 }),
         (Op::OpenReply, Response::Reply(None)),
         (
             Op::OpenReply,
@@ -312,4 +342,57 @@ fn draft_text_bound_is_enforced() {
     });
     let b = encode_request(1, &req).unwrap();
     assert!(decode_request(&b).is_err());
+}
+
+/// Signal offsets are range-checked per op: `SEAL_SIGNAL` 1..=21,
+/// `CLOSE_MAILBOX` 3..=21, `SEAL_FINISH` 0..=3; `DELETE_REPLIES` takes at
+/// most 32 refs.
+#[test]
+fn signal_offsets_and_delete_limits() {
+    for (op, offset, ok) in [
+        (Op::SealSignal, 0u8, false),
+        (Op::SealSignal, 1, true),
+        (Op::SealSignal, 21, true),
+        (Op::SealSignal, 22, false),
+        (Op::CloseMailbox, 2, false),
+        (Op::CloseMailbox, 3, true),
+        (Op::CloseMailbox, 21, true),
+        (Op::SealFinish, 4, false),
+        (Op::SealFinish, 3, true),
+    ] {
+        let b = encode_response(
+            op,
+            1,
+            &Response::Sealed {
+                release_offset_days: offset,
+            },
+        )
+        .unwrap();
+        assert_eq!(decode_response(op, &b).is_ok(), ok, "{op:?} {offset}");
+    }
+    let s = SessionHandle([1; 16]);
+    let too_many = Request::DeleteReplies {
+        sess: s,
+        replies: vec![[2; 16]; MAX_DELETE_REPLIES + 1],
+    };
+    assert!(encode_request(1, &too_many).is_err());
+    let max = Request::DeleteReplies {
+        sess: s,
+        replies: vec![[2; 16]; MAX_DELETE_REPLIES],
+    };
+    let b = encode_request(1, &max).unwrap();
+    assert_eq!(decode_request(&b).unwrap().1, max);
+    // Unknown signal kind.
+    let b = encode_request(
+        1,
+        &Request::SealSignal {
+            sess: s,
+            kind: SignalKind::NoResponse,
+        },
+    )
+    .unwrap();
+    let pos = b.iter().rposition(|x| *x == 2).unwrap();
+    let mut bad = b.to_vec();
+    bad[pos] = 4;
+    assert!(decode_request(&bad).is_err());
 }

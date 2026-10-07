@@ -50,6 +50,12 @@ pub(crate) fn release_offset() -> Result<u8, Error> {
     u8::try_from(x.checked_add(1).ok_or(Error::Internal)?).map_err(|_| Error::Internal)
 }
 
+/// Mailbox-closed signal release offset U{3..21} days (07 BE-078, RVW-B-26).
+pub(crate) fn mailbox_closed_offset() -> Result<u8, Error> {
+    let x = uniform_below(19)?;
+    u8::try_from(x.checked_add(3).ok_or(Error::Internal)?).map_err(|_| Error::Internal)
+}
+
 /// Uniform `f64` in `(0, 1]` with 53 random bits.
 fn unit_open_closed() -> Result<f64, Error> {
     let mut b = [0u8; 8];

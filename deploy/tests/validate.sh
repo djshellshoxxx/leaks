@@ -328,6 +328,18 @@ mutate "DEP-23 maint extra variable @{x}=/**"  apparmor/candor-intake-maint 's|^
 mutate "DEP-23 sealer abi <abi/4.0>"           apparmor/candor-sealer 's|^abi <abi/3.0>,$|abi <abi/4.0>,|'
 mutate "DEP-15 tor network inet (any type)" apparmor/candor-tor-intake 's|^  network inet stream,$|  network inet,|'
 mutate "DEP-15 sealer deny rule removed"    apparmor/candor-sealer '/^  deny ptrace,$/d'
+# ---- W1-D (D-36): web and store syscall allow-lists pinned like the sealer's; store LimitMEMLOCK
+mutate "D-36 web narrowing line removed"        systemd/candor-intake-web.service '/^SystemCallFilter=~_newselect/d'
+mutate "D-36 store narrowing line removed"      systemd/candor-intake-store.service '/^SystemCallFilter=~_newselect/d'
+mutate "D-36 web re-adds io_uring_setup"        systemd/candor-intake-web.service 's|^SystemCallFilter=seccomp landlock_create_ruleset landlock_add_rule landlock_restrict_self$|& io_uring_setup|'
+mutate "D-36 store re-adds memfd_create"        systemd/candor-intake-store.service 's|^SystemCallFilter=seccomp landlock_create_ruleset landlock_add_rule landlock_restrict_self$|& memfd_create|'
+mutate "D-36 web re-adds openat2 + unlinkat"    systemd/candor-intake-web.service 's|^SystemCallFilter=seccomp landlock_create_ruleset landlock_add_rule landlock_restrict_self$|& openat2 unlinkat|'
+mutate "D-36 store drops ptrace from deny"      systemd/candor-intake-store.service 's|^SystemCallFilter=~@privileged @resources @mount @debug |SystemCallFilter=~@privileged @resources @mount |'
+mutate "D-36 sealer denies openat2 again"       systemd/candor-sealer.service 's|^SystemCallFilter=seccomp landlock_create_ruleset landlock_add_rule landlock_restrict_self$|&\nSystemCallFilter=~openat2|'
+mutate "D-36 store drop-in re-allows bind"      systemd/candor-intake-store.service.d/zz.conf $'+[Service]\nSystemCallFilter=bind listen'
+mutate "D-36 web drop-in resets the filter"     systemd/candor-intake-web.service.d/zz.conf $'+[Service]\nSystemCallFilter=\nSystemCallFilter=@system-service'
+mutate "D-36 store LimitMEMLOCK removed"        systemd/candor-intake-store.service '/^LimitMEMLOCK=512M$/d'
+mutate "D-36 store LimitMEMLOCK infinity"       systemd/candor-intake-store.service 's|^LimitMEMLOCK=512M$|LimitMEMLOCK=infinity|'
 mutate "DEP-16 sealer drop-in re-allows io_uring" systemd/candor-sealer.service.d/zz.conf $'+[Service]\nSystemCallFilter=io_uring_setup io_uring_enter io_uring_register'
 mutate "DEP-16 sealer deny line drops userfaultfd" systemd/candor-sealer.service 's| userfaultfd | |'
 mutate "DEP-16 sealer re-add line widened"  systemd/candor-sealer.service 's|^SystemCallFilter=seccomp landlock_create_ruleset|SystemCallFilter=seccomp bpf landlock_create_ruleset|'
@@ -639,6 +651,51 @@ if is_root; then
     pass "config-check work base (this run's own, DEP-27) is root 0700 and every run cleaned up after itself"
   else bad "config-check left work directories behind or the work base is not root 0700"; fi
 fi
+
+# ---- W1-D / O-6: blob volume throughput (config-check --host section blobrate, STO-29 floor)
+# The measurement needs root, a real filesystem (ext4/xfs; $T is on /var/tmp) and a few seconds.
+if is_root; then
+  V="$T/vol"; rm -rf "$V"; install -d -m 0700 "$V" "$V/selftest" "$V/intake" "$V/intake/blobs"
+  case "$(stat -f -c %T "$V")" in
+    ext2/ext3|ext4|xfs)
+      # Positive: the floor is lowered to 1 MB/s so the result does not depend on this CI disk;
+      # the measured rate is reported, and a second run checks the shipped 50 MB/s floor.
+      if cc --host --only blobrate --blob-root "$V" --blob-mib 64 --blob-min-rate 1 > "$T/br.out" 2>&1 && grep -q 'host.blob_volume_rate.*OK' "$T/br.out"; then
+        pass "config-check --host blobrate: $(sed -n 's/.*OK *\([0-9]* MB\/s\).*/\1/p' "$T/br.out" | head -n 1) over 64 MiB write+fsync (floor 1 MB/s)"
+      else bad "config-check --host blobrate positive case: $(tail -n 2 "$T/br.out")"; fi
+      if cc -q --host --only blobrate --blob-root "$V" --blob-mib 64 > "$T/br.out" 2>&1; then pass "config-check --host blobrate: this disk meets the shipped 50 MB/s floor"
+      else skip "config-check --host blobrate: this CI disk is below the 50 MB/s floor (not a config defect): $(grep -o '[0-9]* MB/s sequential' "$T/br.out" | head -n 1)"; fi
+      if [ -z "$(ls -A "$V/selftest")" ]; then pass "blobrate: test file removed"; else bad "blobrate: test file left behind"; fi
+      # Negatives: each must FAIL (exit 30) with the named rule, never write outside selftest.
+      brneg() { # name expect-detail args... (on a fresh copy of the volume layout)
+        local name=$1 want=$2; shift 2
+        if cc -q --host --only blobrate "$@" > "$T/br.out" 2>&1; then bad "blobrate accepted: $name (exit 0)"
+        elif grep -q "host.blob_volume_rate.*FAIL.*$want" "$T/br.out"; then pass "blobrate rejects: $name"
+        else bad "blobrate: $name: unexpected result: $(tail -n 2 "$T/br.out")"; fi
+      }
+      brneg "rate floor unattainable (100000 MB/s)" "below the 100000 MB/s floor" --blob-root "$V" --blob-mib 64 --blob-min-rate 100000
+      chmod 0755 "$V/selftest"; brneg "selftest directory 0755" "root-owned 0700" --blob-root "$V" --blob-mib 64 --blob-min-rate 1; chmod 0700 "$V/selftest"
+      chown nobody "$V/selftest"; brneg "selftest directory owned by nobody" "root-owned 0700" --blob-root "$V" --blob-mib 64 --blob-min-rate 1; chown root "$V/selftest"
+      mv "$V/selftest" "$V/st.real"; ln -s "$V/st.real" "$V/selftest"; brneg "selftest is a symlink" "symlinked" --blob-root "$V" --blob-mib 64 --blob-min-rate 1; rm "$V/selftest"; mv "$V/st.real" "$V/selftest"
+      mv "$V/intake/blobs" "$V/blobs.off"; brneg "blob directory missing" "missing directory" --blob-root "$V" --blob-mib 64 --blob-min-rate 1; mv "$V/blobs.off" "$V/intake/blobs"
+      rm -rf "$V/selftest"; brneg "selftest directory missing" "missing directory" --blob-root "$V" --blob-mib 64 --blob-min-rate 1; install -d -m 0700 "$V/selftest"
+      if [ -d /run ] && [ "$(stat -f -c %T /run)" = tmpfs ]; then
+        TV=$(mktemp -d /run/candor-validate-vol.XXXXXX); chmod 0700 "$TV"; install -d -m 0700 "$TV/selftest" "$TV/intake/blobs"
+        brneg "blob root on tmpfs (compressible/RAM, not the volume)" "unsupported filesystem" --blob-root "$TV" --blob-mib 64 --blob-min-rate 1
+        rm -rf "$TV"
+      fi
+      rm -rf "$V"
+      ;;
+    *) skip "blobrate measurement: $T is not on ext4/xfs" ;;
+  esac
+  # Argument hygiene and modes (exit 2 = usage, never a green run).
+  for a in "--blob-mib 32" "--blob-mib 2048" "--blob-mib 64x" "--blob-min-rate 0" "--blob-min-rate 100001" "--blob-root var/lib/candor" "--blob-root /var/lib/../candor" "--blob-root /var//candor"; do
+    # shellcheck disable=SC2086 # intentional word splitting of the option pair
+    if cc -q --host --only blobrate $a > "$T/br.out" 2>&1; then bad "blobrate accepted invalid option: $a"; elif [ $? -eq 2 ] || grep -q '^config-check: ' "$T/br.out"; then pass "blobrate refuses invalid option: $a (exit 2)"; else bad "blobrate: $a: unexpected exit"; fi
+  done
+  if cc -q --only blobrate --dir "$INTAKE" > "$T/br.out" 2>&1; then bad "blobrate ran in static mode"; else pass "blobrate is host-only (static --only blobrate: exit $?, no green run)"; fi
+  if cc -q --host --root "$HR" --only blobrate > "$T/br.out" 2>&1 && grep -q 'host.blob_volume_rate.*SKIP' "$T/br.out"; then pass "blobrate: offline --root reports SKIP (not measured)"; else bad "blobrate: offline --root: $(tail -n 1 "$T/br.out")"; fi
+else skip "blobrate cases (need root)"; fi
 
 # ------------------------------------------------------------------------- 3./4. systemd-analyze
 UNITS=(tor@candor-intake.service candor-intake-web.service candor-sealer.service candor-intake-store.service candor-intake-pg.service

@@ -35,7 +35,9 @@
 #                               Platform-Manifest apparmor package
 #   scf|<syscall>               effective sealer allow-set (systemd group expansion of the
 #                               SystemCallFilter= sequence; AUD-RM2-DEP-16)
-#   scf-never|<syscall>         must never be in that set (io_uring, userfaultfd, ptrace, ...)
+#   scf-never|<syscall>         must never be in any of the three sets (io_uring, userfaultfd, ptrace, ...)
+#   scf-web|<syscall>, scf-store|<syscall>   the same for candor-intake-web.service and
+#                               candor-intake-store.service (D-36)
 #   hunit|<unit>|<Section>|<Key>|<op>|<value>   distribution units nftables.service and
 #                               systemd-sysctl.service (--host): op = exact or absent
 #   hdropin|<unit>|<path>       the only drop-ins those units may have (AUD-RM2-DEP-18)
@@ -306,6 +308,7 @@ unit|candor-intake-web.service|Service|IPAddressDeny|=|any
 unit|candor-intake-web.service|Service|SocketBindDeny|=|any
 unit|candor-intake-web.service|Service|SystemCallFilter|=|@system-service
 unit|candor-intake-web.service|Service|SystemCallFilter|=|~@privileged @resources @mount @debug @cpu-emulation @obsolete @raw-io @reboot @swap @module @clock @setuid @chown @keyring process_vm_readv process_vm_writev
+unit|candor-intake-web.service|Service|SystemCallFilter|=|~_newselect alarm arm_fadvise64_64 bind cacheflush capget chdir chmod copy_file_range creat dup2 epoll_ctl_old epoll_wait_old eventfd execveat fadvise64 fadvise64_64 fallocate fchdir fchmod fchmodat fchmodat2 fdatasync fgetxattr flistxattr flock fork fremovexattr fsetxattr fsync ftruncate ftruncate64 futimesat get_mempolicy get_thread_area getcpu getcwd getdents getgroups getgroups32 getitimer getpgid getpgrp getppid getpriority getresgid getresgid32 getresuid getresuid32 getrusage getsid getxattr inotify_add_watch inotify_init inotify_init1 inotify_rm_watch io_cancel io_destroy io_getevents io_pgetevents io_pgetevents_time64 io_setup io_submit io_uring_enter io_uring_register io_uring_setup ioprio_get ipc kcmp kill lgetxattr link linkat listen listxattr llistxattr lremovexattr lsetxattr lstat lstat64 memfd_create mkdir mkdirat mknod mknodat mq_getsetattr mq_notify mq_open mq_timedreceive mq_timedreceive_time64 mq_timedsend mq_timedsend_time64 mq_unlink msgctl msgget msgrcv msgsnd msync munlockall name_to_handle_at oldfstat oldlstat oldolduname oldstat olduname open openat2 pause personality pidfd_open pidfd_send_signal pipe pipe2 preadv2 process_madvise process_vm_readv process_vm_writev pselect6 pselect6_time64 pwritev2 readahead readdir readlink recvmmsg recvmmsg_time64 remap_file_pages removexattr rename renameat renameat2 riscv_flush_icache rmdir rt_sigpending rt_sigqueueinfo rt_sigsuspend rt_sigtimedwait rt_sigtimedwait_time64 rt_tgsigqueueinfo sched_get_priority_max sched_get_priority_min sched_getattr sched_getparam sched_getscheduler sched_rr_get_interval sched_rr_get_interval_time64 select semctl semget semop semtimedop semtimedop_time64 sendfile sendfile64 sendmmsg setfsgid setfsgid32 setitimer setns setpgid setsid setxattr shmat shmctl shmdt shmget sigaction signal signalfd signalfd4 sigpending sigprocmask sigsuspend socketcall socketpair splice stat stat64 statfs statfs64 swapcontext symlink symlinkat sync sync_file_range sync_file_range2 syncfs tee timer_create timer_delete timer_getoverrun timer_gettime timer_gettime64 timer_settime timer_settime64 timerfd_create timerfd_gettime timerfd_gettime64 timerfd_settime timerfd_settime64 times truncate truncate64 umask unlink unlinkat unshare userfaultfd utime utimensat utimensat_time64 utimes vfork vmsplice wait4 waitid waitpid
 unit|candor-intake-web.service|Service|SystemCallFilter|=|seccomp landlock_create_ruleset landlock_add_rule landlock_restrict_self
 unit|candor-intake-web.service|Service|TemporaryFileSystem|=|/var:ro
 unit|candor-intake-web.service|Service|InaccessiblePaths|=|-/var/tmp
@@ -376,7 +379,7 @@ unit|candor-sealer.service|Service|IPAddressDeny|=|any
 unit|candor-sealer.service|Service|SocketBindDeny|=|any
 unit|candor-sealer.service|Service|SystemCallFilter|=|@system-service
 unit|candor-sealer.service|Service|SystemCallFilter|=|~@privileged @resources @mount @debug @cpu-emulation @obsolete @raw-io @reboot @swap @module @clock @setuid @chown @keyring process_vm_readv process_vm_writev
-unit|candor-sealer.service|Service|SystemCallFilter|=|~_newselect alarm arm_fadvise64_64 bind cacheflush capget chdir chmod copy_file_range creat dup2 epoll_ctl_old epoll_wait_old eventfd execveat fadvise64 fadvise64_64 fallocate fchdir fchmodat2 fgetxattr flistxattr flock fork fremovexattr fsetxattr ftruncate ftruncate64 futimesat get_mempolicy get_thread_area getcpu getcwd getdents getgroups getgroups32 getitimer getpgid getpgrp getppid getpriority getresgid getresgid32 getresuid getresuid32 getrusage getsid getxattr inotify_add_watch inotify_init inotify_init1 inotify_rm_watch io_cancel io_destroy io_getevents io_pgetevents io_pgetevents_time64 io_setup io_submit io_uring_enter io_uring_register io_uring_setup ioprio_get ipc kcmp kill lgetxattr link listen listxattr llistxattr lremovexattr lsetxattr lstat lstat64 mkdir mknod mknodat mq_getsetattr mq_notify mq_open mq_timedreceive mq_timedreceive_time64 mq_timedsend mq_timedsend_time64 mq_unlink msgctl msgget msgrcv msgsnd msync munlockall name_to_handle_at oldfstat oldlstat oldolduname oldstat olduname open openat2 pause personality pidfd_open pidfd_send_signal pipe pipe2 preadv2 process_madvise process_vm_readv process_vm_writev pselect6 pselect6_time64 pwritev2 readahead readdir readlink recvmmsg recvmmsg_time64 remap_file_pages removexattr rename renameat riscv_flush_icache rmdir rt_sigpending rt_sigqueueinfo rt_sigsuspend rt_sigtimedwait rt_sigtimedwait_time64 rt_tgsigqueueinfo sched_get_priority_max sched_get_priority_min sched_getattr sched_getparam sched_getscheduler sched_rr_get_interval sched_rr_get_interval_time64 select semctl semget semop semtimedop semtimedop_time64 sendfile sendfile64 sendmmsg setfsgid setfsgid32 setitimer setns setpgid setsid setxattr shmat shmctl shmdt shmget sigaction signal signalfd signalfd4 sigpending sigprocmask sigsuspend socketcall socketpair splice stat stat64 statfs statfs64 swapcontext symlink symlinkat sync sync_file_range sync_file_range2 syncfs tee timer_create timer_delete timer_getoverrun timer_gettime timer_gettime64 timer_settime timer_settime64 timerfd_create timerfd_gettime timerfd_gettime64 timerfd_settime timerfd_settime64 times truncate truncate64 umask unlink unshare userfaultfd utime utimes vfork vmsplice wait4 waitid waitpid
+unit|candor-sealer.service|Service|SystemCallFilter|=|~_newselect alarm arm_fadvise64_64 bind cacheflush capget chdir chmod copy_file_range creat dup2 epoll_ctl_old epoll_wait_old eventfd execveat fadvise64 fadvise64_64 fallocate fchdir fchmodat2 fgetxattr flistxattr flock fork fremovexattr fsetxattr ftruncate ftruncate64 futimesat get_mempolicy get_thread_area getcpu getcwd getdents getgroups getgroups32 getitimer getpgid getpgrp getppid getpriority getresgid getresgid32 getresuid getresuid32 getrusage getsid getxattr inotify_add_watch inotify_init inotify_init1 inotify_rm_watch io_cancel io_destroy io_getevents io_pgetevents io_pgetevents_time64 io_setup io_submit io_uring_enter io_uring_register io_uring_setup ioprio_get ipc kcmp kill lgetxattr link listen listxattr llistxattr lremovexattr lsetxattr lstat lstat64 mkdir mknod mknodat mq_getsetattr mq_notify mq_open mq_timedreceive mq_timedreceive_time64 mq_timedsend mq_timedsend_time64 mq_unlink msgctl msgget msgrcv msgsnd msync munlockall name_to_handle_at oldfstat oldlstat oldolduname oldstat olduname open pause personality pidfd_open pidfd_send_signal pipe pipe2 preadv2 process_madvise process_vm_readv process_vm_writev pselect6 pselect6_time64 pwritev2 readahead readdir readlink recvmmsg recvmmsg_time64 remap_file_pages removexattr rename renameat riscv_flush_icache rmdir rt_sigpending rt_sigqueueinfo rt_sigsuspend rt_sigtimedwait rt_sigtimedwait_time64 rt_tgsigqueueinfo sched_get_priority_max sched_get_priority_min sched_getattr sched_getparam sched_getscheduler sched_rr_get_interval sched_rr_get_interval_time64 select semctl semget semop semtimedop semtimedop_time64 sendfile sendfile64 sendmmsg setfsgid setfsgid32 setitimer setns setpgid setsid setxattr shmat shmctl shmdt shmget sigaction signal signalfd signalfd4 sigpending sigprocmask sigsuspend socketcall socketpair splice stat stat64 statfs statfs64 swapcontext symlink symlinkat sync sync_file_range sync_file_range2 syncfs tee timer_create timer_delete timer_getoverrun timer_gettime timer_gettime64 timer_settime timer_settime64 timerfd_create timerfd_gettime timerfd_gettime64 timerfd_settime timerfd_settime64 times truncate truncate64 umask unlink unshare userfaultfd utime utimes vfork vmsplice wait4 waitid waitpid
 unit|candor-sealer.service|Service|SystemCallFilter|=|seccomp landlock_create_ruleset landlock_add_rule landlock_restrict_self
 unit|candor-sealer.service|Service|TemporaryFileSystem|=|/var:ro
 unit|candor-sealer.service|Service|InaccessiblePaths|=|-/var/tmp
@@ -407,6 +410,7 @@ unit|candor-intake-store.service|Service|LoadCredentialEncrypted|=|batch_signing
 unit|candor-intake-store.service|Service|LoadCredentialEncrypted|=|relay_tls_key:/etc/credstore.encrypted/candor-intake.relay_tls_key.cred
 unit|candor-intake-store.service|Service|MemoryMax|=|1G
 unit|candor-intake-store.service|Service|MemorySwapMax|=|0
+unit|candor-intake-store.service|Service|LimitMEMLOCK|=|512M
 unit|candor-intake-store.service|Service|TasksMax|=|256
 unit|candor-intake-store.service|Service|PrivateNetwork|=|yes
 unit|candor-intake-store.service|Service|RestrictAddressFamilies|=|AF_UNIX
@@ -445,6 +449,7 @@ unit|candor-intake-store.service|Service|IPAddressDeny|=|any
 unit|candor-intake-store.service|Service|SocketBindDeny|=|any
 unit|candor-intake-store.service|Service|SystemCallFilter|=|@system-service
 unit|candor-intake-store.service|Service|SystemCallFilter|=|~@privileged @resources @mount @debug @cpu-emulation @obsolete @raw-io @reboot @swap @module @clock @setuid @chown @keyring process_vm_readv process_vm_writev
+unit|candor-intake-store.service|Service|SystemCallFilter|=|~_newselect alarm arm_fadvise64_64 bind cacheflush capget chdir chmod copy_file_range creat dup2 epoll_ctl_old epoll_wait_old eventfd execveat fadvise64 fadvise64_64 fallocate fchdir fchmodat2 fgetxattr flistxattr flock fork fremovexattr fsetxattr ftruncate ftruncate64 futimesat get_mempolicy get_thread_area getcpu getcwd getdents getgroups getgroups32 getitimer getpgid getpgrp getppid getpriority getresgid getresgid32 getresuid getresuid32 getrusage getsid getxattr inotify_add_watch inotify_init inotify_init1 inotify_rm_watch io_cancel io_destroy io_getevents io_pgetevents io_pgetevents_time64 io_setup io_submit io_uring_enter io_uring_register io_uring_setup ioprio_get ipc kcmp kill lgetxattr link listen listxattr llistxattr lremovexattr lsetxattr lstat lstat64 memfd_create mkdir mknod mknodat mq_getsetattr mq_notify mq_open mq_timedreceive mq_timedreceive_time64 mq_timedsend mq_timedsend_time64 mq_unlink msgctl msgget msgrcv msgsnd msync munlockall name_to_handle_at oldfstat oldlstat oldolduname oldstat olduname open pause personality pidfd_open pidfd_send_signal pipe pipe2 preadv2 process_madvise process_vm_readv process_vm_writev pselect6 pselect6_time64 pwritev2 readahead readdir readlink recvmmsg recvmmsg_time64 remap_file_pages removexattr rename renameat riscv_flush_icache rmdir rt_sigpending rt_sigqueueinfo rt_sigsuspend rt_sigtimedwait rt_sigtimedwait_time64 rt_tgsigqueueinfo sched_get_priority_max sched_get_priority_min sched_getattr sched_getparam sched_getscheduler sched_rr_get_interval sched_rr_get_interval_time64 select semctl semget semop semtimedop semtimedop_time64 sendfile sendfile64 sendmmsg setfsgid setfsgid32 setitimer setns setpgid setsid setxattr shmat shmctl shmdt shmget sigaction signal signalfd signalfd4 sigpending sigprocmask sigsuspend socketcall socketpair splice stat stat64 statfs statfs64 swapcontext symlink symlinkat sync sync_file_range sync_file_range2 syncfs tee timer_create timer_delete timer_getoverrun timer_gettime timer_gettime64 timer_settime timer_settime64 timerfd_create timerfd_gettime timerfd_gettime64 timerfd_settime timerfd_settime64 times truncate truncate64 umask unlink unshare userfaultfd utime utimes vfork vmsplice wait4 waitid waitpid
 unit|candor-intake-store.service|Service|SystemCallFilter|=|seccomp landlock_create_ruleset landlock_add_rule landlock_restrict_self
 unit|candor-intake-store.service|Service|TemporaryFileSystem|=|/var:ro
 unit|candor-intake-store.service|Service|BindPaths|=|/var/lib/candor/intake
@@ -734,7 +739,7 @@ unit|candor-intake-maint.timer|Timer|RandomizedDelaySec|=|0
 unit|candor-intake-maint.timer|Timer|Persistent|=|false
 unit|candor-intake-maint.timer|Timer|Unit|=|candor-intake-maint.service
 unit|candor-intake-maint.timer|Install|WantedBy|=|timers.target
-# ---------------------------------------------------------------- sealer effective syscall allow-set (AUD-RM2-DEP-16; sealer README allow-list + riscv_hwprobe, seccomp)
+# ---------------------------------------------------------------- sealer effective syscall allow-set (AUD-RM2-DEP-16; sealer README allow-list + riscv_hwprobe, seccomp; openat2 added by D-36)
 scf|_llseek
 scf|accept
 scf|accept4
@@ -805,8 +810,8 @@ scf|landlock_restrict_self
 scf|linkat
 scf|lseek
 scf|madvise
-scf|memfd_create
 scf|membarrier
+scf|memfd_create
 scf|mkdirat
 scf|mlock
 scf|mlock2
@@ -820,6 +825,7 @@ scf|munmap
 scf|nanosleep
 scf|newfstatat
 scf|openat
+scf|openat2
 scf|poll
 scf|ppoll
 scf|ppoll_time64
@@ -900,6 +906,265 @@ scf-never|bind
 scf-never|listen
 scf-never|socketpair
 scf-never|kill
+# ---------------------------------------------------------------- web service effective syscall allow-set (D-36: sealer set minus memfd_create, openat2 and the file-write calls)
+scf-web|_llseek
+scf-web|accept
+scf-web|accept4
+scf-web|access
+scf-web|arch_prctl
+scf-web|brk
+scf-web|clock_getres
+scf-web|clock_getres_time64
+scf-web|clock_gettime
+scf-web|clock_gettime64
+scf-web|clock_nanosleep
+scf-web|clock_nanosleep_time64
+scf-web|clone
+scf-web|clone3
+scf-web|close
+scf-web|close_range
+scf-web|connect
+scf-web|dup
+scf-web|dup3
+scf-web|epoll_create
+scf-web|epoll_create1
+scf-web|epoll_ctl
+scf-web|epoll_pwait
+scf-web|epoll_pwait2
+scf-web|epoll_wait
+scf-web|eventfd2
+scf-web|execve
+scf-web|exit
+scf-web|exit_group
+scf-web|faccessat
+scf-web|faccessat2
+scf-web|fcntl
+scf-web|fcntl64
+scf-web|fstat
+scf-web|fstat64
+scf-web|fstatat64
+scf-web|fstatfs
+scf-web|fstatfs64
+scf-web|futex
+scf-web|futex_time64
+scf-web|futex_waitv
+scf-web|get_robust_list
+scf-web|getdents64
+scf-web|getegid
+scf-web|getegid32
+scf-web|geteuid
+scf-web|geteuid32
+scf-web|getgid
+scf-web|getgid32
+scf-web|getpeername
+scf-web|getpid
+scf-web|getrandom
+scf-web|getrlimit
+scf-web|getsockname
+scf-web|getsockopt
+scf-web|gettid
+scf-web|gettimeofday
+scf-web|getuid
+scf-web|getuid32
+scf-web|ioctl
+scf-web|landlock_add_rule
+scf-web|landlock_create_ruleset
+scf-web|landlock_restrict_self
+scf-web|lseek
+scf-web|madvise
+scf-web|membarrier
+scf-web|mlock
+scf-web|mlock2
+scf-web|mlockall
+scf-web|mmap
+scf-web|mmap2
+scf-web|mprotect
+scf-web|mremap
+scf-web|munlock
+scf-web|munmap
+scf-web|nanosleep
+scf-web|newfstatat
+scf-web|openat
+scf-web|poll
+scf-web|ppoll
+scf-web|ppoll_time64
+scf-web|prctl
+scf-web|pread64
+scf-web|preadv
+scf-web|prlimit64
+scf-web|pwrite64
+scf-web|pwritev
+scf-web|read
+scf-web|readlinkat
+scf-web|readv
+scf-web|recv
+scf-web|recvfrom
+scf-web|recvmsg
+scf-web|restart_syscall
+scf-web|riscv_hwprobe
+scf-web|rseq
+scf-web|rt_sigaction
+scf-web|rt_sigprocmask
+scf-web|rt_sigreturn
+scf-web|sched_getaffinity
+scf-web|sched_yield
+scf-web|seccomp
+scf-web|send
+scf-web|sendmsg
+scf-web|sendto
+scf-web|set_robust_list
+scf-web|set_thread_area
+scf-web|set_tid_address
+scf-web|set_tls
+scf-web|setsockopt
+scf-web|shutdown
+scf-web|sigaltstack
+scf-web|sigreturn
+scf-web|socket
+scf-web|statx
+scf-web|sysinfo
+scf-web|tgkill
+scf-web|time
+scf-web|tkill
+scf-web|ugetrlimit
+scf-web|uname
+scf-web|write
+scf-web|writev
+# ---------------------------------------------------------------- intake store effective syscall allow-set (D-36: sealer set minus memfd_create; openat2 kept for candor-safefs)
+scf-store|_llseek
+scf-store|accept
+scf-store|accept4
+scf-store|access
+scf-store|arch_prctl
+scf-store|brk
+scf-store|clock_getres
+scf-store|clock_getres_time64
+scf-store|clock_gettime
+scf-store|clock_gettime64
+scf-store|clock_nanosleep
+scf-store|clock_nanosleep_time64
+scf-store|clone
+scf-store|clone3
+scf-store|close
+scf-store|close_range
+scf-store|connect
+scf-store|dup
+scf-store|dup3
+scf-store|epoll_create
+scf-store|epoll_create1
+scf-store|epoll_ctl
+scf-store|epoll_pwait
+scf-store|epoll_pwait2
+scf-store|epoll_wait
+scf-store|eventfd2
+scf-store|execve
+scf-store|exit
+scf-store|exit_group
+scf-store|faccessat
+scf-store|faccessat2
+scf-store|fchmod
+scf-store|fchmodat
+scf-store|fcntl
+scf-store|fcntl64
+scf-store|fdatasync
+scf-store|fstat
+scf-store|fstat64
+scf-store|fstatat64
+scf-store|fstatfs
+scf-store|fstatfs64
+scf-store|fsync
+scf-store|futex
+scf-store|futex_time64
+scf-store|futex_waitv
+scf-store|get_robust_list
+scf-store|getdents64
+scf-store|getegid
+scf-store|getegid32
+scf-store|geteuid
+scf-store|geteuid32
+scf-store|getgid
+scf-store|getgid32
+scf-store|getpeername
+scf-store|getpid
+scf-store|getrandom
+scf-store|getrlimit
+scf-store|getsockname
+scf-store|getsockopt
+scf-store|gettid
+scf-store|gettimeofday
+scf-store|getuid
+scf-store|getuid32
+scf-store|ioctl
+scf-store|landlock_add_rule
+scf-store|landlock_create_ruleset
+scf-store|landlock_restrict_self
+scf-store|linkat
+scf-store|lseek
+scf-store|madvise
+scf-store|membarrier
+scf-store|mkdirat
+scf-store|mlock
+scf-store|mlock2
+scf-store|mlockall
+scf-store|mmap
+scf-store|mmap2
+scf-store|mprotect
+scf-store|mremap
+scf-store|munlock
+scf-store|munmap
+scf-store|nanosleep
+scf-store|newfstatat
+scf-store|openat
+scf-store|openat2
+scf-store|poll
+scf-store|ppoll
+scf-store|ppoll_time64
+scf-store|prctl
+scf-store|pread64
+scf-store|preadv
+scf-store|prlimit64
+scf-store|pwrite64
+scf-store|pwritev
+scf-store|read
+scf-store|readlinkat
+scf-store|readv
+scf-store|recv
+scf-store|recvfrom
+scf-store|recvmsg
+scf-store|renameat2
+scf-store|restart_syscall
+scf-store|riscv_hwprobe
+scf-store|rseq
+scf-store|rt_sigaction
+scf-store|rt_sigprocmask
+scf-store|rt_sigreturn
+scf-store|sched_getaffinity
+scf-store|sched_yield
+scf-store|seccomp
+scf-store|send
+scf-store|sendmsg
+scf-store|sendto
+scf-store|set_robust_list
+scf-store|set_thread_area
+scf-store|set_tid_address
+scf-store|set_tls
+scf-store|setsockopt
+scf-store|shutdown
+scf-store|sigaltstack
+scf-store|sigreturn
+scf-store|socket
+scf-store|statx
+scf-store|sysinfo
+scf-store|tgkill
+scf-store|time
+scf-store|tkill
+scf-store|ugetrlimit
+scf-store|uname
+scf-store|unlinkat
+scf-store|utimensat
+scf-store|utimensat_time64
+scf-store|write
+scf-store|writev
 # ---------------------------------------------------------------- systemd-analyze security residual items (D-21, D-25)
 sec|tor@candor-intake.service|SystemCallFilter=~@resources
 sec|tor@candor-intake.service|RootDirectory=/RootImage=

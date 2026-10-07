@@ -155,7 +155,8 @@ pub fn systemd_unix_listener(expected_name: &str) -> Result<AdoptedListener, Ado
     let fds = std::env::var_os("LISTEN_FDS");
     let names = std::env::var_os("LISTEN_FDNAMES");
     sys::clear_listen_env();
-    let own_pid = rustix::process::getpid().as_raw_nonzero().get();
+    // Pids are positive; a negative raw value cannot occur, and would never match anyway.
+    let own_pid = u32::try_from(rustix::process::getpid().as_raw_nonzero().get()).unwrap_or(0);
     check_listen_env(
         pid.as_deref().map(|v| v.as_encoded_bytes()),
         fds.as_deref().map(|v| v.as_encoded_bytes()),
@@ -426,12 +427,9 @@ mod tests {
             check_listener_fd(inet.as_fd()),
             Err(AdoptError::WrongFamily)
         );
-        // Not a socket at all (the test process's stdin, whatever it is), or not open.
-        let r = check_listener_fd(std::io::stdin().as_fd());
-        assert!(
-            matches!(r, Err(AdoptError::NotSocket | AdoptError::BadFd)),
-            "{r:?}"
-        );
+        // Not a socket at all: a pipe end.
+        let (rd, _wr) = rustix::pipe::pipe().unwrap();
+        assert_eq!(check_listener_fd(rd.as_fd()), Err(AdoptError::NotSocket));
     }
 
     #[test]
