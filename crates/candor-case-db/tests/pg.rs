@@ -18,7 +18,6 @@ use sha2::Digest;
 use sqlx::{AssertSqlSafe, Row};
 use uuid::Uuid;
 
-
 /// Migration: fresh apply, idempotent re-run, every role opens.
 #[tokio::test]
 async fn migrate_and_open_every_role() {
@@ -71,14 +70,23 @@ async fn rls_isolation_every_table() {
         let mut c = conn(&b, &name, reader).await;
         let mut tx = ctx(&mut c, ta, ua, kind_of(reader)).await;
         assert_eq!(count(&mut tx, table, "").await, 1, "{table} as {reader}");
-        assert_eq!(count(&mut tx, table, &format!("WHERE tenant_id = '{tb}'")).await, 0, "{table}");
+        assert_eq!(
+            count(&mut tx, table, &format!("WHERE tenant_id = '{tb}'")).await,
+            0,
+            "{table}"
+        );
         // Moving a row to another tenant: refused by WITH CHECK or by grants.
-        let moved = sqlx::query(AssertSqlSafe(format!("UPDATE {table} SET tenant_id = $1 WHERE tenant_id = $2")))
-            .bind(tb)
-            .bind(ta)
-            .execute(&mut *tx)
-            .await;
-        assert!(moved.is_err(), "{table}: row moved across tenants as {reader}");
+        let moved = sqlx::query(AssertSqlSafe(format!(
+            "UPDATE {table} SET tenant_id = $1 WHERE tenant_id = $2"
+        )))
+        .bind(tb)
+        .bind(ta)
+        .execute(&mut *tx)
+        .await;
+        assert!(
+            moved.is_err(),
+            "{table}: row moved across tenants as {reader}"
+        );
         tx.rollback().await.unwrap();
         // Inserting a B row under A's context: refused (WITH CHECK or grants).
         let mut tx = ctx(&mut c, ta, ua, kind_of(reader)).await;
@@ -87,53 +95,71 @@ async fn rls_isolation_every_table() {
             .bind(ua)
             .execute(&mut *tx)
             .await;
-        assert!(ins.is_err(), "{table}: cross-tenant insert accepted as {reader}");
+        assert!(
+            ins.is_err(),
+            "{table}: cross-tenant insert accepted as {reader}"
+        );
         tx.rollback().await.unwrap();
         // No context at all: an error, never an empty result (fail closed).
         let bare = sqlx::query(AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
             .fetch_one(&mut c)
             .await;
-        assert_eq!(sqlstate(&bare.unwrap_err()), "42501", "{table}: no-context read did not fail closed");
+        assert_eq!(
+            sqlstate(&bare.unwrap_err()),
+            "42501",
+            "{table}: no-context read did not fail closed"
+        );
     }
     // Superuser view: both tenants still hold exactly one row each.
     for (table, _, _) in fixtures::FIXTURES {
-        assert_eq!(count(&mut s, table, &format!("WHERE tenant_id = '{ta}'")).await, 1);
-        assert_eq!(count(&mut s, table, &format!("WHERE tenant_id = '{tb}'")).await, 1);
+        assert_eq!(
+            count(&mut s, table, &format!("WHERE tenant_id = '{ta}'")).await,
+            1
+        );
+        assert_eq!(
+            count(&mut s, table, &format!("WHERE tenant_id = '{tb}'")).await,
+            1
+        );
     }
     // coi_excl_tag: no SELECT for the Desk role; the definer function answers
     // only for the caller's own case.
     let mut c = conn(&b, &name, "candor_case").await;
     let mut tx = ctx(&mut c, ta, ua, "desk").await;
-    let sel = sqlx::query("SELECT count(*) FROM core.coi_excl_tag").fetch_one(&mut *tx).await;
+    let sel = sqlx::query("SELECT count(*) FROM core.coi_excl_tag")
+        .fetch_one(&mut *tx)
+        .await;
     assert_eq!(sqlstate(&sel.unwrap_err()), "42501");
     tx.rollback().await.unwrap();
     let mut tx = ctx(&mut c, ta, ua, "desk").await;
-    let present: bool = sqlx::query("SELECT acl.coi_tag_present($1, pg_catalog.sha256($1::text::bytea))")
-        .bind(ta)
-        .fetch_one(&mut *tx)
-        .await
-        .unwrap()
-        .try_get(0)
-        .unwrap();
+    let present: bool =
+        sqlx::query("SELECT acl.coi_tag_present($1, pg_catalog.sha256($1::text::bytea))")
+            .bind(ta)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap()
+            .try_get(0)
+            .unwrap();
     assert!(present);
-    let other: bool = sqlx::query("SELECT acl.coi_tag_present($1, pg_catalog.sha256($1::text::bytea))")
-        .bind(tb)
-        .fetch_one(&mut *tx)
-        .await
-        .unwrap()
-        .try_get(0)
-        .unwrap();
+    let other: bool =
+        sqlx::query("SELECT acl.coi_tag_present($1, pg_catalog.sha256($1::text::bytea))")
+            .bind(tb)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap()
+            .try_get(0)
+            .unwrap();
     assert!(!other, "a tag of another tenant's case was visible");
     // A non-member of the case (nil user) gets false even for a present tag.
     tx.rollback().await.unwrap();
     let mut tx = ctx(&mut c, ta, Uuid::nil(), "desk").await;
-    let nm: bool = sqlx::query("SELECT acl.coi_tag_present($1, pg_catalog.sha256($1::text::bytea))")
-        .bind(ta)
-        .fetch_one(&mut *tx)
-        .await
-        .unwrap()
-        .try_get(0)
-        .unwrap();
+    let nm: bool =
+        sqlx::query("SELECT acl.coi_tag_present($1, pg_catalog.sha256($1::text::bytea))")
+            .bind(ta)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap()
+            .try_get(0)
+            .unwrap();
     assert!(!nm);
 }
 
@@ -148,12 +174,27 @@ async fn rls_case_acl_hides_non_member() {
     let mut c = conn(&b, &name, "candor_case").await;
     let mut tx = ctx(&mut c, ta, stranger, "desk").await;
     for t in [
-        "core.\"case\"", "core.case_record", "core.message", "core.attachment", "core.evidence_object",
-        "core.submission", "core.sla_timer", "core.legal_hold", "core.case_key_wrap", "core.import_envelope",
-        "core.import_envelope_part", "core.sealed_identity", "core.breakglass_request", "core.case_member",
+        "core.\"case\"",
+        "core.case_record",
+        "core.message",
+        "core.attachment",
+        "core.evidence_object",
+        "core.submission",
+        "core.sla_timer",
+        "core.legal_hold",
+        "core.case_key_wrap",
+        "core.import_envelope",
+        "core.import_envelope_part",
+        "core.sealed_identity",
+        "core.breakglass_request",
+        "core.case_member",
         "core.notification_target",
     ] {
-        assert_eq!(count(&mut tx, t, "").await, 0, "{t} visible to a non-member");
+        assert_eq!(
+            count(&mut tx, t, "").await,
+            0,
+            "{t} visible to a non-member"
+        );
     }
     // A member sees them, but only their own wrap and target.
     tx.rollback().await.unwrap();
@@ -191,7 +232,11 @@ async fn grant_matrix() {
     .iter()
     .map(|r| r.try_get::<String, _>(0).unwrap())
     .collect();
-    assert_eq!(tables.len(), grants::TABLE_GRANTS.len(), "grant matrix must list every table");
+    assert_eq!(
+        tables.len(),
+        grants::TABLE_GRANTS.len(),
+        "grant matrix must list every table"
+    );
     let mut problems = Vec::new();
     for t in &tables {
         let (_, expected) = grants::TABLE_GRANTS
@@ -205,7 +250,15 @@ async fn grant_matrix() {
                 .filter(|(r, _)| *r == "*" || r == role)
                 .map(|(_, p)| *p)
                 .collect();
-            for (letter, priv_) in [("S", "SELECT"), ("I", "INSERT"), ("U", "UPDATE"), ("D", "DELETE"), ("T", "TRUNCATE"), ("R", "REFERENCES"), ("G", "TRIGGER")] {
+            for (letter, priv_) in [
+                ("S", "SELECT"),
+                ("I", "INSERT"),
+                ("U", "UPDATE"),
+                ("D", "DELETE"),
+                ("T", "TRUNCATE"),
+                ("R", "REFERENCES"),
+                ("G", "TRIGGER"),
+            ] {
                 let has: bool = sqlx::query("SELECT pg_catalog.has_table_privilege($1, $2, $3)")
                     .bind(role)
                     .bind(&quoted)
@@ -216,7 +269,10 @@ async fn grant_matrix() {
                     .try_get(0)
                     .unwrap();
                 if has != want.contains(letter) {
-                    problems.push(format!("{t} {role} {priv_}: expected {}", want.contains(letter)));
+                    problems.push(format!(
+                        "{t} {role} {priv_}: expected {}",
+                        want.contains(letter)
+                    ));
                 }
             }
         }
@@ -247,7 +303,10 @@ async fn grant_matrix() {
                 .try_get(0)
                 .unwrap();
             if has != cols.contains(&c.as_str()) {
-                problems.push(format!("{t}.{c} {role} column {priv_}: expected {}", cols.contains(&c.as_str())));
+                problems.push(format!(
+                    "{t}.{c} {role} column {priv_}: expected {}",
+                    cols.contains(&c.as_str())
+                ));
             }
         }
     }
@@ -256,22 +315,31 @@ async fn grant_matrix() {
     // must move or delete blobs (09 §6.5).
     let class = classification::parse_classification(classification::CLASSIFICATION_TSV).unwrap();
     for r in class.iter().filter(|r| r.ciphertext) {
-        for role in ["candor_admin", "candor_worker", "candor_monitor", "candor_notify"] {
+        for role in [
+            "candor_admin",
+            "candor_worker",
+            "candor_monitor",
+            "candor_notify",
+        ] {
             if role == "candor_worker" && r.column == "blob_id" {
                 continue;
             }
             let t = quote(&format!("{}.{}", r.schema, r.table));
-            let has: bool = sqlx::query("SELECT pg_catalog.has_column_privilege($1, $2, $3, 'SELECT')")
-                .bind(role)
-                .bind(&t)
-                .bind(&r.column)
-                .fetch_one(&mut s)
-                .await
-                .unwrap()
-                .try_get(0)
-                .unwrap();
+            let has: bool =
+                sqlx::query("SELECT pg_catalog.has_column_privilege($1, $2, $3, 'SELECT')")
+                    .bind(role)
+                    .bind(&t)
+                    .bind(&r.column)
+                    .fetch_one(&mut s)
+                    .await
+                    .unwrap()
+                    .try_get(0)
+                    .unwrap();
             if has {
-                problems.push(format!("{role} can read ciphertext {}.{}.{}", r.schema, r.table, r.column));
+                problems.push(format!(
+                    "{role} can read ciphertext {}.{}.{}",
+                    r.schema, r.table, r.column
+                ));
             }
         }
     }
@@ -291,7 +359,11 @@ async fn grant_matrix() {
 }
 
 fn quote(t: &str) -> String {
-    if t == "core.case" { "core.\"case\"".into() } else { t.into() }
+    if t == "core.case" {
+        "core.\"case\"".into()
+    } else {
+        t.into()
+    }
 }
 
 // ---- guards and triggers -------------------------------------------------------
@@ -307,8 +379,14 @@ async fn append_only_and_guard_triggers() {
     let mut tx = ctx(&mut c, ta, Uuid::nil(), "kd").await;
     // kd_entry: UPDATE and DELETE raise even for the owner-adjacent role;
     // a gap or a replayed leaf index is refused.
-    let e = sqlx::query("UPDATE kd.kd_entry SET body = '\\x02' WHERE tenant_id = $1").bind(ta).execute(&mut *tx).await;
-    assert!(matches!(sqlstate(&e.unwrap_err()).as_str(), "42501" | "P0003"));
+    let e = sqlx::query("UPDATE kd.kd_entry SET body = '\\x02' WHERE tenant_id = $1")
+        .bind(ta)
+        .execute(&mut *tx)
+        .await;
+    assert!(matches!(
+        sqlstate(&e.unwrap_err()).as_str(),
+        "42501" | "P0003"
+    ));
     tx.rollback().await.unwrap();
     let mut tx = ctx(&mut c, ta, Uuid::nil(), "kd").await;
     let gap = sqlx::query("INSERT INTO kd.kd_entry (tenant_id, leaf_index, entry_type, subject_id, body, leaf_hash, signer_key_id, sig, appended_day, effective_day) \
@@ -317,16 +395,24 @@ async fn append_only_and_guard_triggers() {
     assert_eq!(sqlstate(&gap.unwrap_err()), "P0004");
     tx.rollback().await.unwrap();
     // Superuser (owner-like) cannot update or delete either: the trigger fires regardless.
-    for sql in ["UPDATE kd.kd_entry SET body = '\\x02'", "DELETE FROM kd.kd_entry", "DELETE FROM kd.kd_checkpoint",
-                "DELETE FROM audit.audit_event", "UPDATE audit.audit_event SET payload = '\\x02'",
-                "UPDATE audit.audit_event SET state = 'committed'; UPDATE audit.audit_event SET state = 'aborted'",
-                "DELETE FROM audit.audit_checkpoint", "DELETE FROM kd.member_epoch_key",
-                "UPDATE kd.member_epoch_key SET state = 'destroyed'; UPDATE kd.member_epoch_key SET state = 'active'",
-                "UPDATE core.evidence_object SET blob_id = pg_catalog.gen_random_uuid()",
-                "UPDATE core.\"case\" SET state = 'x'",
-                "UPDATE core.\"case\" SET state = 'x', version = version + 2",
-                "UPDATE core.role SET name = 'z', built_in = true; UPDATE core.role SET name = 'y'"] {
-        let r = sqlx::raw_sql(AssertSqlSafe(format!("BEGIN; {sql}; ROLLBACK;"))).execute(&mut s).await;
+    for sql in [
+        "UPDATE kd.kd_entry SET body = '\\x02'",
+        "DELETE FROM kd.kd_entry",
+        "DELETE FROM kd.kd_checkpoint",
+        "DELETE FROM audit.audit_event",
+        "UPDATE audit.audit_event SET payload = '\\x02'",
+        "UPDATE audit.audit_event SET state = 'committed'; UPDATE audit.audit_event SET state = 'aborted'",
+        "DELETE FROM audit.audit_checkpoint",
+        "DELETE FROM kd.member_epoch_key",
+        "UPDATE kd.member_epoch_key SET state = 'destroyed'; UPDATE kd.member_epoch_key SET state = 'active'",
+        "UPDATE core.evidence_object SET blob_id = pg_catalog.gen_random_uuid()",
+        "UPDATE core.\"case\" SET state = 'x'",
+        "UPDATE core.\"case\" SET state = 'x', version = version + 2",
+        "UPDATE core.role SET name = 'z', built_in = true; UPDATE core.role SET name = 'y'",
+    ] {
+        let r = sqlx::raw_sql(AssertSqlSafe(format!("BEGIN; {sql}; ROLLBACK;")))
+            .execute(&mut s)
+            .await;
         assert!(r.is_err(), "guard missing for `{sql}`");
         let _ = sqlx::raw_sql("ROLLBACK").execute(&mut s).await;
     }
@@ -362,32 +448,52 @@ async fn append_only_and_guard_triggers() {
         // Export approval by the creator, or with the wrong digest.
         "INSERT INTO core.export_approval (tenant_id, export_id, approver_id, decision, digest_confirmed, day) SELECT tenant_id, export_id, created_by, 'approve', package_digest, DATE '2026-01-01' FROM core.export_package",
     ] {
-        let r = sqlx::raw_sql(AssertSqlSafe(format!("BEGIN; {sql}; ROLLBACK;"))).execute(&mut s).await;
+        let r = sqlx::raw_sql(AssertSqlSafe(format!("BEGIN; {sql}; ROLLBACK;")))
+            .execute(&mut s)
+            .await;
         assert!(r.is_err(), "constraint missing for `{sql}`");
         let _ = sqlx::raw_sql("ROLLBACK").execute(&mut s).await;
     }
     // Legal hold derivation: fixture hold is unreleased → case.legal_hold true;
     // releasing it (two people) clears the flag and bumps the version.
     let held: (bool, i64) = {
-        let r = sqlx::query("SELECT legal_hold, version FROM core.\"case\" WHERE tenant_id = $1").bind(ta).fetch_one(&mut s).await.unwrap();
+        let r = sqlx::query("SELECT legal_hold, version FROM core.\"case\" WHERE tenant_id = $1")
+            .bind(ta)
+            .fetch_one(&mut s)
+            .await
+            .unwrap();
         (r.try_get(0).unwrap(), r.try_get(1).unwrap())
     };
     assert!(held.0);
     sqlx::query("UPDATE core.legal_hold SET released_by = $2, release_approved_by = $1, released_day = placed_day, version = version + 1 WHERE tenant_id = $1")
         .bind(ta).bind(ua).execute(&mut s).await.unwrap();
     let after: (bool, i64) = {
-        let r = sqlx::query("SELECT legal_hold, version FROM core.\"case\" WHERE tenant_id = $1").bind(ta).fetch_one(&mut s).await.unwrap();
+        let r = sqlx::query("SELECT legal_hold, version FROM core.\"case\" WHERE tenant_id = $1")
+            .bind(ta)
+            .fetch_one(&mut s)
+            .await
+            .unwrap();
         (r.try_get(0).unwrap(), r.try_get(1).unwrap())
     };
     assert_eq!(after, (false, held.1 + 1));
     // Worker scoping: a worker job other than the erasure kinds cannot delete content.
     let mut c = conn(&b, &name, "candor_worker").await;
     let mut tx = ctx(&mut c, ta, Uuid::nil(), "worker:sla_evaluate").await;
-    let n = sqlx::query("DELETE FROM core.case_record WHERE tenant_id = $1").bind(ta).execute(&mut *tx).await.unwrap().rows_affected();
+    let n = sqlx::query("DELETE FROM core.case_record WHERE tenant_id = $1")
+        .bind(ta)
+        .execute(&mut *tx)
+        .await
+        .unwrap()
+        .rows_affected();
     assert_eq!(n, 0, "worker deleted content outside an erasure job");
     tx.rollback().await.unwrap();
     let mut tx = ctx(&mut c, ta, Uuid::nil(), "worker:crypto_erase_case").await;
-    let n = sqlx::query("DELETE FROM core.case_record WHERE tenant_id = $1").bind(ta).execute(&mut *tx).await.unwrap().rows_affected();
+    let n = sqlx::query("DELETE FROM core.case_record WHERE tenant_id = $1")
+        .bind(ta)
+        .execute(&mut *tx)
+        .await
+        .unwrap()
+        .rows_affected();
     assert_eq!(n, 1);
     tx.rollback().await.unwrap();
     // Job kinds: the notify role sees only its own job kinds.
@@ -410,23 +516,53 @@ async fn tenant_tx_fail_closed() {
     let desk = Principal::staff(t, u, PrincipalKind::Desk).unwrap();
     assert_eq!(case.begin(&desk).await.err(), Some(DbError::TenantUnknown));
     // Bootstrap through the admin pool only.
-    assert_eq!(repo::tenant::bootstrap(&case, t, "Acme", repo::tenant::RiskClass::Low).await.err(), Some(DbError::PrincipalMismatch));
-    assert!(repo::tenant::bootstrap(&admin, t, "Acme", repo::tenant::RiskClass::Low).await.unwrap());
-    assert!(!repo::tenant::bootstrap(&admin, t, "Acme", repo::tenant::RiskClass::Low).await.unwrap());
-    assert_eq!(repo::tenant::bootstrap(&admin, t, "", repo::tenant::RiskClass::Low).await.err(), Some(DbError::InvalidInput("tenant label")));
+    assert_eq!(
+        repo::tenant::bootstrap(&case, t, "Acme", repo::tenant::RiskClass::Low)
+            .await
+            .err(),
+        Some(DbError::PrincipalMismatch)
+    );
+    assert!(
+        repo::tenant::bootstrap(&admin, t, "Acme", repo::tenant::RiskClass::Low)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !repo::tenant::bootstrap(&admin, t, "Acme", repo::tenant::RiskClass::Low)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        repo::tenant::bootstrap(&admin, t, "", repo::tenant::RiskClass::Low)
+            .await
+            .err(),
+        Some(DbError::InvalidInput("tenant label"))
+    );
     // Principal kind must match the pool's role.
-    assert_eq!(admin.begin(&desk).await.err(), Some(DbError::PrincipalMismatch));
+    assert_eq!(
+        admin.begin(&desk).await.err(),
+        Some(DbError::PrincipalMismatch)
+    );
     let mut tx = case.begin(&desk).await.unwrap();
     let row = repo::tenant::get(&mut tx).await.unwrap();
-    assert_eq!((row.label.as_str(), row.suspended, row.version), ("Acme", false, 1));
+    assert_eq!(
+        (row.label.as_str(), row.suspended, row.version),
+        ("Acme", false, 1)
+    );
     tx.commit().await.unwrap();
     // Suspension: Desk refused, Admin and Worker still served.
     let adm = Principal::staff(t, u, PrincipalKind::Admin).unwrap();
     let mut tx = admin.begin(&adm).await.unwrap();
-    assert_eq!(repo::tenant::set_suspended(&mut tx, 7, true).await.err(), Some(DbError::VersionConflict));
+    assert_eq!(
+        repo::tenant::set_suspended(&mut tx, 7, true).await.err(),
+        Some(DbError::VersionConflict)
+    );
     repo::tenant::set_suspended(&mut tx, 1, true).await.unwrap();
     tx.commit().await.unwrap();
-    assert_eq!(case.begin(&desk).await.err(), Some(DbError::TenantSuspended));
+    assert_eq!(
+        case.begin(&desk).await.err(),
+        Some(DbError::TenantSuspended)
+    );
     assert!(admin.begin(&adm).await.is_ok());
     let worker = open(&b, &name, Role::Worker).await;
     let w = Principal::system(t, PrincipalKind::Worker(JobKind::BlobGc)).unwrap();
@@ -444,7 +580,9 @@ async fn tenant_tx_fail_closed() {
     assert!(after.is_empty(), "tenant context survived the transaction");
     // A session-level SET is harmless: the next TenantTx overrides it, and a
     // raw statement without the wrapper still fails on the other tables.
-    let bare = sqlx::query("SELECT count(*) FROM core.\"case\"").fetch_one(&mut c).await;
+    let bare = sqlx::query("SELECT count(*) FROM core.\"case\"")
+        .fetch_one(&mut c)
+        .await;
     assert_eq!(sqlstate(&bare.unwrap_err()), "42501");
 }
 
@@ -458,60 +596,185 @@ async fn tamper_and_drift_refused() {
     let mig = b.clone().username(&superuser()).database(&name);
     // Ledger digest altered: migrate and open refuse.
     sqlx::raw_sql("UPDATE candor.schema_migration SET sha256 = pg_catalog.decode(pg_catalog.repeat('ab', 32), 'hex')").execute(&mut s).await.unwrap();
-    assert_eq!(migrate(&mig).await.err(), Some(DbError::Integrity("applied migration differs from build")));
-    assert_eq!(try_open(&b, &name, Role::Case).await.err(), Some(DbError::Integrity("schema version mismatch")));
+    assert_eq!(
+        migrate(&mig).await.err(),
+        Some(DbError::Integrity("applied migration differs from build"))
+    );
+    assert_eq!(
+        try_open(&b, &name, Role::Case).await.err(),
+        Some(DbError::Integrity("schema version mismatch"))
+    );
     let digest = sha2::Sha256::digest(MIGRATIONS[0].1.as_bytes());
-    sqlx::query("UPDATE candor.schema_migration SET sha256 = $1").bind(digest.as_slice()).execute(&mut s).await.unwrap();
+    sqlx::query("UPDATE candor.schema_migration SET sha256 = $1")
+        .bind(digest.as_slice())
+        .execute(&mut s)
+        .await
+        .unwrap();
     assert!(try_open(&b, &name, Role::Case).await.is_ok());
     // Schema hash altered.
     sqlx::raw_sql("UPDATE candor.schema_meta SET schema_hash = pg_catalog.decode(pg_catalog.repeat('ab', 32), 'hex')").execute(&mut s).await.unwrap();
-    assert_eq!(try_open(&b, &name, Role::Case).await.err(), Some(DbError::Integrity("schema hash mismatch")));
-    sqlx::query("UPDATE candor.schema_meta SET schema_hash = $1").bind(schema_hash().as_slice()).execute(&mut s).await.unwrap();
+    assert_eq!(
+        try_open(&b, &name, Role::Case).await.err(),
+        Some(DbError::Integrity("schema hash mismatch"))
+    );
+    sqlx::query("UPDATE candor.schema_meta SET schema_hash = $1")
+        .bind(schema_hash().as_slice())
+        .execute(&mut s)
+        .await
+        .unwrap();
     // Classification row altered.
-    sqlx::raw_sql("UPDATE candor.column_class SET class = 'SYS' WHERE column_name = 'record_ct'").execute(&mut s).await.unwrap();
-    assert_eq!(try_open(&b, &name, Role::Case).await.err(), Some(DbError::Integrity("schema lint failed")));
-    sqlx::raw_sql("UPDATE candor.column_class SET class = 'CT' WHERE column_name = 'record_ct'").execute(&mut s).await.unwrap();
+    sqlx::raw_sql("UPDATE candor.column_class SET class = 'SYS' WHERE column_name = 'record_ct'")
+        .execute(&mut s)
+        .await
+        .unwrap();
+    assert_eq!(
+        try_open(&b, &name, Role::Case).await.err(),
+        Some(DbError::Integrity("schema lint failed"))
+    );
+    sqlx::raw_sql("UPDATE candor.column_class SET class = 'CT' WHERE column_name = 'record_ct'")
+        .execute(&mut s)
+        .await
+        .unwrap();
     // Drift: an extra table, an extra (unclassified, time-typed) column.
-    sqlx::raw_sql("CREATE TABLE core.extra (tenant_id uuid NOT NULL, x int)").execute(&mut s).await.unwrap();
-    assert_eq!(try_open(&b, &name, Role::Case).await.err(), Some(DbError::Integrity("schema guards differ from build")));
-    sqlx::raw_sql("DROP TABLE core.extra").execute(&mut s).await.unwrap();
-    sqlx::raw_sql("ALTER TABLE core.\"case\" ADD COLUMN seen_at timestamptz").execute(&mut s).await.unwrap();
-    assert_eq!(try_open(&b, &name, Role::Case).await.err(), Some(DbError::Integrity("schema lint failed")));
+    sqlx::raw_sql("CREATE TABLE core.extra (tenant_id uuid NOT NULL, x int)")
+        .execute(&mut s)
+        .await
+        .unwrap();
+    assert_eq!(
+        try_open(&b, &name, Role::Case).await.err(),
+        Some(DbError::Integrity("schema guards differ from build"))
+    );
+    sqlx::raw_sql("DROP TABLE core.extra")
+        .execute(&mut s)
+        .await
+        .unwrap();
+    sqlx::raw_sql("ALTER TABLE core.\"case\" ADD COLUMN seen_at timestamptz")
+        .execute(&mut s)
+        .await
+        .unwrap();
+    assert_eq!(
+        try_open(&b, &name, Role::Case).await.err(),
+        Some(DbError::Integrity("schema lint failed"))
+    );
     let mut c = conn(&b, &name, "candor_monitor").await;
     let v = lint::live(&mut c).await.unwrap();
-    assert!(v.iter().any(|m| m.starts_with("L3")) && v.iter().any(|m| m.starts_with("L5")), "{v:?}");
-    sqlx::raw_sql("ALTER TABLE core.\"case\" DROP COLUMN seen_at").execute(&mut s).await.unwrap();
+    assert!(
+        v.iter().any(|m| m.starts_with("L3")) && v.iter().any(|m| m.starts_with("L5")),
+        "{v:?}"
+    );
+    sqlx::raw_sql("ALTER TABLE core.\"case\" DROP COLUMN seen_at")
+        .execute(&mut s)
+        .await
+        .unwrap();
     // Guards disabled: RLS unforced, a trigger disabled, a policy dropped.
     for (break_, fix) in [
-        ("ALTER TABLE core.message NO FORCE ROW LEVEL SECURITY", "ALTER TABLE core.message FORCE ROW LEVEL SECURITY"),
-        ("ALTER TABLE kd.kd_entry DISABLE TRIGGER kd_entry_append_only", "ALTER TABLE kd.kd_entry ENABLE TRIGGER kd_entry_append_only"),
-        ("DROP POLICY p_case_acl ON core.case_record", "CREATE POLICY p_case_acl ON core.case_record AS RESTRICTIVE FOR ALL TO candor_case USING (false)"),
-        ("DROP POLICY p_tenant ON core.job", "CREATE POLICY p_tenant ON core.job AS PERMISSIVE FOR ALL USING (tenant_id = candor.tenant()) WITH CHECK (tenant_id = candor.tenant())"),
+        (
+            "ALTER TABLE core.message NO FORCE ROW LEVEL SECURITY",
+            "ALTER TABLE core.message FORCE ROW LEVEL SECURITY",
+        ),
+        (
+            "ALTER TABLE kd.kd_entry DISABLE TRIGGER kd_entry_append_only",
+            "ALTER TABLE kd.kd_entry ENABLE TRIGGER kd_entry_append_only",
+        ),
+        (
+            "DROP POLICY p_case_acl ON core.case_record",
+            "CREATE POLICY p_case_acl ON core.case_record AS RESTRICTIVE FOR ALL TO candor_case USING (false)",
+        ),
+        (
+            "DROP POLICY p_tenant ON core.job",
+            "CREATE POLICY p_tenant ON core.job AS PERMISSIVE FOR ALL USING (tenant_id = candor.tenant()) WITH CHECK (tenant_id = candor.tenant())",
+        ),
     ] {
-        sqlx::raw_sql(AssertSqlSafe(break_.to_string())).execute(&mut s).await.unwrap();
-        assert_eq!(try_open(&b, &name, Role::Case).await.err(), Some(DbError::Integrity("schema guards differ from build")), "{break_}");
-        sqlx::raw_sql(AssertSqlSafe(fix.to_string())).execute(&mut s).await.unwrap();
+        sqlx::raw_sql(AssertSqlSafe(break_.to_string()))
+            .execute(&mut s)
+            .await
+            .unwrap();
+        assert_eq!(
+            try_open(&b, &name, Role::Case).await.err(),
+            Some(DbError::Integrity("schema guards differ from build")),
+            "{break_}"
+        );
+        sqlx::raw_sql(AssertSqlSafe(fix.to_string()))
+            .execute(&mut s)
+            .await
+            .unwrap();
     }
     // Privileged or cross-member logins.
     for (break_, fix, want) in [
-        ("ALTER ROLE candor_case BYPASSRLS", "ALTER ROLE candor_case NOBYPASSRLS", "login is not the plain application role"),
-        ("ALTER ROLE candor_case CREATEROLE", "ALTER ROLE candor_case NOCREATEROLE", "login is not the plain application role"),
-        ("GRANT candor_admin TO candor_case", "REVOKE candor_admin FROM candor_case", "login is not the plain application role"),
-        ("GRANT candor_migrator TO candor_case", "REVOKE candor_migrator FROM candor_case", "login is not the plain application role"),
-        ("ALTER ROLE candor_case SET statement_timeout = '1h'", "ALTER ROLE candor_case RESET statement_timeout", "session settings differ"),
+        (
+            "ALTER ROLE candor_case BYPASSRLS",
+            "ALTER ROLE candor_case NOBYPASSRLS",
+            "login is not the plain application role",
+        ),
+        (
+            "ALTER ROLE candor_case CREATEROLE",
+            "ALTER ROLE candor_case NOCREATEROLE",
+            "login is not the plain application role",
+        ),
+        (
+            "GRANT candor_admin TO candor_case",
+            "REVOKE candor_admin FROM candor_case",
+            "login is not the plain application role",
+        ),
+        (
+            "GRANT candor_migrator TO candor_case",
+            "REVOKE candor_migrator FROM candor_case",
+            "login is not the plain application role",
+        ),
+        (
+            "ALTER ROLE candor_case SET statement_timeout = '1h'",
+            "ALTER ROLE candor_case RESET statement_timeout",
+            "session settings differ",
+        ),
     ] {
-        sqlx::raw_sql(AssertSqlSafe(break_.to_string())).execute(&mut s).await.unwrap();
-        assert_eq!(try_open(&b, &name, Role::Case).await.err(), Some(DbError::Integrity(want)), "{break_}");
-        sqlx::raw_sql(AssertSqlSafe(fix.to_string())).execute(&mut s).await.unwrap();
+        sqlx::raw_sql(AssertSqlSafe(break_.to_string()))
+            .execute(&mut s)
+            .await
+            .unwrap();
+        assert_eq!(
+            try_open(&b, &name, Role::Case).await.err(),
+            Some(DbError::Integrity(want)),
+            "{break_}"
+        );
+        sqlx::raw_sql(AssertSqlSafe(fix.to_string()))
+            .execute(&mut s)
+            .await
+            .unwrap();
     }
     // Logging of SQL text or bind values on this database: refused (IMP-RM3-019).
-    for (k, v) in [("log_statement", "all"), ("log_min_error_statement", "error"), ("log_parameter_max_length_on_error", "1024")] {
-        sqlx::raw_sql(AssertSqlSafe(format!("ALTER DATABASE {name} SET {k} = '{v}'"))).execute(&mut s).await.unwrap();
-        assert_eq!(try_open(&b, &name, Role::Case).await.err(), Some(DbError::Integrity("session settings differ")), "{k}");
-        sqlx::raw_sql(AssertSqlSafe(format!("ALTER DATABASE {name} RESET {k}"))).execute(&mut s).await.unwrap();
+    for (k, v) in [
+        ("log_statement", "all"),
+        ("log_min_error_statement", "error"),
+        ("log_parameter_max_length_on_error", "1024"),
+    ] {
+        sqlx::raw_sql(AssertSqlSafe(format!(
+            "ALTER DATABASE {name} SET {k} = '{v}'"
+        )))
+        .execute(&mut s)
+        .await
+        .unwrap();
+        assert_eq!(
+            try_open(&b, &name, Role::Case).await.err(),
+            Some(DbError::Integrity("session settings differ")),
+            "{k}"
+        );
+        sqlx::raw_sql(AssertSqlSafe(format!("ALTER DATABASE {name} RESET {k}")))
+            .execute(&mut s)
+            .await
+            .unwrap();
     }
     // A superuser login under an app role name is refused.
-    let r = CaseDb::open(b.clone().username(&superuser()).database(&name), Role::Case, 1).await;
-    assert_eq!(r.err(), Some(DbError::Integrity("login is not the plain application role")));
+    let r = CaseDb::open(
+        b.clone().username(&superuser()).database(&name),
+        Role::Case,
+        1,
+    )
+    .await;
+    assert_eq!(
+        r.err(),
+        Some(DbError::Integrity(
+            "login is not the plain application role"
+        ))
+    );
     assert!(try_open(&b, &name, Role::Case).await.is_ok());
 }

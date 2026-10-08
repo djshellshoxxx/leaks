@@ -14,7 +14,11 @@ pub fn base() -> Option<PgConnectOptions> {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(5433);
-    Some(PgConnectOptions::new_without_pgpass().socket(dir).port(port))
+    Some(
+        PgConnectOptions::new_without_pgpass()
+            .socket(dir)
+            .port(port),
+    )
 }
 
 pub fn superuser() -> String {
@@ -83,7 +87,12 @@ pub fn uuid_of(id: &[u8; 16]) -> Uuid {
 
 /// Begin a transaction on a raw connection with the three context settings
 /// (what `TenantTx` does; used for raw probes).
-pub async fn ctx<'c>(c: &'c mut PgConnection, tenant: Uuid, user: Uuid, kind: &str) -> sqlx::Transaction<'c, sqlx::Postgres> {
+pub async fn ctx<'c>(
+    c: &'c mut PgConnection,
+    tenant: Uuid,
+    user: Uuid,
+    kind: &str,
+) -> sqlx::Transaction<'c, sqlx::Postgres> {
     let mut tx = c.begin().await.unwrap();
     sqlx::query(
         "SELECT pg_catalog.set_config('candor.tenant_id', $1::uuid::text, true), \
@@ -109,12 +118,14 @@ pub fn sqlstate(e: &sqlx::Error) -> String {
 
 /// Count rows of a table under the current transaction's context.
 pub async fn count(tx: &mut PgConnection, table: &str, filter: &str) -> i64 {
-    sqlx::query(AssertSqlSafe(format!("SELECT count(*) FROM {table} {filter}")))
-        .fetch_one(tx)
-        .await
-        .unwrap()
-        .try_get(0)
-        .unwrap()
+    sqlx::query(AssertSqlSafe(format!(
+        "SELECT count(*) FROM {table} {filter}"
+    )))
+    .fetch_one(tx)
+    .await
+    .unwrap()
+    .try_get(0)
+    .unwrap()
 }
 
 /// Insert every fixture row for `tenant` as the superuser (RLS bypassed).
