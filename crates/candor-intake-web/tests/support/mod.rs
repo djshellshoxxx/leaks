@@ -349,7 +349,13 @@ fn handle(st: &SealerState, req: Request) -> Response {
             s.parts.retain(|p| p.0 != part);
             Response::Empty
         }
-        Request::NoteReal { .. } | Request::Status => err(ErrorCode::BadState),
+        // The mock sealer does not implement the istore-backed deletion ops (SW-14/SW-15 land in the
+        // web integration step), so they refuse like the other unsupported ops.
+        Request::NoteReal { .. }
+        | Request::Status
+        | Request::SealSignal { .. }
+        | Request::DeleteReplies { .. }
+        | Request::CloseMailbox { .. } => err(ErrorCode::BadState),
     }
 }
 
