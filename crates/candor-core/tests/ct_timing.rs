@@ -154,13 +154,21 @@ fn constant_time_comparisons() {
 
     // Positive control: a short-circuiting comparison must be detected.
     let x = vec![0x5Au8; 4096];
-    let mut y_first = x.clone();
-    y_first[0] ^= 1;
-    let mut y_last = x.clone();
-    y_last[4095] ^= 1;
+    // One shared buffer for both classes: separate allocations differ in address,
+    // alignment and cache-set placement, which gives a stable, data-independent timing
+    // offset (a harness artefact, not a leak). Only the mismatch position changes.
+    let y = std::cell::RefCell::new(x.clone());
+    let with_mismatch = |c: bool, f: &mut dyn FnMut(&[u8])| {
+        let i = if c { 0 } else { 4095 };
+        let mut y = y.borrow_mut();
+        y[i] ^= 1;
+        f(black_box(&y[..]));
+        y[i] ^= 1;
+    };
     let (a, b) = measure(2000, 16, 0, |c| {
-        let y = if c { &y_first } else { &y_last };
-        black_box(black_box(&x[..]) == black_box(&y[..]));
+        with_mismatch(c, &mut |y| {
+            black_box(black_box(&x[..]) == black_box(y));
+        });
     });
     let t = max_t(&a, &b);
     println!("ct_timing positive control (==): max |t| = {t:.2}");
@@ -172,8 +180,9 @@ fn constant_time_comparisons() {
     // The confirmation procedure must still flag a real leak: the short-circuiting
     // comparison reproduces |t| > T_FAIL in every one of the independent runs.
     let (leak, t) = confirmed_leak("leaky == (must be flagged)", 2000, 16, |c| {
-        let y = if c { &y_first } else { &y_last };
-        black_box(black_box(&x[..]) == black_box(&y[..]));
+        with_mismatch(c, &mut |y| {
+            black_box(black_box(&x[..]) == black_box(y));
+        });
     });
     assert!(
         leak,
@@ -182,8 +191,9 @@ fn constant_time_comparisons() {
 
     // kdf::ct_eq (MACs, tags, bound hashes, slots): mismatch at the first vs last byte.
     check_ct("kdf::ct_eq", 2000, 16, |c| {
-        let y = if c { &y_first } else { &y_last };
-        black_box(ct_eq(black_box(&x), black_box(y)));
+        with_mismatch(c, &mut |y| {
+            black_box(ct_eq(black_box(&x), black_box(y)));
+        });
     });
 
     // header_mac verification: wrong MAC differing at byte 0 vs byte 31.
