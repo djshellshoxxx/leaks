@@ -16,6 +16,9 @@ url = "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
 [imports.zcash]
 url = "https://raw.githubusercontent.com/zcash/rust-ecosystem/main/supply-chain/audits.toml"
 
+[policy.candor-authz]
+criteria = "safe-to-deploy"
+
 [policy.candor-case-db]
 criteria = "safe-to-deploy"
 
@@ -388,6 +391,11 @@ notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.getrandom]]
 version = "0.3.4"
+criteria = "safe-to-deploy"
+notes = "transitive via the case-db dependencies; not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.getrandom]]
+version = "0.3.4"
 criteria = "safe-to-run"
 notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 
@@ -705,6 +713,11 @@ notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
 version = "5.2.0"
 criteria = "safe-to-run"
 notes = "not yet audited; expires 2027-03-30 (28 §5.2)"
+
+[[exemptions.r-efi]]
+version = "5.3.0"
+criteria = "safe-to-deploy"
+notes = "transitive (getrandom 0.3.4 on UEFI targets only); not yet audited; expires 2027-03-30 (28 §5.2)"
 
 [[exemptions.r-efi]]
 version = "6.0.0"

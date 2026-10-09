@@ -5,7 +5,7 @@ Candor (working name) is a specification for an anonymous reporting, source-comm
 - **Community Edition** — free, AGPL-3.0-or-later, self-hostable, with the **same** anonymity, cryptographic and security protections as the commercial edition.
 - **Enterprise / Government Edition** — commercially supported modules (HA, fleet management, SSO bridging, compliance packs, integrations, managed hosting) that never sit in the source trust path.
 
-This repository contains **research and specifications only** — no implementation yet. It is designed so separate teams can build frontend, backend, cryptography, infrastructure and administration components without inventing major architectural decisions.
+This repository contains the **research and specifications** and the first part of the **Community Edition implementation** (Rust crates under `crates/`: crypto library, safe file handling, audit log, source-facing pages, intake store, sealer, intake web service, host configuration). Each finished component passed an independent security audit (`process/audits/`); the internal case zone, recipient app and operations stages are not finished. See `process/STATUS.md` for exactly what is done, what is not cleared, and what needs people.
 
 > Candor is not "unhackable", "perfectly anonymous" or "untraceable". Every protection in these documents states what is protected, from whom, under which assumptions (`specs/40-SECURITY-ASSUMPTIONS.md`), and what residual risk remains.
 
@@ -41,7 +41,7 @@ The script exits non-zero if any requirement ID is duplicated or any security re
 
 ## Status
 
-Draft v1.0 specification (2026-09-30). Research limitations (blocked primary sources, items marked UNVERIFIED) are listed in `specs/00-RESEARCH.md` §1 and must be closed before implementation freezes the affected decisions.
+Specification set: complete draft v1.0 (2026-09-30). Implementation: RM-0, RM-1 and most of RM-2 (intake zone) are built and audited; RM-3 (case zone) is partly started; RM-4 onwards is not started. Research limitations (blocked primary sources, items marked UNVERIFIED) are listed in `specs/00-RESEARCH.md` §1. **Not ready for real use**: external audits and a cryptography review are required before any release. Details and the hand-off list: `process/STATUS.md`.
 
 ## Preview site
 

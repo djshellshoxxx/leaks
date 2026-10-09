@@ -1,0 +1,56 @@
+# Candor Community Edition: status and hand-off (2026-10-09)
+
+Branch `claude/tender-tesla-z8tfnl`, pull request #1 (draft). Build paused: the Fable usage limit was reached; the owner then chose Haiku "until it is beyond its ability". The remaining work is large and security-critical, and it needs the adversarial independent audits that gave the earlier steps their assurance, so it is left for a stronger model (see §4).
+
+Nothing here is "unhackable", "perfectly anonymous" or "100% secure". Assurance claims below mean only what the audit files in `process/audits/` say.
+
+## 1. Done and independently audited (zero open Critical/High; Mediums fixed or accepted in writing)
+
+| Area | Crate / path | Audit file | Verdict |
+|---|---|---|---|
+| Specifications, research, decisions (ADR-001..057), 2,400+ traceable requirements, three adversarial reviews, secure-implementation specs, source safety tips | `specs/`, `research/`, `process/` | `specs/REVIEW-REPORT.md` | complete draft |
+| Foundations: CI, supply chain (cargo-deny/vet, SBOM), DCO, reproducible builds, nightly fuzz | `.github/`, `deny.toml`, `supply-chain/`, `scripts/` | `AUDIT-RM0-INF.md` | pass |
+| Crypto library (HPKE/X-Wing, STREAM, KDF, formats) | `crates/candor-core` | `AUDIT-RM1-core.md` | pass |
+| Safe file handling | `crates/candor-safefs` | `AUDIT-RM1-safefs-log.md` | pass |
+| Privacy-preserving audit log | `crates/candor-log` | `AUDIT-RM1-safefs-log.md` (round 4) | pass |
+| Source-facing HTML (no JS), safety tips | `crates/candor-source-ui` | `AUDIT-RM1-source-ui.md` | pass |
+| Intake store (PostgreSQL, erasure, deletion list) | `crates/candor-intake-store` | `AUDIT-RM2-intake-store.md` (round 7) | pass |
+| Sealer (in-RAM encryption for the no-JS path) | `crates/candor-sealer` | `AUDIT-RM2-sealer.md` (round 7) | pass |
+| Intake host configuration (units, AppArmor, nftables, config-check) | `deploy/` | `AUDIT-RM2-deploy.md`, `AUDIT-RM2-memlock-deploy.md` (round 2) | pass |
+| systemd socket adoption, the only `unsafe` crate | `crates/candor-memlock` | `AUDIT-RM2-memlock-deploy.md` | pass |
+| Safe file reader (reproducibly built) | `crates/candor-safe-read` | `AUDIT-RM2-memlock-deploy.md` | pass |
+| Source web service (Tor-only, no-JS) | `crates/candor-intake-web` | `AUDIT-RM2-intake-web.md` (round 2) | pass |
+| Preview site and donation page | `docs/` | n/a | live once Pages is enabled |
+
+## 2. Built but NOT cleared
+
+| Item | State | What is needed |
+|---|---|---|
+| istore IPC (store link: protocol, server, client, K31 deletion ops, SEAL_SIGNAL/DeleteReplies/CloseMailbox, idempotent retry, `mailbox_account` table) | audit rounds 1–3 found and the builder fixed IPC-01..14 (verified by the auditor). IPC-15 (shutdown flush lost queued writes) was fixed by a Haiku-class builder and checked by the lead with a mutation test (old behaviour: 2 of 7 tests fail; fix: all pass). | **A stronger independent round-4 re-audit of `Sealer::shutdown_flush`, `IstoreSink`, `classify_upsert` and migration 0001, plus a variant scan.** The gate is CONDITIONAL until then (`AUDIT-RM2-istore-ipc.md`). |
+| `crates/candor-case-db` (RM-3: case schema, RLS, TenantTx) | migration 0001 and tests exist; its live schema lint still refuses; no lib.rs beyond a placeholder | finish, then audit |
+| `crates/candor-authz` (RM-3: authorization engine, COI) | modules `model`, `coi`, `ids`, `policy` written; `lib.rs` is a placeholder; untested as a whole | finish, then audit |
+
+## 3. Not started (software)
+
+- **RM-2 leftovers:** SW-14/SW-15 pages wired to the istore ops; WEB-11 (Leave page when a token is unknown); draft-preserving re-authentication; S08 invisible-character normalisation; the daemon binaries (web, sealer, store) that use `candor-memlock`; an end-to-end test (Tor-less, Unix sockets); a dedicated `candor-log` health code for the account-queue backlog and dead letters; deploy settings `wmem_default >= 212,992` and distinct intake users; spec 07 §5.11 line; sealer README `openat2` note.
+- **RM-3 core zone:** relay (C-09), case service (C-10), authentication (C-21), audit service (C-24), key directory (C-14), notifications (C-23), erasure key vault and retention, jobs/SLA, core self-test.
+- **RM-4:** Candor Desk (recipient desktop app, hardware-bound keys), evidence viewer/containment, export package.
+- **RM-5 operations:** installers, TUF update client, platform manifest/floors, backup agent and restore drills, upgrade/rollback orchestration (including the database schema upgrade mechanism), support bundles.
+- **RM-8:** Source App (embedded Arti, encrypted vault). Arti migration is gated by ADR-049 (its onion-service DoS protection is not yet non-experimental).
+- **RM-6, RM-7 (software parts):** i18n pipeline, accessibility fixes, release-candidate QA matrix, TUF repository tooling, reproducibility verification by two builders.
+
+## 4. Needs people (cannot be done by an AI session, and must not be faked)
+
+1. **Security Lead sign-off** of the four imported cargo-vet audit sets in `supply-chain/trusted-importers.toml` (bytecode-alliance, google, mozilla, zcash). This is the only reason the `cargo-vet` CI job is red.
+2. `SECURITY.md` contacts and PGP/age keys; the EFF wordlist hash check against eff.org.
+3. **External audits and a cryptography review** before any release (RM-6): including `ml-dsa 0.1.1`, `hpke`, `ml-kem`, `x-wing`, which are in the crypto set and have only exemptions today.
+4. Usability and accessibility studies with real people; translation review.
+5. Production key ceremonies, the TUF repository, transparency-log witnesses, bug bounty, vulnerability-disclosure process (RM-7).
+6. GitHub Pages: set the source to branch `claude/tender-tesla-z8tfnl`, folder `/docs`. The optional copy of the repository to `djshellshoxxx/blowmywhistle` (the sandbox blocked the push; a script was provided).
+
+## 5. How to continue
+
+- Read `process/BUILD-BRIEF.md`, `process/WAVE-BRIEF.md`, `process/AUDIT-CHECKLIST.md`, `specs/impl/IMPL-RM*.md` and `specs/DECISIONS.md` (ADR-054..057 are the newest).
+- Order: (1) round-4 independent audit of the istore IPC; (2) finish RM-2 (§3); (3) finish `candor-case-db` and `candor-authz`, then the rest of RM-3, each crate built by one agent and audited by a different one (builder ≠ auditor); (4) RM-4, RM-5, RM-8.
+- Working rules that mattered: two agents at a time (API limits and 4 cores); `export CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0`; `cargo ... -p <crate>` only; delete scratch builds (the session disk allowance is about 9–14 GB); each fix needs a red-to-green regression test.
+- Known CI facts: `cargo-vet` stays red until item 1 of §4 is done; all other checks were green at the last full run (see the pull request).
