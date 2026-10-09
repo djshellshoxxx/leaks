@@ -655,3 +655,133 @@ async fn delete_during_outage_keeps_the_queued_create() {
             .is_none()
     );
 }
+
+/// Health sink that keeps the last backlog count it was given.
+#[derive(Default)]
+struct LastBacklog {
+    events: AtomicUsize,
+    last: AtomicUsize,
+}
+impl candor_sealer::server::HealthSink for LastBacklog {
+    fn account_write_dropped(&self) {}
+    fn account_backlog(&self, queued: usize) {
+        self.events.fetch_add(1, Ordering::SeqCst);
+        self.last.store(queued, Ordering::SeqCst);
+    }
+}
+
+/// Login with the passphrase and check that the account is in the store.
+async fn account_logs_in(env: &Env, f: &Fixture, phrase: &str, s: u8) {
+    let Response::Locator { lookup_tag } = ok(
+        &f.sealer,
+        Request::LoginDerive {
+            sess: sess(s),
+            passphrase: SecretBytes::from_slice(phrase.as_bytes()),
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    assert!(
+        env.store()
+            .lookup_account(&LookupTag(lookup_tag))
+            .await
+            .unwrap()
+            .is_some(),
+        "the account exists"
+    );
+}
+
+/// Submit one create (sealed and queued) for `s`, returning its phrase.
+async fn queue_create(f: &Fixture, s: SessionHandle) -> String {
+    let phrase = confirmed_phrase(f, s).await;
+    let Response::Sealed { .. } = ok(
+        &f.sealer,
+        Request::SealFinish {
+            sess: s,
+            delayed_delivery: false,
+        },
+    )
+    .await
+    else {
+        panic!()
+    };
+    phrase
+}
+
+/// AUD-RM2-IPC-15 (auditor's PoC, red → green): a store outage, one failed
+/// flush (backoff 1), the store comes back, then a SIGTERM flush inside the
+/// old backoff window. The backoff must not skip the shutdown attempt: the
+/// queued create lands and the passphrase logs in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_flush_under_backoff_writes_the_queue() {
+    let env = Env::new().await;
+    let f = fixture_for(&env);
+    let s = sess(1);
+    let phrase = queue_create(&f, s).await;
+    assert_eq!(f.sealer.queued_accounts(), 1);
+    env.store().mark_restore_pending().await.unwrap();
+    assert_eq!(f.sealer.flush_accounts(), Err(SinkError));
+    clear_restore(env.store()).await;
+    // Inside the backoff window: the next scheduled flush would be skipped.
+    let n = f.sealer.shutdown_flush().expect("everything flushed");
+    assert!(n >= 1, "the create and dummies were written, got {n}");
+    assert_eq!(f.sealer.queued_accounts(), 0);
+    account_logs_in(&env, &f, &phrase, 2).await;
+}
+
+/// AUD-RM2-IPC-15: a healthy store and a shutdown right after an outage
+/// ended. Two creates queued during a long outage (backoff at its cap) all
+/// land in the shutdown batch, and both passphrases log in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_after_outage_flushes_every_queued_create() {
+    let env = Env::new().await;
+    let f = fixture_for(&env);
+    let p1 = queue_create(&f, sess(1)).await;
+    let p2 = queue_create(&f, sess(3)).await;
+    assert_eq!(f.sealer.queued_accounts(), 2);
+    env.store().mark_restore_pending().await.unwrap();
+    // Three real failures (skipped flushes in between) raise the backoff to
+    // its cap, MAX_FLUSH_BACKOFF.
+    let mut fails = 0;
+    while fails < 3 {
+        if f.sealer.flush_accounts().is_err() {
+            fails += 1;
+        }
+    }
+    assert_eq!(f.sealer.queued_accounts(), 2, "both still queued");
+    assert_eq!(f.sealer.dead_letters(), 0);
+    clear_restore(env.store()).await;
+    let n = f.sealer.shutdown_flush().expect("everything flushed");
+    assert!(n >= 2, "both creates written, got {n}");
+    assert_eq!(f.sealer.queued_accounts(), 0);
+    account_logs_in(&env, &f, &p1, 2).await;
+    account_logs_in(&env, &f, &p2, 4).await;
+}
+
+/// AUD-RM2-IPC-15: the store is still down at shutdown. The sealer does not
+/// claim success: it returns the lost count, raises one backlog health event
+/// carrying that count, and keeps nothing silently dropped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_with_store_down_reports_the_lost_count() {
+    let env = Env::new().await;
+    let f = fixture_for(&env);
+    let health = Arc::new(LastBacklog::default());
+    f.sealer.set_health_sink(health.clone());
+    let _phrase = queue_create(&f, sess(1)).await;
+    assert_eq!(f.sealer.queued_accounts(), 1);
+    env.store().mark_restore_pending().await.unwrap();
+    let Err(candor_sealer::server::ShutdownLoss(lost)) = f.sealer.shutdown_flush() else {
+        panic!("a store that is still down must not report success")
+    };
+    // The real create plus 1..=4 dummies, none written, all still queued.
+    assert_eq!(lost, f.sealer.queued_accounts(), "lost = still queued");
+    assert!((2..=5).contains(&lost), "got {lost}");
+    assert_eq!(f.sealer.dead_letters(), 0);
+    assert!(
+        health.events.load(Ordering::SeqCst) >= 1,
+        "backlog reported"
+    );
+    assert_eq!(health.last.load(Ordering::SeqCst), lost, "count only");
+}

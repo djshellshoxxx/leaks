@@ -382,3 +382,15 @@ Info items of round 2: `DELETE_REPLIES` now deletes by the newest flushed tag (s
 
 ### Check results (round 2, 2026-10-07)
 All 25 sealer test binaries green after the round-2 changes (`tests/chaff.rs::chaff_fails_closed_without_time_or_directory` now expects the one skipped flush of the IPC-10 backoff before the batch lands); clippy/fmt clean; store-side checks as in the store SPEC-NOTES.
+
+## Fixes for AUD-RM2-IPC round 3 (AUD-RM2-IPC-15, High; lead decision binding)
+
+- `shutdown_flush` ignores and clears the IPC-10 backoff and makes one bounded attempt for every queued write (the 1–4 shutdown dummies included), in one shuffled batch, under `flush_lock`. There is no retry loop: a store refusal or outage ends the pass, as in the normal flush.
+- Return type: `Ok(n)` only when the queue is empty after the attempt (`n` writes landed). Otherwise `Err(ShutdownLoss(lost))` with `lost` = writes still queued, and one `HealthSink::account_backlog(lost)` call carries that count only (no identifier). `spawn_sigterm_flush` returns the same type; a failed flush thread reports the current queue length.
+- Remaining loss window (accepted residual; a durable spool is out of scope): writes still queued when the store is down at shutdown are lost at exit. The source-facing crash notice (11a) already covers this. The integrator may delay exit for a bounded retry and must treat `ShutdownLoss` as a failed flush, not a clean stop.
+
+| Finding | Mechanism | Test |
+|---|---|---|
+| IPC-15 (High) SIGTERM flush under backoff | backoff cleared before the shutdown attempt | `istore.rs::shutdown_flush_under_backoff_writes_the_queue` (PoC: outage, failed flush, store back, shutdown inside the old window; create lands, passphrase logs in); `shutdown_after_outage_flushes_every_queued_create` (two creates at the backoff cap all land); `shutdown_with_store_down_reports_the_lost_count` (`ShutdownLoss(lost)`, lost = still queued, health event carries the count) |
+
+Callers updated: `tests/signal.rs`, `tests/chaff.rs` and `tests/shutdown.rs` use `.unwrap()` on the success path and are unchanged in meaning.

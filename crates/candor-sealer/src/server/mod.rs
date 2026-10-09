@@ -429,6 +429,11 @@ pub const MAX_FLUSH_BACKOFF: u8 = 4;
 /// removed as soon as they are idle and default, so this is a hard cap.
 pub const MAX_SOURCE_STATES: usize = 16_384;
 
+/// Account writes [`Sealer::shutdown_flush`] could not write before exit
+/// (AUD-RM2-IPC-15). Carries only the count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShutdownLoss(pub usize);
+
 /// Where the sealer reports a dead-lettered account write (ADR-057(4)); the
 /// integrator wires it to `candor-log` (`sys.health`, service `sealer`,
 /// `DEGRADED`, check `QUEUE_BACKLOG`) through [`AuditHealthSink`].
@@ -2274,9 +2279,19 @@ impl Sealer {
     /// operations stay queued (in order) for the next flush.
     pub fn flush_accounts(&self) -> Result<usize, sink::SinkError> {
         let _serial = lock(&self.st.flush_lock);
+        self.flush_locked(false)
+    }
+
+    /// The flush body; the caller holds `flush_lock`. `shutdown` ignores and
+    /// clears the IPC-10 backoff (AUD-RM2-IPC-15): the last attempt before
+    /// exit must not be skipped.
+    fn flush_locked(&self, shutdown: bool) -> Result<usize, sink::SinkError> {
         let batch = {
             let mut q = lock(&self.st.accounts);
-            if q.skip_flushes > 0 {
+            if shutdown {
+                q.skip_flushes = 0;
+                q.backoff = 0;
+            } else if q.skip_flushes > 0 {
                 // Backing off after an unavailable store (IPC-10): nothing
                 // is written this round, nothing is dropped.
                 q.skip_flushes = q.skip_flushes.saturating_sub(1);
@@ -2387,17 +2402,43 @@ impl Sealer {
     /// Graceful-shutdown flush (SEA-28(c)): queue 1–4 dummy account creates
     /// and write everything queued as one shuffled batch, so the last batch
     /// before a restart looks like any other. Blocking.
-    pub fn shutdown_flush(&self) -> Result<usize, sink::SinkError> {
+    ///
+    /// The IPC-10 backoff is ignored and cleared (AUD-RM2-IPC-15): this is one
+    /// bounded attempt per queued write, with no retry loop. `Ok(n)` means the
+    /// queue is empty and `n` writes landed. `Err(ShutdownLoss(lost))` means
+    /// `lost` writes are still queued (or could not be attempted) and will be
+    /// lost at exit; a backlog health event carries that count.
+    pub fn shutdown_flush(&self) -> Result<usize, ShutdownLoss> {
+        // Dummies are best effort: a failed draw only means fewer of them.
         let n = rand::uniform_below(4)
-            .map_err(|_| sink::SinkError)?
-            .saturating_add(1);
+            .map(|r| r.saturating_add(1))
+            .unwrap_or(0);
         for _ in 0..n {
-            let a = dummy_account(&self.st).map_err(|_| sink::SinkError)?;
+            let Ok(a) = dummy_account(&self.st) else {
+                break;
+            };
             let tag = a.account.lookup_tag;
             enqueue_account(&self.st, a);
             remember_dummy(&self.st, tag);
         }
-        self.flush_accounts()
+        let (flushed, ok) = {
+            let _serial = lock(&self.st.flush_lock);
+            match self.flush_locked(true) {
+                Ok(w) => (w, true),
+                Err(_) => (0, false),
+            }
+        };
+        let left = lock(&self.st.accounts).pending.len();
+        if ok && left == 0 {
+            return Ok(flushed);
+        }
+        // Never a success claim when anything is left: at least one write is
+        // reported lost whenever the flush itself failed.
+        let lost = left.max(1);
+        if let Some(h) = self.health() {
+            h.account_backlog(lost);
+        }
+        Err(ShutdownLoss(lost))
     }
 
     /// Install a SIGTERM handler (call inside the runtime, at start, so a
@@ -2406,16 +2447,18 @@ impl Sealer {
     /// and exits (SEA-28(c)).
     pub fn spawn_sigterm_flush(
         &self,
-    ) -> std::io::Result<tokio::task::JoinHandle<Result<usize, sink::SinkError>>> {
+    ) -> std::io::Result<tokio::task::JoinHandle<Result<usize, ShutdownLoss>>> {
         use tokio::signal::unix::{SignalKind, signal};
         let mut term = signal(SignalKind::terminate())?;
         let me = self.clone();
         Ok(tokio::spawn(async move {
             term.recv().await;
             let m = me.clone();
-            blocking(move || m.shutdown_flush())
-                .await
-                .unwrap_or(Err(sink::SinkError))
+            match blocking(move || m.shutdown_flush()).await {
+                Ok(r) => r,
+                // The flush thread failed: report what is still queued.
+                Err(()) => Err(ShutdownLoss(me.queued_accounts().max(1))),
+            }
         }))
     }
 
