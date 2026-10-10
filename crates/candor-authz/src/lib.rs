@@ -68,10 +68,10 @@ pub const fn authorize(
         return Decision::Deny;
     }
 
-    if let Some(coi_user) = resource.coi_user {
-        if coi_user.0 == principal.user.0 {
-            return Decision::Deny;
-        }
+    if let Some(coi_user) = resource.coi_user
+        && coi_user.0 == principal.user.0
+    {
+        return Decision::Deny;
     }
 
     let emergency = match break_glass {
@@ -208,7 +208,7 @@ pub fn validate_wrap_recipients(
     }
 
     for (index, key_id) in key_ids.iter().enumerate() {
-        if key_ids[..index].contains(key_id) {
+        if key_ids.iter().take(index).any(|prior| prior == key_id) {
             return Err(WrapError::DuplicateRecipient);
         }
         let Some(candidate) = candidates

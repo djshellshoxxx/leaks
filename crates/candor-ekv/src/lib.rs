@@ -153,7 +153,7 @@ impl ErasureVault {
             )
             .map_err(|_| VaultError::Crypto)?;
 
-        let mut outer = Vec::with_capacity(NONCE_LEN + ciphertext.len());
+        let mut outer = Vec::with_capacity(NONCE_LEN.saturating_add(ciphertext.len()));
         outer.extend_from_slice(&nonce);
         outer.extend_from_slice(&ciphertext);
         Ok(outer)

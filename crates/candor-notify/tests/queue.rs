@@ -13,8 +13,8 @@ fn notification_model_contains_only_closed_content_free_fields() {
 fn duplicate_notifications_are_collapsed() {
     let mut q = NotifyQueue::new(3);
     let n = Notification::new(Destination(7), NotificationKind::CaseActivity, 42);
-    assert_eq!(q.enqueue(n), true);
-    assert_eq!(q.enqueue(n), false);
+    assert!(q.enqueue(n));
+    assert!(!q.enqueue(n));
     assert_eq!(q.len(), 1);
 }
 
@@ -23,7 +23,7 @@ fn retry_budget_is_bounded() {
     let mut q = NotifyQueue::new(2);
     let n = Notification::new(Destination(9), NotificationKind::AccountSecurity, 88);
     assert!(q.enqueue(n));
-    assert_eq!(q.record_failure(n), true);
-    assert_eq!(q.record_failure(n), false);
+    assert!(q.record_failure(n));
+    assert!(!q.record_failure(n));
     assert_eq!(q.len(), 0);
 }

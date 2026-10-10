@@ -54,3 +54,10 @@ Nothing here is "unhackable", "perfectly anonymous" or "100% secure". Assurance 
 - Order: (1) round-4 independent audit of the istore IPC; (2) finish RM-2 (§3); (3) finish `candor-case-db` and `candor-authz`, then the rest of RM-3, each crate built by one agent and audited by a different one (builder ≠ auditor); (4) RM-4, RM-5, RM-8.
 - Working rules that mattered: two agents at a time (API limits and 4 cores); `export CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0`; `cargo ... -p <crate>` only; delete scratch builds (the session disk allowance is about 9–14 GB); each fix needs a red-to-green regression test.
 - Known CI facts: `cargo-vet` stays red until item 1 of §4 is done; all other checks were green at the last full run (see the pull request).
+
+## 6. Update 2026-10-10: merged orphaned branches (built, NOT audited)
+- Merged `chatgpt/rm3-core-zone-20261004` and `chatgpt/complete-rm3-core` (RM-3 core zone: candor-authz, case, ekv, notify, relay, auth, worker, retention). None of it has passed the independent audit gate.
+- Lib clippy is clean for authz/notify/ekv. Policy (6), rm3_contract (4) and notify queue (3) tests pass.
+- Still red (spec tests ahead of the implementation): candor-authz `session_contract` (2 of 5 fail); candor-notify `content_free` and candor-ekv `aead`/`erasure` tests do not compile (missing API: `for_daily_slot`, `create`, `NoKey`). CI `clippy --all-targets` and `test` will stay red until these are implemented. Next loop item.
+- Older orphan files `crates/candor-authz/src/{model,coi,ids,policy}.rs` are unused by the merged `lib.rs`.
+- Build loop: one Haiku worker, about 1h work then 3h break (reminder every 4h).

@@ -91,12 +91,15 @@ impl NotifyQueue {
         else {
             return false;
         };
-        let next = self.entries[index].failures.saturating_add(1);
+        let Some(entry) = self.entries.get_mut(index) else {
+            return false;
+        };
+        let next = entry.failures.saturating_add(1);
         if next >= self.max_retries {
             self.entries.remove(index);
             return false;
         }
-        self.entries[index].failures = next;
+        entry.failures = next;
         true
     }
 
