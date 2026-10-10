@@ -18,8 +18,16 @@ pub enum ImportOutcome {
     Duplicate(CaseId),
 }
 
+/// The audit service could not durably record the import (the import is then refused).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AuditCommitFailed;
+
 pub trait AuditCommit {
-    fn commit_case_import(&mut self, tenant: TenantId, case: CaseId) -> Result<(), ()>;
+    fn commit_case_import(
+        &mut self,
+        tenant: TenantId,
+        case: CaseId,
+    ) -> Result<(), AuditCommitFailed>;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,7 +81,7 @@ impl CaseService {
 
         audit
             .commit_case_import(tenant, case)
-            .map_err(|()| CaseError::AuditUnavailable)?;
+            .map_err(|AuditCommitFailed| CaseError::AuditUnavailable)?;
 
         self.records.push(Record {
             tenant,

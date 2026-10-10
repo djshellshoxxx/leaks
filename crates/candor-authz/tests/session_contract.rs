@@ -31,7 +31,14 @@ fn st_rm3_recipient_session_enforces_idle_and_absolute_limits() {
         Err(SessionError::IdleExpired)
     );
 
+    // Keep the session active inside the 15-minute idle window so only the absolute
+    // 8-hour limit is under test (AUTH-017: idle 15 min / absolute 8 h).
     let mut absolute = Session::new(token(3), StaffClass::Recipient, Audience::DeskApi, 1_000);
+    let mut now = 1_000;
+    while now + 900 < 29_800 {
+        now += 900;
+        assert_eq!(absolute.validate(Audience::DeskApi, now), Ok(()));
+    }
     assert_eq!(absolute.validate(Audience::DeskApi, 29_800), Ok(()));
     assert_eq!(
         absolute.validate(Audience::DeskApi, 29_801),
@@ -48,7 +55,14 @@ fn st_rm3_admin_session_enforces_stricter_limits() {
         Err(SessionError::IdleExpired)
     );
 
+    // Keep the session active inside the 10-minute idle window so only the absolute
+    // 2-hour limit is under test (AUTH-017: idle 10 min / absolute 2 h).
     let mut absolute = Session::new(token(5), StaffClass::Admin, Audience::AdminApi, 1_000);
+    let mut now = 1_000;
+    while now + 600 < 8_200 {
+        now += 600;
+        assert_eq!(absolute.validate(Audience::AdminApi, now), Ok(()));
+    }
     assert_eq!(absolute.validate(Audience::AdminApi, 8_200), Ok(()));
     assert_eq!(
         absolute.validate(Audience::AdminApi, 8_201),

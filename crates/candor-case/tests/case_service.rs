@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 use candor_authz::{CaseId, Principal, Role, TenantId, UserId};
-use candor_case::{AuditCommit, CaseError, CaseService, ImportOutcome};
+use candor_case::{AuditCommit, AuditCommitFailed, CaseError, CaseService, ImportOutcome};
 
 #[derive(Default)]
 struct Audit {
@@ -9,9 +9,13 @@ struct Audit {
 }
 
 impl AuditCommit for Audit {
-    fn commit_case_import(&mut self, _tenant: TenantId, _case: CaseId) -> Result<(), ()> {
+    fn commit_case_import(
+        &mut self,
+        _tenant: TenantId,
+        _case: CaseId,
+    ) -> Result<(), AuditCommitFailed> {
         if self.fail {
-            return Err(());
+            return Err(AuditCommitFailed);
         }
         self.commits = self.commits.saturating_add(1);
         Ok(())
@@ -39,8 +43,7 @@ fn duplicate_relay_import_is_idempotent() {
     let mut audit = Audit::default();
     let digest = [7; 32];
     let Some(case) = imported(svc.import(TenantId(1), digest, &mut audit)) else {
-        assert!(false, "first import must create");
-        return;
+        panic!("first import must create");
     };
     assert_eq!(
         svc.import(TenantId(1), digest, &mut audit),
@@ -73,8 +76,7 @@ fn unauthorized_and_missing_case_probes_are_indistinguishable() {
     let mut svc = CaseService::new();
     let mut audit = Audit::default();
     let Some(case) = imported(svc.import(TenantId(1), [9; 32], &mut audit)) else {
-        assert!(false, "import must create");
-        return;
+        panic!("import must create");
     };
     assert_eq!(
         svc.open_case(investigator(2, 7), case),
@@ -91,8 +93,7 @@ fn imported_case_is_not_readable_until_assigned() {
     let mut svc = CaseService::new();
     let mut audit = Audit::default();
     let Some(case) = imported(svc.import(TenantId(1), [10; 32], &mut audit)) else {
-        assert!(false, "import must create");
-        return;
+        panic!("import must create");
     };
     assert_eq!(
         svc.open_case(investigator(1, 7), case),
