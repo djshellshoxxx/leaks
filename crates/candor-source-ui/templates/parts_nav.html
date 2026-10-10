@@ -1,0 +1,9 @@
+{#- SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{#- Part navigation buttons (field `part`, 0-based). Placed inside the screen's form, or tied to
+    it with `navform`, so that edits on this part are saved when the source moves on. -#}
+{%- if let Some(nav) = p.part_nav() %}
+<div class="actions pair" role="group" aria-label="{{ p.t("sui-part-nav") }}">
+{%- if let Some(prev) = nav.prev %}<button type="submit" name="part" value="{{ prev }}"{% if !navform.is_empty() %} form="{{ navform }}"{% endif %}>{{ p.t("sui-part-prev") }}</button>{% endif %}
+{%- if let Some(next) = nav.next %}<button type="submit" name="part" value="{{ next }}"{% if !navform.is_empty() %} form="{{ navform }}"{% endif %}>{{ p.t("sui-part-next") }}</button>{% endif %}
+</div>
+{%- endif %}

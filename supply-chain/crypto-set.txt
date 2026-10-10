@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Crypto set for the cargo-vet release gate (28-SUPPLY-CHAIN.md §5.2; ADR-052(8)).
+# Single source of truth for scripts/vet-release.sh: every locked version of each
+# crate named here must carry a real `candor-crypto-reviewed` audit (audits.toml,
+# recorded by a Candor Crypto Reviewer) before a release. PR CI does not use this
+# list (PR policy is safe-to-deploy only).
+# scripts/check-vet-policy.py fails if a Cargo.lock crate from the 28 §5.2 crypto
+# list is missing here, or if an entry is not in Cargo.lock.
+# One crate name per line; '#' starts a comment.
+argon2
+blake3
+chacha20poly1305
+curve25519-dalek
+ed25519-dalek
+getrandom
+hkdf
+hmac
+hpke
+ml-dsa
+ml-kem
+rand_chacha
+rand_core
+sha2
+sha3
+subtle
+x-wing
+x25519-dalek
+zeroize

@@ -1,0 +1,3 @@
+# Build output of tools/build-safe-read.sh (release packaging ships the binary)
+/.build/
+/tools/candor-safe-read

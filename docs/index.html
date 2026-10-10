@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="description" content="Candor: an open-source, high-assurance anonymous whistleblowing and case-management platform. Design preview and project status.">
+<title>Candor — anonymous reporting, built carefully</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="site.css">
+</head>
+<body>
+<header class="wrap">
+  <a class="brand" href="./">Candor</a>
+  <nav><a href="preview/">Preview</a><a href="#status">Status</a><a href="#donate">Support</a><a href="https://github.com/djshellshoxxx/leaks">Source</a></nav>
+</header>
+<main class="wrap">
+  <h1>Anonymous reporting, built carefully.</h1>
+  <p class="lede">Candor is a free, open-source (AGPL-3.0) platform for anonymous whistleblowing and secure case management, designed for newsrooms, NGOs, companies and public bodies that need to receive reports from people who cannot afford to be identified.</p>
+  <p class="note"><strong>Work in progress.</strong> Candor is not ready for real use and there is no live instance. Nothing on this site accepts reports. No system is unhackable or perfectly anonymous; every protection in the design states what it protects, from whom, and what risk remains.</p>
+  <div class="actions">
+    <a class="btn" href="preview/">See the source interface</a>
+    <a class="btn alt" href="https://github.com/djshellshoxxx/leaks">Read the code and specifications</a>
+  </div>
+
+  <h2>Design principles</h2>
+  <div class="grid">
+    <div class="card"><h3>Tor only</h3><p>Reports arrive only through a Tor onion service. There is no clearnet fallback and the web interface works without JavaScript.</p></div>
+    <div class="card"><h3>No master key</h3><p>Reports are encrypted to short-lived, per-recipient keys with hybrid post-quantum encryption (HPKE with X-Wing). Administrators hold no case keys.</p></div>
+    <div class="card"><h3>Conflict-of-interest aware</h3><p>Anyone a report concerns is excluded before encryption, so they never hold a key that can open it.</p></div>
+    <div class="card"><h3>Minimal metadata</h3><p>No IP addresses, browser details or exact submission times are stored or logged. Audit logs record staff actions, not sources.</p></div>
+    <div class="card"><h3>Isolated intake</h3><p>The internet-facing zone holds only ciphertext; the internal case zone pulls from it and nothing flows back.</p></div>
+    <div class="card"><h3>Audited step by step</h3><p>Every component is reviewed by an independent auditor before it is integrated; findings and decisions are published in the repository.</p></div>
+  </div>
+
+  <h2 id="status">Status</h2>
+  <table>
+    <tr><th>Area</th><th>State</th></tr>
+    <tr><td>Research and specifications</td><td>Complete draft: 41 documents, 56 architecture decisions, three adversarial reviews</td></tr>
+    <tr><td>Core libraries (crypto, safe file handling, audit log, source interface)</td><td>Built; each passed an independent security audit</td></tr>
+    <tr><td>Intake zone (sealer, intake store, server configuration)</td><td>Built; each passed an independent security audit</td></tr>
+    <tr><td>Intake web service</td><td>Built; passed an independent security audit</td></tr>
+    <tr><td>Internal case zone (database layer, permissions engine)</td><td>Started, not finished</td></tr>
+    <tr><td>Recipient desktop app, document viewer, operations tooling, source app</td><td>Not started</td></tr>
+    <tr><td>External cryptography review</td><td>Required before any release</td></tr>
+  </table>
+  <p class="muted">Details: <a href="https://github.com/djshellshoxxx/leaks/blob/claude/tender-tesla-z8tfnl/specs/DECISIONS.md">architecture decisions</a> · <a href="https://github.com/djshellshoxxx/leaks/tree/claude/tender-tesla-z8tfnl/process/audits">audit reports</a> · <a href="https://github.com/djshellshoxxx/leaks/blob/claude/tender-tesla-z8tfnl/specs/11a-SOURCE-SAFETY-TIPS.md">source safety tips</a> · <a href="https://github.com/djshellshoxxx/leaks/pull/1">development pull request</a></p>
+
+  <h2 id="donate">Support the project</h2>
+  <div class="donate">
+    <div>
+      <p>Candor is developed in the open and will stay free. If you would like to support the work, you can donate in Monero (XMR).</p>
+      <p class="addr" id="xmr">85cSWLFurZj8XbKWX7Kk3u1oUtp5vLGQcLSfXEdGnTUU5P9mik6GCPk8guPfAwzHdFFUCbDKChZEphQyp6BNMQwo5oyPLUD</p>
+      <p><a class="btn alt" href="monero:85cSWLFurZj8XbKWX7Kk3u1oUtp5vLGQcLSfXEdGnTUU5P9mik6GCPk8guPfAwzHdFFUCbDKChZEphQyp6BNMQwo5oyPLUD">Open in a Monero wallet</a></p>
+      <p class="muted">Check that the address in your wallet matches the one above character for character, and the copy in the repository <a href="https://github.com/djshellshoxxx/leaks/blob/claude/tender-tesla-z8tfnl/README.md#support">README</a>. Donations are optional and do not buy any influence over the project's security decisions.</p>
+    </div>
+    <img class="qr" src="monero-qr.svg" width="196" height="196" alt="QR code for the Monero donation address">
+  </div>
+</main>
+<footer class="wrap">
+  Candor (working name) · Community Edition, AGPL-3.0-or-later · <a href="https://github.com/djshellshoxxx/leaks">github.com/djshellshoxxx/leaks</a>
+</footer>
+</body>
+</html>

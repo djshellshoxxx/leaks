@@ -1,0 +1,40 @@
+Candor Community Edition — licensing overview
+=============================================
+
+This repository is licensed per crate/directory, not under a single licence.
+Full licence texts are in LICENSES/ (REUSE layout, file name = SPDX identifier).
+Every source file carries an `SPDX-License-Identifier:` header, and every crate
+declares its licence in its own `Cargo.toml` (`license = "..."`). Where this
+overview and a file's SPDX header differ, the SPDX header governs for that file.
+
+| Scope                                         | SPDX identifier      | Decision        |
+|-----------------------------------------------|----------------------|-----------------|
+| crates/candor-core  (C-11, reusable crypto)   | Apache-2.0 OR MIT    | ADR-031         |
+| crates/candor-safefs (safe file-system API)   | Apache-2.0 OR MIT    | ADR-031         |
+| All other Trust Path code (every other crate, | AGPL-3.0-or-later    | ADR-020         |
+|   installers, build and release tooling)      |                      |                 |
+| Repository infrastructure (CI, scripts,       | AGPL-3.0-or-later    | ADR-020         |
+|   Makefile, deny.toml, supply-chain/)         |                      |                 |
+| Documentation (specs/, *.md guides)           | CC-BY-SA-4.0         | 36 §13, BIZ-010 |
+
+Licence texts:
+  LICENSES/AGPL-3.0-or-later.txt   GNU Affero General Public License v3.0 (or later)
+  LICENSES/Apache-2.0.txt          Apache License 2.0
+  LICENSES/MIT.txt                 MIT License
+  LICENSES/CC-BY-SA-4.0.txt        Creative Commons Attribution-ShareAlike 4.0
+
+Notes
+-----
+* AGPL-3.0-or-later section 13 applies: if you run a modified version of an
+  AGPL-licensed Candor component as a network service, you must offer its
+  Corresponding Source to the users interacting with it.
+* candor-core and candor-safefs are dual-licensed: you may use them under
+  either Apache-2.0 or MIT, at your option (ADR-031). When they are linked into
+  an AGPL component, the combined work is distributed under the AGPL.
+* Contributions are accepted under the Developer Certificate of Origin v1.1
+  (see CONTRIBUTING.md); there is no CLA and no copyright assignment
+  (36-OPEN-SOURCE-GOVERNANCE.md §4). Copyright remains with the contributors.
+* Enterprise Edition modules are separate works under a commercial licence and
+  are not part of this repository (ADR-020).
+* "Candor" is a (working-name) trademark of the Candor Foundation; the licences
+  above grant no trademark rights. See 36-OPEN-SOURCE-GOVERNANCE.md §5.

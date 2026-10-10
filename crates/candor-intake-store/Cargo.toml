@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+[package]
+name = "candor-intake-store"
+version = "0.1.0"
+description = "Candor Intake Store (C-08): IntakeStore trait, PostgreSQL and in-memory implementations"
+license = "AGPL-3.0-or-later"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Both on by default so that the integration tests (and the store binary) get
+# them; consumers that only need the protocol or the client set
+# `default-features = false` (the sealer does).
+default = ["server", "client"]
+# `istore` IPC server loop (`server` module): SEQPACKET listener, SO_PEERCRED
+# roles, hand-over receiver, K31 deletion op. Needs a tokio runtime handle.
+server = ["tokio/rt", "tokio/time"]
+# `istore` IPC client (`client` module): `IstoreClient` (web reads) and the
+# sealer-side connection; runs blocking socket calls on `spawn_blocking`.
+client = ["tokio/rt"]
+
+# Every dependency is justified in SPEC-NOTES.md ("Dependencies").
+[dependencies]
+candor-core = { path = "../candor-core" }
+candor-safefs = { path = "../candor-safefs" }
+rustix = { version = "=1.1.2", default-features = false, features = ["std", "fs", "net"] }
+sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "postgres", "uuid"] }
+uuid = { version = "=1.18.1", default-features = false }
+tokio = { version = "=1.48.0", default-features = false, features = ["sync"] }
+sha2 = { version = "=0.11.0", default-features = false }
+getrandom = { version = "=0.4.3", default-features = false }
+subtle = { version = "=2.6.1", default-features = false }
+zeroize = { version = "=1.8.2", default-features = false, features = ["alloc"] }
+
+[dev-dependencies]
+tokio = { version = "=1.48.0", default-features = false, features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
+proptest = { version = "=1.11.0", default-features = false, features = ["std"] }
+tempfile = { version = "=3.23.0", default-features = false }

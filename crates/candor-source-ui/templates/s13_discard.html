@@ -1,0 +1,14 @@
+{#- SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{% extends "layout.html" %}
+{#- S13 Discard draft: equal buttons, no guilt copy, no countdown (ADP-02/03/04/08). -#}
+{% block main %}
+<h1>{{ p.t("sui-end-discard-h1") }}</h1>
+<p>{{ p.t("sui-end-discard-text") }}</p>
+<form method="post" action="{{ p.href(Route::End) }}">
+{% include "ft.html" %}
+<div class="actions pair">
+<button type="submit" name="action" value="discard">{{ p.t("sui-end-discard-yes") }}</button>
+<button type="submit" name="action" value="keep">{{ p.t("sui-end-discard-no") }}</button>
+</div>
+</form>
+{% endblock %}

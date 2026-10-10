@@ -1,0 +1,14 @@
+{#- SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{% extends "layout.html" %}
+{% block main %}
+<h1>{{ p.t("sui-askdel-h1") }}</h1>
+<p>{{ p.t("sui-askdel-message") }}</p>
+<p>{{ p.t("sui-askdel-honest") }}</p>
+<form method="post" action="{{ p.href(Route::End) }}">
+{% include "ft.html" %}
+<div class="actions pair">
+<button type="submit" name="action" value="ask-delete-confirm">{{ p.t("sui-askdel-yes") }}</button>
+<a class="btn" href="{{ p.href(Route::Inbox) }}">{{ p.t("sui-askdel-no") }}</a>
+</div>
+</form>
+{% endblock %}

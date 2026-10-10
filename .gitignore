@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Build outputs (Cargo.lock is committed: 28 §5.2)
+target/
+**/*.rs.bk
+# Generated SBOMs (CI uploads them as artefacts; releases sign them)
+*.cdx.json
+*.cdx.xml
+# Python caches from tools/
+__pycache__/
+*.pyc
+# Fuzzing corpora/artefacts are kept outside the tree unless curated
+fuzz/artifacts/
+fuzz/coverage/
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+# Local environment files (never commit secrets; secret scanning runs in CI)
+.env
+
+# Fuzzing working state (generated; seeds live in fuzz/seeds/)
+crates/*/fuzz/corpus/
+crates/*/fuzz/artifacts/
+crates/*/fuzz/coverage/
+crates/*/fuzz/target/

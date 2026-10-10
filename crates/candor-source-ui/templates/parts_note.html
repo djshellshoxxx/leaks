@@ -1,0 +1,6 @@
+{#- SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{#- Multi-part notice (AUD-RM1-SUI-01): long content is split into parts, never cut. `last_key`
+    names the screen's sentence about controls that are only on the last part ("" = none). -#}
+{%- if let Some(nav) = p.part_nav() %}
+<p class="note" role="status">{{ p.t2("sui-part-status", "n", nav.cur, "total", nav.total) }}{% if !last_key.is_empty() %} {{ p.t(last_key) }}{% endif %}</p>
+{%- endif %}

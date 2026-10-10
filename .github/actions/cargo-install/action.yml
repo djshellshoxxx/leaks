@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Local composite action: install a CI tool from crates.io at an exact version with
+# its own lockfile (cargo install --locked --version =x.y.z). No downloaded binaries,
+# no piped install scripts (28 §7, INC-39). The tool mirror (28 §5.5) replaces
+# crates.io here once it is live.
+name: cargo-install
+description: Install a pinned cargo tool
+inputs:
+  crate:
+    description: Crate name
+    required: true
+  version:
+    description: Exact version (without "=")
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: cargo install
+      shell: bash
+      env:
+        CRATE: ${{ inputs.crate }}
+        VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+          echo "version must be exact x.y.z" >&2; exit 1
+        fi
+        cargo install --locked --version "=$VERSION" "$CRATE"

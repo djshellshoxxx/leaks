@@ -1,0 +1,11 @@
+{#- SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{#- One team message, or one piece of a long one (SUI-030, SUI-033; AUD-RM1-SUI-01/-10). Plain
+    text, day-granular date, framed so it cannot pass for page text; bidi controls are shown as
+    U+FFFD. `text` is already escaped. -#}
+<article class="msg" aria-labelledby="m-{{ index }}">
+<h3 id="m-{{ index }}">{{ p.t2("sui-msg-heading", "sender", sender, "date", date.to_string()) }}{% if let Some(pc) = piece %} {{ p.t2("sui-part-of", "n", pc.n, "total", pc.total) }}{% endif %}</h3>
+<p class="ut" dir="auto">{{ text|safe }}</p>
+{%- if deletable %}
+<form method="post" action="{{ p.href(Route::Conversation) }}">{% include "ft.html" %}<input type="hidden" name="action" value="reply-delete"><input type="hidden" name="reply_index" value="{{ index }}"><button type="submit" class="btn-link">{{ p.t2("sui-conv-delete", "sender", sender, "date", date.to_string()) }}</button></form>
+{%- endif %}
+</article>

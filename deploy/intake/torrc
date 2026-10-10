@@ -1,0 +1,100 @@
+## SPDX-License-Identifier: AGPL-3.0-or-later
+## Candor Intake Gateway (C-05) - tor instance `candor-intake`.
+## Managed file, do not edit. Installed as /etc/tor/instances/candor-intake/torrc,
+## root:root 0644. The self-test compares its hash with the release manifest
+## (16-TOR-I2P.md NET-004, 32-OPERATIONS.md `tor.config_hash`); any local change is a FAIL.
+## Template: 16-TOR-I2P.md §7.1. Deviations from §7.1 are listed in deploy/SPEC-NOTES.md
+## (all of them are stricter, none weakens a §7.1 setting).
+## Only tunables documented in 16 §7.1 notes (PoW / intro-DoS numbers) may differ per site.
+
+## ---------------------------------------------------------------- Process / host
+## systemd runs tor in the foreground as _tor-candor-intake (16 §7.3, unit tor@candor-intake).
+RunAsDaemon 0
+DataDirectory /var/lib/tor-instances/candor-intake
+## NET-010: seccomp sandbox; no debugger attach; no core dumps (LimitCORE=0 in the unit).
+Sandbox 1
+DisableDebuggerAttachment 1
+AvoidDiskWrites 1
+HardwareAccel 1
+## NET-010 / 16 §7.3: the unit sets MemoryDenyWriteExecute=yes, so the Equi-X/HashX JIT
+## must not be used; the interpreted PoW verifier is used instead (deploy/SPEC-NOTES.md D-03).
+CompiledProofOfWorkHash 0
+
+## ---------------------------------------------------------------- Not a client proxy, relay, bridge or exit
+## NET-011, 16 §7.4 lint. NET-045: the source onion instance has no SocksPort.
+## No clearnet listener of any kind (NET-002, ADR-002, 16 §14).
+SocksPort 0
+TransPort 0
+NATDPort 0
+DNSPort 0
+HTTPTunnelPort 0
+ORPort 0
+DirPort 0
+ExitRelay 0
+ExitPolicy reject *:*
+BridgeRelay 0
+PublishServerDescriptor 0
+
+## ---------------------------------------------------------------- Control interface
+## NET-009 / AUD-RM2-DEP-04: no control interface at all - no TCP ControlPort and no
+## ControlSocket. tor has no per-command ACL, so any control access would expose circuit and
+## stream events (exact visit times, LOG-005) and SETCONF of path-selection options. Health is
+## derived from process liveness and an external onion fetch (SPEC-NOTES D-27).
+## config-check.sh rejects any ControlSocket/ControlPort in the effective configuration.
+ControlPort 0
+CookieAuthentication 1
+
+## ---------------------------------------------------------------- Logging: minimal, no client/circuit data
+## NET-008 / LOG-005 / 32 `tor.log_level`: level warn, never a file. LOG-005 asks for stderr;
+## 16 §7.1 says syslog - stderr is used so that no syslog daemon can ever receive tor output
+## (SPEC-NOTES D-02). AUD-RM2-DEP-05: the unit discards stderr (StandardError=null) because
+## journald stamps every stored line to the microsecond, which LogTimeGranularity cannot
+## coarsen; tor output therefore reaches no journal at all (SPEC-NOTES D-28).
+Log warn stderr
+SafeLogging 1
+LogMessageDomains 0
+## LOG-005: coarse log timestamps (1 h) so that no tor message carries a precise time.
+LogTimeGranularity 1 hour
+## LOG-005: no onion-service statistics.
+HiddenServiceStatistics 0
+
+## ---------------------------------------------------------------- Guard / padding defaults kept explicit
+## ADR-001 as amended by ADR-049(1): vanguards-lite on every profile (incl. HIGH);
+## the Python vanguards add-on SHALL NOT be deployed (NET-007).
+UseEntryGuards 1
+VanguardsLiteEnabled 1
+ConnectionPadding 1
+ReducedConnectionPadding 0
+CircuitPadding 1
+ReducedCircuitPadding 0
+
+## ---------------------------------------------------------------- Onion service: source intake
+## NET-001 (Tor v3 onion only), NET-019 / NET-043 / ADR-028 / ADR-032 (key only here,
+## HiddenServiceDir 0700, key 0600, on the LUKS volume; see secret-placement.toml).
+HiddenServiceDir /var/lib/tor-instances/candor-intake/hs-source/
+HiddenServiceVersion 3
+## NET-002: target is a Unix socket only (socket unit candor-intake-web.socket, 0660
+## candor-web:_tor-candor-intake). Exactly one HiddenServicePort (16 §7.4).
+## Onion-TLS mode (NET-042) REPLACES this line with port 443 -> https.sock.
+HiddenServicePort 80 unix:/run/candor/source-web/http.sock
+HiddenServiceAllowUnknownPorts 0
+HiddenServiceDirGroupReadable 0
+HiddenServiceNumIntroductionPoints 5
+HiddenServiceMaxStreams 32
+HiddenServiceMaxStreamsCloseCircuit 1
+## 16 §7.1 / §13 L4: per-circuit identifier for in-memory rate limiting in C-06 only
+## (NET-013: never persisted or logged). 17 §5.5 says "no ExportCircuitID" - conflict
+## recorded in SPEC-NOTES D-04; 16 §7.1 (NET-004) is followed.
+HiddenServiceExportCircuitID haproxy
+## NET-005: single-hop / non-anonymous modes are forbidden.
+HiddenServiceSingleHopMode 0
+HiddenServiceNonAnonymousMode 0
+
+## ---------------------------------------------------------------- DoS defences (ADR-026, NET-006, 16 §13)
+## Numeric values are site tunables within the bounds of 34; defaults per 16 §7.1.
+HiddenServicePoWDefensesEnabled 1
+HiddenServicePoWQueueRate 250
+HiddenServicePoWQueueBurst 2500
+HiddenServiceEnableIntroDoSDefense 1
+HiddenServiceEnableIntroDoSRatePerSec 25
+HiddenServiceEnableIntroDoSBurstPerSec 200

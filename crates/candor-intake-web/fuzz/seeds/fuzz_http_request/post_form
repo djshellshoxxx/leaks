@@ -1,0 +1,9 @@
+PROXY TCP6 fc00:dead:beef:4dad::0:29a ::1 666 80
+POST /en/login HTTP/1.1
+Host: abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion
+Content-Type: application/x-www-form-urlencoded
+Content-Length: 10
+Origin: null
+Sec-Fetch-Site: same-origin
+
+csrf=abcde
