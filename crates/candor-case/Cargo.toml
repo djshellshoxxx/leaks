@@ -2,17 +2,15 @@
 [package]
 name = "candor-case"
 version = "0.1.0"
-description = "Candor Case Service (C-10/C-22): authorization, case invariants, and core-zone workflows"
+description = "Candor RM-3 case service core with tenant isolation and fail-closed audit commit"
 license = "AGPL-3.0-or-later"
 edition.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[dependencies]
+candor-authz = { path = "../candor-authz" }
+
 [lints]
 workspace = true
-
-[dependencies]
-
-[dev-dependencies]
-proptest = { version = "=1.11.0", default-features = false, features = ["std"] }

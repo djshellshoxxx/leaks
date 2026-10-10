@@ -28,16 +28,28 @@ fn st_rm3_ekv_aad_binds_tenant_case_epoch_and_recipient() {
     let context = ctx(1, 10, 99);
     let outer = vault.seal(&context, b"inner-wrap").unwrap();
 
-    assert_eq!(vault.unseal(&ctx(2, 10, 99), &outer), Err(VaultError::NoKey));
-    assert_eq!(vault.unseal(&ctx(1, 11, 99), &outer), Err(VaultError::NoKey));
+    assert_eq!(
+        vault.unseal(&ctx(2, 10, 99), &outer),
+        Err(VaultError::NoKey)
+    );
+    assert_eq!(
+        vault.unseal(&ctx(1, 11, 99), &outer),
+        Err(VaultError::NoKey)
+    );
 
     let mut wrong_recipient = context;
     wrong_recipient.recipient_key_id = 100;
-    assert_eq!(vault.unseal(&wrong_recipient, &outer), Err(VaultError::Authentication));
+    assert_eq!(
+        vault.unseal(&wrong_recipient, &outer),
+        Err(VaultError::Authentication)
+    );
 
     let mut wrong_epoch = context;
     wrong_epoch.key_epoch = 4;
-    assert_eq!(vault.unseal(&wrong_epoch, &outer), Err(VaultError::Authentication));
+    assert_eq!(
+        vault.unseal(&wrong_epoch, &outer),
+        Err(VaultError::Authentication)
+    );
 }
 
 #[test]
@@ -61,7 +73,10 @@ fn st_rm3_rekey_missing_creates_fresh_key_but_never_revives_old_ciphertext() {
     vault.simulate_missing_key_for_restore_test(1, 10).unwrap();
 
     vault.rekey_missing(1, 10).unwrap();
-    assert_eq!(vault.unseal(&context, &old_outer), Err(VaultError::Authentication));
+    assert_eq!(
+        vault.unseal(&context, &old_outer),
+        Err(VaultError::Authentication)
+    );
     let new_outer = vault.seal(&context, b"new").unwrap();
     assert_eq!(vault.unseal(&context, &new_outer), Ok(b"new".to_vec()));
 }

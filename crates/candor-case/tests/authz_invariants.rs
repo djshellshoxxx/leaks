@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 use candor_case::{
-    authorize, validate_key_wraps, Action, AuthzContext, Decision, DenyCode, Obligation, Principal,
-    ResourceRef, Role, WrapCandidate, WrapError,
+    Action, AuthzContext, Decision, DenyCode, Obligation, Principal, ResourceRef, Role,
+    WrapCandidate, WrapError, authorize, validate_key_wraps,
 };
 use std::collections::BTreeSet;
 
@@ -86,17 +86,49 @@ fn st_rm3_suspended_principal_is_explicitly_denied() {
 #[test]
 fn st_rm3_wrap_validation_rejects_extra_excluded_stale_or_too_few_recipients() {
     let candidates = BTreeSet::from([
-        WrapCandidate { key_id: 1, user_id: 10, current: true, excluded: false },
-        WrapCandidate { key_id: 2, user_id: 20, current: true, excluded: false },
-        WrapCandidate { key_id: 3, user_id: 30, current: true, excluded: true },
-        WrapCandidate { key_id: 4, user_id: 40, current: false, excluded: false },
+        WrapCandidate {
+            key_id: 1,
+            user_id: 10,
+            current: true,
+            excluded: false,
+        },
+        WrapCandidate {
+            key_id: 2,
+            user_id: 20,
+            current: true,
+            excluded: false,
+        },
+        WrapCandidate {
+            key_id: 3,
+            user_id: 30,
+            current: true,
+            excluded: true,
+        },
+        WrapCandidate {
+            key_id: 4,
+            user_id: 40,
+            current: false,
+            excluded: false,
+        },
     ]);
 
     assert_eq!(validate_key_wraps(&[1, 2], &candidates, 2), Ok(()));
-    assert_eq!(validate_key_wraps(&[1], &candidates, 2), Err(WrapError::TooFewRecipients));
-    assert_eq!(validate_key_wraps(&[1, 99], &candidates, 2), Err(WrapError::NotCandidate));
-    assert_eq!(validate_key_wraps(&[1, 3], &candidates, 2), Err(WrapError::Excluded));
-    assert_eq!(validate_key_wraps(&[1, 4], &candidates, 2), Err(WrapError::StaleKey));
+    assert_eq!(
+        validate_key_wraps(&[1], &candidates, 2),
+        Err(WrapError::TooFewRecipients)
+    );
+    assert_eq!(
+        validate_key_wraps(&[1, 99], &candidates, 2),
+        Err(WrapError::NotCandidate)
+    );
+    assert_eq!(
+        validate_key_wraps(&[1, 3], &candidates, 2),
+        Err(WrapError::Excluded)
+    );
+    assert_eq!(
+        validate_key_wraps(&[1, 4], &candidates, 2),
+        Err(WrapError::StaleKey)
+    );
 }
 
 #[test]

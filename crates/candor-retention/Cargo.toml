@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 [package]
-name = "candor-authz"
+name = "candor-retention"
 version = "0.1.0"
-description = "Candor tenant-scoped deny-by-default authorization and COI policy engine"
+description = "Candor RM-3 retention and erasure ordering state machine"
 license = "AGPL-3.0-or-later"
 edition.workspace = true
 rust-version.workspace = true

@@ -16,13 +16,22 @@ url = "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
 [imports.zcash]
 url = "https://raw.githubusercontent.com/zcash/rust-ecosystem/main/supply-chain/audits.toml"
 
+[policy.candor-auth]
+criteria = "safe-to-deploy"
+
 [policy.candor-authz]
+criteria = "safe-to-deploy"
+
+[policy.candor-case]
 criteria = "safe-to-deploy"
 
 [policy.candor-case-db]
 criteria = "safe-to-deploy"
 
 [policy.candor-core]
+criteria = "safe-to-deploy"
+
+[policy.candor-ekv]
 criteria = "safe-to-deploy"
 
 [policy.candor-intake-store]
@@ -37,6 +46,15 @@ criteria = "safe-to-deploy"
 [policy.candor-memlock]
 criteria = "safe-to-deploy"
 
+[policy.candor-notify]
+criteria = "safe-to-deploy"
+
+[policy.candor-relay]
+criteria = "safe-to-deploy"
+
+[policy.candor-retention]
+criteria = "safe-to-deploy"
+
 [policy.candor-safe-read]
 criteria = "safe-to-deploy"
 
@@ -47,6 +65,9 @@ criteria = "safe-to-deploy"
 criteria = "safe-to-deploy"
 
 [policy.candor-source-ui]
+criteria = "safe-to-deploy"
+
+[policy.candor-worker]
 criteria = "safe-to-deploy"
 
 [[exemptions.aead]]

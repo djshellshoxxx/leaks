@@ -211,14 +211,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
-name = "candor-authz"
+name = "candor-auth"
 version = "0.1.0"
 dependencies = [
- "candor-core",
- "proptest",
- "serde",
- "serde_json",
  "subtle",
+]
+
+[[package]]
+name = "candor-authz"
+version = "0.1.0"
+
+[[package]]
+name = "candor-case"
+version = "0.1.0"
+dependencies = [
+ "candor-authz",
 ]
 
 [[package]]
@@ -255,6 +262,15 @@ dependencies = [
  "subtle",
  "unicode-normalization",
  "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "candor-ekv"
+version = "0.1.0"
+dependencies = [
+ "chacha20poly1305",
+ "getrandom 0.4.3",
  "zeroize",
 ]
 
@@ -327,6 +343,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "candor-notify"
+version = "0.1.0"
+
+[[package]]
+name = "candor-relay"
+version = "0.1.0"
+
+[[package]]
+name = "candor-retention"
+version = "0.1.0"
+
+[[package]]
 name = "candor-safe-read"
 version = "0.1.0"
 dependencies = [
@@ -389,6 +417,10 @@ dependencies = [
  "unic-langid",
  "zeroize",
 ]
+
+[[package]]
+name = "candor-worker"
+version = "0.1.0"
 
 [[package]]
 name = "cap-fs-ext"
@@ -789,7 +821,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1824,7 +1856,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2388,7 +2420,7 @@ dependencies = [
  "fastrand",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2782,7 +2814,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

@@ -6,7 +6,13 @@ use candor_relay::{
 };
 use ed25519_dalek::{Signer, SigningKey};
 
-fn signed_request(key: &SigningKey, method: &str, path: &str, body: &[u8], counter: u64) -> [u8; 64] {
+fn signed_request(
+    key: &SigningKey,
+    method: &str,
+    path: &str,
+    body: &[u8],
+    counter: u64,
+) -> [u8; 64] {
     let message = candor_relay::request_signing_message(method, path, body, counter);
     key.sign(&message).to_bytes()
 }
@@ -18,7 +24,10 @@ fn st_rm3_relay_rejects_replayed_or_non_increasing_counters() {
     let mut auth = RelayAuthenticator::new(verifying, 41);
     let sig = signed_request(&signing, "POST", "/relay/v1/batches/claim", b"claim", 42);
 
-    assert_eq!(auth.verify("POST", "/relay/v1/batches/claim", b"claim", 42, &sig), Ok(()));
+    assert_eq!(
+        auth.verify("POST", "/relay/v1/batches/claim", b"claim", 42, &sig),
+        Ok(())
+    );
     assert_eq!(
         auth.verify("POST", "/relay/v1/batches/claim", b"claim", 42, &sig),
         Err(RelayAuthError::Replay)
@@ -62,7 +71,10 @@ fn st_rm3_relay_validator_accepts_only_tenant_channels_current_epochs_and_bounde
 
     let mut wrong_channel = valid.clone();
     wrong_channel.channel_id = 99;
-    assert_eq!(validator.validate(&wrong_channel), Err(ValidationError::Channel));
+    assert_eq!(
+        validator.validate(&wrong_channel),
+        Err(ValidationError::Channel)
+    );
 
     let mut old_epoch = valid.clone();
     old_epoch.epoch_index = 16;
@@ -70,19 +82,31 @@ fn st_rm3_relay_validator_accepts_only_tenant_channels_current_epochs_and_bounde
 
     let mut wrong_slots = valid.clone();
     wrong_slots.header_slot_count = 15;
-    assert_eq!(validator.validate(&wrong_slots), Err(ValidationError::HeaderSlots));
+    assert_eq!(
+        validator.validate(&wrong_slots),
+        Err(ValidationError::HeaderSlots)
+    );
 
     let mut huge_manifest = valid.clone();
     huge_manifest.manifest_ct_len = 65_537;
-    assert_eq!(validator.validate(&huge_manifest), Err(ValidationError::ManifestSize));
+    assert_eq!(
+        validator.validate(&huge_manifest),
+        Err(ValidationError::ManifestSize)
+    );
 
     let mut too_many_parts = valid.clone();
     too_many_parts.part_padded_sizes = vec![65_536; 33];
-    assert_eq!(validator.validate(&too_many_parts), Err(ValidationError::PartCount));
+    assert_eq!(
+        validator.validate(&too_many_parts),
+        Err(ValidationError::PartCount)
+    );
 
     let mut non_bucket = valid;
     non_bucket.part_padded_sizes = vec![123_456];
-    assert_eq!(validator.validate(&non_bucket), Err(ValidationError::PartBucket));
+    assert_eq!(
+        validator.validate(&non_bucket),
+        Err(ValidationError::PartBucket)
+    );
 }
 
 #[test]
@@ -119,9 +143,15 @@ fn st_rm3_relay_header_and_manifest_limits_are_exact() {
 
     let mut header_too_large = base.clone();
     header_too_large.header_ct_len = 8_193;
-    assert_eq!(validator.validate(&header_too_large), Err(ValidationError::HeaderSize));
+    assert_eq!(
+        validator.validate(&header_too_large),
+        Err(ValidationError::HeaderSize)
+    );
 
     let mut manifest_too_large = base;
     manifest_too_large.manifest_ct_len = 65_537;
-    assert_eq!(validator.validate(&manifest_too_large), Err(ValidationError::ManifestSize));
+    assert_eq!(
+        validator.validate(&manifest_too_large),
+        Err(ValidationError::ManifestSize)
+    );
 }

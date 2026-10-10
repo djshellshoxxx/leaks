@@ -2,7 +2,7 @@
 [package]
 name = "candor-notify"
 version = "0.1.0"
-description = "Candor content-free notification service (C-23)"
+description = "Candor content-free notification queue"
 license = "AGPL-3.0-or-later"
 edition.workspace = true
 rust-version.workspace = true
@@ -11,5 +11,3 @@ publish.workspace = true
 
 [lints]
 workspace = true
-
-[dependencies]
