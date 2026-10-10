@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+[package]
+name = "candor-auth"
+version = "0.1.0"
+description = "Candor staff authentication/session service (C-21)"
+license = "AGPL-3.0-or-later"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+subtle = { version = "=2.6.1", default-features = false }
