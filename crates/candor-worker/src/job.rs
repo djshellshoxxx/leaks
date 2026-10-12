@@ -123,3 +123,23 @@ pub fn base_backoff_seconds(attempts: u32) -> u64 {
         .unwrap_or(u64::MAX)
         .min(BACKOFF_CAP_SECONDS)
 }
+
+/// Retry delay with bounded ±20% jitter, in whole seconds.
+///
+/// `random_draw` must be supplied by the scheduler from a cryptographically
+/// secure random generator independently for each retry. Keeping random number
+/// generation outside this function permits deterministic boundary tests and
+/// avoids silently substituting predictable pseudo-randomness. The 6-hour cap
+/// applies to the unjittered exponential backoff; jitter may increase the
+/// final delay to 7.2 hours, as required by the ±20% window.
+#[must_use]
+pub fn jittered_backoff_seconds(attempts: u32, random_draw: u64) -> u64 {
+    let base = base_backoff_seconds(attempts);
+    let spread = base / 5;
+    let lower = base - spread;
+    let choices = spread * 2 + 1;
+    // Multiplication-high maps all 2^64 draws into the finite choice range;
+    // it avoids overflow and gives each result nearly equal probability.
+    let offset = ((u128::from(random_draw) * u128::from(choices)) >> 64) as u64;
+    lower + offset
+}
