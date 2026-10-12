@@ -7,5 +7,5 @@
 mod job;
 mod retention;
 
-pub use job::{Job, JobError, JobState, LEASE_SECONDS, base_backoff_seconds};
+pub use job::{Job, JobError, JobState, LEASE_SECONDS, base_backoff_seconds, jittered_backoff_seconds};
 pub use retention::{RetentionAction, RetentionCase};
