@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 use candor_worker::{
-    Job, JobError, JobState, RetentionAction, RetentionCase, base_backoff_seconds,
+    Job, JobError, JobState, RetentionAction, RetentionCase, base_backoff_seconds, jittered_backoff_seconds,
 };
 
 #[test]
@@ -90,4 +90,23 @@ fn st_rm3_auto_dispose_requires_explicit_option_and_grace() {
         ..pending
     };
     assert_eq!(enabled.evaluate(), RetentionAction::DisposeApprovedByPolicy);
+}
+
+#[test]
+fn st_rm3_retry_jitter_stays_inside_twenty_percent_and_varies_by_draw() {
+    assert_eq!(jittered_backoff_seconds(0, 0), 24);
+    assert_eq!(jittered_backoff_seconds(0, u64::MAX), 36);
+    assert_eq!(jittered_backoff_seconds(1, 0), 48);
+    assert_eq!(jittered_backoff_seconds(1, u64::MAX), 72);
+    assert_eq!(jittered_backoff_seconds(10, 0), 17_280);
+    assert_eq!(jittered_backoff_seconds(10, u64::MAX), 25_920);
+    for attempts in [0, 1, 2, 9, 10, 31, u32::MAX] {
+        let base = base_backoff_seconds(attempts);
+        let lower = base - base / 5;
+        let upper = base + base / 5;
+        for draw in [0, 1, 7, 99, u64::MAX / 2, u64::MAX] {
+            let actual = jittered_backoff_seconds(attempts, draw);
+            assert!((lower..=upper).contains(&actual));
+        }
+    }
 }
