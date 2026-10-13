@@ -30,6 +30,21 @@ pub trait AuditCommit {
     ) -> Result<(), AuditCommitFailed>;
 }
 
+/// Authoritative, current conflict-of-interest status. Implementations must read
+/// the trusted blinded-tag/COI policy service; never build this from client input.
+/// A failed check must not be interpreted as "not excluded".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CoiUnavailable;
+
+pub trait CoiLookup {
+    fn is_excluded(
+        &self,
+        tenant: TenantId,
+        case: CaseId,
+        user: UserId,
+    ) -> Result<bool, CoiUnavailable>;
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Record {
     tenant: TenantId,
@@ -93,25 +108,18 @@ impl CaseService {
         Ok(ImportOutcome::Imported(case))
     }
 
-    pub fn assign(
+    /// Only an authorized triage actor may assign an investigator. The COI
+    /// lookup is mandatory for both actor and recipient, and errors fail closed.
+    pub fn assign<C: CoiLookup>(
         &mut self,
-        tenant: TenantId,
+        principal: Principal,
         case: CaseId,
         user: UserId,
+        coi: &C,
     ) -> Result<(), CaseError> {
         let record = self
             .records
             .iter_mut()
-            .find(|record| record.tenant == tenant && record.case == case)
-            .ok_or(CaseError::NotFound)?;
-        record.assigned_to = Some(user);
-        Ok(())
-    }
-
-    pub fn open_case(&self, principal: Principal, case: CaseId) -> Result<CaseId, CaseError> {
-        let record = self
-            .records
-            .iter()
             .find(|record| record.tenant == principal.tenant && record.case == case)
             .ok_or(CaseError::NotFound)?;
         let resource = CaseResource {
@@ -119,6 +127,45 @@ impl CaseService {
             case: record.case,
             assigned_to: record.assigned_to,
             coi_user: None,
+        };
+        if authorize(principal, Action::AssignCase, resource, 0, None) != Decision::Allow {
+            return Err(CaseError::NotFound);
+        }
+        // Never accept the absence of a COI result as permission to proceed.
+        let actor_excluded = coi
+            .is_excluded(principal.tenant, case, principal.user)
+            .map_err(|_| CaseError::NotFound)?;
+        let recipient_excluded = coi
+            .is_excluded(principal.tenant, case, user)
+            .map_err(|_| CaseError::NotFound)?;
+        if actor_excluded || recipient_excluded {
+            return Err(CaseError::NotFound);
+        }
+        record.assigned_to = Some(user);
+        Ok(())
+    }
+
+    /// Read requires a fresh, authoritative COI decision even for assigned
+    /// investigators. A missing decision and a missing case look identical.
+    pub fn open_case<C: CoiLookup>(
+        &self,
+        principal: Principal,
+        case: CaseId,
+        coi: &C,
+    ) -> Result<CaseId, CaseError> {
+        let record = self
+            .records
+            .iter()
+            .find(|record| record.tenant == principal.tenant && record.case == case)
+            .ok_or(CaseError::NotFound)?;
+        let excluded = coi
+            .is_excluded(principal.tenant, case, principal.user)
+            .map_err(|_| CaseError::NotFound)?;
+        let resource = CaseResource {
+            tenant: record.tenant,
+            case: record.case,
+            assigned_to: record.assigned_to,
+            coi_user: if excluded { Some(principal.user) } else { None },
         };
         if authorize(principal, Action::ViewCase, resource, 0, None) != Decision::Allow {
             return Err(CaseError::NotFound);
