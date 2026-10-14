@@ -14,6 +14,20 @@ fn st_rm3_staff_tokens_are_256_bit_opaque_values() {
 }
 
 #[test]
+fn staff_session_binds_subject_without_exposing_it_to_debug_logs() {
+    let session = Session::new(
+        token(9),
+        0xdead_beef,
+        StaffClass::Recipient,
+        Audience::DeskApi,
+        1_000,
+    );
+    assert_eq!(session.subject_ref(), 0xdead_beef);
+    assert_eq!(session.token().as_bytes(), token(9).as_bytes());
+    assert_eq!(format!("{session:?}"), "Session([redacted])");
+}
+
+#[test]
 fn st_rm3_cross_audience_replay_is_rejected() {
     let mut session = Session::new(
         token(1),
@@ -50,7 +64,11 @@ fn st_rm3_recipient_session_has_15_min_idle_and_8_hour_absolute_limits() {
         Audience::DeskApi,
         1_000,
     );
-    assert_eq!(absolute.validate(Audience::DeskApi, 29_800), Ok(()));
+    // Keep the session active inside the 15-minute idle window while testing
+    // the independent eight-hour absolute lifetime.
+    for now in (1_800_u64..=29_800).step_by(800) {
+        assert_eq!(absolute.validate(Audience::DeskApi, now), Ok(()));
+    }
     assert_eq!(
         absolute.validate(Audience::DeskApi, 29_801),
         Err(SessionError::AbsoluteExpired)
@@ -67,7 +85,10 @@ fn st_rm3_admin_session_has_10_min_idle_and_2_hour_absolute_limits() {
     );
 
     let mut absolute = Session::new(token(5), 77, StaffClass::Admin, Audience::AdminApi, 1_000);
-    assert_eq!(absolute.validate(Audience::AdminApi, 8_200), Ok(()));
+    // Keep the admin session active inside the 10-minute idle window.
+    for now in (1_450_u64..=8_200).step_by(450) {
+        assert_eq!(absolute.validate(Audience::AdminApi, now), Ok(()));
+    }
     assert_eq!(
         absolute.validate(Audience::AdminApi, 8_201),
         Err(SessionError::AbsoluteExpired)
