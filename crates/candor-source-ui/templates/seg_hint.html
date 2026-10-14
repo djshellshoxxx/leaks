@@ -1,0 +1,3 @@
+{#- SPDX-License-Identifier: AGPL-3.0-or-later -#}
+<li>{{ p.fmt_hint(h) }}
+<form method="post" action="{{ p.href(Route::Questionnaire) }}" class="inline">{% include "ft.html" %}<input type="hidden" name="nav" value="goto"><input type="hidden" name="step" value="{{ h.step }}"><button type="submit" class="btn-link">{{ p.t1("sui-review-edit", "question", p.text_plain(h.field)) }}</button></form></li>

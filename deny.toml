@@ -1,0 +1,215 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# cargo-deny policy for Candor (28-SUPPLY-CHAIN.md §5.2, §6; 27 SG-05; ST-010/ST-011).
+# Pinned tool: cargo-deny =0.20.2 (see Makefile / .github/workflows/ci.yml).
+# Changes to this file are Trust Path changes (36 §6.1: build/policy changes) and need
+# two Trust Path Maintainer approvals plus a Security Team approval.
+
+[graph]
+# Evaluate every platform we ship for, with all features, so no feature-gated
+# dependency escapes the policy.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "aarch64-linux-android",
+]
+all-features = true
+
+[output]
+feature-depth = 1
+
+# ---------------------------------------------------------------------------
+# Advisories: RustSec DB. Vulnerabilities are always errors in cargo-deny >= 0.16.
+# 28 §5.2: unmaintained = warn generally, deny for T0. cargo-deny cannot scope by
+# tier, so we take the stricter setting for the whole graph ("all"); a reviewed
+# exception goes in `ignore` with a reason and an expiry date (27 §13.2: <= 90 days).
+# In release builds the DB is the mirrored copy (28 §5.5); set CARGO_DENY_DB_URL /
+# db-urls to the internal mirror there.
+# ---------------------------------------------------------------------------
+[advisories]
+db-urls = ["https://github.com/rustsec/advisory-db"]
+unmaintained = "all"
+unsound = "all"
+yanked = "deny"
+ignore = [
+    # { id = "RUSTSEC-0000-0000", reason = "<risk statement>; expires YYYY-MM-DD; approved by <SecLead>+<TPM>" },
+]
+
+# ---------------------------------------------------------------------------
+# Licences: AGPL-3.0-or-later–compatible allow-list (36 §4, 24; ADR-020/031).
+# Every entry here is GPLv3/AGPLv3-compatible for distribution of the combined work.
+# Deliberately NOT allowed: GPL-2.0-only, LGPL-2.x-only, SSPL, BUSL, Elastic,
+# Commons-Clause, CC-BY-NC*, OpenSSL/SSLeay (GPL-incompatible), any "proprietary".
+# ---------------------------------------------------------------------------
+[licenses]
+confidence-threshold = 0.93
+allow = [
+    "AGPL-3.0-or-later",          # Candor Trust Path crates (ADR-020)
+    "Apache-2.0",                 # candor-core / candor-safefs (ADR-031), RustCrypto etc.
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MIT-0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "0BSD",
+    "Zlib",
+    "CC0-1.0",
+    "Unlicense",
+    "BSL-1.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "MPL-2.0",                    # GPL-compatible (MPL-2.0 §3.3 secondary licences); file-level copyleft respected
+    "CDLA-Permissive-2.0",        # data licence used by webpki-roots/Mozilla CA data
+]
+exceptions = [
+    # { allow = ["<SPDX>"], crate = "<name>" },  # crate-specific, reviewed exceptions only
+]
+
+[licenses.private]
+# Workspace crates have `publish = false`; we still want their declared licence
+# checked against the allow-list, so do not ignore them.
+ignore = false
+
+# ---------------------------------------------------------------------------
+# Bans
+# ---------------------------------------------------------------------------
+[bans]
+multiple-versions = "warn"
+# Wildcard version requirements ("*") are banned; dependencies are pinned "=x.y.z"
+# (BUILD-BRIEF rule 4; 28 §5.1 item 2). Path deps inside the workspace are exempt.
+wildcards = "deny"
+allow-wildcard-paths = true
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+
+deny = [
+    # 28 §5.2: OpenSSL is denied (only a future, separately-reviewed `candor-fips`
+    # feature may use it; add a `wrappers` entry for that crate when it exists).
+    { crate = "openssl", reason = "28 §5.2: OpenSSL denied outside candor-fips" },
+    { crate = "openssl-sys", reason = "28 §5.2: OpenSSL denied outside candor-fips" },
+    { crate = "openssl-src", reason = "28 §5.2: OpenSSL denied outside candor-fips" },
+    { crate = "native-tls", reason = "pulls system OpenSSL/SChannel; use rustls (ADR-019)" },
+    # 28 §5.2: duplicate versions of crypto-set crates are denied (two copies = two
+    # audit surfaces and possible mixed-version key handling).
+    { crate = "chacha20poly1305", deny-multiple-versions = true },
+    { crate = "aes-gcm", deny-multiple-versions = true },
+    { crate = "hkdf", deny-multiple-versions = true },
+    { crate = "sha2", deny-multiple-versions = true },
+    { crate = "sha3", deny-multiple-versions = true },
+    { crate = "x25519-dalek", deny-multiple-versions = true },
+    { crate = "ed25519-dalek", deny-multiple-versions = true },
+    { crate = "curve25519-dalek", deny-multiple-versions = true },
+    { crate = "ml-kem", deny-multiple-versions = true },
+    { crate = "ml-dsa", deny-multiple-versions = true },
+    { crate = "hpke", deny-multiple-versions = true },
+    { crate = "argon2", deny-multiple-versions = true },
+    { crate = "blake3", deny-multiple-versions = true },
+    { crate = "zeroize", deny-multiple-versions = true },
+    { crate = "subtle", deny-multiple-versions = true },
+    { crate = "aws-lc-rs", deny-multiple-versions = true },
+]
+skip = [
+    # Exception ENABLED per ADR-051 (owner approval; 27 §13.2 interim, expires 2026-12-30)
+    # Maintainer approval and an expiry <= 90 days): hpke =0.14.1 (mandated by the
+    # build brief) depends on sha3 0.12 directly and on sha3 0.11 via ml-kem 0.3.2.
+    { crate = "sha3@0.11.0", reason = "hpke 0.14.1 -> ml-kem 0.3.2 pulls sha3 0.11 while hpke uses 0.12 directly; both RustCrypto, no advisory. Approved by project owner as interim exception (ADR-051). Expires 2026-12-30: remove when ml-kem moves to sha3 0.12." },
+    { crate = "sha2@0.10.9", reason = "sqlx 0.9 (candor-intake-store) depends on sha2 0.10; workspace uses 0.11. RustCrypto, no advisory. Interim exception per ADR-052(7); expires 2026-12-30." },
+]
+skip-tree = []
+
+[bans.build]
+# 28 §5.2: build scripts and proc-macros are inventoried; build-time execution of
+# shipped binaries or interpreted scripts by dependencies is denied (INC-37).
+executables = "deny"
+interpreted = "deny"
+enable-builtin-globs = true
+include-dependencies = true
+include-workspace = false
+include-archives = true
+# 28 §5.2 "new build.rs ... require explicit approval" (AUD-RM0-INF-06): only the
+# crates below may run a build script. The list is the inventory of the locked
+# graph at the time of the INF fixes, pinned name@version so a bump (which can
+# change build.rs arbitrarily) fails `cargo deny check bans` until a reviewer
+# re-reads the new build.rs and updates the entry. Adding an entry needs
+# release-supply-chain + security-team approval (CODEOWNERS).
+allow-build-scripts = [
+    { crate = "blake3@1.8.2" },
+    { crate = "cap-fs-ext@3.4.5" },
+    { crate = "cap-primitives@3.4.6" },
+    { crate = "cap-std@3.4.5" },
+    { crate = "crc32fast@1.5.2" },
+    { crate = "crossbeam-utils@0.8.23" },
+    { crate = "curve25519-dalek@5.0.0" },
+    { crate = "generic-array@0.14.9" },
+    { crate = "getrandom@0.3.4" },
+    { crate = "getrandom@0.4.3" },
+    # Lead decision (C-06 build step, 2026-10-01; candor-intake-web SPEC-NOTES
+    # decision 1): request-head tokenizer for the Source Web Service. build.rs
+    # only runs `$RUSTC --version` and reads CARGO_CFG_* to emit SIMD cfgs; it
+    # fetches, writes and executes nothing else (built default-features off,
+    # i.e. no_std, so the SIMD path is disabled anyway).
+    { crate = "httparse@1.10.1" },
+    { crate = "icu_normalizer_data@2.3.0" },
+    { crate = "icu_properties_data@2.3.0" },
+    { crate = "io-extras@0.18.4" },
+    { crate = "io-lifetimes@2.0.4" },
+    { crate = "libc@0.2.189" },
+    { crate = "libsqlite3-sys@0.37.0" },
+    { crate = "num-traits@0.2.19" },
+    { crate = "parking_lot_core@0.9.12" },
+    { crate = "proc-macro2@1.0.107" },
+    { crate = "quote@1.0.47" },
+    { crate = "rustix@1.1.2" },
+    { crate = "rustversion@1.0.23" },
+    { crate = "selectors@0.38.0" },
+    { crate = "serde@1.0.228" },
+    { crate = "serde_core@1.0.228" },
+    { crate = "serde_json@1.0.149" },
+    { crate = "target-triple@1.0.1" },
+    { crate = "thiserror@2.0.21" },
+    { crate = "wasm-bindgen@0.2.129" },
+    { crate = "wasm-bindgen-shared@0.2.129" },
+    { crate = "web_atoms@0.2.6" },
+    { crate = "windows_aarch64_gnullvm@0.52.6" },
+    { crate = "windows_aarch64_msvc@0.52.6" },
+    { crate = "windows_i686_gnu@0.52.6" },
+    { crate = "windows_i686_gnullvm@0.52.6" },
+    { crate = "windows_i686_msvc@0.52.6" },
+    { crate = "windows_x86_64_gnu@0.52.6" },
+    { crate = "windows_x86_64_gnullvm@0.52.6" },
+    { crate = "windows_x86_64_msvc@0.52.6" },
+    { crate = "wit-bindgen@0.57.1" },
+    { crate = "zerocopy@0.8.59" },
+    { crate = "zmij@1.0.23" },
+]
+#
+# Reviewed bypasses. Each is pinned to an exact version so a bump forces re-review.
+# Reviewed: the listed files are CI/dev helpers or link-time import libraries and are
+# NOT executed by the crate's build script.
+bypass = [
+    # Upstream CI/test helpers; build.rs only drives `cc` on bundled C/asm.
+    { crate = "blake3@1.8.2", allow-globs = [".github/workflows/*.py", "c/test.py"] },
+    # Maintainer utility script; build.rs only probes rustc version/cfgs.
+    { crate = "libc@0.2.189", allow-globs = ["etc/libc-util.py"] },
+    # Upstream CI/dev scripts; zerocopy's build.rs only detects rustc version.
+    { crate = "zerocopy@0.8.59", allow-globs = ["cargo.sh", "win-cargo.bat", "ci/*.sh"] },
+    # Upstream test helper; build.rs only selects the backend cfg (no Command, no I/O).
+    { crate = "curve25519-dalek@5.0.0", allow-globs = ["tests/build_tests.sh"] },
+    # windows-rs import libraries (link-time stubs, no code executed at build time).
+    { crate = "windows_x86_64_gnu@0.52.6", allow-globs = ["lib/*.a"] },
+    { crate = "windows_x86_64_msvc@0.52.6", allow-globs = ["lib/*.lib"] },
+]
+
+# ---------------------------------------------------------------------------
+# Sources: crates.io only (or the internal mirror once live, 28 §5.5); no git deps.
+# ---------------------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+required-git-spec = "rev"

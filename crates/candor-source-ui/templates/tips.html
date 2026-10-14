@@ -1,0 +1,10 @@
+{#- SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{#- Per-screen safety tips region (11a TIP-001). No form controls, no external links. -#}
+<aside class="box tips" aria-labelledby="tips-h"><h2 id="tips-h">{{ p.t("tip-region") }}</h2>
+{%- for t in p.tips() %}
+{% include "tip.html" %}
+{%- endfor %}
+{%- if p.tip_more_link() %}
+<p><a href="{{ p.href(Route::SafetyTips) }}">{{ p.t("tip-more") }}</a></p>
+{%- endif %}
+</aside>

@@ -1,0 +1,63 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Candor release gate — cargo-vet crypto-reviewed stage (ADR-052(8); 28 §5.2;
+# AUD-RM0-INF-01). PR CI (ci.yml job cargo-vet) requires safe-to-deploy only; this
+# workflow additionally requires a real `candor-crypto-reviewed` audit for every
+# locked version of every crate in supply-chain/crypto-set.txt
+# (scripts/vet-release.sh). It never runs on pull requests.
+#
+# Hardening (28 §7, ST-133), same rules as ci.yml:
+#  * external actions pinned by full commit SHA with a version comment;
+#  * workflow-level permissions empty; the job requests contents: read only;
+#  * pull_request / pull_request_target are not triggers here;
+#  * checkout never persists credentials; no caches;
+#  * tools installed with cargo install --locked --version =x.y.z;
+#  * no github.event values are interpolated into run blocks.
+#
+# Tool pins (bump only via reviewed PR; 14-day cooling, 28 §5.1): cargo-vet =0.10.2
+
+name: release-gate
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: release-gate-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  vet-release:
+    name: cargo-vet release gate (candor-crypto-reviewed)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt
+      - uses: ./.github/actions/cargo-install
+        with:
+          crate: cargo-vet
+          version: 0.10.2
+      - name: Vet policy lint (staging, crypto-set coverage, import approvals)
+        run: python3 scripts/check-vet-policy.py
+      - name: PR-stage vet (safe-to-deploy)
+        run: cargo vet --locked
+      - name: Release-stage vet (crypto set requires candor-crypto-reviewed)
+        run: scripts/vet-release.sh

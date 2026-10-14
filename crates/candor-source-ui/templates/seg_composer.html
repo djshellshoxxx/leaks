@@ -1,0 +1,13 @@
+{#- SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{#- S12 message text (or one piece of a long restored draft). The field belongs to the reply
+    form through `form`. A newline follows the start tag so a leading newline in the text
+    survives parsing. `text` is already escaped. -#}
+{%- let fid = "text" %}
+<div class="field">
+<label for="f-text">{{ p.t("sui-conv-text") }}{% if let Some(pc) = piece %} {{ p.t2("sui-part-of", "n", pc.n, "total", pc.total) }}{% endif %}</label>
+<div class="hint" id="h-text"><p>{{ p.t("sui-q-ai") }}</p><p>{{ p.t1("sui-q-maxlen", "max", 60000u64) }}</p></div>
+{% include "field_error.html" %}
+<textarea id="f-text" name="text" form="reply-form" rows="10" maxlength="60000" dir="auto" aria-describedby="{{ p.describedby(fid, true) }}"{% if p.has_field_error(fid) %} aria-invalid="true"{% endif %}>
+{{ text|safe }}</textarea>
+{%- if !piece_value.is_empty() %}<input type="hidden" name="piece" form="reply-form" value="{{ piece_value }}">{% endif %}
+</div>

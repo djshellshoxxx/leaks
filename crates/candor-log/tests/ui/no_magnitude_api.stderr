@@ -1,0 +1,29 @@
+error[E0432]: unresolved import `candor_log::metrics::Magnitude`
+ --> tests/ui/no_magnitude_api.rs:5:39
+  |
+5 | use candor_log::metrics::{KThreshold, Magnitude, MemoryReleaseHistory, MicroKey, PeriodRegistry};
+  |                                       ^^^^^^^^^ no `Magnitude` in `metrics`
+
+error[E0599]: no method named `release_magnitude` found for struct `PeriodRegistry<H>` in the current scope
+  --> tests/ui/no_magnitude_api.rs:12:15
+   |
+12 |     let _ = r.release_magnitude(p, c, "a", Magnitude::Mean, &pop, KThreshold::DEFAULT);
+   |               ^^^^^^^^^^^^^^^^^ method not found in `PeriodRegistry<MemoryReleaseHistory>`
+
+error[E0599]: no method named `release_ratio` found for struct `PeriodRegistry<H>` in the current scope
+  --> tests/ui/no_magnitude_api.rs:13:15
+   |
+13 |     let _ = r.release_ratio(p, c, "b", 10, 20, KThreshold::DEFAULT);
+   |               ^^^^^^^^^^^^^
+   |
+help: there is a method `release` with a similar name, but with different arguments
+  --> src/metrics.rs
+   |
+   | /     pub fn release(
+   | |         &mut self,
+   | |         period: MonthStamp,
+   | |         current: MonthStamp,
+...  |
+   | |         k: KThreshold,
+   | |     ) -> Result<Released, ReleaseError> {
+   | |_______________________________________^

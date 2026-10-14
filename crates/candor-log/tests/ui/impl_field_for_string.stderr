@@ -1,0 +1,37 @@
+error[E0277]: the trait bound `ClientAddr: field::sealed::Sealed` is not satisfied
+ --> tests/ui/impl_field_for_string.rs:8:21
+  |
+8 | impl AuditField for ClientAddr {
+  |                     ^^^^^^^^^^ unsatisfied trait bound
+  |
+help: the trait `field::sealed::Sealed` is not implemented for `ClientAddr`
+ --> tests/ui/impl_field_for_string.rs:6:1
+  |
+6 | struct ClientAddr(String);
+  | ^^^^^^^^^^^^^^^^^
+  = help: the following other types implement trait `field::sealed::Sealed`:
+            AaguidClass
+            Aal
+            AgeDays
+            Approvers
+            AttestationKind
+            Audience
+            AuthMethod
+            AuthzDenyReason
+          and $N others
+note: required by a bound in `AuditField`
+ --> src/field.rs
+  |
+  | pub trait AuditField: sealed::Sealed {
+  |                       ^^^^^^^^^^^^^^ required by this bound in `AuditField`
+  = note: `AuditField` is a "sealed trait", because to implement it you also need to implement `candor_log::field::sealed::Sealed`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
+  = help: the following types implement the trait:
+            candor_log::codes::Code<S>
+            candor_log::codes::AuthMethod
+            candor_log::codes::Aal
+            candor_log::codes::AaguidClass
+            candor_log::codes::Audience
+            candor_log::codes::LoginFailure
+            candor_log::codes::SessionEndReason
+            candor_log::codes::DirectorySource
+          and $N others

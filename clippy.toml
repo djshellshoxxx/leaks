@@ -1,0 +1,136 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Workspace clippy configuration (27 §12). The deny set lives in [workspace.lints]
+# in the root Cargo.toml; this file only tunes lint behaviour.
+#
+# No crate may carry its own clippy.toml: a crate-local file *replaces* this
+# one, which would silently drop the bans below (checked by
+# crates/candor-safefs/scripts/lint-safefs.sh).
+msrv = "1.94"
+# Tests may unwrap/expect/panic/index: a failing test SHOULD panic. Production code
+# keeps the deny set (no panics on hostile input, 27 §12.2).
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true
+
+# LOG-001 / 20 §7 / P-12 (AUD-RM1-LOG-09): no free-text output in any crate;
+# use the candor-log typed API or diag!. `log`/`tracing` paths are listed so
+# a crate that adds either dependency (even renamed) is flagged at the call
+# site; lint-logging.sh additionally rejects the dependency itself.
+disallowed-macros = [
+    { path = "std::dbg", reason = "may print secrets; use typed logging (27 §12.3, LOG-001)" },
+    { path = "std::println", reason = "LOG-001: use the candor-log typed API" },
+    { path = "std::print", reason = "LOG-001: use the candor-log typed API" },
+    { path = "std::eprintln", reason = "LOG-001: use the candor-log typed API" },
+    { path = "std::eprint", reason = "LOG-001: use the candor-log typed API" },
+    { path = "log::log", reason = "LOG-001: free-text logging crate", allow-invalid = true },
+    { path = "log::trace", reason = "LOG-001: free-text logging crate", allow-invalid = true },
+    { path = "log::debug", reason = "LOG-001: free-text logging crate", allow-invalid = true },
+    { path = "log::info", reason = "LOG-001: free-text logging crate", allow-invalid = true },
+    { path = "log::warn", reason = "LOG-001: free-text logging crate", allow-invalid = true },
+    { path = "log::error", reason = "LOG-001: free-text logging crate", allow-invalid = true },
+    { path = "tracing::event", reason = "LOG-001: free-text logging crate", allow-invalid = true },
+    { path = "tracing::trace", reason = "LOG-001: free-text logging crate", allow-invalid = true },
+    { path = "tracing::debug", reason = "LOG-001: free-text logging crate", allow-invalid = true },
+    { path = "tracing::info", reason = "LOG-001: free-text logging crate", allow-invalid = true },
+    { path = "tracing::warn", reason = "LOG-001: free-text logging crate", allow-invalid = true },
+    { path = "tracing::error", reason = "LOG-001: free-text logging crate", allow-invalid = true },
+]
+
+# ADR-027 / ST-005 (AUD-RM1-SFS-01) and LOG-001 (AUD-RM1-LOG-09).
+# Only candor-safefs may touch the filesystem by path or extract archives; it
+# opts out per module with a reasoned `#[allow(clippy::disallowed_methods)]`
+# (lint-safefs.sh rejects that allow anywhere else). Obtaining a stdio handle
+# is banned so `writeln!(std::io::stderr(), ..)` cannot bypass the macro bans.
+disallowed-methods = [
+    { path = "std::fs::write", reason = "ADR-027: use candor-safefs" },
+    { path = "std::fs::read", reason = "ADR-027: use candor-safefs" },
+    { path = "std::fs::read_to_string", reason = "ADR-027: use candor-safefs" },
+    { path = "std::fs::read_dir", reason = "ADR-027: use candor-safefs" },
+    { path = "std::fs::read_link", reason = "ADR-027: use candor-safefs" },
+    { path = "std::fs::create_dir", reason = "ADR-027: use candor-safefs" },
+    { path = "std::fs::create_dir_all", reason = "ADR-027: use candor-safefs" },
+    { path = "std::fs::remove_file", reason = "ADR-027: use candor-safefs" },
+    { path = "std::fs::remove_dir", reason = "ADR-027: use candor-safefs" },
+    { path = "std::fs::remove_dir_all", reason = "ADR-027: use candor-safefs" },
+    { path = "std::fs::rename", reason = "ADR-027: use candor-safefs" },
+    { path = "std::fs::copy", reason = "ADR-027: use candor-safefs" },
+    { path = "std::fs::hard_link", reason = "ADR-027: use candor-safefs" },
+    { path = "std::fs::soft_link", reason = "ADR-027: use candor-safefs" },
+    { path = "std::fs::metadata", reason = "ADR-027: use candor-safefs" },
+    { path = "std::fs::symlink_metadata", reason = "ADR-027: use candor-safefs" },
+    { path = "std::fs::canonicalize", reason = "ADR-027: use candor-safefs" },
+    { path = "std::fs::set_permissions", reason = "ADR-027: use candor-safefs" },
+    { path = "std::fs::exists", reason = "ADR-027: use candor-safefs" },
+    { path = "std::fs::File::open", reason = "ADR-027: use candor-safefs" },
+    { path = "std::fs::File::create", reason = "ADR-027: use candor-safefs" },
+    { path = "std::fs::File::create_new", reason = "ADR-027: use candor-safefs" },
+    { path = "std::fs::File::options", reason = "ADR-027: use candor-safefs" },
+    { path = "std::fs::OpenOptions::open", reason = "ADR-027: use candor-safefs" },
+    { path = "std::fs::DirBuilder::create", reason = "ADR-027: use candor-safefs" },
+    { path = "std::os::unix::fs::symlink", reason = "ADR-027: use candor-safefs" },
+    { path = "std::path::Path::join", reason = "ADR-027: never compose paths from input; use candor-safefs ids" },
+    { path = "std::path::PathBuf::push", reason = "ADR-027: never compose paths from input; use candor-safefs ids" },
+    { path = "std::path::Path::with_file_name", reason = "ADR-027: never compose paths from input" },
+    { path = "std::path::Path::with_extension", reason = "ADR-027: never compose paths from input" },
+    { path = "std::path::PathBuf::set_file_name", reason = "ADR-027: never compose paths from input (AUD-RM1-SFS-11)" },
+    { path = "std::path::PathBuf::set_extension", reason = "ADR-027: never compose paths from input (AUD-RM1-SFS-11)" },
+    { path = "std::env::temp_dir", reason = "ADR-027: no ad-hoc temp files; use a candor-safefs staging/scratch root (AUD-RM1-SFS-11)" },
+    { path = "tempfile::tempdir", reason = "ADR-027: test-only crate; use a candor-safefs root (AUD-RM1-SFS-11)", allow-invalid = true },
+    { path = "tempfile::tempdir_in", reason = "ADR-027: test-only crate; use a candor-safefs root (AUD-RM1-SFS-11)", allow-invalid = true },
+    { path = "tempfile::tempfile", reason = "ADR-027: test-only crate; use a candor-safefs root (AUD-RM1-SFS-11)", allow-invalid = true },
+    { path = "tempfile::tempfile_in", reason = "ADR-027: test-only crate; use a candor-safefs root (AUD-RM1-SFS-11)", allow-invalid = true },
+    { path = "tempfile::NamedTempFile::new", reason = "ADR-027: test-only crate; use a candor-safefs root (AUD-RM1-SFS-11)", allow-invalid = true },
+    { path = "tempfile::NamedTempFile::new_in", reason = "ADR-027: test-only crate; use a candor-safefs root (AUD-RM1-SFS-11)", allow-invalid = true },
+    { path = "tempfile::Builder::tempfile", reason = "ADR-027: test-only crate; use a candor-safefs root (AUD-RM1-SFS-11)", allow-invalid = true },
+    { path = "tempfile::Builder::tempdir", reason = "ADR-027: test-only crate; use a candor-safefs root (AUD-RM1-SFS-11)", allow-invalid = true },
+    # Spawning processes passes input to tools outside every gate (rm, tar,
+    # unzip, logger). A crate that must spawn (e.g. tor supervision) adds a
+    # reasoned `#[allow(clippy::disallowed_methods, reason = "..")]` on that
+    # item with a `// safefs-lint: allow(<reason>)` marker on the same line,
+    # which is the per-crate allow-list reviewed in CODEOWNERS
+    # (AUD-RM1-SFS-11, AUD-RM1-LOG-21).
+    { path = "std::process::Command::new", reason = "AUD-RM1-SFS-11/LOG-21: no process spawning outside reviewed, allow-listed sites" },
+    { path = "std::os::unix::process::CommandExt::exec", reason = "AUD-RM1-SFS-11: no process spawning outside reviewed sites" },
+    { path = "rustix::fs::open", reason = "ADR-027: use candor-safefs", allow-invalid = true },
+    { path = "rustix::fs::openat", reason = "ADR-027: use candor-safefs", allow-invalid = true },
+    { path = "rustix::fs::openat2", reason = "ADR-027: use candor-safefs", allow-invalid = true },
+    { path = "rustix::fs::rename", reason = "ADR-027: use candor-safefs", allow-invalid = true },
+    { path = "rustix::fs::renameat", reason = "ADR-027: use candor-safefs", allow-invalid = true },
+    { path = "rustix::fs::renameat_with", reason = "ADR-027: use candor-safefs", allow-invalid = true },
+    { path = "rustix::fs::unlink", reason = "ADR-027: use candor-safefs", allow-invalid = true },
+    { path = "rustix::fs::unlinkat", reason = "ADR-027: use candor-safefs", allow-invalid = true },
+    { path = "rustix::fs::link", reason = "ADR-027: use candor-safefs", allow-invalid = true },
+    { path = "rustix::fs::linkat", reason = "ADR-027: use candor-safefs", allow-invalid = true },
+    { path = "rustix::fs::mkdir", reason = "ADR-027: use candor-safefs", allow-invalid = true },
+    { path = "rustix::fs::mkdirat", reason = "ADR-027: use candor-safefs", allow-invalid = true },
+    { path = "rustix::fs::symlink", reason = "ADR-027: use candor-safefs", allow-invalid = true },
+    { path = "rustix::fs::symlinkat", reason = "ADR-027: use candor-safefs", allow-invalid = true },
+    { path = "libc::open", reason = "ADR-027: use candor-safefs", allow-invalid = true },
+    { path = "libc::openat", reason = "ADR-027: use candor-safefs", allow-invalid = true },
+    { path = "libc::rename", reason = "ADR-027: use candor-safefs", allow-invalid = true },
+    { path = "libc::renameat", reason = "ADR-027: use candor-safefs", allow-invalid = true },
+    { path = "libc::unlink", reason = "ADR-027: use candor-safefs", allow-invalid = true },
+    { path = "libc::link", reason = "ADR-027: use candor-safefs", allow-invalid = true },
+    { path = "libc::symlink", reason = "ADR-027: use candor-safefs", allow-invalid = true },
+    { path = "nix::fcntl::open", reason = "ADR-027: use candor-safefs", allow-invalid = true },
+    { path = "nix::fcntl::openat", reason = "ADR-027: use candor-safefs", allow-invalid = true },
+    { path = "nix::fcntl::renameat", reason = "ADR-027: use candor-safefs", allow-invalid = true },
+    { path = "nix::unistd::unlink", reason = "ADR-027: use candor-safefs", allow-invalid = true },
+    { path = "std::io::stdout", reason = "LOG-001: no free-text output; use the candor-log typed API" },
+    { path = "std::io::stderr", reason = "LOG-001: no free-text output; use the candor-log typed API" },
+    # AUD-RM1-LOG-26: producers of caller-influenced audit sequence values
+    # are for audit/verify tooling only; allowed with a reasoned
+    # `#[allow(clippy::disallowed_methods, reason = "..")]` at those sites.
+    { path = "candor_log::field::Seq::of_failure", reason = "AUD-RM1-LOG-26: audit/verify tooling only", allow-invalid = true },
+    { path = "candor_log::field::SeqRange::within", reason = "AUD-RM1-LOG-26: audit/verify tooling only", allow-invalid = true },
+    { path = "std::panic::panic_any", reason = "LOG-001 / AUD-RM1-LOG-21: a panic payload reaches stderr/journald" },
+    { path = "std::panic::resume_unwind", reason = "LOG-001 / AUD-RM1-LOG-21: a panic payload reaches stderr/journald" },
+]
+
+# Archive extraction only through candor-safefs::archive (10 §10).
+disallowed-types = [
+    { path = "tar::Archive", reason = "ADR-027 / FILE-019: use candor_safefs::archive", allow-invalid = true },
+    { path = "zip::ZipArchive", reason = "ADR-027 / FILE-019: use candor_safefs::archive", allow-invalid = true },
+    { path = "zip::read::ZipArchive", reason = "ADR-027 / FILE-019: use candor_safefs::archive", allow-invalid = true },
+]

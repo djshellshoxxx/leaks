@@ -1,0 +1,5 @@
+PROXY TCP6 fc00:dead:beef:4dad::0:29a ::1 666 80
+GET /en/inbox HTTP/1.1
+Host: abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion
+Cookie: __Host-cs=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; __Host-cpre=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+

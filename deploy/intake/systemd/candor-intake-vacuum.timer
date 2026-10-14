@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Slot VACUUM 15 minutes after each default import slot (4 slots/day at 00, 06, 12, 18 UTC;
+# ADR-038(1)). A site with another slot schedule (HIGH/GOV: 1/day) installs a drop-in with
+# OnCalendar= reset and its own slot times (config-check pins the effective value).
+[Unit]
+Description=Candor intake slot VACUUM schedule
+
+[Timer]
+# Fixed wall-clock time in UTC; no randomisation, no catch-up after downtime (a missed run is
+# not repeated at boot time, which would tie it to an unrelated event).
+OnCalendar=*-*-* 00,06,12,18:15:00 UTC
+AccuracySec=1s
+RandomizedDelaySec=0
+Persistent=false
+Unit=candor-intake-vacuum.service
+
+[Install]
+WantedBy=timers.target

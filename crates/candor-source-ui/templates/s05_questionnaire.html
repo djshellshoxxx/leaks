@@ -1,0 +1,22 @@
+{#- SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{% extends "layout.html" %}
+{#- S05 Questionnaire step: POST /q with step in the body; Back is a submit that also saves. -#}
+{% block main %}
+<h1>{{ p.t(p.screen.title_key(p.vm).as_str()) }}</h1>
+{% include "errors.html" %}
+{%- let last_key = "" %}
+{% include "parts_note.html" %}
+<form method="post" action="{{ p.href(Route::Questionnaire) }}">
+{% include "ft.html" %}
+<input type="hidden" name="step" value="{{ p.vm.questionnaire.step }}">
+{%- for s in p.region(Region::Questions) %}
+{{ s|safe }}
+{%- endfor %}
+{%- let navform = "" %}
+{% include "parts_nav.html" %}
+<div class="actions">
+<button type="submit" name="nav" value="next" class="btn-primary">{{ p.t("sui-btn-save-continue") }}</button>
+<button type="submit" name="nav" value="back" formnovalidate>{{ p.t("sui-btn-back") }}</button>
+</div>
+</form>
+{% endblock %}

@@ -1,0 +1,139 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# C-07 sealer (07 §4.1-§4.4, §5.2). Holds K35 (sealer signing key) and the per-deployment
+# Argon2id salt, both delivered as TPM-sealed systemd credentials (ADR-028; R7 SI-B-01:
+# never via Environment=). Tier W drafts and keys live only in mlocked RAM (ADR-034).
+# No network (PrivateNetwork=yes), no capabilities (mlock is allowed by LimitMEMLOCK, so
+# CAP_IPC_LOCK is not needed). The only writable path is the RAM-only Tier W staging tmpfs
+# (/run/candor/staging, owned 0700 by candor-sealer): the sealer writes the sealed parts and
+# bundles itself through candor-safefs, confined there by Landlock (crates/candor-sealer
+# SPEC-NOTES item 7, amending 07 §4.2 "ReadWritePaths none"; AUD-RM2-SEA-16).
+# Syscalls: an explicit allow-list (07 §4.3 + ADR-052(10), AUD-RM2-SEA-06) expressed as the
+# @system-service baseline minus everything not on the list (see the SystemCallFilter= block).
+[Unit]
+Description=Candor sealer (C-07, Z-INTAKE)
+Requires=candor-sealer.socket run-candor-staging.mount nftables.service
+Wants=candor-intake-store.socket
+After=candor-sealer.socket candor-intake-store.socket run-candor-staging.mount nftables.service
+StartLimitIntervalSec=60s
+StartLimitBurst=5
+
+[Service]
+Type=exec
+ExecStart=/usr/lib/candor/sealer/candor-sealer
+User=candor-sealer
+Group=candor-sealer
+# Chaff COMMIT_ENVELOPE to the intake store (07 §5.3, ADR-047(3)).
+SupplementaryGroups=candor-istore-clients
+Restart=on-failure
+RestartSec=2s
+AppArmorProfile=candor-sealer
+LoadCredentialEncrypted=sealer_signing_key:/etc/credstore.encrypted/candor-intake.sealer_signing_key.cred
+LoadCredentialEncrypted=argon2_salt:/etc/credstore.encrypted/candor-intake.argon2_salt.cred
+# 07 §4.2 per-unit delta. The staging tmpfs is charged to this cgroup when the sealer writes
+# it, so MemoryMax = 2560M (07 §4.2: mlocked keys/drafts + working set) + staging size; the
+# profile drop-ins (profiles/ce-*/) adjust it together with the mount size. Never swap.
+MemoryMax=6656M
+# Sealer-wide upload memory budget (Limits::memory_budget_bytes, AUD-RM2-SEA-26). Staged parts
+# in the tmpfs and the bundle memfd are both counted in it. The sealer refuses to start
+# without a valid value. config-check requires budget <= MemoryMax - 1024 MiB, and staging
+# tmpfs size >= budget, so the budget (not ENOSPC) refuses uploads. Per-draft upload quota
+# (Limits::per_session_upload_bytes): at most half the budget, which is the shared pool.
+# Sessions (ADR-056): MAX_SESSIONS 16..65536; UPLOAD_SLOTS 16..4096 and >= MAX_SESSIONS;
+# guaranteed slice (budget / 2) / slots >= 1 MiB. None of these is a secret; secrets never go
+# through Environment= (see top). One variable per line.
+Environment=CANDOR_SEALER_MEMORY_BUDGET_MIB=3840
+Environment=CANDOR_SEALER_SESSION_UPLOAD_MIB=768
+Environment=CANDOR_SEALER_UPLOAD_SLOTS=512
+Environment=CANDOR_SEALER_MAX_SESSIONS=512
+MemorySwapMax=0
+LimitMEMLOCK=2G
+TasksMax=64
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+# ---- 07 §4.2 / 17 §5.3 / R7 SI-B-01 hardening baseline (do not weaken; config-check.sh) ----
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateIPC=yes
+PrivateMounts=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+UMask=0077
+CapabilityBoundingSet=
+AmbientCapabilities=
+KeyringMode=private
+DevicePolicy=closed
+SystemCallArchitectures=native
+SystemCallErrorNumber=EPERM
+LimitCORE=0
+# Executables only from /usr (the program and ld.so/libs); /run, /var, /tmp, /dev/shm, /etc
+# are never executable for this unit (R7 SI-B-01).
+NoExecPaths=/
+ExecPaths=/usr
+# Tier W staging (SPEC-NOTES item 7 of the sealer): the only writable path (noexec tmpfs).
+ReadWritePaths=/run/candor/staging
+# No IP at all (07 §4.2 IPAddressDeny=any); no bind() on AF_INET/AF_INET6.
+IPAddressDeny=any
+SocketBindDeny=any
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @debug @cpu-emulation @obsolete @raw-io @reboot @swap @module @clock @setuid @chown @keyring process_vm_readv process_vm_writev
+# ADR-052(10)/AUD-RM2-SEA-06: narrow the baseline to the sealer's explicit allow-list. Effective set
+# (with the deny groups above and the Landlock/seccomp re-adds below): read write readv writev
+# pread64 pwrite64 preadv pwritev lseek recvmsg sendmsg recvfrom sendto accept accept4 socket
+# connect getsockopt setsockopt getsockname getpeername shutdown close close_range fcntl ioctl dup
+# dup3 epoll_* eventfd2 poll ppoll futex* mmap munmap mremap madvise mprotect brk mlock mlock2
+# mlockall munlock membarrier rt_sig{return,procmask,action} sigaltstack tgkill tkill getpid gettid
+# clock_gettime clock_getres clock_nanosleep nanosleep gettimeofday time getrandom exit exit_group
+# restart_syscall sched_yield sched_getaffinity clone clone3 set_robust_list get_robust_list rseq
+# set_tid_address arch_prctl execve prctl prlimit64 getrlimit fstat newfstatat statx fstatfs
+# openat unlinkat renameat2 linkat mkdirat fsync fdatasync fchmod fchmodat utimensat getdents64
+# readlinkat access faccessat faccessat2 get{u,eu,g,eg}id uname sysinfo. connect/socket are
+# AF_UNIX only (RestrictAddressFamilies=AF_UNIX, PrivateNetwork=yes): the intake-store socket.
+# memfd_create: sealed in-RAM bundle memfds handed to the store over SCM_RIGHTS (ADR-055(1), SEA-16).
+# Filesystem calls are confined to the staging root by Landlock (07 §4.3 vs SPEC-NOTES item 7).
+# openat2 stays allowed: candor-safefs (cap-std) opens every path with openat2(RESOLVE_BENEATH)
+# and falls back only on ENOSYS, never on the EPERM this filter would return (deploy D-36).
+# socketpair stays allowed (D-38, AUD-RM2-DEP-33): tokio's signal driver creates an in-process
+# AF_UNIX pair when the runtime is built; RestrictAddressFamilies=AF_UNIX confines it.
+SystemCallFilter=~_newselect alarm arm_fadvise64_64 bind cacheflush capget chdir chmod copy_file_range creat dup2 epoll_ctl_old epoll_wait_old eventfd execveat fadvise64 fadvise64_64 fallocate fchdir fchmodat2 fgetxattr flistxattr flock fork fremovexattr fsetxattr ftruncate ftruncate64 futimesat get_mempolicy get_thread_area getcpu getcwd getdents getgroups getgroups32 getitimer getpgid getpgrp getppid getpriority getresgid getresgid32 getresuid getresuid32 getrusage getsid getxattr inotify_add_watch inotify_init inotify_init1 inotify_rm_watch io_cancel io_destroy io_getevents io_pgetevents io_pgetevents_time64 io_setup io_submit io_uring_enter io_uring_register io_uring_setup ioprio_get ipc kcmp kill lgetxattr link listen listxattr llistxattr lremovexattr lsetxattr lstat lstat64 mkdir mknod mknodat mq_getsetattr mq_notify mq_open mq_timedreceive mq_timedreceive_time64 mq_timedsend mq_timedsend_time64 mq_unlink msgctl msgget msgrcv msgsnd msync munlockall name_to_handle_at oldfstat oldlstat oldolduname oldstat olduname open pause personality pidfd_open pidfd_send_signal pipe pipe2 preadv2 process_madvise process_vm_readv process_vm_writev pselect6 pselect6_time64 pwritev2 readahead readdir readlink recvmmsg recvmmsg_time64 remap_file_pages removexattr rename renameat riscv_flush_icache rmdir rt_sigpending rt_sigqueueinfo rt_sigsuspend rt_sigtimedwait rt_sigtimedwait_time64 rt_tgsigqueueinfo sched_get_priority_max sched_get_priority_min sched_getattr sched_getparam sched_getscheduler sched_rr_get_interval sched_rr_get_interval_time64 select semctl semget semop semtimedop semtimedop_time64 sendfile sendfile64 sendmmsg setfsgid setfsgid32 setitimer setns setpgid setsid setxattr shmat shmctl shmdt shmget sigaction signal signalfd signalfd4 sigpending sigprocmask sigsuspend socketcall splice stat stat64 statfs statfs64 swapcontext symlink symlinkat sync sync_file_range sync_file_range2 syncfs tee timer_create timer_delete timer_getoverrun timer_gettime timer_gettime64 timer_settime timer_settime64 timerfd_create timerfd_gettime timerfd_gettime64 timerfd_settime timerfd_settime64 times truncate truncate64 umask unlink unshare userfaultfd utime utimes vfork vmsplice wait4 waitid waitpid
+# R7 SI-B-02/SI-B-03: the process installs its own seccompiler filter (07 §4.3) and Landlock
+# ruleset after init; both syscall families only ever reduce privilege.
+SystemCallFilter=seccomp landlock_create_ruleset landlock_add_rule landlock_restrict_self
+# Nothing else on Z-INTAKE is visible (defence in depth on top of DAC/AppArmor).
+TemporaryFileSystem=/var:ro
+# /var/tmp: PrivateTmp's /var/tmp is disk-backed on the host; nothing may be written there
+# (AUD-RM2-DEP-12).
+InaccessiblePaths=-/var/tmp
+InaccessiblePaths=-/run/tor-instances -/run/candor/intake-pg -/run/credentials/candor-intake-store.service -/etc/tor -/etc/candor/intake/postgresql -/boot
+InaccessiblePaths=-/run/candor/source-web
+# ---- Logging (ADR-016, LOG-004/005, LOG-007, NET-008; AUD-RM2-DEP-05/06) ----
+# No output of this service reaches any journal: journald stamps every stored line to the
+# microsecond, so a source-triggerable event would record the exact time of a source action
+# (LOG-004 asks for hour granularity, which journald cannot provide). stdout and stderr are
+# discarded; LogLevelMax=emerg also suppresses the service manager's own messages about this
+# unit (start/stop/crash records) in the host journal. Liveness is visible through the unit
+# state only (SPEC-NOTES D-28). LogNamespace keeps any syslog()/journal-socket write of the
+# process out of the host journal.
+StandardInput=null
+StandardOutput=null
+StandardError=null
+LogNamespace=candor-intake
+LogLevelMax=emerg
+SyslogIdentifier=candor-sealer
+
+[Install]
+WantedBy=multi-user.target

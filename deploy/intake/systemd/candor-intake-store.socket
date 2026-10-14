@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# C-08 intake store IPC (07 §5.3: /run/candor/istore/istore.sock, SEQPACKET; peers candor-web
+# and, for chaff COMMIT_ENVELOPE only, candor-sealer - checked in-process with SO_PEERCRED).
+# Group candor-istore-clients has no /etc/group members; it is granted per unit through
+# SupplementaryGroups= in candor-intake-web.service and candor-sealer.service.
+[Unit]
+Description=Candor intake store IPC socket (C-08, Z-INTAKE)
+After=systemd-tmpfiles-setup.service
+
+[Socket]
+ListenSequentialPacket=/run/candor/istore/istore.sock
+SocketUser=candor-istore
+SocketGroup=candor-istore-clients
+SocketMode=0660
+DirectoryMode=0750
+RemoveOnStop=yes
+Accept=no
+Backlog=64
+FileDescriptorName=istore
+Service=candor-intake-store.service
+
+[Install]
+WantedBy=sockets.target

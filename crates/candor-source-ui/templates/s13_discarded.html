@@ -1,0 +1,8 @@
+{#- SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{% extends "layout.html" %}
+{% block main %}
+<h1>{{ p.t("sui-end-discarded-h1") }}</h1>
+<p>{{ p.t("sui-end-discarded-text") }}</p>
+<p>{{ p.tm("sui-new-identity")|safe }}</p>
+<div class="actions"><a class="btn" href="{{ p.href(Route::Landing) }}">{{ p.t("sui-leave-back") }}</a></div>
+{% endblock %}

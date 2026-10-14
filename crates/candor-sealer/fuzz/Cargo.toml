@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# cargo-fuzz layout (IMPL-RM2 §2.3; ST-043; AUD-RM2-SEA-09). Run with:
+#   cargo +nightly fuzz run fuzz_sealer_ipc -- -max_total_time=600 -rss_limit_mb=2048
+# (from crates/candor-sealer). Own workspace so the main workspace never builds
+# libFuzzer.
+[package]
+name = "candor-sealer-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "AGPL-3.0-or-later"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.10"
+candor-sealer = { path = ".." }
+candor-core = { path = "../../candor-core" }
+candor-safefs = { path = "../../candor-safefs" }
+candor-log = { path = "../../candor-log" }
+tokio = { version = "=1.48.0", default-features = false, features = ["rt"] }
+zeroize = { version = "=1.8.2", default-features = false, features = ["alloc"] }
+ml-dsa = { version = "=0.1.1", default-features = false }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "fuzz_sealer_ipc"
+path = "fuzz_targets/fuzz_sealer_ipc.rs"
+test = false
+doc = false
+bench = false
+
+# Writes the seed corpus to fuzz/seeds/fuzz_sealer_ipc/ (AUD-RM2-SEA-23):
+#   cargo +nightly run --bin gen_seeds
+[[bin]]
+name = "gen_seeds"
+path = "fuzz_targets/gen_seeds.rs"
+test = false
+doc = false
+bench = false

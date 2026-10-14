@@ -1,0 +1,7 @@
+PROXY TCP6 fc00:dead:beef:4dad::0:29a ::1 666 80
+GET /en/ HTTP/1.1
+Host: abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion
+
+GET /en/status HTTP/1.1
+Host: abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion
+

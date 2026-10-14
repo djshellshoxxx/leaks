@@ -1,0 +1,100 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# C-06 source web service (07 §5.1). Unit name per the RM-2 deployment brief; OS user
+# candor-web (07 §4.1). Socket-activated (candor-intake-web.socket): the process receives the
+# listening AF_UNIX fd named "http" (sd_listen_fds) and never creates an IP socket.
+# Network: none (PrivateNetwork=yes, NET-032, 16 §14.2). Holds no long-term key.
+[Unit]
+Description=Candor source web (C-06, Z-INTAKE)
+Requires=candor-intake-web.socket nftables.service
+Wants=candor-sealer.socket candor-intake-store.socket
+After=candor-intake-web.socket candor-sealer.socket candor-intake-store.socket nftables.service
+StartLimitIntervalSec=60s
+StartLimitBurst=5
+
+[Service]
+Type=exec
+ExecStart=/usr/lib/candor/source-web/candor-web
+User=candor-web
+Group=candor-web
+# Group candor-web gives access to seal.sock; candor-istore-clients to istore.sock.
+SupplementaryGroups=candor-istore-clients
+Restart=on-failure
+RestartSec=2s
+AppArmorProfile=candor-web
+# 07 §4.2 per-unit delta.
+MemoryMax=1G
+MemorySwapMax=0
+LimitMEMLOCK=1G
+TasksMax=256
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+# ---- 07 §4.2 / 17 §5.3 / R7 SI-B-01 hardening baseline (do not weaken; config-check.sh) ----
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateIPC=yes
+PrivateMounts=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+UMask=0077
+CapabilityBoundingSet=
+AmbientCapabilities=
+KeyringMode=private
+DevicePolicy=closed
+SystemCallArchitectures=native
+SystemCallErrorNumber=EPERM
+LimitCORE=0
+# Executables only from /usr (the program and ld.so/libs); /run, /var, /tmp, /dev/shm, /etc
+# are never executable for this unit (R7 SI-B-01).
+NoExecPaths=/
+ExecPaths=/usr
+# No IP at all (07 §4.2 IPAddressDeny=any); no bind() on AF_INET/AF_INET6.
+IPAddressDeny=any
+SocketBindDeny=any
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @debug @cpu-emulation @obsolete @raw-io @reboot @swap @module @clock @setuid @chown @keyring process_vm_readv process_vm_writev
+# D-36: narrowed to the web service's explicit allow-list, derived like the sealer's (same deny
+# list, plus the calls the web never makes: no file writes (no ReadWritePaths, no safefs in
+# production), no memfd. Effective set pinned by config-check (scf-web| lines).
+# socketpair stays allowed (D-38, AUD-RM2-DEP-33): tokio's signal driver creates an in-process
+# AF_UNIX pair when the runtime is built; RestrictAddressFamilies=AF_UNIX confines it.
+SystemCallFilter=~_newselect alarm arm_fadvise64_64 bind cacheflush capget chdir chmod copy_file_range creat dup2 epoll_ctl_old epoll_wait_old eventfd execveat fadvise64 fadvise64_64 fallocate fchdir fchmod fchmodat fchmodat2 fdatasync fgetxattr flistxattr flock fork fremovexattr fsetxattr fsync ftruncate ftruncate64 futimesat get_mempolicy get_thread_area getcpu getcwd getdents getgroups getgroups32 getitimer getpgid getpgrp getppid getpriority getresgid getresgid32 getresuid getresuid32 getrusage getsid getxattr inotify_add_watch inotify_init inotify_init1 inotify_rm_watch io_cancel io_destroy io_getevents io_pgetevents io_pgetevents_time64 io_setup io_submit io_uring_enter io_uring_register io_uring_setup ioprio_get ipc kcmp kill lgetxattr link linkat listen listxattr llistxattr lremovexattr lsetxattr lstat lstat64 memfd_create mkdir mkdirat mknod mknodat mq_getsetattr mq_notify mq_open mq_timedreceive mq_timedreceive_time64 mq_timedsend mq_timedsend_time64 mq_unlink msgctl msgget msgrcv msgsnd msync munlockall name_to_handle_at oldfstat oldlstat oldolduname oldstat olduname open openat2 pause personality pidfd_open pidfd_send_signal pipe pipe2 preadv2 process_madvise process_vm_readv process_vm_writev pselect6 pselect6_time64 pwritev2 readahead readdir readlink recvmmsg recvmmsg_time64 remap_file_pages removexattr rename renameat renameat2 riscv_flush_icache rmdir rt_sigpending rt_sigqueueinfo rt_sigsuspend rt_sigtimedwait rt_sigtimedwait_time64 rt_tgsigqueueinfo sched_get_priority_max sched_get_priority_min sched_getattr sched_getparam sched_getscheduler sched_rr_get_interval sched_rr_get_interval_time64 select semctl semget semop semtimedop semtimedop_time64 sendfile sendfile64 sendmmsg setfsgid setfsgid32 setitimer setns setpgid setsid setxattr shmat shmctl shmdt shmget sigaction signal signalfd signalfd4 sigpending sigprocmask sigsuspend socketcall splice stat stat64 statfs statfs64 swapcontext symlink symlinkat sync sync_file_range sync_file_range2 syncfs tee timer_create timer_delete timer_getoverrun timer_gettime timer_gettime64 timer_settime timer_settime64 timerfd_create timerfd_gettime timerfd_gettime64 timerfd_settime timerfd_settime64 times truncate truncate64 umask unlink unlinkat unshare userfaultfd utime utimensat utimensat_time64 utimes vfork vmsplice wait4 waitid waitpid
+# R7 SI-B-02/SI-B-03: self-applied seccomp and Landlock (privilege-reducing only).
+SystemCallFilter=seccomp landlock_create_ruleset landlock_add_rule landlock_restrict_self
+# Nothing else on Z-INTAKE is visible (defence in depth on top of DAC/AppArmor).
+TemporaryFileSystem=/var:ro
+# /var/tmp: PrivateTmp's /var/tmp is disk-backed on the host; nothing may be written there
+# (AUD-RM2-DEP-12).
+InaccessiblePaths=-/var/tmp
+InaccessiblePaths=-/run/tor-instances -/run/candor/staging -/run/candor/intake-pg -/run/credentials/candor-intake-store.service -/run/credentials/candor-sealer.service -/etc/credstore.encrypted -/etc/tor -/etc/candor/intake/postgresql -/boot
+# ---- Logging (ADR-016, LOG-004/005, LOG-007, NET-008; AUD-RM2-DEP-05/06) ----
+# No output of this service reaches any journal: journald stamps every stored line to the
+# microsecond, so a source-triggerable event would record the exact time of a source action
+# (LOG-004 asks for hour granularity, which journald cannot provide). stdout and stderr are
+# discarded; LogLevelMax=emerg also suppresses the service manager's own messages about this
+# unit (start/stop/crash records) in the host journal. Liveness is visible through the unit
+# state only (SPEC-NOTES D-28). LogNamespace keeps any syslog()/journal-socket write of the
+# process out of the host journal.
+StandardInput=null
+StandardOutput=null
+StandardError=null
+LogNamespace=candor-intake
+LogLevelMax=emerg
+SyslogIdentifier=candor-web
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,9 @@
+{#- SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{% extends "layout.html" %}
+{#- S92: generic; no stack traces, IDs or hostnames (SUI-038). -#}
+{% block main %}
+<h1>{{ p.t("sui-error-h1") }}</h1>
+<p>{{ p.t("sui-error-text") }}</p>
+<p class="note">{{ p.t("sui-draft-limits") }}</p>
+<p><a href="{{ p.href(Route::Landing) }}">{{ p.t("sui-nav-start") }}</a></p>
+{% endblock %}

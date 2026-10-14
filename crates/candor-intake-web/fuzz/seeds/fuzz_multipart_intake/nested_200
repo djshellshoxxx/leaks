@@ -1,0 +1,7 @@
+Èmultipart/form-data; boundary=----geckoformboundary1234
+------geckoformboundary1234
+Content-Disposition: form-data; name="file"; filename="a"
+Content-Type: multipart/mixed; boundary=z
+
+x
+------geckoformboundary1234--

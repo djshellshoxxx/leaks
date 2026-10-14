@@ -1,0 +1,99 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# AppArmor profile for C-05, the intake tor instance (IMPL-RM2 §2.1, 17 §5.2, R7 SI-B-04,
+# NET-010; AUD-RM2-DEP-08). Enforce mode. Installed as /etc/apparmor.d/candor-tor-intake and
+# attached by AppArmorProfile=candor-tor-intake in tor@candor-intake.service (no '-' prefix:
+# the unit does not start without it). Derived from Debian's system_tor/abstractions/tor, but
+# limited to this instance: no capabilities (tor starts as _tor-candor-intake, never root), no
+# exec, no pluggable transports, no UDP, no control socket, no log file.
+abi <abi/3.0>,
+# Self-contained (AUD-RM2-DEP-23): no include of distribution abstractions or tunables (their
+# drop-in directories could widen this profile). The two variables are defined here (values of
+# Debian's tunables/proc and tunables/kernelvars); the runtime rules are inlined below.
+@{PROC}=/proc/
+@{pid}={[1-9],[1-9][0-9],[1-9][0-9][0-9],[1-9][0-9][0-9][0-9],[1-9][0-9][0-9][0-9][0-9],[1-9][0-9][0-9][0-9][0-9][0-9],[1-4][0-9][0-9][0-9][0-9][0-9][0-9]}
+
+profile candor-tor-intake flags=(attach_disconnected) {
+  # ---- runtime, inlined and minimised from abstractions/base (AUD-RM2-DEP-23): dynamic loader
+  # and shared libraries (read/map, no write, no exec of anything else), /dev/null for the
+  # inherited stdio, /dev/urandom, the own memory map (glibc/Rust main-thread stack guard) and
+  # signals between the process's own threads/processes. Not inlined: locale, X11, home
+  # directories, ld.so.preload, journal sockets, ptrace, the other base rules.
+  /etc/ld.so.cache r,
+  /usr/lib/*-linux-gnu*/**.so* mr,
+  /dev/null rw,
+  /dev/urandom r,
+  @{PROC}/@{pid}/maps r,
+  signal (send, receive) peer=@{profile_name},
+  # Unix-socket rules abstractions/base granted (kept so behaviour is unchanged).
+  unix (create, getattr, getopt, setopt, shutdown),
+  unix (receive) peer=(label=unconfined),
+  unix peer=(label=@{profile_name}),
+  /dev/random r,
+  # OpenSSL configuration (was abstractions/openssl; no engine or .d directories).
+  /etc/ssl/openssl.cnf r,
+
+  /usr/bin/tor mr,
+  /usr/sbin/tor mr,
+  /etc/tor/instances/candor-intake/torrc r,
+  /usr/share/tor/** r,
+
+  # DataDirectory and the onion key (16 §7.1; 0700/0600, owner only).
+  owner /var/lib/tor-instances/candor-intake/ rw,
+  owner /var/lib/tor-instances/candor-intake/** rwk,
+  # Onion target: the C-06 socket (NET-002), Unix socket only.
+  /run/candor/source-web/ r,
+  /run/candor/source-web/http.sock rw,
+  # Type=notify readiness.
+  /run/systemd/notify w,
+
+  # Circuits to Tor relays over TCP (E1) and the Unix-socket target; nothing else.
+  network inet stream,
+  network unix stream,
+  network unix dgram,
+
+  # Read by tor at start-up (MaxMemInQueues, CPU count, sandbox setup).
+  @{PROC}/meminfo r,
+  @{PROC}/sys/kernel/random/uuid r,
+  @{PROC}/sys/net/core/somaxconn r,
+  @{PROC}/@{pid}/stat r,
+  @{PROC}/@{pid}/status r,
+  /sys/devices/system/cpu/ r,
+  /sys/devices/system/cpu/** r,
+  signal (receive) peer=unconfined,
+
+  # ---- explicit denials (win over any allow; denials are audited) ----
+  deny capability,
+  deny ptrace,
+  deny mount,
+  deny umount,
+  deny pivot_root,
+  deny network inet dgram,
+  deny network inet raw,
+  deny network inet6 dgram,
+  deny network inet6 raw,
+  deny network netlink,
+  deny network packet,
+  deny @{PROC}/*/mem rw,
+  deny @{PROC}/*/environ r,
+  deny @{PROC}/kcore r,
+  deny /dev/mem rw,
+  deny /dev/kmem rw,
+  deny /dev/log w,
+  deny /run/systemd/journal/dev-log w,
+  deny /run/systemd/journal/socket w,
+  deny /run/systemd/journal/syslog w,
+  deny /var/log/** w,
+  deny /run/candor/sealer/** rwklx,
+  deny /run/candor/istore/** rwklx,
+  deny /run/candor/staging/** rwklx,
+  deny /run/candor/intake-pg/** rwklx,
+  deny /run/candor/directory/** rwklx,
+  deny /run/credentials/** rwklx,
+  deny /var/lib/candor/** rwklx,
+  deny /var/lib/postgresql/** rwklx,
+  deny /etc/credstore.encrypted/** rwklx,
+  deny /etc/candor/** rwklx,
+  deny /etc/shadow r,
+  deny /etc/gshadow r,
+  deny /boot/** rwklx,
+}

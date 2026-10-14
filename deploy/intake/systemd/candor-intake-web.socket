@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# C-06 source web listener: the ONLY target of the intake onion service (torrc
+# HiddenServicePort 80 unix:/run/candor/source-web/http.sock). NET-002: Unix socket only, no
+# TCP listener anywhere. Created by PID 1, so candor-web needs no write access to /run and
+# the socket mode/owner cannot be changed by the service (07 §4.1 socket permissions:
+# directory 0750, group = the single permitted client = the intake tor instance).
+[Unit]
+Description=Candor source web socket (C-06, Z-INTAKE)
+# The directory is created by tmpfiles.d/candor-intake.conf (0750 candor-web:_tor-candor-intake).
+After=systemd-tmpfiles-setup.service
+Requires=nftables.service
+After=nftables.service
+
+[Socket]
+ListenStream=/run/candor/source-web/http.sock
+SocketUser=candor-web
+SocketGroup=_tor-candor-intake
+SocketMode=0660
+DirectoryMode=0750
+RemoveOnStop=yes
+Accept=no
+# 07 §11: concurrent connections from tor to web = 512.
+Backlog=512
+FileDescriptorName=http
+Service=candor-intake-web.service
+
+[Install]
+WantedBy=sockets.target

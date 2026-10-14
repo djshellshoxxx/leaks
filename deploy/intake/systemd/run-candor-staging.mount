@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Tier W staging area (ADR-034; 07 §5.3; 17 §5.4): RAM-only tmpfs holding ciphertext parts
+# under per-session keys that exist only in sealer RAM. Never on persistent storage
+# (32 `intake.tierw_staging_bytes`: staging on persistent storage = DANGEROUS).
+# Ownership is set after mounting by libmount (X-mount.owner/group/mode, util-linux >= 2.38;
+# Debian 13 ships 2.41): 0700 candor-sealer - no other non-root user can enter it. The sealer
+# writes it itself through candor-safefs, which requires a 0700 root owned by its own uid
+# (crates/candor-sealer SPEC-NOTES item 7; AUD-RM2-SEA-16).
+# `noswap` (Linux >= 6.4) makes the mount fail on kernels that cannot honour it: fail closed.
+# Size: CE-SINGLE 4 GiB (18 §4.1), CE-HARDENED 8 GiB (18 §4.2, 32 default) via profile drop-in.
+[Unit]
+Description=Candor Tier W staging tmpfs (ciphertext only, RAM only)
+DefaultDependencies=no
+Conflicts=umount.target
+Before=local-fs.target umount.target
+After=systemd-sysusers.service
+
+[Mount]
+What=tmpfs
+Where=/run/candor/staging
+Type=tmpfs
+Options=size=4G,nr_inodes=65536,mode=0700,nosuid,nodev,noexec,noswap,X-mount.owner=candor-sealer,X-mount.group=candor-sealer,X-mount.mode=0700
+DirectoryMode=0755
+
+[Install]
+WantedBy=local-fs.target

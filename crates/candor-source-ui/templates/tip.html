@@ -1,0 +1,7 @@
+{#- SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{#- One safety tip (11a TIP-002): NORMAL text always visible, HIGHER-RISK detail in <details>. -#}
+<div class="tip"><p>{{ p.tm(t.normal_key().as_str())|safe }}</p>
+{%- if p.tip_details() %}
+<details><summary>{{ p.t("tip-high-summary") }}</summary><p>{{ p.tm(t.high_key().as_str())|safe }}</p></details>
+{%- endif %}
+</div>

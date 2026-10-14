@@ -1,0 +1,27 @@
+{#- SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{% extends "layout.html" %}
+{#- S13 Close mailbox: consequence text incl. closure timing and configured backup statement
+    (SUI-035, SUI-080); passphrase re-entry (08 SW-15). -#}
+{% block main %}
+<h1>{{ p.t("sui-close-h1") }}</h1>
+{% include "errors.html" %}
+<p>{{ p.t("sui-close-explain") }}</p>
+<p>{% if let Some(days) = p.vm.deployment.intake_backup_days %}{{ p.t1("sui-close-backups", "days", days) }}{% else %}{{ p.t("sui-close-no-backups") }}{% endif %}</p>
+{%- let c = crate::guidance::GC35 %}
+<details><summary>{{ p.t(c.title) }}</summary>{% for b in c.normal %}{{ p.block_html(b)|safe }}{% endfor %}</details>
+<form method="post" action="{{ p.href(Route::End) }}">
+{% include "ft.html" %}
+<input type="hidden" name="action" value="delete-account">
+{%- let fid = "passphrase" %}
+<div class="field">
+<label for="f-passphrase">{{ p.t("sui-close-passphrase") }}</label>
+{% include "field_error.html" %}
+<input type="text" id="f-passphrase" name="passphrase" autocomplete="off" autocapitalize="none" spellcheck="false" dir="ltr" maxlength="256"{% if p.has_field_error(fid) %} aria-invalid="true" aria-describedby="e-passphrase"{% endif %}>
+</div>
+<div class="actions pair">
+<button type="submit">{{ p.t("sui-close-yes") }}</button>
+<a class="btn" href="{{ p.href(Route::Inbox) }}">{{ p.t("sui-close-no") }}</a>
+</div>
+</form>
+<p>{{ p.t("sops-legal-n1") }} {{ p.t("sops-legal-n2") }}</p>
+{% endblock %}

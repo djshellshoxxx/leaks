@@ -1,0 +1,20 @@
+{#- SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{% extends "layout.html" %}
+{#- S04b-X: fail closed; never "send anyway" (ADR-037 §1, SUI-057). -#}
+{% block main %}
+<h1>{{ p.t("sui-nox-h1") }}</h1>
+<p>{{ p.t("sui-nox-text") }}</p>
+<ul>
+{%- for c in p.vm.no_reader.alternatives %}
+<li><bdi>{{ c.name }}</bdi>: <bdi>{{ c.description }}</bdi></li>
+{%- endfor %}
+</ul>
+{%- if !p.vm.deployment.external_bodies.is_empty() %}
+<p>{{ p.t("sui-nox-external") }}</p>
+<ul>{% for b in p.vm.deployment.external_bodies %}<li dir="auto">{{ b }}</li>{% endfor %}</ul>
+{%- endif %}
+<div class="actions pair">
+<a class="btn" href="{{ p.href(Route::New) }}">{{ p.t("sui-nox-choose") }}</a>
+<a class="btn" href="{{ p.href(Route::Concerns) }}">{{ p.t("sui-nox-change") }}</a>
+</div>
+{% endblock %}

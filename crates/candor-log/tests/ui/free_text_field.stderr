@@ -1,0 +1,7 @@
+error[E0559]: variant `AuditEvent::CaseOpened` has no field named `message`
+ --> tests/ui/free_text_field.rs:9:9
+  |
+9 |         message: "user agent Mozilla/5.0",
+  |         ^^^^^^^ `AuditEvent::CaseOpened` does not have this field
+  |
+  = note: all struct fields are already assigned

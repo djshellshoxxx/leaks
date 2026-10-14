@@ -1,0 +1,8 @@
+PROXY TCP6 fc00:dead:beef:4dad::0:29a ::1 666 80
+POST /en/login HTTP/1.1
+Host: abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion
+Content-Length: 4
+Transfer-Encoding: chunked
+
+0
+

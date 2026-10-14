@@ -1,0 +1,10 @@
+error[E0277]: `Sensitive<String>` doesn't implement `Debug`
+ --> tests/ui/debug_sensitive.rs:7:30
+  |
+7 |     let _s = format!("{:?}", ua);
+  |                       ----   ^^ `Sensitive<String>` cannot be formatted using `{:?}` because it doesn't implement `Debug`
+  |                       |
+  |                       required by this formatting parameter
+  |
+  = help: the trait `Debug` is not implemented for `Sensitive<String>`
+  = note: this error originates in the macro `$crate::__export::format_args` which comes from the expansion of the macro `format` (in Nightly builds, run with -Z macro-backtrace for more info)
