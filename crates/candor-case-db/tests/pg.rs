@@ -214,6 +214,49 @@ async fn rls_case_acl_hides_non_member() {
     assert_eq!(count(&mut tx, "core.case_key_wrap", "").await, 1);
 }
 
+/// SECURITY: a Desk principal cannot add itself to an existing case. This
+/// reproduces the prior RLS WITH CHECK (user_id = candor.uid()) escalation.
+#[tokio::test]
+async fn rls_case_member_denies_self_enrollment_without_existing_membership() {
+    let Some(b) = base() else { return };
+    let name = fresh_db(&b).await;
+    let (tenant, owner, stranger) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let mut s = su(&b, &name).await;
+    load_fixtures(&mut s, tenant, owner).await;
+    // Ensure that the attempted write cannot fail solely due to a missing
+    // user foreign key; the outsider is a real user in the same tenant.
+    sqlx::query(
+        "INSERT INTO core.app_user (tenant_id, user_id, username, display_name, state) \
+                 VALUES ($1, $2, 'outsider', 'Outsider', 'active')",
+    )
+    .bind(tenant)
+    .bind(stranger)
+    .execute(&mut s)
+    .await
+    .unwrap();
+
+    let mut desk = conn(&b, &name, "candor_case").await;
+    let mut tx = ctx(&mut desk, tenant, stranger, "desk").await;
+    let attempt = sqlx::query(
+        "INSERT INTO core.case_member (tenant_id, case_id, user_id, access_level) \
+         VALUES ($1, $2, $3, 'lead')",
+    )
+    .bind(tenant)
+    .bind(tenant)
+    .bind(stranger)
+    .execute(&mut *tx)
+    .await;
+    assert!(
+        attempt.is_err(),
+        "an unassigned Desk account enrolled itself as a lead in another case"
+    );
+    tx.rollback().await.unwrap();
+
+    // The original legitimate lead is still a member.
+    let mut tx = ctx(&mut desk, tenant, owner, "desk").await;
+    assert_eq!(count(&mut tx, "core.case_member", "").await, 1);
+}
+
 // ---- grant matrix (db-grant-audit; 09 §6.4, §7; ADR-015) ---------------------
 
 #[tokio::test]
