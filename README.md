@@ -47,6 +47,10 @@ Specification set: complete draft v1.0 (2026-09-30). Implementation: RM-0, RM-1 
 
 A static design preview (landing page plus every source-interface screen rendered from `candor-source-ui`) lives in `docs/` for GitHub Pages. Regenerate the screens with `cargo run -p candor-source-ui --example render_all` and copy the `en_*` pages into `docs/preview/`. The preview is not a live service and accepts nothing.
 
+## Wiki
+
+Wiki source pages are in [docs/wiki/](docs/wiki/Home.md): a navigation layer for the specs, the developer commands and the codebase map. Authoritative content remains in `specs/`.
+
 ## Support
 
 Candor is developed in the open and will stay free. Donations are optional and buy no influence over security decisions. Monero (XMR):
