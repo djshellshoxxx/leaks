@@ -11,6 +11,6 @@ Summary from the README; the binding decisions are in `specs/DECISIONS.md` (47 A
 - **No server-side master key; administrators hold no case keys.**
 - **Audit logs without source-identifying metadata.**
 - **Cryptographic deletion** reaching backups within a bounded window.
-- **Trust-path code in Rust with `unsafe` forbidden** (workspace lints), and fuzzing of parsers (`crates/candor-core/fuzz/`).
+- **Rust trust-path code.** The workspace lints set `unsafe_code = "forbid"` and deny `unwrap`, `expect` and `panic` in Clippy; check each crate for overrides. Parsers are fuzzed (`crates/candor-core/fuzz/`).
 
 *(inferred: the crate split, e.g. `candor-core` and `candor-safefs` under Apache-2.0 OR MIT per ADR-031, is there to keep the cryptographic and file-handling primitives reusable; the Cargo.toml header states the licence split.)*
