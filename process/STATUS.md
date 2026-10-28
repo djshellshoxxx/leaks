@@ -4,29 +4,31 @@ Branch `claude/tender-tesla-z8tfnl`, pull request #1 (draft). Build paused: the 
 
 Nothing here is "unhackable", "perfectly anonymous" or "100% secure". Assurance claims below mean only what the audit files in `process/audits/` say.
 
-## 1. Done and independently audited (zero open Critical/High; Mediums fixed or accepted in writing)
+## 1. Audit status by component
 
-| Area | Crate / path | Audit file | Verdict |
+Verdicts are the final `Gate:` line in each audit file under `process/audits/` (reconciled 2026-10-28 against the files; the earlier table overstated several). "PASS" means no open Critical/High/Medium in scope at that commit. It is not a security certification.
+
+| Area | Crate / path | Audit file | Final gate (commit) |
 |---|---|---|---|
 | Specifications, research, decisions (ADR-001..057), 2,400+ traceable requirements, three adversarial reviews, secure-implementation specs, source safety tips | `specs/`, `research/`, `process/` | `specs/REVIEW-REPORT.md` | complete draft |
-| Foundations: CI, supply chain (cargo-deny/vet, SBOM), DCO, reproducible builds, nightly fuzz | `.github/`, `deny.toml`, `supply-chain/`, `scripts/` | `AUDIT-RM0-INF.md` | pass |
-| Crypto library (HPKE/X-Wing, STREAM, KDF, formats) | `crates/candor-core` | `AUDIT-RM1-core.md` | pass |
-| Safe file handling | `crates/candor-safefs` | `AUDIT-RM1-safefs-log.md` | pass |
-| Privacy-preserving audit log | `crates/candor-log` | `AUDIT-RM1-safefs-log.md` (round 4) | pass |
-| Source-facing HTML (no JS), safety tips | `crates/candor-source-ui` | `AUDIT-RM1-source-ui.md` | pass |
-| Intake store (PostgreSQL, erasure, deletion list) | `crates/candor-intake-store` | `AUDIT-RM2-intake-store.md` (round 7) | pass |
-| Sealer (in-RAM encryption for the no-JS path) | `crates/candor-sealer` | `AUDIT-RM2-sealer.md` (round 7) | pass |
-| Intake host configuration (units, AppArmor, nftables, config-check) | `deploy/` | `AUDIT-RM2-deploy.md`, `AUDIT-RM2-memlock-deploy.md` (round 2) | pass |
-| systemd socket adoption, the only `unsafe` crate | `crates/candor-memlock` | `AUDIT-RM2-memlock-deploy.md` | pass |
-| Safe file reader (reproducibly built) | `crates/candor-safe-read` | `AUDIT-RM2-memlock-deploy.md` | pass |
-| Source web service (Tor-only, no-JS) | `crates/candor-intake-web` | `AUDIT-RM2-intake-web.md` (round 2) | pass |
+| Foundations: CI, supply chain (cargo-deny/vet, SBOM), DCO, reproducible builds, nightly fuzz | `.github/`, `deny.toml`, `supply-chain/`, `scripts/` | `AUDIT-RM0-RM1-sourceui-infra.md` (infra part) | PASS-conditional, 2026-10-01 `c9014b2`: needs Security Lead import approvals and a green first CI run (cargo-vet still red, §4) |
+| Crypto library (HPKE/X-Wing, STREAM, KDF, formats) | `crates/candor-core` | `AUDIT-RM1-candor-core.md` | PASS, 2026-10-01 `0d486a9` (round 2) |
+| Safe file handling | `crates/candor-safefs` | `AUDIT-RM1-safefs-log.md` | file gate FAIL, 2026-10-01 `fc64069`; no separate safefs verdict stated in the file |
+| Privacy-preserving audit log | `crates/candor-log` | `AUDIT-RM1-safefs-log.md` | **FAIL**, 2026-10-01 `fc64069`: 2 High open (LOG-02 residual channel, LOG-16); LOG-17..19 Medium need fix or written acceptance |
+| Source-facing HTML (no JS), safety tips | `crates/candor-source-ui` | `AUDIT-RM0-RM1-sourceui-infra.md` (source-ui part) | PASS, 2026-10-01 `c9014b2` |
+| Intake store (PostgreSQL, erasure, deletion list) | `crates/candor-intake-store` | `AUDIT-RM2-intake-store.md` (round 7) | PASS, 2026-10-01 `e9e6a1a` |
+| Sealer (in-RAM encryption for the no-JS path) | `crates/candor-sealer` | `AUDIT-RM2-sealer.md` | PASS, 2026-10-01 `3f41a3a` |
+| Intake host configuration (units, AppArmor, nftables, config-check) | `deploy/` | `AUDIT-RM2-deploy.md` | PASS, 2026-10-01 `2956e4f` (latest delta in file) |
+| systemd socket adoption, the only `unsafe` crate | `crates/candor-memlock` | `AUDIT-RM2-memlock-deploy.md` | PASS, 2026-10-07 `2c00f6f` (round 2) |
+| Safe file reader (reproducibly built) | `crates/candor-safe-read` | `AUDIT-RM2-deploy.md` | PASS, 2026-10-01 `e9e6a1a` (with `deploy/`) |
+| Source web service (Tor-only, no-JS) | `crates/candor-intake-web` | `AUDIT-RM2-intake-web.md` | PASS, 2026-10-01 `9ffeffd` (for in-scope files; later changes void it per file §G) |
 | Preview site and donation page | `docs/` | n/a | live once Pages is enabled |
 
 ## 2. Built but NOT cleared
 
 | Item | State | What is needed |
 |---|---|---|
-| istore IPC (store link: protocol, server, client, K31 deletion ops, SEAL_SIGNAL/DeleteReplies/CloseMailbox, idempotent retry, `mailbox_account` table) | audit rounds 1–3 found and the builder fixed IPC-01..14 (verified by the auditor). IPC-15 (shutdown flush lost queued writes) was fixed by a Haiku-class builder and checked by the lead with a mutation test (old behaviour: 2 of 7 tests fail; fix: all pass). | **A stronger independent round-4 re-audit of `Sealer::shutdown_flush`, `IstoreSink`, `classify_upsert` and migration 0001, plus a variant scan.** The gate is CONDITIONAL until then (`AUDIT-RM2-istore-ipc.md`). |
+| istore IPC (store link: protocol, server, client, K31 deletion ops, SEAL_SIGNAL/DeleteReplies/CloseMailbox, idempotent retry, `mailbox_account` table) | audit rounds 1–3 found and the builder fixed IPC-01..14 (verified by the auditor). IPC-15 (shutdown flush lost queued writes) was fixed by a Haiku-class builder and checked by the lead with a mutation test (old behaviour: 2 of 7 tests fail; fix: all pass). | **A stronger independent round-4 re-audit of `Sealer::shutdown_flush`, `IstoreSink`, `classify_upsert` and migration 0001, plus a variant scan.** The audit file's final gate is **FAIL** (2026-10-07 `8d37885`, IPC-15 High recorded open). The builder's IPC-15 fix has not been independently re-audited, so the gate is not CONDITIONAL (`AUDIT-RM2-istore-ipc.md`). |
 | `crates/candor-case-db` (RM-3: case schema, RLS, TenantTx) | migration 0001 and tests exist; its live schema lint still refuses; no lib.rs beyond a placeholder | finish, then audit |
 | `crates/candor-authz` (RM-3: authorization engine, COI) | modules `model`, `coi`, `ids`, `policy` written; `lib.rs` is a placeholder; untested as a whole | finish, then audit |
 
@@ -70,3 +72,15 @@ Nothing here is "unhackable", "perfectly anonymous" or "100% secure". Assurance 
   - `candor-case`: `AuditCommit` now returns a named `AuditCommitFailed` instead of `Result<(), ()>`; three `assert!(false, ..)` in `case_service.rs` became `panic!` with the same messages. case_service 4 and schema 3 pass.
   - Still red (unimplemented requirements, loop work): `candor-case/tests/authz_invariants.rs`, `candor-relay/tests/relay_invariants.rs`, `candor-worker/tests/job_retention.rs`, `candor-auth/tests/session_invariants.rs`. All of this code is built, not audited.
 - 2026-10-10 loop cycle 1 (resumed): `candor-worker` implemented by a Haiku worker to satisfy `job_retention.rs` as written (Job claim/renew with 5-min lease, `base_backoff_seconds` = min(30·2^n, 6 h), `RetentionCase::evaluate`: legal hold wins, no silent disposal). Lead-verified: 8/8 tests, clippy clean, fmt clean, safefs-lint and candor-log logging lint pass; code read, arithmetic checked. BUILT, NOT AUDITED. Open: the spec's ±20 % backoff jitter is not implemented (needs an RNG, untested); `candor-retention` types not reused (different model). Next in the loop: `candor-case/tests/authz_invariants.rs`, then `candor-auth/tests/session_invariants.rs`, then `candor-relay/tests/relay_invariants.rs`.
+
+## 7. Update 2026-10-28: reconciliation of the handoff against the audit files (documentation only)
+
+- Scope: `process/STATUS.md` only. No source, test, or policy file changed. Haiku-class documentation pass.
+- Repository state checked: default branch `main` at `065ac0c`; this branch `claude/tender-tesla-z8tfnl` at `4686d63`, equal to the remote head. Draft PR #1 is open on this branch.
+- Other owners, left untouched: draft PRs #4–#7 on `security/*` branches (case access and COI, PostgreSQL self-enrollment, retention hold, staff session); PRs #8 (modular-first roadmap) and #9 (wiki), which do not change this file; Dependabot PR #10.
+- Evidence: the audit-file names cited in §1 were checked against `process/audits/`. Most did not exist and are corrected above. Each verdict now comes from the final `Gate:` line in its audit file, not from earlier wording in this handoff.
+- Overstatements corrected: `candor-log` is FAIL (2 High open); the `candor-safefs` file gate is FAIL; the infra gate is PASS-conditional; the istore IPC gate is FAIL (IPC-15 High recorded open).
+- Not present: `candor_leaks_security_audit_2026-10-12.md` is not in the repository, so no historical reconciliation against it was possible.
+- Not run: no `cargo build`, `cargo test` or clippy in this session. Only `cargo --version` was attempted, which started a toolchain download. Nothing here is verified by a test run.
+- Unresolved (no Haiku-class change proposed): IPC-15 re-audit; LOG-02 and LOG-16 (candor-log High); LOG-17..19 Medium acceptance; the intake-web fuzz runs (not run per its audit); cargo-vet sign-off (§4). All security-sensitive, so they wait for owner review and a stronger model.
+- Next: an independent auditor, not the builder, re-tests the istore IPC-15 fix and the candor-log findings. This handoff is updated again after that result.
