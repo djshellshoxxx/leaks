@@ -1,0 +1,105 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# AppArmor profile for the intake PostgreSQL 16 cluster (C-08 store database; 17 §5.2,
+# R7 SI-B-04; AUD-RM2-DEP-08). Enforce mode. Installed as /etc/apparmor.d/candor-intake-pg and
+# attached by AppArmorProfile=candor-intake-pg in candor-intake-pg.service (no '-' prefix).
+# Allowed: the server binary and its libraries/share files, the Candor configuration, its data
+# directory, its Unix socket directory and POSIX shared memory. Denied: exec (no
+# archive_command, no COPY PROGRAM), IP networking, capabilities, every other Candor path.
+abi <abi/3.0>,
+# Self-contained (AUD-RM2-DEP-23): no include of distribution abstractions or tunables (their
+# drop-in directories could widen this profile). The two variables are defined here (values of
+# Debian's tunables/proc and tunables/kernelvars); the runtime rules are inlined below.
+@{PROC}=/proc/
+@{pid}={[1-9],[1-9][0-9],[1-9][0-9][0-9],[1-9][0-9][0-9][0-9],[1-9][0-9][0-9][0-9][0-9],[1-9][0-9][0-9][0-9][0-9][0-9],[1-4][0-9][0-9][0-9][0-9][0-9][0-9]}
+
+profile candor-intake-pg /usr/lib/postgresql/16/bin/postgres flags=(attach_disconnected) {
+  # ---- runtime, inlined and minimised from abstractions/base (AUD-RM2-DEP-23): dynamic loader
+  # and shared libraries (read/map, no write, no exec of anything else), /dev/null for the
+  # inherited stdio, /dev/urandom, the own memory map (glibc/Rust main-thread stack guard) and
+  # signals between the process's own threads/processes. Not inlined: locale, X11, home
+  # directories, ld.so.preload, journal sockets, ptrace, the other base rules.
+  /etc/ld.so.cache r,
+  /usr/lib/*-linux-gnu*/**.so* mr,
+  /dev/null rw,
+  /dev/urandom r,
+  @{PROC}/@{pid}/maps r,
+  signal (send, receive) peer=@{profile_name},
+  # Unix-socket rules abstractions/base granted (kept so behaviour is unchanged).
+  unix (create, getattr, getopt, setopt, shutdown),
+  unix (receive) peer=(label=unconfined),
+  unix peer=(label=@{profile_name}),
+  # Peer authentication resolves the client uid to a name (getpwuid via nsswitch files).
+  /etc/nsswitch.conf r,
+  /etc/passwd r,
+  # Server locale (lc_* from initdb) and encoding conversion modules.
+  /usr/lib/locale/** r,
+  /usr/lib/*-linux-gnu*/gconv/gconv-modules* r,
+
+  /usr/lib/postgresql/16/bin/postgres mr,
+  /usr/lib/postgresql/16/lib/** mr,
+  /usr/share/postgresql/16/** r,
+  /usr/share/postgresql-common/** r,
+  /usr/share/zoneinfo/** r,
+  /etc/candor/intake/postgresql/ r,
+  /etc/candor/intake/postgresql/* r,
+
+  # Data directory (LUKS volume, 09 §10) and socket directory.
+  owner /var/lib/postgresql/16/candor-intake/ rw,
+  owner /var/lib/postgresql/16/candor-intake/** rwk,
+  /run/candor/intake-pg/ rw,
+  /run/candor/intake-pg/** rwk,
+  # Cumulative statistics on tmpfs (data_directory/pg_stat -> here; AUD-RM2-STO-11).
+  owner /run/candor/intake-pg-stat/ rw,
+  owner /run/candor/intake-pg-stat/** rwk,
+  # dynamic_shared_memory_type = posix, shared_memory_type = mmap.
+  owner /dev/shm/PostgreSQL.* rw,
+  /run/systemd/notify w,
+
+  network unix stream,
+  network unix dgram,
+  unix (create, bind, listen, accept, connect, receive, send, getattr, getopt, setopt, shutdown) type=stream,
+  # postmaster and backends signal each other; systemd signals the postmaster.
+  signal (send, receive) peer=candor-intake-pg,
+  signal (receive) peer=unconfined,
+
+  @{PROC}/@{pid}/stat r,
+  @{PROC}/@{pid}/status r,
+  @{PROC}/@{pid}/oom_score_adj rw,
+  /sys/fs/cgroup/**/memory.max r,
+  /sys/devices/system/cpu/** r,
+
+  # ---- explicit denials (win over any allow; denials are audited) ----
+  deny capability,
+  deny ptrace,
+  deny mount,
+  deny umount,
+  deny pivot_root,
+  deny network inet,
+  deny network inet6,
+  deny network netlink,
+  deny network packet,
+  deny /{usr/,}bin/** x,
+  deny @{PROC}/*/mem rw,
+  deny @{PROC}/*/environ r,
+  deny @{PROC}/kcore r,
+  deny /dev/mem rw,
+  deny /dev/kmem rw,
+  deny /dev/log w,
+  deny /run/systemd/journal/dev-log w,
+  deny /run/systemd/journal/socket w,
+  deny /run/systemd/journal/syslog w,
+  deny /var/log/** w,
+  deny /run/tor-instances/** rwklx,
+  deny /var/lib/tor-instances/** rwklx,
+  deny /run/candor/source-web/** rwklx,
+  deny /run/candor/sealer/** rwklx,
+  deny /run/candor/istore/** rwklx,
+  deny /run/candor/staging/** rwklx,
+  deny /var/lib/candor/** rwklx,
+  deny /run/credentials/** rwklx,
+  deny /etc/credstore.encrypted/** rwklx,
+  deny /etc/tor/** rwklx,
+  deny /etc/shadow r,
+  deny /etc/gshadow r,
+  deny /boot/** rwklx,
+}

@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Extra RUSTFLAGS shared by scripts/repro-check.sh and the release pipeline
+# (AUD-RM0-INF-04, 28 §8.2). One flag per line; '#' lines are comments.
+# The release pipeline MUST build with exactly these flags plus the same
+# --remap-path-prefix set, or published SHA256SUMS cannot match release builds.
+# Currently empty: the workspace relies on [profile.release] in Cargo.toml.

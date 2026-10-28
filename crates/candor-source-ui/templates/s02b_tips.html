@@ -1,0 +1,16 @@
+{#- SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{% extends "layout.html" %}
+{#- S02b Safety tips for each step (11a §5; ADR-051(2)). Lists every tip with both tracks, so
+    opening this page does not single out higher-risk readers (05 GP-1). -#}
+{% block main %}
+<h1>{{ p.t("tip-page-h1") }}</h1>
+<p>{{ p.tm("tip-page-intro")|safe }}</p>
+{%- for t in p.all_tips() %}
+<section id="{{ t.anchor() }}" aria-labelledby="{{ t.anchor() }}-h"><h2 id="{{ t.anchor() }}-h">{{ p.t(t.title_key().as_str()) }}</h2>
+{% include "tip.html" %}
+</section>
+{%- endfor %}
+<div class="actions">
+<a class="btn btn-primary" href="{{ p.href(Route::Safety) }}">{{ p.t("sui-btn-back") }}</a>
+</div>
+{% endblock %}

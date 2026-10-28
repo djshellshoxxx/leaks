@@ -1,0 +1,79 @@
+{
+  "cases": [
+    {
+      "ciphertext": "3e12ba9f3ec33891d59508da15daca39",
+      "ciphertext_len": 16,
+      "ciphertext_sha256": "f92d7d2c8a967fe52951e24af38cc6eda65ce190f0eba876cabc488903e73d31",
+      "plaintext_len": 0
+    },
+    {
+      "ciphertext": "4ae4769759acab8547292ed40805803379",
+      "ciphertext_len": 17,
+      "ciphertext_sha256": "ee41d29aaa99fd3db560f0407df10e6661b02467c8d11b05d925a2024ba70885",
+      "plaintext_len": 1
+    },
+    {
+      "ciphertext": "4a4b3ef2255b4d3353955dcb22a76718cec86cde2b4650369a1b4da3251bf257eb5b791f9982d9ef822a8e3b2f709b7b3d16308bcbf71e2f5a7e2c3f0d13e522258121cbd343835addc35bdb1a7c74eb0cf4ce1c423ab3d4223f020608d326fa530c1a4989e013c5e6e42a22e8cd5bd79c8c6290",
+      "ciphertext_len": 116,
+      "ciphertext_sha256": "cb6adaa2c3397c6fd6f14c1dff5bce30be1d720936bea72d6d55c83804f26bc3",
+      "plaintext_len": 100
+    },
+    {
+      "ciphertext_len": 65552,
+      "ciphertext_sha256": "5f266f635f25301542df0ae07ceb69d2e7a050506db3f3cc6d6968736ec61d03",
+      "plaintext_len": 65536
+    },
+    {
+      "ciphertext_len": 65569,
+      "ciphertext_sha256": "82bcdd9356af3abd7dc816fefad15526b00da4413d2854f8b2c24601e29fecc4",
+      "plaintext_len": 65537
+    },
+    {
+      "ciphertext_len": 196682,
+      "ciphertext_sha256": "8aa06a354e0fc2ca964131d20473a4cef3b8cb2292a1a7156deb2b7c6121aae8",
+      "plaintext_len": 196618
+    }
+  ],
+  "ck": "96d8b02665f1d6dfa3489869b015abd47742702f3a676717ffaece2679c11242",
+  "description": "Payload STREAM (§13.3). K_pay = HKDF(IKM=CK, salt=payload_nonce, info='candor/v1/payload' || u16be(suite)). plaintext byte i = i mod 251.",
+  "k_pay": "201d9ae556b6bd5925a5080a5794b4915bef0eb6fe9d26a0e00a140c5fc1d1f6",
+  "negative": [
+    {
+      "base_plaintext_len": 196618,
+      "expect": "reject",
+      "mutation": "drop the final chunk",
+      "name": "truncated"
+    },
+    {
+      "base_plaintext_len": 196618,
+      "expect": "reject",
+      "mutation": "drop the final chunk and declare plaintext_len = 196608",
+      "name": "no_final"
+    },
+    {
+      "base_plaintext_len": 196618,
+      "expect": "reject",
+      "mutation": "swap chunks 0 and 1",
+      "name": "reordered"
+    },
+    {
+      "base_plaintext_len": 196618,
+      "expect": "reject",
+      "mutation": "replace chunk 1 by chunk 0",
+      "name": "duplicated"
+    },
+    {
+      "base_plaintext_len": 196618,
+      "expect": "reject",
+      "mutation": "append one 0x00 byte",
+      "name": "trailing"
+    },
+    {
+      "base_plaintext_len": 196618,
+      "expect": "reject",
+      "mutation": "flip bit 0 of the last byte",
+      "name": "bitflip_last"
+    }
+  ],
+  "payload_nonce": "3c37f0fbd893edad2434995a31658649"
+}

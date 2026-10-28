@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Reference RM-3 relay-link policy. Installer substitutes the signed-config address.
+define intake_relay = 10.20.30.40
+
+table inet candor_relay_link {
+    chain output {
+        type filter hook output priority 0; policy drop;
+        ct state established,related accept
+        meta skuid candor-relay ip daddr $intake_relay tcp dport 7443 ct state new accept
+    }
+
+    chain input {
+        type filter hook input priority 0; policy drop;
+        ct state established,related accept
+    }
+}

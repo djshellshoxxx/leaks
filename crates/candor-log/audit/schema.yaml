@@ -1,0 +1,1495 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Candor audit schema registry (specs/20-LOGGING-AUDITING.md §5, §7; LOG-014).
+# Changes to this file require the `audit-schema` review label and two
+# code-owner approvals (27). It must equal candor_log::schema::registry_yaml();
+# crates/candor-log/tests/schema_registry.rs fails on any drift.
+# v2 (AUD-RM1-LOG-02/16/17): date-only events are written to the shuffled
+# slot streams `case-slot` / `sys-slot`; a CASE event with a system actor is
+# date-only and goes to `case-slot` as well. Tombstones carry dual-approved
+# payloads (`CaseDisposal`, `RetentionPrune`) built only by the disposal API.
+version: 2
+events:
+  - type: "auth.login_succeeded"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "method"
+        type: "AuthMethod"
+        codes: ["FIDO2", "PIV", "TOTP", "SSO+FIDO2"]
+      - name: "aal"
+        type: "Aal"
+        codes: ["AAL1", "AAL2", "AAL3"]
+      - name: "authenticator_aaguid_class"
+        type: "AaguidClass"
+        codes: ["CERTIFIED", "UNCERTIFIED"]
+      - name: "audience"
+        type: "Audience"
+        codes: ["DESK_API", "ADMIN_API"]
+  - type: "auth.login_failed"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "method"
+        type: "AuthMethod"
+        codes: ["FIDO2", "PIV", "TOTP", "SSO+FIDO2"]
+      - name: "failure_code"
+        type: "LoginFailure"
+        codes: ["BAD_ASSERTION", "UV_MISSING", "UNKNOWN_CREDENTIAL", "SUSPENDED", "IDP_REJECTED"]
+      - name: "audience"
+        type: "Audience"
+        codes: ["DESK_API", "ADMIN_API"]
+  - type: "auth.stepup_succeeded"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "operation_class"
+        type: "Code<OperationClass>"
+      - name: "descriptor_hash_prefix"
+        type: "HashPrefix8"
+  - type: "auth.stepup_failed"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "operation_class"
+        type: "Code<OperationClass>"
+      - name: "descriptor_hash_prefix"
+        type: "HashPrefix8"
+  - type: "auth.logout"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "reason_code"
+        type: "SessionEndReason"
+        codes: ["USER_LOGOUT", "IDLE_TIMEOUT", "ABSOLUTE_TIMEOUT", "REVOKED", "SUSPENDED", "DEVICE_REVOKED"]
+  - type: "auth.session_expired"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "reason_code"
+        type: "SessionEndReason"
+        codes: ["USER_LOGOUT", "IDLE_TIMEOUT", "ABSOLUTE_TIMEOUT", "REVOKED", "SUSPENDED", "DEVICE_REVOKED"]
+  - type: "auth.session_revoked"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "reason_code"
+        type: "SessionEndReason"
+        codes: ["USER_LOGOUT", "IDLE_TIMEOUT", "ABSOLUTE_TIMEOUT", "REVOKED", "SUSPENDED", "DEVICE_REVOKED"]
+  - type: "auth.token_refreshed"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields: []
+  - type: "auth.authenticator_enrolled"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "aaguid_class"
+        type: "AaguidClass"
+        codes: ["CERTIFIED", "UNCERTIFIED"]
+      - name: "count_after"
+        type: "SmallCount"
+  - type: "auth.authenticator_removed"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "aaguid_class"
+        type: "AaguidClass"
+        codes: ["CERTIFIED", "UNCERTIFIED"]
+      - name: "count_after"
+        type: "SmallCount"
+  - type: "auth.totp_fallback_used"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields: []
+  - type: "user.created"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "target"
+        type: "UserRef"
+      - name: "source"
+        type: "DirectorySource"
+        codes: ["MANUAL", "SCIM", "IDP"]
+  - type: "user.suspended"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "target"
+        type: "UserRef"
+      - name: "source"
+        type: "DirectorySource"
+        codes: ["MANUAL", "SCIM", "IDP"]
+  - type: "user.reactivated"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "target"
+        type: "UserRef"
+      - name: "source"
+        type: "DirectorySource"
+        codes: ["MANUAL", "SCIM", "IDP"]
+  - type: "user.suspended_dormant"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "target"
+        type: "UserRef"
+      - name: "source"
+        type: "DirectorySource"
+        codes: ["MANUAL", "SCIM", "IDP"]
+  - type: "user.authenticator_count_low"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "target"
+        type: "UserRef"
+  - type: "user.enrollment_approved"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "target"
+        type: "UserRef"
+      - name: "approver"
+        type: "UserRef"
+  - type: "user.listed"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "scope"
+        type: "Code<ListScope>"
+  - type: "device.custody_recorded"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "target"
+        type: "UserRef"
+      - name: "device"
+        type: "DeviceKeyId"
+      - name: "custody_class"
+        type: "CustodyClass"
+        codes: ["INDEPENDENT", "ORG"]
+  - type: "device.custody_revoked"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "target"
+        type: "UserRef"
+      - name: "device"
+        type: "DeviceKeyId"
+      - name: "custody_class"
+        type: "CustodyClass"
+        codes: ["INDEPENDENT", "ORG"]
+  - type: "device.enroll_requested"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields: []
+  - type: "device.enrolled"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields: []
+  - type: "device.revoked"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields: []
+  - type: "role.assigned"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "target"
+        type: "UserRef"
+      - name: "role"
+        type: "Role"
+        codes: ["INTAKE_TRIAGER", "INVESTIGATOR", "CASE_LEAD", "REVIEWER", "CHANNEL_OWNER", "IDENTITY_CUSTODIAN", "LEGAL_COUNSEL", "OVERSIGHT", "RECORDS_OFFICER", "RECORDS_CUSTODIAN", "AUDITOR", "METRICS_VIEWER", "SECURITY_OFFICER", "SYS_ADMIN", "USER_ADMIN", "RECOVERY_TRUSTEE", "INDEPENDENT_APPROVER", "EMERGENCY_ADMIN"]
+  - type: "role.revoked"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "target"
+        type: "UserRef"
+      - name: "role"
+        type: "Role"
+        codes: ["INTAKE_TRIAGER", "INVESTIGATOR", "CASE_LEAD", "REVIEWER", "CHANNEL_OWNER", "IDENTITY_CUSTODIAN", "LEGAL_COUNSEL", "OVERSIGHT", "RECORDS_OFFICER", "RECORDS_CUSTODIAN", "AUDITOR", "METRICS_VIEWER", "SECURITY_OFFICER", "SYS_ADMIN", "USER_ADMIN", "RECOVERY_TRUSTEE", "INDEPENDENT_APPROVER", "EMERGENCY_ADMIN"]
+  - type: "role.expired"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "target"
+        type: "UserRef"
+      - name: "role"
+        type: "Role"
+        codes: ["INTAKE_TRIAGER", "INVESTIGATOR", "CASE_LEAD", "REVIEWER", "CHANNEL_OWNER", "IDENTITY_CUSTODIAN", "LEGAL_COUNSEL", "OVERSIGHT", "RECORDS_OFFICER", "RECORDS_CUSTODIAN", "AUDITOR", "METRICS_VIEWER", "SECURITY_OFFICER", "SYS_ADMIN", "USER_ADMIN", "RECOVERY_TRUSTEE", "INDEPENDENT_APPROVER", "EMERGENCY_ADMIN"]
+  - type: "authz.denied"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "action"
+        type: "Code<Action>"
+      - name: "resource_kind"
+        type: "Code<ResourceKind>"
+      - name: "reason_code"
+        type: "AuthzDenyReason"
+        codes: ["NO_RELATION", "TENANT_MISMATCH", "STEP_UP_REQUIRED", "DUAL_CONTROL_REQUIRED", "STATE_INVALID", "SUSPENDED"]
+  - type: "approval.created"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "dc_code"
+        type: "DcCode"
+      - name: "approver"
+        type: "Option<UserRef>"
+      - name: "effective_date"
+        type: "Option<DayStamp>"
+  - type: "approval.granted"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "dc_code"
+        type: "DcCode"
+      - name: "approver"
+        type: "Option<UserRef>"
+      - name: "effective_date"
+        type: "Option<DayStamp>"
+  - type: "approval.consumed"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "dc_code"
+        type: "DcCode"
+      - name: "approver"
+        type: "Option<UserRef>"
+      - name: "effective_date"
+        type: "Option<DayStamp>"
+  - type: "approval.expired"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "dc_code"
+        type: "DcCode"
+      - name: "approver"
+        type: "Option<UserRef>"
+      - name: "effective_date"
+        type: "Option<DayStamp>"
+  - type: "breakglass.requested"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "reason_code"
+        type: "Code<BreakglassReason>"
+      - name: "duration_min"
+        type: "DurationMin"
+      - name: "review_outcome"
+        type: "Option<ReviewOutcome>"
+        codes: ["PENDING", "JUSTIFIED", "NOT_JUSTIFIED"]
+  - type: "breakglass.approved"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "reason_code"
+        type: "Code<BreakglassReason>"
+      - name: "duration_min"
+        type: "DurationMin"
+      - name: "review_outcome"
+        type: "Option<ReviewOutcome>"
+        codes: ["PENDING", "JUSTIFIED", "NOT_JUSTIFIED"]
+  - type: "breakglass.expired"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "reason_code"
+        type: "Code<BreakglassReason>"
+      - name: "duration_min"
+        type: "DurationMin"
+      - name: "review_outcome"
+        type: "Option<ReviewOutcome>"
+        codes: ["PENDING", "JUSTIFIED", "NOT_JUSTIFIED"]
+  - type: "breakglass.reviewed"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "reason_code"
+        type: "Code<BreakglassReason>"
+      - name: "duration_min"
+        type: "DurationMin"
+      - name: "review_outcome"
+        type: "Option<ReviewOutcome>"
+        codes: ["PENDING", "JUSTIFIED", "NOT_JUSTIFIED"]
+  - type: "breakglass.wrap_refused"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "reason_code"
+        type: "Code<BreakglassReason>"
+      - name: "duration_min"
+        type: "DurationMin"
+      - name: "review_outcome"
+        type: "Option<ReviewOutcome>"
+        codes: ["PENDING", "JUSTIFIED", "NOT_JUSTIFIED"]
+  - type: "fleet.action"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "action_code"
+        type: "Code<crate::codes::FleetAction>"
+      - name: "outcome"
+        type: "Outcome"
+        codes: ["OK", "DENIED", "ERROR"]
+  - type: "fleet.denied"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "action_code"
+        type: "Code<crate::codes::FleetAction>"
+      - name: "outcome"
+        type: "Outcome"
+        codes: ["OK", "DENIED", "ERROR"]
+  - type: "cfg.changed"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "key"
+        type: "Code<ConfigKey>"
+      - name: "class"
+        type: "ConfigClass"
+        codes: ["SAFE", "ADVANCED", "DANGEROUS"]
+      - name: "old_value_hash"
+        type: "Hash32"
+      - name: "new_value"
+        type: "ConfigValue"
+  - type: "cfg.dangerous_enabled"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "key"
+        type: "Code<ConfigKey>"
+      - name: "expiry"
+        type: "StaffTimer"
+  - type: "cfg.dangerous_disabled"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "key"
+        type: "Code<ConfigKey>"
+      - name: "expiry"
+        type: "StaffTimer"
+  - type: "cfg.dangerous_expired"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "key"
+        type: "Code<ConfigKey>"
+      - name: "expiry"
+        type: "StaffTimer"
+  - type: "cfg.attestation_recorded"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "attestation_kind"
+        type: "AttestationKind"
+        codes: ["INFRA_BACKUP_EXCLUDES_VAULT"]
+      - name: "attester"
+        type: "UserRef"
+  - type: "cfg.change_cancelled"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields: []
+  - type: "cfg.workflow_published"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields: []
+  - type: "channel.config_changed"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields: []
+  - type: "keydir.entry_published"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "entry_kind"
+        type: "KeydirEntryKind"
+        codes: ["USER_KEY", "MEMBER_EPOCH_KEY", "CHANNEL_DESCRIPTOR", "CHANNEL_ROSTER", "OPERATOR_STATEMENT", "RELEASE"]
+      - name: "entry_hash"
+        type: "Hash32"
+      - name: "publication_slot_date"
+        type: "DayStamp"
+  - type: "keydir.consistency_failure"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "observer"
+        type: "Observer"
+        codes: ["DESK", "WITNESS", "MONITOR", "CORE"]
+      - name: "detail_code"
+        type: "Code<KeydirDetail>"
+  - type: "keydir.snapshot_rejected"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields: []
+  - type: "keydir.epoch_destroyed"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields: []
+  - type: "audit.checkpoint_signed"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "stream"
+        type: "StreamId"
+        codes: ["sec", "case", "sys", "case-slot", "sys-slot"]
+      - name: "seq_range"
+        type: "SeqRange"
+      - name: "root"
+        type: "CheckpointRoot"
+  - type: "audit.witness_cosigned"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "witness_id"
+        type: "WitnessId"
+      - name: "checkpoint_seq"
+        type: "Seq"
+  - type: "audit.witness_failed"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "witness_id"
+        type: "WitnessId"
+      - name: "checkpoint_seq"
+        type: "Seq"
+  - type: "audit.verification_failed"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "stream"
+        type: "StreamId"
+        codes: ["sec", "case", "sys", "case-slot", "sys-slot"]
+      - name: "seq"
+        type: "Seq"
+      - name: "failure_code"
+        type: "VerifyFailureCode"
+        codes: ["CHAIN_MISMATCH", "SEQUENCE_GAP", "SEQUENCE_ORDER", "NON_CANONICAL", "ENVELOPE_MISMATCH", "MERKLE_MISMATCH", "BAD_SIGNATURE", "CHECKPOINT_CHAIN", "TRUNCATED", "ROLLBACK", "MISSING_PREFIX", "UNBOUND_REDACTION", "UNBOUND_PRUNE"]
+  - type: "audit.exported"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "stream"
+        type: "StreamId"
+        codes: ["sec", "case", "sys", "case-slot", "sys-slot"]
+      - name: "seq_range"
+        type: "SeqRange"
+      - name: "destination_class"
+        type: "DestinationClass"
+        codes: ["AUDITOR_FILE", "REGULATOR", "LAW_ENFORCEMENT", "COUNSEL", "INTEGRATION", "INTERNAL"]
+      - name: "approvers"
+        type: "Approvers"
+      - name: "recipient_key_fingerprint"
+        type: "Hash32"
+  - type: "audit.viewed"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "stream"
+        type: "StreamId"
+        codes: ["sec", "case", "sys", "case-slot", "sys-slot"]
+      - name: "seq_range"
+        type: "SeqRange"
+  - type: "audit.read"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "stream"
+        type: "StreamId"
+        codes: ["sec", "case", "sys", "case-slot", "sys-slot"]
+      - name: "filter_kind"
+        type: "Code<FilterKind>"
+      - name: "result_count_bucket"
+        type: "CountBucket"
+        codes: ["1", "2-9", "10-99", ">=100"]
+  - type: "audit.retention_tombstone"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "prune"
+        type: "RetentionPrune"
+  - type: "secret.placement_violation"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "host_role"
+        type: "HostRole"
+        codes: ["intake", "core", "monitor", "desk"]
+      - name: "secret_kind"
+        type: "Code<SecretKind>"
+  - type: "selftest.logging_violation"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "host_role"
+        type: "HostRole"
+        codes: ["intake", "core", "monitor", "desk"]
+      - name: "check_code"
+        type: "LoggingCheck"
+        codes: ["TOR_LOG_ENABLED", "TOR_SAFELOGGING_OFF", "ACCESS_LOG_PRESENT", "JOURNAL_PERSISTENT", "NFT_LOG_RULE", "COREDUMP_ENABLED", "UNEXPECTED_LOG_FILE", "CAPTURE_TOOL_RUNNING"]
+  - type: "update.applied"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "component"
+        type: "Component"
+        codes: ["CANDOR", "TOR", "POSTGRES", "OS", "DESK", "SANDBOX_IMAGE"]
+      - name: "version"
+        type: "Version"
+      - name: "reason_code"
+        type: "Option<UpdateReason>"
+        codes: ["SIGNATURE_INVALID", "ROLLBACK", "FREEZE", "BELOW_FLOOR", "NOT_IN_LOG"]
+  - type: "update.rejected"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "component"
+        type: "Component"
+        codes: ["CANDOR", "TOR", "POSTGRES", "OS", "DESK", "SANDBOX_IMAGE"]
+      - name: "version"
+        type: "Version"
+      - name: "reason_code"
+        type: "Option<UpdateReason>"
+        codes: ["SIGNATURE_INVALID", "ROLLBACK", "FREEZE", "BELOW_FLOOR", "NOT_IN_LOG"]
+  - type: "backup.completed"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "backup_id"
+        type: "BackupId"
+      - name: "scope"
+        type: "BackupScope"
+        codes: ["CORE", "INTAKE", "VAULT", "AUDIT"]
+      - name: "erasure_log_applied"
+        type: "bool"
+      - name: "intake_deletion_list_applied"
+        type: "bool"
+  - type: "backup.restore_performed"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "backup_id"
+        type: "BackupId"
+      - name: "scope"
+        type: "BackupScope"
+        codes: ["CORE", "INTAKE", "VAULT", "AUDIT"]
+      - name: "erasure_log_applied"
+        type: "bool"
+      - name: "intake_deletion_list_applied"
+        type: "bool"
+  - type: "platform.mismatch"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "component"
+        type: "Component"
+        codes: ["CANDOR", "TOR", "POSTGRES", "OS", "DESK", "SANDBOX_IMAGE"]
+      - name: "expected_manifest_hash_prefix"
+        type: "HashPrefix8"
+      - name: "reason_code"
+        type: "PlatformReason"
+        codes: ["BELOW_FLOOR", "MANIFEST_MISMATCH"]
+  - type: "ekv.rewrap_opened"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "affected_case_bucket"
+        type: "CountBucket"
+        codes: ["1", "2-9", "10-99", ">=100"]
+      - name: "approvers"
+        type: "Approvers"
+  - type: "ekv.rewrap_closed"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "affected_case_bucket"
+        type: "CountBucket"
+        codes: ["1", "2-9", "10-99", ">=100"]
+      - name: "approvers"
+        type: "Approvers"
+  - type: "tenant.created"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "tenant"
+        type: "TenantRef"
+  - type: "tenant.deleted"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "tenant"
+        type: "TenantRef"
+  - type: "onion.rotated"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields: []
+  - type: "metrics.aggregate_viewed"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields:
+      - name: "report_id"
+        type: "ReportId"
+  - type: "support.bundle_created"
+    class: SECURITY
+    stream: sec
+    ts: staff
+    fields: []
+  - type: "case.imported"
+    class: CASE
+    stream: case-slot
+    ts: date_only
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "channel_id"
+        type: "ChannelId"
+      - name: "received_day"
+        type: "DayStamp"
+      - name: "import_slot_date"
+        type: "DayStamp"
+  - type: "case.envelope_rejected"
+    class: CASE
+    stream: case-slot
+    ts: date_only
+    fields:
+      - name: "pending_envelope_bucket"
+        type: "CountBucket"
+        codes: ["1", "2-9", "10-99", ">=100"]
+      - name: "approvers"
+        type: "Approvers"
+  - type: "case.state_changed"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "from_state"
+        type: "CaseState"
+        codes: ["PENDING_IMPORT", "NEW", "TRIAGE", "ASSESSMENT", "INVESTIGATION", "ON_HOLD", "DECISION", "REMEDIATION", "CLOSED", "REFERRED", "DISMISSED", "RETAINED", "DISPOSED"]
+      - name: "to_state"
+        type: "CaseState"
+        codes: ["PENDING_IMPORT", "NEW", "TRIAGE", "ASSESSMENT", "INVESTIGATION", "ON_HOLD", "DECISION", "REMEDIATION", "CLOSED", "REFERRED", "DISMISSED", "RETAINED", "DISPOSED"]
+  - type: "case.assigned"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "target"
+        type: "UserRef"
+      - name: "relation"
+        type: "Relation"
+        codes: ["TRIAGE", "LEAD", "INVESTIGATOR", "REVIEWER", "COUNSEL", "RECORDS", "OVERSIGHT"]
+      - name: "reason_code"
+        type: "Option<MembershipReason>"
+        codes: ["REMOVED", "EXPIRED"]
+  - type: "case.member_added"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "target"
+        type: "UserRef"
+      - name: "relation"
+        type: "Relation"
+        codes: ["TRIAGE", "LEAD", "INVESTIGATOR", "REVIEWER", "COUNSEL", "RECORDS", "OVERSIGHT"]
+      - name: "reason_code"
+        type: "Option<MembershipReason>"
+        codes: ["REMOVED", "EXPIRED"]
+  - type: "case.member_removed"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "target"
+        type: "UserRef"
+      - name: "relation"
+        type: "Relation"
+        codes: ["TRIAGE", "LEAD", "INVESTIGATOR", "REVIEWER", "COUNSEL", "RECORDS", "OVERSIGHT"]
+      - name: "reason_code"
+        type: "MembershipReason"
+        codes: ["REMOVED", "EXPIRED"]
+  - type: "case.member_suspended"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "target"
+        type: "UserRef"
+      - name: "relation"
+        type: "Relation"
+        codes: ["TRIAGE", "LEAD", "INVESTIGATOR", "REVIEWER", "COUNSEL", "RECORDS", "OVERSIGHT"]
+      - name: "reason_code"
+        type: "MembershipReason"
+        codes: ["REMOVED", "EXPIRED"]
+  - type: "case.wrap_deletion_requested"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "target"
+        type: "UserRef"
+      - name: "approvers"
+        type: "Option<Approvers>"
+      - name: "not_before_day"
+        type: "DayStamp"
+  - type: "case.wrap_deletion_approved"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "target"
+        type: "UserRef"
+      - name: "approvers"
+        type: "Option<Approvers>"
+      - name: "not_before_day"
+        type: "DayStamp"
+  - type: "case.wrap_deletion_executed"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "target"
+        type: "UserRef"
+      - name: "approvers"
+        type: "Option<Approvers>"
+      - name: "not_before_day"
+        type: "DayStamp"
+  - type: "case.rekeyed"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "key_generation"
+        type: "KeyGeneration"
+  - type: "case.coi_attested"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "attester"
+        type: "UserRef"
+  - type: "case.coi_tags_updated"
+    class: CASE
+    stream: case-slot
+    ts: date_only
+    fields:
+      - name: "case"
+        type: "CaseRef"
+  - type: "case.coi_wrap_violation"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "detail_code"
+        type: "CoiWrapDetail"
+        codes: ["WRAP_FOR_EXCLUDED_TAG", "WRAP_SET_NOT_ACL"]
+  - type: "case.sla_reminder"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "timer_id"
+        type: "TimerId"
+      - name: "due_date"
+        type: "DayStamp"
+  - type: "case.sla_breached"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "timer_id"
+        type: "TimerId"
+      - name: "due_date"
+        type: "DayStamp"
+  - type: "case.sla_extended"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "timer_id"
+        type: "TimerId"
+      - name: "due_date"
+        type: "DayStamp"
+  - type: "case.sla_paused"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "timer_id"
+        type: "TimerId"
+      - name: "due_date"
+        type: "DayStamp"
+  - type: "case.sla_resumed"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "timer_id"
+        type: "TimerId"
+      - name: "due_date"
+        type: "DayStamp"
+  - type: "case.canary_escalated"
+    class: CASE
+    stream: case-slot
+    ts: date_only
+    fields:
+      - name: "subject"
+        type: "CaseOrBucket"
+      - name: "trigger_code"
+        type: "CanaryTrigger"
+        codes: ["C1", "C2", "C3", "C4", "C5"]
+  - type: "case.dismiss_requested"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "reason_code"
+        type: "Code<CaseDecisionReason>"
+      - name: "approver"
+        type: "Option<UserRef>"
+  - type: "case.dismiss_approved"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "reason_code"
+        type: "Code<CaseDecisionReason>"
+      - name: "approver"
+        type: "Option<UserRef>"
+  - type: "case.closure_approved"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "reason_code"
+        type: "Code<CaseDecisionReason>"
+      - name: "approver"
+        type: "Option<UserRef>"
+  - type: "case.reopened"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "reason_code"
+        type: "Code<CaseDecisionReason>"
+      - name: "approver"
+        type: "Option<UserRef>"
+  - type: "case.referred"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "reason_code"
+        type: "Code<CaseDecisionReason>"
+      - name: "approver"
+        type: "Option<UserRef>"
+  - type: "case.message_sent"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "template_code"
+        type: "TemplateCode"
+        codes: ["ACK", "RFI", "FEEDBACK", "EXTENSION", "CLOSURE", "UNSEAL_NOTICE", "CUSTOM"]
+  - type: "case.message_read"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+  - type: "case.opened"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+  - type: "case.listed"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "scope"
+        type: "Code<ListScope>"
+  - type: "case.eligibility_computed"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "subject"
+        type: "CaseOrChannel"
+  - type: "intake.listed"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "channel_id"
+        type: "ChannelId"
+  - type: "intake.envelope_read"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "channel_id"
+        type: "ChannelId"
+  - type: "evidence.imported"
+    class: CASE
+    stream: case-slot
+    ts: date_only
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "evid"
+        type: "EvidRef"
+      - name: "manifest_match"
+        type: "bool"
+  - type: "evidence.opened"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "evid"
+        type: "EvidRef"
+      - name: "level"
+        type: "Level"
+        codes: ["L0", "L1", "L2", "L3", "L4"]
+  - type: "evidence.transformed"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "xform_id"
+        type: "XformId"
+      - name: "operation"
+        type: "Code<XformOp>"
+      - name: "input_count"
+        type: "Count"
+      - name: "output_count"
+        type: "Count"
+  - type: "evidence.export_approved"
+    class: CASE
+    stream: case
+    ts: staff
+    fields: []
+  - type: "evidence.exported"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "package_id"
+        type: "PackageId"
+      - name: "evid_count"
+        type: "Count"
+      - name: "destination_class"
+        type: "DestinationClass"
+        codes: ["AUDITOR_FILE", "REGULATOR", "LAW_ENFORCEMENT", "COUNSEL", "INTEGRATION", "INTERNAL"]
+      - name: "original"
+        type: "bool"
+      - name: "approvers"
+        type: "Approvers"
+      - name: "psr_id"
+        type: "Option<PsrId>"
+  - type: "evidence.export_fetched"
+    class: CASE
+    stream: case
+    ts: staff
+    fields: []
+  - type: "evidence.deleted"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "evid"
+        type: "EvidRef"
+      - name: "method"
+        type: "DeletionMethod"
+        codes: ["CRYPTO_ERASE", "PURGE"]
+  - type: "evidence.listed"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "scope"
+        type: "Code<ListScope>"
+  - type: "custody.head"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "custody_mac"
+        type: "Hash32"
+  - type: "identity.unseal_requested"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "legal_basis_code"
+        type: "Code<LegalBasis>"
+      - name: "approvers"
+        type: "Option<Approvers>"
+      - name: "notice_state"
+        type: "NoticeState"
+        codes: ["QUEUED", "DEFERRED"]
+  - type: "identity.unseal_approved"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "legal_basis_code"
+        type: "Code<LegalBasis>"
+      - name: "approvers"
+        type: "Option<Approvers>"
+      - name: "notice_state"
+        type: "NoticeState"
+        codes: ["QUEUED", "DEFERRED"]
+  - type: "identity.unseal_denied"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "legal_basis_code"
+        type: "Code<LegalBasis>"
+      - name: "approvers"
+        type: "Option<Approvers>"
+      - name: "notice_state"
+        type: "NoticeState"
+        codes: ["QUEUED", "DEFERRED"]
+  - type: "identity.unsealed"
+    class: CASE
+    stream: case
+    ts: staff
+    fields: []
+  - type: "legalhold.set"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "hold_ref"
+        type: "HoldRef"
+  - type: "legalhold.released"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "hold_ref"
+        type: "HoldRef"
+  - type: "case.disposal_requested"
+    class: CASE
+    stream: case
+    ts: staff
+    fields: []
+  - type: "case.disposal_approved"
+    class: CASE
+    stream: case
+    ts: staff
+    fields: []
+  - type: "case.disposed"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "disposal"
+        type: "CaseDisposal"
+  - type: "case.slot_disposed"
+    class: CASE
+    stream: case-slot
+    ts: date_only
+    fields:
+      - name: "disposal"
+        type: "CaseDisposal"
+  - type: "case.data_purged"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "reason_code"
+        type: "PurgeReason"
+        codes: ["EU_ART17_IRRELEVANT"]
+  - type: "oversight.opened"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "mode"
+        type: "OversightMode"
+        codes: ["STANDARD", "RESTRICTED"]
+  - type: "case.rewrapped_after_vault_loss"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "approvers"
+        type: "Approvers"
+  - type: "case.identity_request_refused"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+      - name: "requester"
+        type: "UserRef"
+      - name: "refusal_code"
+        type: "IdentityRefusal"
+        codes: ["NO_LEGAL_BASIS", "NOT_NECESSARY", "SCOPE"]
+  - type: "records.search_performed"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "query_hash"
+        type: "Hash32"
+      - name: "legal_basis_code"
+        type: "Code<LegalBasis>"
+      - name: "case_count_bucket"
+        type: "CountBucket"
+        codes: ["1", "2-9", "10-99", ">=100"]
+  - type: "records.case_read"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "case"
+        type: "CaseRef"
+  - type: "breakglass.key_wrapped"
+    class: CASE
+    stream: case
+    ts: staff
+    fields: []
+  - type: "channel.membership_changed"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "channel_id"
+        type: "ChannelId"
+      - name: "approvers"
+        type: "Approvers"
+      - name: "policy_hash"
+        type: "Hash32"
+      - name: "effective_date"
+        type: "DayStamp"
+  - type: "coi_map.changed"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "channel_id"
+        type: "ChannelId"
+      - name: "approvers"
+        type: "Approvers"
+      - name: "policy_hash"
+        type: "Hash32"
+      - name: "effective_date"
+        type: "DayStamp"
+  - type: "sla_pack.changed"
+    class: CASE
+    stream: case
+    ts: staff
+    fields:
+      - name: "channel_id"
+        type: "ChannelId"
+      - name: "approvers"
+        type: "Approvers"
+      - name: "policy_hash"
+        type: "Hash32"
+      - name: "effective_date"
+        type: "DayStamp"
+  - type: "sys.service_started"
+    class: SYSTEM
+    stream: sys
+    ts: system
+    fields:
+      - name: "service"
+        type: "Service"
+        codes: ["tor", "web", "upload", "intake_store", "relay", "core", "authz", "auth", "audit", "health", "keydir", "admin", "viewer", "backup", "scheduler", "siem", "sealer"]
+      - name: "version"
+        type: "Version"
+      - name: "exit_code"
+        type: "Option<ExitCode>"
+  - type: "sys.service_stopped"
+    class: SYSTEM
+    stream: sys
+    ts: system
+    fields:
+      - name: "service"
+        type: "Service"
+        codes: ["tor", "web", "upload", "intake_store", "relay", "core", "authz", "auth", "audit", "health", "keydir", "admin", "viewer", "backup", "scheduler", "siem", "sealer"]
+      - name: "version"
+        type: "Version"
+      - name: "exit_code"
+        type: "Option<ExitCode>"
+  - type: "sys.service_crashed"
+    class: SYSTEM
+    stream: sys
+    ts: system
+    fields:
+      - name: "service"
+        type: "Service"
+        codes: ["tor", "web", "upload", "intake_store", "relay", "core", "authz", "auth", "audit", "health", "keydir", "admin", "viewer", "backup", "scheduler", "siem", "sealer"]
+      - name: "version"
+        type: "Version"
+      - name: "exit_code"
+        type: "Option<ExitCode>"
+  - type: "sys.health"
+    class: SYSTEM
+    stream: sys
+    ts: system
+    fields:
+      - name: "service"
+        type: "Service"
+        codes: ["tor", "web", "upload", "intake_store", "relay", "core", "authz", "auth", "audit", "health", "keydir", "admin", "viewer", "backup", "scheduler", "siem", "sealer"]
+      - name: "status"
+        type: "HealthStatus"
+        codes: ["OK", "DEGRADED", "DOWN"]
+      - name: "check_code"
+        type: "HealthCheck"
+        codes: ["LIVENESS", "READINESS", "DATABASE", "DISK", "TOR_BOOTSTRAP", "RELAY_SCHEDULE", "ABUSE_FLOOD", "POW_PRESSURE", "QUEUE_BACKLOG", "INSECURE_DEV_OVERRIDE"]
+  - type: "sys.capacity"
+    class: SYSTEM
+    stream: sys
+    ts: system
+    fields:
+      - name: "resource"
+        type: "CapacityResource"
+        codes: ["DISK", "MEM", "QUEUE"]
+      - name: "percent_bucket"
+        type: "PercentBucket"
+  - type: "sys.relay_daily"
+    class: SYSTEM
+    stream: sys-slot
+    ts: date_only
+    fields:
+      - name: "date"
+        type: "DayStamp"
+      - name: "slots_ok"
+        type: "SmallCount"
+      - name: "slots_failed"
+        type: "SmallCount"
+      - name: "slots_overrun"
+        type: "SmallCount"
+  - type: "sys.relay_slot_overrun"
+    class: SYSTEM
+    stream: sys-slot
+    ts: date_only
+    fields:
+      - name: "date"
+        type: "DayStamp"
+      - name: "slot_index"
+        type: "SlotIndex"
+  - type: "sys.tor_status"
+    class: SYSTEM
+    stream: sys
+    ts: system
+    fields:
+      - name: "bootstrap_percent"
+        type: "Percent"
+      - name: "onion_published"
+        type: "bool"
+      - name: "pow_enabled"
+        type: "bool"
+  - type: "sys.job"
+    class: SYSTEM
+    stream: sys
+    ts: system
+    fields:
+      - name: "job_kind"
+        type: "JobKind"
+        codes: ["RETENTION", "EPOCH_ROTATE", "CHECKPOINT", "BACKUP"]
+      - name: "outcome"
+        type: "Outcome"
+        codes: ["OK", "DENIED", "ERROR"]
+  - type: "sys.clock"
+    class: SYSTEM
+    stream: sys
+    ts: system
+    fields:
+      - name: "drift_ms_bucket"
+        type: "DriftBucket"
+        codes: ["<100ms", "<1s", "<10s", "<1min", "<5min", ">=5min"]
+      - name: "source_count"
+        type: "SmallCount"
+  - type: "sys.sandbox_image"
+    class: SYSTEM
+    stream: sys
+    ts: system
+    fields:
+      - name: "image_name"
+        type: "Code<SandboxImage>"
+      - name: "age_days"
+        type: "AgeDays"
+  - type: "sys.retention_tombstone"
+    class: SYSTEM
+    stream: sys
+    ts: system
+    fields:
+      - name: "prune"
+        type: "RetentionPrune"
+  - type: "sys.stage_lost"
+    class: SYSTEM
+    stream: sys-slot
+    ts: date_only
+    fields:
+      - name: "stream"
+        type: "StreamId"
+        codes: ["sec", "case", "sys", "case-slot", "sys-slot"]
+  - type: "sys.slot_retention_tombstone"
+    class: SYSTEM
+    stream: sys-slot
+    ts: date_only
+    fields:
+      - name: "prune"
+        type: "RetentionPrune"

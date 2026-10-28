@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# deny-free-text-logging exceptions: `<path-glob relative to workspace root> <reason>`.
+# Every entry requires review by two code owners (20 §7, LOG-014 analogue).
+# (none)

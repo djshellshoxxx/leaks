@@ -1,0 +1,8 @@
+{#- SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{#- Delivery timing (ADR-038 §4): equal weight; default next pickup. -#}
+<fieldset aria-describedby="h-delayed_delivery">
+<legend>{{ p.t("sui-delivery-legend") }}</legend>
+<p class="hint" id="h-delayed_delivery">{{ p.t("sui-delivery-help") }}</p>
+<div class="choice"><input type="radio" id="f-delayed_delivery" name="delayed_delivery" value="false"{% if !delayed %} checked{% endif %}><label for="f-delayed_delivery">{{ p.t("sui-delivery-now") }}</label></div>
+<div class="choice"><input type="radio" id="f-delayed_delivery-1" name="delayed_delivery" value="true"{% if delayed %} checked{% endif %}><label for="f-delayed_delivery-1">{{ p.t("sui-delivery-delay") }}</label></div>
+</fieldset>

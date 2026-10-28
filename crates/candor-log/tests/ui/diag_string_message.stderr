@@ -1,0 +1,11 @@
+error: no rules expected `name`
+ --> tests/ui/diag_string_message.rs:5:29
+  |
+5 |     candor_log::diag!(Warn, name);
+  |                             ^^^^ no rules expected this token in macro call
+  |
+note: while trying to match meta-variable `$msg:literal`
+ --> src/diag.rs
+  |
+  |     ($level:ident, $msg:literal $(, $code:expr)* $(,)?) => {{
+  |                    ^^^^^^^^^^^^

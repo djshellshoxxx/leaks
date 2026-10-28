@@ -1,0 +1,35 @@
+{#- SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{% extends "layout.html" %}
+{#- S07 Metadata Warning: class by extension only (ADR-012); explicit choice, no checkbox (ADP-10). -#}
+{% block main %}
+<h1>{{ p.t("sui-meta-h1") }}</h1>
+<p class="honesty">{{ p.t("sui-meta-honest") }}</p>
+{%- let last_key = "sui-part-continue-last" %}
+{% include "parts_note.html" %}
+<table>
+<caption>{{ p.t("sui-meta-caption") }}</caption>
+<thead><tr><th scope="col">{{ p.t("sui-meta-col-file") }}</th><th scope="col">{{ p.t("sui-meta-col-type") }}</th><th scope="col">{{ p.t("sui-meta-col-risks") }}</th></tr></thead>
+<tbody>
+{%- for s in p.region(Region::MetaRows) %}
+{{ s|safe }}
+{%- endfor %}
+</tbody>
+</table>
+<p>{{ p.t("sui-meta-also") }}</p>
+<ul>
+<li>{{ p.t("sui-meta-also-canary") }}</li>
+<li>{{ p.t("sui-meta-also-watermark") }}</li>
+<li>{{ p.t("sui-meta-also-dots") }}</li>
+</ul>
+<form method="post" action="{{ p.href(Route::FilesCheck) }}">
+{% include "ft.html" %}
+<div class="actions pair">
+<button type="submit" name="action" value="change">{{ p.t("sui-meta-change") }}</button>
+{%- if p.is_last_part() %}
+<button type="submit" name="action" value="continue">{{ p.t("sui-meta-continue") }}</button>
+{%- endif %}
+</div>
+{%- let navform = "" %}
+{% include "parts_nav.html" %}
+</form>
+{% endblock %}

@@ -1,0 +1,18 @@
+{
+  "case_id": "7db221a53e173b6dc2dad7f412090ca0",
+  "case_key": "b1a54277d7e6320c315e3261d379740328d0f851e0686a084ccde085dc3b0141",
+  "column_id": 2,
+  "description": "Encrypted case record (§13.8). key = HKDF(IKM=CaseKey, salt='candor/v1/case', info='candor/v1/case/record/' || u16be(table_id)).",
+  "key_version": 1,
+  "negative": {
+    "expect": "reject",
+    "stale_row_version": 4
+  },
+  "plaintext": "43617365207469746c65",
+  "record": "010001000000010f63cc6f09da6586f7dea3100c94087219492ab6129e2ba0a7e53a4be3b6e5ad703cc07e740033cd89c5142a7db0dd95c43d",
+  "record_id": "13d7bc336fcc568a9b8ef16c2a01eb16",
+  "record_key": "e08a17a333628167665d655eebf26e527f812c79fe9fb99808bd826e992fc3c5",
+  "row_version": 5,
+  "table_id": 7,
+  "tenant_id": "cef2d8fdede6dd581554474a2ee9b275"
+}

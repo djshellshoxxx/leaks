@@ -1,0 +1,71 @@
+{#- SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{#- Page template (11 §5.1). Zero <script>; one inline stylesheet; no external resources. -#}
+<!DOCTYPE html>
+<html lang="{{ p.lang() }}" dir="{{ p.dir() }}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<link rel="icon" href="data:,">
+<title>{{ p.title }}</title>
+<style>{{ p.css|safe }}</style>
+</head>
+<body>
+<a class="skip" href="#main">{{ p.t("sui-skip") }}</a>
+<header>
+<div class="mode {{ p.mode().css_class() }}" role="status" aria-label="{{ p.t("sui-mode-region") }}">
+{%- if p.mode() != Mode::Anonymous %}<span class="pattern" aria-hidden="true"></span>{% endif %}
+<p><svg class="glyph" aria-hidden="true" focusable="false" viewBox="0 0 16 16"><path d="M8 0 1.5 2.5v5C1.5 11.6 4.3 15 8 16c3.7-1 6.5-4.4 6.5-8.5v-5z"/></svg>{{ p.banner_html()|safe }}
+{%- if p.mode() == Mode::ConfidentialIdentitySeen %} {{ p.t("sui-mode-cue-seen") }}{% endif %}</p>
+{%- if p.mode() != Mode::Clearnet %}
+<p class="tier">{{ p.t("sui-tier-w") }}{% if !p.minimal() %} <a href="{{ p.href(Route::Status) }}#protection">{{ p.t("sui-tier-w-options") }}</a>{% endif %}</p>
+{%- endif %}
+</div>
+{%- if p.has_warnings() %}
+<div aria-label="{{ p.t("sui-wb-region") }}" role="region">
+{%- if let Some(w) = p.wb_operator() %}
+<div class="warn"><p>{{ w }}</p></div>
+{%- endif %}
+{%- if let Some(w) = p.wb_incident() %}
+<div class="warn"><p>{{ w }}{% if !p.wb_incident_is_capture() && !p.minimal() %} <a href="{{ p.href(Route::Status) }}#operator">{{ p.t("sui-wb-incident-link") }}</a>{% endif %}</p></div>
+{%- endif %}
+{%- for w in p.wb_roster() %}
+<div class="warn"><p>{{ w }}{% if !p.minimal() %} <a href="{{ p.href(Route::Status) }}#changes">{{ p.t("sui-wb-roster-link") }}</a>{% endif %}</p></div>
+{%- endfor %}
+</div>
+{%- endif %}
+<p class="org">{{ p.t1("sui-header-org", "org", p.org()) }}</p>
+{%- if let Some(n) = p.step() %}
+<p class="steptext">{{ p.step_label() }}</p>
+<nav class="steps" aria-label="{{ p.t("sui-step-nav") }}"><ol>
+{%- for (num, name, href, state) in p.steps() %}
+<li{% if state == 1 %} aria-current="step"{% endif %}>{% if state == 0 %}<a href="{{ href }}">{{ name }}</a> <span class="vh">{{ p.t("sui-step-done") }}</span>{% else %}{{ name }}{% endif %}</li>
+{%- endfor %}
+</ol></nav>
+{%- endif %}
+</header>
+<main id="main" tabindex="-1">
+{%- block main %}{% endblock %}
+{% include "tips.html" %}
+{%- if p.in_session() %}
+<p class="note">{{ p.t("sui-session-rule") }}</p>
+<div class="warn tw tw-idle" role="status"><p>{{ p.t("sui-session-idle-warn") }}</p>{% include "stay.html" %}</div>
+<div class="warn {{ p.abs_warn_class() }}" role="status"><p>{{ p.t("sui-session-abs-warn") }}</p>{% include "stay.html" %}</div>
+{%- endif %}
+</main>
+{%- if !p.minimal() %}
+<footer>
+<nav aria-label="{{ p.t("sui-footer-nav") }}"><ul>
+<li><a href="{{ p.href(Route::Safety) }}">{{ p.t("sui-footer-help") }}</a></li>
+<li><a href="{{ p.href(Route::Status) }}">{{ p.t("sui-footer-protect") }}</a></li>
+<li><details><summary>{{ p.t("sui-footer-language") }}</summary><ul>
+{%- for (tag, name, href, current) in p.languages() %}
+<li><a href="{{ href }}" hreflang="{{ tag }}" lang="{{ tag }}"{% if current %} aria-current="page"{% endif %}>{{ name }}</a></li>
+{%- endfor %}
+</ul></details></li>
+<li><form method="post" action="{{ p.href(Route::Leave) }}">{% include "ft.html" %}<button type="submit">{{ p.t("sui-footer-leave") }}</button></form></li>
+</ul></nav>
+</footer>
+{%- endif %}
+</body>
+</html>

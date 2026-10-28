@@ -1,0 +1,3 @@
+{#- SPDX-License-Identifier: AGPL-3.0-or-later -#}
+<tr><th scope="row"><bdi class="mono">{{ name }}</bdi></th><td>{{ p.file_class_names(f) }}</td>
+<td><ul>{% for c in p.file_classes(f) %}{% for k in c.risk_keys() %}<li>{{ p.t(k) }}</li>{% endfor %}{% endfor %}</ul></td></tr>

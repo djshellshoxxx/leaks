@@ -1,0 +1,57 @@
+{#- SPDX-License-Identifier: AGPL-3.0-or-later -#}
+{#- One questionnaire field (11 §7 S05). Every control has a visible label; hints and
+    errors are linked with aria-describedby; month + year only (GC-30, SUI-020). Text values
+    arrive escaped in `val`; a long value may be one piece (`piece`, AUD-RM1-SUI-01). -#}
+{%- let fid = q.id.as_str() %}
+{%- let desc = p.describedby(fid, p.q_has_hint(q)) %}
+<div class="field">
+{%- match q.kind %}
+{%- when QuestionKind::ShortText | QuestionKind::LongText %}
+<label for="f-{{ fid }}">{{ p.text_html(q.label)|safe }} {% if q.required %}{{ p.t("sui-required") }}{% else %}{{ p.t("sui-optional") }}{% endif %}{% if let Some(pc) = piece %} {{ p.t2("sui-part-of", "n", pc.n, "total", pc.total) }}{% endif %}</label>
+{%- if p.q_has_hint(q) %}
+<div class="hint" id="h-{{ fid }}">{% if let Some(h) = q.hint %}<p>{{ p.text_html(h)|safe }}</p>{% endif %}{% if q.kind == QuestionKind::LongText %}<p>{{ p.t("sui-q-ai") }}</p>{% endif %}<p>{{ p.t1("sui-q-maxlen", "max", p.q_maxlen(q)) }}</p></div>
+{%- endif %}
+{% include "field_error.html" %}
+{%- if q.kind == QuestionKind::LongText %}
+<textarea id="f-{{ fid }}" name="{{ fid }}" rows="10" maxlength="60000" dir="auto"{% if q.required && piece.is_none() %} required{% endif %}{% if !desc.is_empty() %} aria-describedby="{{ desc }}"{% endif %}{% if p.has_field_error(fid) %} aria-invalid="true"{% endif %}>
+{{ val|safe }}</textarea>
+<details><summary>{{ p.t("sui-q-details") }}</summary>{% let c = p.card("GC-30").unwrap_or(crate::guidance::GC30) %}{% for b in c.normal %}{{ p.block_html(b)|safe }}{% endfor %}</details>
+{%- else %}
+<input type="text" id="f-{{ fid }}" name="{{ fid }}" maxlength="500" dir="auto" value="{{ val|safe }}"{% if q.required && piece.is_none() %} required{% endif %}{% if !desc.is_empty() %} aria-describedby="{{ desc }}"{% endif %}{% if p.has_field_error(fid) %} aria-invalid="true"{% endif %}>
+{%- endif %}
+{%- if !piece_value.is_empty() %}<input type="hidden" name="piece" value="{{ piece_value }}">{% endif %}
+{%- when QuestionKind::SingleChoice(opts) | QuestionKind::MultiChoice(opts) %}
+{%- let multi = matches!(q.kind, QuestionKind::MultiChoice(_)) %}
+<fieldset{% if !desc.is_empty() %} aria-describedby="{{ desc }}"{% endif %}>
+<legend>{{ p.text_html(q.label)|safe }} {% if q.required %}{{ p.t("sui-required") }}{% else %}{{ p.t("sui-optional") }}{% endif %}</legend>
+{%- if let Some(h) = q.hint %}<p class="hint" id="h-{{ fid }}">{{ p.text_html(h)|safe }}</p>{% endif %}
+{% include "field_error.html" %}
+{%- for o in opts %}
+<div class="choice"><input type="{% if multi %}checkbox{% else %}radio{% endif %}" name="{{ fid }}" value="{{ o.value }}" id="f-{{ fid }}{% if !loop.first %}-{{ loop.index0 }}{% endif %}"{% if p.q_selected(q, o.value.as_str()) %} checked{% endif %}{% if p.has_field_error(fid) %} aria-invalid="true"{% endif %}><label for="f-{{ fid }}{% if !loop.first %}-{{ loop.index0 }}{% endif %}">{{ p.text_html(o.label)|safe }}</label></div>
+{%- endfor %}
+</fieldset>
+{%- when QuestionKind::YesNoNotSure %}
+<fieldset{% if !desc.is_empty() %} aria-describedby="{{ desc }}"{% endif %}>
+<legend>{{ p.text_html(q.label)|safe }} {% if q.required %}{{ p.t("sui-required") }}{% else %}{{ p.t("sui-optional") }}{% endif %}</legend>
+{%- if let Some(h) = q.hint %}<p class="hint" id="h-{{ fid }}">{{ p.text_html(h)|safe }}</p>{% endif %}
+{% include "field_error.html" %}
+{%- for (v, label) in p.yes_no() %}
+<div class="choice"><input type="radio" name="{{ fid }}" value="{{ v }}" id="f-{{ fid }}{% if !loop.first %}-{{ loop.index0 }}{% endif %}"{% if p.q_selected(q, v) %} checked{% endif %}><label for="f-{{ fid }}{% if !loop.first %}-{{ loop.index0 }}{% endif %}">{{ label }}</label></div>
+{%- endfor %}
+</fieldset>
+{%- when QuestionKind::MonthYear with { years } %}
+<fieldset aria-describedby="{{ desc }}">
+<legend>{{ p.text_html(q.label)|safe }} {% if q.required %}{{ p.t("sui-required") }}{% else %}{{ p.t("sui-optional") }}{% endif %}</legend>
+<p class="hint" id="h-{{ fid }}">{% if let Some(h) = q.hint %}{{ p.text_html(h)|safe }} {% endif %}{{ p.t("sui-q-when-hint") }}</p>
+{% include "field_error.html" %}
+<div class="inline-fields">
+<div><label for="f-{{ fid }}">{{ p.t("sui-q-month") }}</label>
+<select id="f-{{ fid }}" name="{{ fid }}_month"{% if p.has_field_error(fid) %} aria-invalid="true"{% endif %}><option value="">{{ p.t("sui-q-month-none") }}</option>{% for (v, name) in p.months() %}<option value="{{ v }}"{% if p.q_month(q) == v %} selected{% endif %}>{{ name }}</option>{% endfor %}</select></div>
+<div><label for="f-{{ fid }}-year">{{ p.t("sui-q-year") }}</label>
+<select id="f-{{ fid }}-year" name="{{ fid }}_year"><option value="">{{ p.t("sui-q-year-none") }}</option>{% for y in years %}<option value="{{ y }}"{% if p.q_year(q) == y.to_string() %} selected{% endif %}>{{ y }}</option>{% endfor %}</select></div>
+</div>
+<div class="choice"><input type="checkbox" name="{{ fid }}_ongoing" value="1" id="f-{{ fid }}-ongoing"{% if p.q_selected(q, "ongoing") %} checked{% endif %}><label for="f-{{ fid }}-ongoing">{{ p.t("sui-q-ongoing") }}</label></div>
+<div class="choice"><input type="checkbox" name="{{ fid }}_unsure" value="1" id="f-{{ fid }}-unsure"{% if p.q_selected(q, "unsure") %} checked{% endif %}><label for="f-{{ fid }}-unsure">{{ p.t("sui-q-unsure") }}</label></div>
+</fieldset>
+{%- endmatch %}
+</div>

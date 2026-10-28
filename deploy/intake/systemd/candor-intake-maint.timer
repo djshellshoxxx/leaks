@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Daily maintenance window at a fixed time, after the last default import slot (18 UTC) and its
+# VACUUM, outside the weekly update window (23 §: Sunday 03:00 local).
+[Unit]
+Description=Candor intake daily maintenance window
+
+[Timer]
+# Fixed wall-clock time in UTC; no randomisation, no catch-up after downtime (a missed run is
+# not repeated at boot time, which would tie it to an unrelated event).
+OnCalendar=*-*-* 21:00:00 UTC
+AccuracySec=1s
+RandomizedDelaySec=0
+Persistent=false
+Unit=candor-intake-maint.service
+
+[Install]
+WantedBy=timers.target

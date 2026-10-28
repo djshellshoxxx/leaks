@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Local composite action: install the exact toolchain pinned in rust-toolchain.toml
+# via the runner's rustup (which verifies the upstream-signed channel manifest hashes).
+# No third-party toolchain action is used (28 §7: fewer external actions to trust).
+name: setup-rust
+description: Install the pinned Rust toolchain from rust-toolchain.toml
+inputs:
+  components:
+    description: Comma-separated rustup components
+    required: false
+    default: rustfmt,clippy
+runs:
+  using: composite
+  steps:
+    - name: Install pinned toolchain
+      shell: bash
+      env:
+        COMPONENTS: ${{ inputs.components }}
+      run: |
+        set -euo pipefail
+        tc=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+        if [ -z "$tc" ]; then echo "no channel in rust-toolchain.toml" >&2; exit 1; fi
+        rustup set auto-self-update disable || true
+        rustup toolchain install "$tc" --profile minimal --component "$COMPONENTS" --no-self-update
+        rustup default "$tc"
+        rustc --version --verbose
+        cargo --version

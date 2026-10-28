@@ -1,0 +1,41 @@
+error[E0277]: the trait bound `String: DiagCode` is not satisfied
+ --> tests/ui/diag_free_text_code.rs:5:5
+  |
+5 |     candor_log::diag!(Warn, "peer", ip);
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |     |
+  |     the trait `DiagCode` is not implemented for `String`
+  |     required by a bound introduced by this call
+  |
+  = help: the following other types implement trait `DiagCode`:
+            AaguidClass
+            Aal
+            AttestationKind
+            Audience
+            AuthMethod
+            AuthzDenyReason
+            BackupScope
+            CanaryTrigger
+          and $N others
+  = note: this error originates in the macro `candor_log::diag` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: the trait bound `u64: DiagCode` is not satisfied
+ --> tests/ui/diag_free_text_code.rs:6:5
+  |
+6 |     candor_log::diag!(Warn, "size", 4096u64);
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |     |
+  |     the trait `DiagCode` is not implemented for `u64`
+  |     required by a bound introduced by this call
+  |
+  = help: the following other types implement trait `DiagCode`:
+            AaguidClass
+            Aal
+            AttestationKind
+            Audience
+            AuthMethod
+            AuthzDenyReason
+            BackupScope
+            CanaryTrigger
+          and $N others
+  = note: this error originates in the macro `candor_log::diag` (in Nightly builds, run with -Z macro-backtrace for more info)

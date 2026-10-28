@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Stable rustfmt options only (pinned toolchain, no nightly).
+edition = "2024"
+style_edition = "2024"
+newline_style = "Unix"

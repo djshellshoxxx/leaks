@@ -1,0 +1,104 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# C-05 intake tor instance (16-TOR-I2P.md §7.1, §7.3; NET-003..NET-011). Replaces the Debian
+# tor@.service template for this instance: tor starts directly as _tor-candor-intake (never
+# as root), with no capabilities, its own seccomp sandbox (Sandbox 1) inside the systemd one.
+# --defaults-torrc /dev/null: no distribution defaults can add a SocksPort, Log file or User.
+# Package requirement (R7 SI-D-01): C tor >= 0.4.8 with "pow: yes" in tor --list-modules;
+# checked by deploy/tools/config-check.sh --host.
+[Unit]
+Description=Candor intake tor instance (C-05 source onion service)
+Requires=nftables.service
+Wants=network-online.target
+After=network-online.target nftables.service systemd-sysusers.service
+RequiresMountsFor=/var/lib/tor-instances/candor-intake
+StartLimitIntervalSec=60s
+StartLimitBurst=5
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=_tor-candor-intake
+# Primary group _tor-candor-intake: it owns /run/candor/source-web (0750) and http.sock (0660),
+# so tor can reach the onion target (AUD-RM2-DEP-11). There is no control socket and no
+# control group (AUD-RM2-DEP-04). DataDirectory and HiddenServiceDir stay 0700/0600.
+Group=_tor-candor-intake
+# MAC layer for the network-facing parser (AUD-RM2-DEP-08; 17 §5.2, R7 SI-B-04). No '-' prefix:
+# the unit fails to start if the profile is not loaded (fail closed).
+AppArmorProfile=candor-tor-intake
+ExecStartPre=/usr/bin/tor --defaults-torrc /dev/null -f /etc/tor/instances/candor-intake/torrc --verify-config --quiet
+ExecStart=/usr/bin/tor --defaults-torrc /dev/null -f /etc/tor/instances/candor-intake/torrc
+ExecReload=/bin/kill -HUP $MAINPID
+KillSignal=SIGINT
+TimeoutStartSec=300
+TimeoutStopSec=60
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=65536
+# ---- 16 §7.3 / 07 §4.2 / R7 SI-B-01 hardening (do not weaken; config-check.sh) ----
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateIPC=yes
+PrivateMounts=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# Requires CompiledProofOfWorkHash 0 in the torrc (no HashX JIT).
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+UMask=0077
+CapabilityBoundingSet=
+AmbientCapabilities=
+KeyringMode=private
+DevicePolicy=closed
+SystemCallArchitectures=native
+SystemCallErrorNumber=EPERM
+LimitCORE=0
+NoExecPaths=/
+ExecPaths=/usr
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @debug @cpu-emulation @obsolete @raw-io @reboot @swap @module @clock @setuid @chown @keyring process_vm_readv process_vm_writev
+# tor raises RLIMIT_NOFILE to the hard limit at start-up; its own Sandbox needs seccomp(2).
+SystemCallFilter=setrlimit seccomp
+# Tor only: AF_INET for circuits to Tor relays (E1). AF_INET6 only through the documented
+# site drop-in when the host has an IPv6 uplink (16 §7.1 note; 17 §4.3). AF_NETLINK is not
+# granted (stricter than 16 §7.3; SPEC-NOTES D-06).
+RestrictAddressFamilies=AF_UNIX AF_INET
+# Tor relays are public addresses: deny every non-public range in-kernel, in addition to
+# nftables (stops a compromised tor from reaching the LAN, relay or management networks).
+IPAddressDeny=0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.0.2.0/24 192.168.0.0/16 198.18.0.0/15 198.51.100.0/24 203.0.113.0/24 224.0.0.0/4 240.0.0.0/4 ::/128 ::1/128 ::ffff:0:0/96 fc00::/7 fe80::/10 ff00::/8
+# The onion service needs no listening IP socket (HiddenServicePort targets a Unix socket).
+SocketBindDeny=any
+# Only its own state plus the web socket directory are visible.
+TemporaryFileSystem=/var:ro
+BindPaths=/var/lib/tor-instances/candor-intake
+# /var/tmp: PrivateTmp's /var/tmp is disk-backed on the host; nothing may be written there
+# (AUD-RM2-DEP-12).
+InaccessiblePaths=-/var/tmp
+InaccessiblePaths=-/run/candor/sealer -/run/candor/istore -/run/candor/staging -/run/candor/intake-pg -/run/candor/config -/run/candor/directory -/run/credentials/candor-intake-store.service -/run/credentials/candor-sealer.service -/etc/credstore.encrypted -/etc/candor -/boot
+# ---- Logging (ADR-016, LOG-004/005, LOG-007, NET-008; AUD-RM2-DEP-05/06) ----
+# No output of tor reaches any journal: journald stamps every stored line to the microsecond,
+# so a source-triggerable warning would record the exact time of a source action. stdout and
+# stderr are discarded; LogLevelMax=emerg also suppresses the service manager's own messages
+# about this unit (start/stop/crash records) in the host journal. Liveness is visible through
+# the unit state only (SPEC-NOTES D-28). LogNamespace keeps any syslog()/journal-socket write
+# of the process out of the host journal.
+StandardInput=null
+StandardOutput=null
+StandardError=null
+LogNamespace=candor-intake
+LogLevelMax=emerg
+SyslogIdentifier=tor-candor-intake
+
+[Install]
+WantedBy=multi-user.target
