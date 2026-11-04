@@ -136,10 +136,15 @@ pub fn base_backoff_seconds(attempts: u32) -> u64 {
 pub fn jittered_backoff_seconds(attempts: u32, random_draw: u64) -> u64 {
     let base = base_backoff_seconds(attempts);
     let spread = base / 5;
-    let lower = base - spread;
-    let choices = spread * 2 + 1;
-    // Multiplication-high maps all 2^64 draws into the finite choice range;
-    // it avoids overflow and gives each result nearly equal probability.
-    let offset = ((u128::from(random_draw) * u128::from(choices)) >> 64) as u64;
-    lower + offset
+    // `spread <= base`, so the subtraction never underflows; `base` is capped at
+    // 6 h in seconds, so neither the doubling nor the final sum can overflow `u64`.
+    // Saturating ops make the absence of side effects explicit for the
+    // `arithmetic_side_effects` lint (27 §12) without changing any result.
+    let lower = base.saturating_sub(spread);
+    let choices = spread.saturating_mul(2).saturating_add(1);
+    // Multiplication-high maps all 2^64 draws into the finite choice range; the
+    // `u128` product of two `u64` values can never overflow `u128`, so the
+    // saturating multiply is exact and `offset < choices` fits back into `u64`.
+    let offset = (u128::from(random_draw).saturating_mul(u128::from(choices)) >> 64) as u64;
+    lower.saturating_add(offset)
 }
