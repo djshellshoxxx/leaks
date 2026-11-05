@@ -95,7 +95,21 @@ A new dependency is a new person you are asking every source to trust (28 §5.1)
   anonymity classification.
 - Tests for the positive, negative and hostile-input paths, mapped to spec test IDs.
 
-## 6. Before you open a PR
+## 6. Modularity and gradual migration (owner requirement)
+
+All new code and all future fixes **must use modular, single-responsibility
+components with narrow interfaces**. Existing code will also be modularized
+incrementally, beginning with the lowest-risk test-only and data-only changes;
+there must be no big-bang rewrite. Existing public contracts and security,
+anonymity and error guarantees must remain unchanged in structural refactors.
+
+The binding agent workflow is in [AGENTS.md](AGENTS.md). The prioritized code
+inventory, safe extraction sequence and verification gates are in
+[process/MODULARIZATION-ROADMAP.md](process/MODULARIZATION-ROADMAP.md).
+Separate refactoring PRs from security fixes; keep each migration independently
+reviewable and tested.
+
+## 7. Before you open a PR
 
 ```
 make check     # fmt-check, clippy -D warnings, tests, cargo-deny, docs-lint
@@ -106,6 +120,6 @@ Disclose AI assistance in the PR (`AI-Assisted: yes/no`). AI-assisted code is
 reviewed exactly like any other code, and you must be able to explain it. Never
 give AI tools real submissions, secrets or signing material.
 
-## 7. Conduct
+## 8. Conduct
 
 Participation is governed by the [Code of Conduct](CODE_OF_CONDUCT.md).
