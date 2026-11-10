@@ -23,7 +23,7 @@ cargo clippy -p candor-authz --all-targets --locked -- -D warnings
 cargo fmt -p candor-authz -- --check
 ```
 
-These are **commands to run**, not a claim that they were executed by this documentation update. The mandatory workspace CI and independent authorization/security review remain separate acceptance gates. Current workspace-level blockers include DCO history, unrelated formatting/Clippy/compilation failures, cargo-deny advisories and Security Lead cargo-vet approvals. Check the [qualification runbook](../../docs/CI-QUALIFICATION-RUNBOOK.md) (in this documentation PR) and the latest [continuation handoff](../../docs/handoffs/CHATGPT_ZERO_CODEX_LATEST.md) (on the development PR) for source-pinned results; neither unmerged file is part of the current default branch.
+These are **commands to run**, not a claim that they were executed by this documentation update. The mandatory workspace CI and independent authorization/security review remain separate acceptance gates. Current workspace-level blockers include DCO history, unrelated formatting/Clippy/compilation failures, cargo-deny advisories and Security Lead cargo-vet approvals. Check the [qualification runbook](../../docs/CI-QUALIFICATION-RUNBOOK.md) (in this documentation PR) and the latest [continuation handoff](https://github.com/djshellshoxxx/leaks/pull/13) (on separate draft PR #13) for source-pinned results; neither unmerged file is part of the current default branch.
 
 ## Integration next steps
 
