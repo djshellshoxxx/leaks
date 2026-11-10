@@ -19,6 +19,9 @@
 #[allow(dead_code)]
 mod preview;
 
+#[path = "render/padding.rs"]
+mod padding;
+
 use std::collections::HashSet;
 use zeroize::Zeroizing;
 
@@ -115,16 +118,6 @@ fn every_screen_renders_for_every_locale() {
         n += 1;
     }
     assert!(n >= 36 * 4 * 4);
-}
-
-// ST: SUI-005 / SUI-069 / SUI-078 — worst-case optional content still fits its class.
-#[test]
-fn max_content_fits_size_classes() {
-    for (s, l) in all_cases() {
-        let vm = max_content(sample_view_model(s, Mode::Anonymous, false));
-        let p = render(s, &vm, &l).unwrap_or_else(|e| panic!("{} {}: {e:?}", s.spec_id(), l.tag()));
-        assert_eq!(p.body.len(), p.class.bytes());
-    }
 }
 
 // ST: SUI-001, SUI-003, SUI-006, SUI-037, SUI-039, SUI-050, DP-10, DP-13 — template output scan.
@@ -1032,12 +1025,6 @@ fn dates_day_only() {
     assert!(!text.contains("unread") && !text.contains("last visit"));
 }
 
-#[test]
-fn robots_padded() {
-    let p = robots_txt();
-    assert_eq!(p.body.len(), SizeClass::P1.bytes());
-}
-
 mod prop {
     use super::*;
     use proptest::prelude::*;
@@ -1059,26 +1046,6 @@ mod prop {
             let h = Html::parse_document(&b);
             prop_assert_eq!(h.select(&sel("article")).count(), 2);
         }
-    }
-}
-
-// ST: SUI-005 — the largest P1 page (S02) keeps headroom in every built-in locale.
-#[test]
-fn s02_budget_report() {
-    for l in Locale::ALL {
-        let vm = max_content(sample_view_model(Screen::Safety, Mode::Anonymous, false));
-        let p = render(Screen::Safety, &vm, &l).unwrap();
-        assert!(
-            p.unpadded_len <= SizeClass::P1.max_unpadded(),
-            "{}",
-            l.tag()
-        );
-        println!(
-            "S02 {}: {} of {} bytes",
-            l.tag(),
-            p.unpadded_len,
-            SizeClass::P1.max_unpadded()
-        );
     }
 }
 
