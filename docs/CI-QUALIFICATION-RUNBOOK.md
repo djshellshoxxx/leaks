@@ -1,0 +1,102 @@
+<!-- SPDX-License-Identifier: CC-BY-SA-4.0 -->
+# Candor CI qualification and blocker triage (2026-11-10)
+
+**Status: developer/operator diagnostic guide, not release evidence or security approval.**
+Source snapshot: repository default `claude/tender-tesla-z8tfnl` at
+`9097f75f6529ed3dfa259de20d2fa9c78f434bda`. This is **not** the
+`main` branch. The required modular rules in `AGENTS.md` are proposed in
+[draft PR #8](https://github.com/djshellshoxxx/leaks/pull/8), not merged.
+
+This guide explains how to distinguish **scoped changes** from unrelated
+red workspace gates. Do not report a PR as verified or release-ready just
+because some checks pass.
+
+## Exact-head evidence procedure
+
+1. Record the **full 40-character head SHA** and base SHA of the PR being
+   evaluated. Make sure GitHub Actions is inspecting that exact head or its
+   corresponding PR merge ref and record which one. A CI result from another
+   PR, branch, or older head does not qualify the new head.
+2. Review **all** workflow jobs, including skipped and cancelled jobs, and
+   the exact log locations of each failure. Keep their failing status intact.
+3. For a code move or structural test extraction, compare test function names,
+   negative assertions, property tests and fixture bytes before and after.
+   Textual equivalence is **not** proof that the Rust compiler discovers or
+   executes the moved tests. Obtain a focused test result for the changed
+   package and the required workspace/security gates.
+4. Record the source revision, commands, outputs, CI links, approvals and
+   unresolved blockers in `docs/handoffs/CHATGPT_ZERO_CODEX_LATEST.md`
+   on the owner branch. Ensure a handoff-only commit also gets a new check.
+5. Do not alter rustfmt, Clippy, advisories, cargo-vet or DCO enforcement to
+   make checks green. Do not take over another active PR to fix its blockers.
+
+## Current verified CI snapshot
+
+As inspected on **2026-11-10** (logs, not local test runs):
+
+| Candidate | Exact head | Workflow | Observed outcome |
+| --- | --- | --- | --- |
+| Draft PR #13 (source-UI padding tests) | `1194085bc4ca1b58c919832aeeec40ea54d7da86` | [run 42819538406](https://github.com/djshellshoxxx/leaks/actions/runs/42819538406) | Completed: 7 pass, 6 fail, 1 skip |
+| Draft PR #14 (read-only audit ledger) | `cb88d8e5d540ca0519801f59ab5001250b97463f` | [run 42819606916](https://github.com/djshellshoxxx/leaks/actions/runs/42819606916) | Completed: same job distribution |
+| Draft PR #15 (documentation ledger) | `4df90c6c65d607d7af96ac6f4df507506230ece4` | [run 42819761010](https://github.com/djshellshoxxx/leaks/actions/runs/42819761010) | Completed: same job distribution |
+| Draft PR #12 (continuation policy) | `47d5136360c8c773ce39b6a7dc88cec11bdda1b6` | [run 42754179538](https://github.com/djshellshoxxx/leaks/actions/runs/42754179538) | Completed: failed, including DCO |
+
+PRs #13–#15 passed DCO, docs-lint, workflow-lint, repo-lints,
+secret-scan, SBOM and reproducibility. They failed workspace fmt,
+Clippy, tests, unprivileged tests, cargo-deny and cargo-vet.
+The scheduled-only supply-chain job was skipped by the normal PR trigger.
+**No focused source-UI runtime test was run or verified in this review.**
+
+## Diagnosed gates and ownership
+
+| Gate | Log-backed cause on PR #13 | Required action |
+| --- | --- | --- |
+| fmt | `cargo fmt --all -- --check` reports differences only in `crates/candor-worker/src/lib.rs` and `crates/candor-worker/tests/job_retention.rs`, not the extracted test files. | Existing **draft PR #11** owns the formatted worker files; do not duplicate. |
+| clippy | Four `arithmetic_side_effects` errors in `candor-worker` during the workspace check. | **PR #11** has a proposed focused remediation. Its merge/review is a separate decision. |
+| test and unprivileged test | `candor-auth/tests/session_invariants.rs` fails to import `Audience`, `Session`, `SessionError`, `SessionToken`, `StaffClass` from `candor_auth` (E0432). No complete workspace test run follows. | Subject-bound sessions are owned by **draft PR #7**; confirm integration and test acceptance with its owner. |
+| cargo-vet | `scripts/check-vet-policy.py` reports **12 missing approval fields** across `bytecode-alliance`, `google`, `mozilla`, `zcash` imports. | **Security Lead** alone must review and fill genuine import approvals, `approved-by`, `approved`, `review-due`. Do not invent sign-off. |
+| cargo-deny | Locked dependency advisories, including `tokio` and `zip`, cause the advisories subcheck to fail. Bans, licenses and sources passed in this run. | Review vulnerable-code reachability and permitted pinned dependency updates with the responsible owner; do not ignore advisories or change supply-chain policy to suppress them. |
+| DCO on PR #12 | PR #12 commit lacks required Signed-off-by trailer. | Its **existing owner** must correct history through the authorized DCO procedure, without rewriting another agent's branch. |
+
+These are *failure-attribution observations*, not a claim that PR #13 or
+the default branch is secure, correct or qualified. The same red gates on
+docs-only PRs support preexisting-workspace classification but are not a
+substitute for package-specific test execution.
+
+## Local reproduction commands (reference only — not executed here)
+
+The pinned Rust toolchain is **1.94.1** (`rust-toolchain.toml`). From a
+checked-out exact PR head on a suitable Unix environment:
+
+```sh
+rustc --version
+cargo fmt --all -- --check
+cargo test -p candor-source-ui --all-targets --locked
+cargo clippy -p candor-source-ui --all-targets --all-features --locked -- -D warnings
+python3 tools/traceability.py
+python3 tools/constants_lint.py
+bash crates/candor-safefs/scripts/lint-safefs.sh
+bash crates/candor-log/scripts/lint-logging.sh
+```
+
+For whole-workspace checks, see [`Makefile`](../Makefile) and
+[`ci.yml`](../.github/workflows/ci.yml). CI uses an additional
+unprivileged-user workspace test with a production-like memlock limit;
+`make test` is **not equivalent** to this runner job.
+
+The project requires cargo-deny and cargo-vet gates in addition to focused
+tests; passing the focused commands is necessary but insufficient for
+integration or release. The separate
+[`process/STATUS.md`](../process/STATUS.md) records human security-review
+holds, including external crypto review and source-anonymity guarantees.
+
+## GitHub collaboration and publication boundaries
+
+Use the existing PRs rather than opening duplicate blocker issues.
+Keep exact-head evidence in the owning PR/handoff. No automatic merge,
+workflow policy change, deployment, wiki publication or release is
+authorized by this guide. Wiki source is already owned by draft
+[PR #9](https://github.com/djshellshoxxx/leaks/pull/9);
+the **live GitHub Wiki remains unpublished**. After the PR #9 owner
+accepts corrections, link this guide from the Developer Guide without
+overwriting that active branch.
