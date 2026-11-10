@@ -118,3 +118,20 @@ It uses a read-only repository token, disables checkout credential persistence, 
 At first inspection, the [focused workflow run 42849936348](https://github.com/djshellshoxxx/leaks/actions/runs/42849936348) was **in progress** and the [workspace run 42849935985](https://github.com/djshellshoxxx/leaks/actions/runs/42849935985) was **queued**. Neither constitutes passing evidence yet. The preceding PR #13 exact head `20c1361bf85bed7c89b7da7431ed9eae36b494d2` [run 42840341857](https://github.com/djshellshoxxx/leaks/actions/runs/42840341857) completed with 7 passes, 6 failures and 1 skip, matching the unresolved workspace blockers, so the structural test extraction remains unqualified.
 
 This is **workflow-source documentation**, not a claim that the source-UI module passed, the test extraction is independently accepted, or the release/security gates were satisfied.
+
+## Later exact-head CI reconciliation — 2026-11-10
+
+This section supersedes the earlier **in-progress** status for the *specific* C-06 workflow but does not change its historical wording or any release criteria.
+
+| Exact draft head | Workflow and evidence | Result |
+| --- | --- | --- |
+| PR #13 `84ad15de5f0deb8d2b56c262999454463d6c9854` | [Focused source-UI 42851353993](https://github.com/djshellshoxxx/leaks/actions/runs/42851353993) | **Success**, single scoped job: cargo fmt, package tests and all-target/all-feature warning-deny Clippy. |
+| Same PR #13 exact head | [Mandatory workspace 42851354059](https://github.com/djshellshoxxx/leaks/actions/runs/42851354059) | **Failure**: 7 passing, 6 failing, 1 skipped. |
+| Audit PR #14 head `daa08e09493cfb3f223e5a3296092a58cbb0b2e2` | [Workspace 42850455718](https://github.com/djshellshoxxx/leaks/actions/runs/42850455718) | **Failure**: 7 pass / 6 fail / 1 skip. |
+| Docs PR #15 head `6abd13840968c01664ca1fa62ca53ef7ba377e7a` | [Workspace 42850726230](https://github.com/djshellshoxxx/leaks/actions/runs/42850726230) | **Failure**: 7 pass / 6 fail / 1 skip. |
+
+The first focused run [42849936348](https://github.com/djshellshoxxx/leaks/actions/runs/42849936348), on earlier PR #13 head `3e1276fca89c30103fb781d0c30ef3fe21c75e71`, also passed; its hosted logs showed **87 successful tests, zero failures**, including the three `padding::` tests newly relocated from `render.rs`. The later exact-head focused workflow succeeded too. The Rust files and additive workflow did not change between those two commits; the later head modified only the handoff. These two scoped runs are positive executable evidence for the source-UI package, *not* independent review or whole-workspace acceptance. There were **no local Rust test executions** in the ChatGPT phase.
+
+At the later head, the mandatory workspace's failed job names remained `fmt`, `clippy`, `test`, `test (unprivileged user)`, `cargo-deny` and `cargo-vet`. Successful jobs were DCO, docs-lint, workflow-lint, repository lints, secret scan, SBOM and reproducibility. The scheduled-only supply-chain job was skipped on this PR trigger. The same distribution on audit/docs-only PRs supports previously identified independent blockers, but is *not* evidence that those blockers are harmless or approved.
+
+**Decision gate:** keep PR #13 draft until an independent reviewer accepts the test-only move and additive CI workflow. PR #7 remains the owned session fix, PR #11 the owned worker lint/fmt remediation; human Security Lead import sign-offs and dependency advisory triage remain mandatory. Do not merge or issue any security/release claim based on this scoped success.
