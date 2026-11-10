@@ -8,12 +8,14 @@ timestamps and the `24-LICENSING-BUSINESS-MODEL.md` §TEL metrics regime.
 
 **Log staff actions richly, source activity never.**
 
+**Implementation and assurance status (integration source `9097f75f6529ed3dfa259de20d2fa9c78f434bda`):** The table below describes coded interfaces and intended safeguards, **not an approved production deployment or audit pass**. [`process/STATUS.md`](../../process/STATUS.md) retains a **FAIL** gate for `candor-log`, including two High issues (LOG-02 residual channel and LOG-16) and Medium issues requiring fixes or written acceptance. The earlier [independent safefs/log audit](../../process/audits/AUDIT-RM1-safefs-log.md) is source- and date-scoped; do not treat older statements of passed checks as proof that subsequent changes were re-audited. See [`SPEC-NOTES.md`](SPEC-NOTES.md) for implementation deviations and unresolved integration decisions.
+
 ## What is in the crate
 
 | Module | Purpose | Spec |
 |---|---|---|
 | `event` | `AuditEvent`: one variant per catalog type (20 §5.1–§5.3, §5.5) with an allow-listed field schema | LOG-001, LOG-020, LOG-024 |
-| `field`, `ids`, `codes` | sealed `AuditField` trait; pseudonymous IDs (`CaseRef`, `UserRef`, …) minted only from the CSPRNG and persisted as MAC-sealed `IdToken`s, randomized hiding value commitments (`Hash32::commit`), artefact-bound `Seq`/`SeqRange`/`CheckpointRoot`, bounded counters, `DayStamp`, closed code enums and compile-time-only numeric `Code<T>` registries. No type for IPs, UAs, filenames, sizes or source times exists, and no raw constructor lets one be laundered in | LOG-001, LOG-002, P-01..P-17 |
+| `field`, `ids`, `codes` | sealed `AuditField` trait; pseudonymous IDs (`CaseRef`, `UserRef`, …) minted only from the CSPRNG and persisted as MAC-sealed `IdToken`s, randomized hiding value commitments (`Hash32::commit`), artefact-bound `Seq`/`SeqRange`/`CheckpointRoot`, bounded counters, `DayStamp`, closed code enums and compile-time-only numeric `Code<T>` registries. No dedicated payload type for IPs, UAs, filenames, sizes or source times is provided; constructor/field-laundering resistance still requires independent audit remediation (see status above) | LOG-001, LOG-002, P-01..P-17 |
 | `sensitive` | `Sensitive<T>`: no `Debug`/`Display`/`Serialize`/`AuditField`, zeroized on drop (the exposed `&T` is guarded by the output bans, not the type) | LOG-002 |
 | `envelope` | 20 §4 envelope; timestamp policy (staff ms, import/system-actor CASE date-only, SYSTEM second, Z-INTAKE hour) | LOG-004, LOG-012, LOG-013, LOG-021 |
 | `cbor` | hand-rolled deterministic CBOR (RFC 8949 §4.2.1) encoder + strict decoder | 20 §4 |
@@ -47,10 +49,14 @@ log.emit(EventContext::staff(user), AuditEvent::CaseOpened { case })?;
 log.tick()?;                                          // at least every 5 minutes
 ```
 
-There is no way to log a string: payload fields are sealed types, events have
-no message field, identifiers and codes have no raw constructors, and the
-workspace clippy.toml bans every free-text output path (see `tests/ui/*.rs`,
-`tests/not_loggable.rs`).
+The event schema has no general free-text message payload and uses sealed
+field types. This narrows accidental data exposure, but **does not prove that
+all arbitrary strings or source metadata are impossible to log**: the
+independent audit identified constructor/field laundering, diagnostic and
+lint-enforcement gaps in its dated scope. Verify the current code and close
+remaining audit findings before making an operational privacy claim. Tests
+under `tests/ui/` and `tests/not_loggable.rs` are design evidence, not a
+substitute for independent review.
 
 ## Checks
 
