@@ -100,3 +100,21 @@ authorized by this guide. Wiki source is already owned by draft
 the **live GitHub Wiki remains unpublished**. After the PR #9 owner
 accepts corrections, link this guide from the Developer Guide without
 overwriting that active branch.
+
+## Additive focused C-06 source-UI qualification (2026-11-10)
+
+Draft [PR #13](https://github.com/djshellshoxxx/leaks/pull/13) now proposes an **additional**, narrowly scoped GitHub Actions workflow, `.github/workflows/source-ui-qualification.yml`, at commit `3e1276fca89c30103fb781d0c30ef3fe21c75e71`.
+
+The proposed job checks out the pull-request revision using the repository's pinned action, installs the repository's pinned Rust toolchain via its existing local setup action, and executes:
+
+```sh
+cargo fmt -p candor-source-ui -- --check
+cargo test -p candor-source-ui --all-targets --locked
+cargo clippy -p candor-source-ui --all-targets --all-features --locked -- -D warnings
+```
+
+It uses a read-only repository token, disables checkout credential persistence, does not access secrets or production services, and is triggered by pull requests touching the source-UI crate or the focused workflow/its toolchain inputs. The existing mandatory workspace tests, supply-chain checks, DCO, and other CI gates remain **unchanged and independently required**. This additive workflow requires the normal security review appropriate to any workflow change.
+
+At first inspection, the [focused workflow run 42849936348](https://github.com/djshellshoxxx/leaks/actions/runs/42849936348) was **in progress** and the [workspace run 42849935985](https://github.com/djshellshoxxx/leaks/actions/runs/42849935985) was **queued**. Neither constitutes passing evidence yet. The preceding PR #13 exact head `20c1361bf85bed7c89b7da7431ed9eae36b494d2` [run 42840341857](https://github.com/djshellshoxxx/leaks/actions/runs/42840341857) completed with 7 passes, 6 failures and 1 skip, matching the unresolved workspace blockers, so the structural test extraction remains unqualified.
+
+This is **workflow-source documentation**, not a claim that the source-UI module passed, the test extraction is independently accepted, or the release/security gates were satisfied.
