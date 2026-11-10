@@ -16,6 +16,8 @@ pub enum RetentionState {
 pub enum RetentionError {
     NotFound,
     InvalidOrder,
+    LegalHold,
+    NotDue,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,8 +70,16 @@ impl RetentionWorker {
             .ok_or(RetentionError::NotFound)
     }
 
-    pub fn mark_tombstoned(&mut self, id: ItemId) -> Result<(), RetentionError> {
+    /// Erasure begins only after the configured due day, and never under a
+    /// legal hold. Callers must separately obtain disposal authorization.
+    pub fn mark_tombstoned(&mut self, id: ItemId, today: u32) -> Result<(), RetentionError> {
         let item = self.item_mut(id)?;
+        if item.legal_hold {
+            return Err(RetentionError::LegalHold);
+        }
+        if today < item.due_day {
+            return Err(RetentionError::NotDue);
+        }
         match item.state {
             RetentionState::Pending => item.state = RetentionState::Tombstoned,
             RetentionState::Tombstoned
@@ -81,6 +91,9 @@ impl RetentionWorker {
 
     pub fn mark_key_destroyed(&mut self, id: ItemId) -> Result<(), RetentionError> {
         let item = self.item_mut(id)?;
+        if item.legal_hold {
+            return Err(RetentionError::LegalHold);
+        }
         match item.state {
             RetentionState::Tombstoned => item.state = RetentionState::KeyDestroyed,
             RetentionState::KeyDestroyed | RetentionState::Disposed => {}
@@ -91,6 +104,9 @@ impl RetentionWorker {
 
     pub fn mark_disposed(&mut self, id: ItemId) -> Result<(), RetentionError> {
         let item = self.item_mut(id)?;
+        if item.legal_hold {
+            return Err(RetentionError::LegalHold);
+        }
         match item.state {
             RetentionState::KeyDestroyed => item.state = RetentionState::Disposed,
             RetentionState::Disposed => {}

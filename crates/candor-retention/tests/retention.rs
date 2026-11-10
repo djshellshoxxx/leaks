@@ -18,7 +18,7 @@ fn disposal_requires_tombstone_then_key_destruction() {
         worker.mark_disposed(ItemId(1)),
         Err(RetentionError::InvalidOrder)
     );
-    assert_eq!(worker.mark_tombstoned(ItemId(1)), Ok(()));
+    assert_eq!(worker.mark_tombstoned(ItemId(1), 100), Ok(()));
     assert_eq!(
         worker.mark_disposed(ItemId(1)),
         Err(RetentionError::InvalidOrder)
@@ -31,8 +31,8 @@ fn disposal_requires_tombstone_then_key_destruction() {
 #[test]
 fn transitions_are_idempotent_for_retry_safety() {
     let mut worker = RetentionWorker::new(vec![RetentionItem::new(ItemId(7), 100, false)]);
-    assert_eq!(worker.mark_tombstoned(ItemId(7)), Ok(()));
-    assert_eq!(worker.mark_tombstoned(ItemId(7)), Ok(()));
+    assert_eq!(worker.mark_tombstoned(ItemId(7), 100), Ok(()));
+    assert_eq!(worker.mark_tombstoned(ItemId(7), 100), Ok(()));
     assert_eq!(worker.mark_key_destroyed(ItemId(7)), Ok(()));
     assert_eq!(worker.mark_key_destroyed(ItemId(7)), Ok(()));
     assert_eq!(worker.mark_disposed(ItemId(7)), Ok(()));
