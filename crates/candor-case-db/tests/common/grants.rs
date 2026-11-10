@@ -155,7 +155,7 @@ pub const TABLE_GRANTS: &[(&str, &[(&str, &str)])] = &[
     ),
     (
         "core.case_member",
-        &[("candor_case", "SIUD"), ("candor_worker", "SUD")],
+        &[("candor_case", "S"), ("candor_worker", "SUD")],
     ),
     (
         "core.case_state_history",

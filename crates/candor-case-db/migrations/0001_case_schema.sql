@@ -1321,11 +1321,14 @@ BEGIN
   END LOOP;
 END
 $acl$;
--- The creator inserts their own membership row first (case creation).
+-- A user MUST NOT be able to enroll themself merely by setting user_id
+-- to their own identity. Until case creation has a separately authorized,
+-- transaction-safe provisioning path, candor_case receives read-only member
+-- grants below. Never restore the unrestricted self-membership exception.
 DROP POLICY p_case_acl ON core.case_member;
 CREATE POLICY p_case_acl ON core.case_member AS RESTRICTIVE FOR ALL TO candor_case
   USING (acl.is_case_member(case_member.case_id))
-  WITH CHECK (user_id = candor.uid() OR acl.is_case_member(case_member.case_id));
+  WITH CHECK (acl.is_case_member(case_member.case_id));
 CREATE POLICY p_case_acl ON core.attachment AS RESTRICTIVE FOR ALL TO candor_case
   USING (EXISTS (SELECT 1 FROM core.message g WHERE g.tenant_id = candor.tenant() AND g.message_id = attachment.message_id
                  AND acl.is_case_member(g.case_id)))
@@ -1403,7 +1406,10 @@ GRANT UPDATE (state, header_digest, escalated_date) ON core.import_envelope TO c
 GRANT DELETE ON core.import_envelope TO candor_worker;
 GRANT SELECT, UPDATE, DELETE ON core.import_envelope_part TO candor_worker;
 -- 5.2.4 cases.
-GRANT SELECT, INSERT, UPDATE, DELETE ON core."case", core.submission, core.case_member, core.case_state_history, core.sla_timer TO candor_case;
+GRANT SELECT, INSERT, UPDATE, DELETE ON core."case", core.submission, core.case_state_history, core.sla_timer TO candor_case;
+-- Fail closed: only a dedicated, authenticated membership service may write.
+-- Pending that service, candor_case has no member write capability.
+GRANT SELECT ON core.case_member TO candor_case;
 GRANT SELECT (tenant_id, case_id, display_ref, channel_id, workflow_def_id, workflow_version, state, priority, received_date, last_import_month, opened_day, closed_day, key_epoch, retention_policy_id, deletion_due_day, legal_hold, ek_missing, version) ON core."case" TO candor_worker;
 GRANT UPDATE (state, closed_day, deletion_due_day, ek_missing, version) ON core."case" TO candor_worker;
 GRANT DELETE ON core."case" TO candor_worker;
