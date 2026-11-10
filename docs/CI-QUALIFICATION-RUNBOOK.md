@@ -135,3 +135,19 @@ The first focused run [42849936348](https://github.com/djshellshoxxx/leaks/actio
 At the later head, the mandatory workspace's failed job names remained `fmt`, `clippy`, `test`, `test (unprivileged user)`, `cargo-deny` and `cargo-vet`. Successful jobs were DCO, docs-lint, workflow-lint, repository lints, secret scan, SBOM and reproducibility. The scheduled-only supply-chain job was skipped on this PR trigger. The same distribution on audit/docs-only PRs supports previously identified independent blockers, but is *not* evidence that those blockers are harmless or approved.
 
 **Decision gate:** keep PR #13 draft until an independent reviewer accepts the test-only move and additive CI workflow. PR #7 remains the owned session fix, PR #11 the owned worker lint/fmt remediation; human Security Lead import sign-offs and dependency advisory triage remain mandatory. Do not merge or issue any security/release claim based on this scoped success.
+
+
+## Sixth exact-head check and independent-review acceptance checklist — 2026-11-10
+
+The latest development handoff commit `b758fff8966fefca9b20a8007c7dc5de18160db1` on draft PR #13 ran both workflows:
+
+| Workflow | Exact-head run | Result |
+| --- | --- | --- |
+| Focused source-UI qualification | [42860230477](https://github.com/djshellshoxxx/leaks/actions/runs/42860230477) | **Completed success** (1/1 job). |
+| Mandatory workspace CI | [42860230789](https://github.com/djshellshoxxx/leaks/actions/runs/42860230789) | **Completed failure**: 7 passed / 6 failed / 1 skipped. |
+
+The six failing jobs remain workspace fmt, Clippy, regular and unprivileged tests, cargo-deny and cargo-vet. DCO, docs-lint, workflow-lint, repo-lints, secret-scan, SBOM and reproducibility passed. Separate draft audit PR #14 [42859914373](https://github.com/djshellshoxxx/leaks/actions/runs/42859914373) and docs PR #15 [42860343760](https://github.com/djshellshoxxx/leaks/actions/runs/42860343760) each finished with **the same 7/6/1 breakdown**. These are source-pinned job-summary observations, not a rerun of the 87 package tests or a waiver for any required gate.
+
+Before accepting PR #13, an **independent** reviewer should confirm the three extracted test bodies/assertions are unchanged, the `render::padding` module import and test names remain discoverable, the workflow's pinned actions and read-only permissions are appropriate, and the test command exercises the actual PR head. The previous run [42849936348](https://github.com/djshellshoxxx/leaks/actions/runs/42849936348) contains the explicit hosted 87-test passing evidence; the current run establishes renewed **job-level** success. The reviewer must not infer whole-workspace, supply-chain or crypto/anonymity clearance. Keep all integration, Trust Path audit, human Security Lead and release gates in force.
+
+No local cargo commands, live wiki updates or independent acceptance were performed while preparing this documentation.
