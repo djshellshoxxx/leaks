@@ -1,6 +1,21 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 use candor_authz::{CaseId, Principal, Role, TenantId, UserId};
-use candor_case::{AuditCommit, AuditCommitFailed, CaseError, CaseService, ImportOutcome};
+use candor_case::{
+    AuditCommit, AuditCommitFailed, CaseError, CaseService, CoiLookup, CoiUnavailable,
+    ImportOutcome,
+};
+
+struct NoConflicts;
+impl CoiLookup for NoConflicts {
+    fn is_excluded(
+        &self,
+        _tenant: TenantId,
+        _case: CaseId,
+        _user: UserId,
+    ) -> Result<bool, CoiUnavailable> {
+        Ok(false)
+    }
+}
 
 #[derive(Default)]
 struct Audit {
@@ -79,11 +94,11 @@ fn unauthorized_and_missing_case_probes_are_indistinguishable() {
         panic!("import must create");
     };
     assert_eq!(
-        svc.open_case(investigator(2, 7), case),
+        svc.open_case(investigator(2, 7), case, &NoConflicts),
         Err(CaseError::NotFound)
     );
     assert_eq!(
-        svc.open_case(investigator(1, 7), CaseId(u128::MAX)),
+        svc.open_case(investigator(1, 7), CaseId(u128::MAX), &NoConflicts),
         Err(CaseError::NotFound)
     );
 }
@@ -96,9 +111,24 @@ fn imported_case_is_not_readable_until_assigned() {
         panic!("import must create");
     };
     assert_eq!(
-        svc.open_case(investigator(1, 7), case),
+        svc.open_case(investigator(1, 7), case, &NoConflicts),
         Err(CaseError::NotFound)
     );
-    assert_eq!(svc.assign(TenantId(1), case, UserId(7)), Ok(()));
-    assert_eq!(svc.open_case(investigator(1, 7), case), Ok(case));
+    assert_eq!(
+        svc.assign(
+            Principal {
+                tenant: TenantId(1),
+                user: UserId(9),
+                role: Role::Triage
+            },
+            case,
+            UserId(7),
+            &NoConflicts
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        svc.open_case(investigator(1, 7), case, &NoConflicts),
+        Ok(case)
+    );
 }
