@@ -534,3 +534,38 @@ newer integration work. Current mandatory workspace CI and required human
 approvals remain separate and unresolved. Never treat a successful focused
 record unit test as proof of production key lifecycle, Tor-only source intake,
 case-zone authorization, backup erasure, or recipient acceptance.
+
+## Wrap-stanza context and erasure-layer qualification (CRYPTO-011/053/057; 2026-11-11)
+
+This is a **source-backed test inventory**, not proof of runtime qualification,
+cryptographic correctness, or deployed erasure. Pinned default source:
+`9097f75f6529ed3dfa259de20d2fa9c78f434bda`.
+Source: `crates/candor-core/src/stanza.rs` (blob
+`a3f6c0c185b5f5f47f9bf057b70ff14f752770a1`),
+`src/kem.rs`, `src/slots.rs`; contract: `specs/04-CRYPTOGRAPHY.md`
+§9.10 and §13.2. Relevant implementation decisions and known spec-amendment
+gaps are in `crates/candor-core/SPEC-NOTES.md`.
+
+| Boundary / requirement | Existing source and regression inventory | Acceptance still required |
+| --- | --- | --- |
+| Strict stanza framing, supported suite, ciphertext bound (CRYPTO-053) | `WrapStanza::decode`, `stanza::tests::decode_rejects`, `decode_arbitrary_never_panics` | Run malformed/truncated/trailing/excessive-length cases at the exact source head; measure resource behavior with hostile inputs; ensure all consuming paths decode and validate. |
+| HPKE context and object-hash binding | `HpkeWrapContext::info`, `stanza::tests::hpke_reply_roundtrip_and_binding` | Test tenant/channel/mailbox/recipient-context negatives through actual caller and reject context-inappropriate metadata before using it as identity or authorization evidence. |
+| Case-key content wrapping to tenant, case, version and object | `stanza::tests::case_aead_roundtrip_and_binding`; `open_case_aead` | Verify application supplies authoritative identifiers/version and handles stale or relocated ciphertext without releasing plaintext. |
+| EK as outer layer over HPKE stanza, never direct raw case key (§9.10) | `stanza::tests::casekey_ek_roundtrip_and_ek_direct_wrap`; `tests/vectors.rs::stanza_vectors` | Verify recipient/key identity, inner type and policy in real case-zone consumers; independently accept actual EKV storage, restoration and erasure semantics. |
+| Privacy-safe diagnostic output | `stanza::tests::context_debug_is_redacted`, `WrapStanza::Debug` | Review downstream error/log/trace fields and telemetry under source-identifying values; crate Debug tests alone do not establish anonymity. |
+
+Reference commands **not executed** in this documentation pass:
+
+```sh
+cargo test -p candor-core --lib stanza::tests --locked
+cargo test -p candor-core --test vectors stanza_vectors --locked
+cargo clippy -p candor-core --all-targets --all-features --locked -- -D warnings
+cargo fmt -p candor-core -- --check
+```
+
+No producer/consumer changes, test assertions, cryptographic primitives,
+normative protocol or financial/security policy are authorized by this matrix.
+A focused unit/vector pass cannot replace workspace checks, Trust Path
+review, case-zone authorization and recipient acceptance, full Tor-only intake
+testing or independent crypto/security sign-off. Record only actually executed
+test outcomes and exact-head workflow links when available.
