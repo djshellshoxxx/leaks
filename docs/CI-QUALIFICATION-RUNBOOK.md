@@ -161,3 +161,39 @@ The exact-head [workspace run 42870913553](https://github.com/djshellshoxxx/leak
 **Remediation:** coordinate with the owner of each isolated `chatgpt/zero-codex/*` branch to correct the affected commits' DCO trailers via a narrowly reviewed commit-message rebase (force-with-lease only on that owned branch), then rerun exact-head checks. A new signed-off commit alone does **not** repair historical commits checked across the PR. Do not rewrite a concurrent owner's branch or bypass the DCO script. Preserve PR diff, substantive review history and all other security gates; note that the checker name reflects the repository's expected contributor identity and must be confirmed by the contributor before attestation.
 
 PR #13 remains draft pending independent acceptance of the test-only move and additive workflow; none of these focused tests close the external trust-path or supply-chain blockers.
+
+
+## PostgreSQL-backed acceptance is not equivalent to default cargo success (2026-11-11)
+
+The intake store's `crates/candor-intake-store/tests/pg.rs` explicitly checks
+`CANDOR_TEST_PG` before provisioning test databases (`base()`, lines 30–43).
+When that environment variable is absent, the PostgreSQL-specific tests
+return early rather than exercise the database. Accordingly, **a passing
+default `cargo test -p candor-intake-store` is not sufficient evidence**
+that role grants, RLS, PostgreSQL restart/restore, deletion-list monotonicity,
+or remnant-erasure tests passed against a running server.
+
+For a dedicated test environment, the crate documents the **throwaway,
+unprivileged** fixture wrapper (see
+[`crates/candor-intake-store/README.md`](../crates/candor-intake-store/README.md)
+and its checked-in script):
+
+```sh
+crates/candor-intake-store/scripts/pg-test.sh cargo test -p candor-intake-store --test pg
+```
+
+The wrapper creates an isolated PostgreSQL 16 Unix-socket cluster, sets
+`CANDOR_TEST_PG`, runs the supplied command and tears the cluster down.
+Review its script and local prerequisites before invoking it. Record the
+*actual* command, resulting job logs, PostgreSQL fixture status and exact
+revision; neither this guide nor ordinary workspace CI establishes that the
+database-backed assertions were executed. A prior on-repository test count
+without `CANDOR_TEST_PG` is **not** substitute evidence. No such database
+fixture was started in the 2026-11-11 ChatGPT documentation review.
+
+Requirement-to-test examples: R7 SI-E-02 role/grant isolation →
+`pg_roles_and_grants`; R7 SI-E-03 tenant isolation →
+`pg_rls_tenant_isolation`; BE-074 restore-pending / retention guards →
+`pg_durability_and_guards` and the deletion-list tests in `pg.rs`.
+These are **test definitions and traceability links**, not fresh test results
+or an independent security certification.
