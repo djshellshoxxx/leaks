@@ -569,3 +569,46 @@ A focused unit/vector pass cannot replace workspace checks, Trust Path
 review, case-zone authorization and recipient acceptance, full Tor-only intake
 testing or independent crypto/security sign-off. Record only actually executed
 test outcomes and exact-head workflow links when available.
+
+## Authorization policy registration and test scope (RM-3; 2026-11-11)
+
+**Source pin:** default `claude/tender-tesla-z8tfnl` at
+`9097f75f6529ed3dfa259de20d2fa9c78f434bda`. This section distinguishes
+a **present Rust source file** from an actually compiled and exercised policy.
+It is a documentation/traceability correction, not a change to authorization
+requirements, code, security gates or approved routes.
+
+| Intended capability | Source status on the pinned default | Existing proof / outstanding acceptance |
+| --- | --- | --- |
+| Basic tenancy, assignment, COI and bounded break-glass checks | `crates/candor-authz/src/lib.rs::authorize` is exported | `tests/policy.rs` has six authorization cases; focused CI and full PEP integration still require separately recorded execution |
+| Explicit account-state denies, case-content role/relation obligations and wrap-recipient checks | `src/lib.rs::{authorize_case,validate_wrap_recipients}` are exported | `tests/rm3_contract.rs` has four tests; actual case-service/DB/PDP enforcement requires independently reviewed cross-service acceptance |
+| Recipient/admin session idle, absolute lifetime, audience and revocation | `mod session;` and public re-exports are registered in `src/lib.rs` | `tests/session_contract.rs` has five session tests; no authentication or token-verification integration is implied |
+| Canonical policy JSON, permissions matrix, declarative routes, dual-control rule parsing and `Policy::baseline` | `src/policy.rs` **exists but is not a module of `src/lib.rs`**. Its `serde`/`serde_json` dependencies are absent from `candor-authz/Cargo.toml`; its `include_bytes!("../authz/matrix.json")` asset is absent under the crate at this source pin | **Not compiled or qualified as active enforcement**. The above test files do not call this parser. Do not infer a working route registry or policy baseline from its comments or file presence |
+
+The owned RM-3 [draft PR #16](https://github.com/djshellshoxxx/leaks/pull/16)
+changes `candor-authz/src/lib.rs` and adds `pdp.rs`. Those draft
+changes must be reviewed and qualified on their own exact head; they are
+**not** merged into the default source and are not evidence that dormant
+`policy.rs` is running. No changes to the independently owned authorization
+implementation are proposed here.
+
+Reference-only checks for the compiled public API (not executed during
+documentation maintenance):
+
+```sh
+cargo test -p candor-authz --test policy --locked
+cargo test -p candor-authz --test rm3_contract --locked
+cargo test -p candor-authz --test session_contract --locked
+cargo clippy -p candor-authz --all-targets --all-features --locked -- -D warnings
+```
+
+For any *future, approved* matrix-parser integration, obtain canonical
+fixture and missing-asset provenance, dependency review, bounded malformed
+JSON and route-declaration negative tests, approval/step-up/COI isolation
+tests, exact-head CI and independent authorization/security review first.
+Do not register inactive policy modules merely to make documentation claims
+true. The user/developer Wiki pages remain under [draft PR #9](https://github.com/djshellshoxxx/leaks/pull/9):
+Home and Sidebar both link separate User Guide and Developer Guide, but the
+live Wiki is not verified as published. The User Guide's statements about
+historical safe-file/audit-log gates need owner correction using
+`process/STATUS.md`, which records FAIL outcomes.
