@@ -62,11 +62,12 @@ rt.block_on(async {
     let serve = sealer.serve(listener);                    // refuses unless hardened, per thread
     tokio::pin!(serve);
     let flushed: Result<usize, ShutdownLoss> = tokio::select! {
-        r = &mut serve => {                                // serving ended first (listener or hardening
-            r?;                                            // failure): still flush, never exit with a queue
-            let s = sealer.clone();
-            tokio::task::spawn_blocking(move || s.shutdown_flush()).await
-                .unwrap_or_else(|_| Err(ShutdownLoss(sealer.queued_accounts().max(1))))
+        served = &mut serve => {                           // serving ended first (listener or hardening
+            let s = sealer.clone();                        // failure): flush BEFORE propagating the error,
+            let flushed = tokio::task::spawn_blocking(move || s.shutdown_flush()).await  // never exit with a queue
+                .unwrap_or_else(|_| Err(ShutdownLoss(sealer.queued_accounts().max(1))));
+            served?;
+            flushed
         }
         r = &mut term => {                                 // SIGTERM: `serve` is dropped here, so no new
             r.unwrap_or_else(|_| Err(ShutdownLoss(sealer.queued_accounts().max(1))))  // session is accepted

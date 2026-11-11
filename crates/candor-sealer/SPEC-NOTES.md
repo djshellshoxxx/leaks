@@ -401,7 +401,7 @@ Callers updated: `tests/signal.rs`, `tests/chaff.rs` and `tests/shutdown.rs` use
   state at entry (and `spawn_sigterm_flush` sets it the instant SIGTERM arrives, before the flush
   thread starts). `queue_has_room` is `false` while stopping, and every enqueue site checks it
   *before* `commit_group`, so a `SEAL_FINISH` / `ROTATE_FINISH` / chaff event that would queue a
-  write is refused with `BUSY` and nothing is half done (the draft keeps its attachments). A write
+  write is refused with `BUSY` and nothing is committed (for `SEAL_FINISH` the staged parts were already taken before the room check, so the source restarts the submission, as for any `BUSY`; nothing reached the store). A write
   whose room check passed just before the flag is still attempted: the flush lock is held across
   the pass, a bounded extra pass (at most two) runs only when a write arrived while a pass was
   writing (`arrivals` counter; a refused write is not hammered, ADR-057(4)), and the final count
@@ -431,3 +431,8 @@ Callers updated: `tests/signal.rs`, `tests/chaff.rs` and `tests/shutdown.rs` use
 | IPC-18 (Low) undercount on thread failure | snapshot before the pass; drop guard | `shutdown_failure.rs::flush_thread_failure_reports_at_least_the_taken_batch` (auditor's P3, own binary: a sink that panics; `ShutdownLoss(n)` with `n` ≥ the batch size, backlog event raised) |
 | Info: `ok && left == 0` uncovered | — | `signal.rs::refused_write_at_shutdown_is_reported_not_claimed` (auditor's P2) |
 | IPC-16 (chaff) a stopping sealer still took dummy rotations; a full queue took them past its bound | every chaff shape is gated on `queue_has_room` (create and rotation); `chaff_event_shaped` makes the shape explicit for conformance tests (production still draws it) | `signal.rs::stopping_sealer_refuses_chaff`; `stale_dummy_rotation_after_restore_is_dropped` rewritten to mint dummies through regular batches (it used `shutdown_flush` as a shortcut, which now stops the sealer for good) |
+
+### Round-4 re-test result (independent, 2026-11-11, `52eb19a`): Gate PASS
+- IPC-16 Fixed, IPC-18 Fixed, IPC-17 (a)(c)(d) fixed; (b) fixed in the README after the re-test (the serve-error branch now flushes before propagating the error).
+- **IPC-19 (Low, open):** in-flight commits are not awaited before the final count: a seal admitted before SIGTERM whose commit lands after the SIGTERM retry's count is reported (`late_arrivals`, backlog event) but lost at exit; three or more staggered arrivals exhaust the bounded passes and end in `Err` with the store up (reported, not retried further). Accepted as the documented residual of a RAM queue without a durable spool; a drain that awaits in-flight `commit_group`s is the follow-up.
+- Info: the extra-pass, `closed`-branch and SIGTERM-retry paths have no shipped test (the auditor's Q1/Q2/Q3 PoCs cover them; to be added as regression tests in the follow-up); the refusal count advances once per shutdown pass.
