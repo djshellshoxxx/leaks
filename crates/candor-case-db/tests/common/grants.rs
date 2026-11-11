@@ -383,6 +383,43 @@ pub const TABLE_GRANTS: &[(&str, &[(&str, &str)])] = &[
 /// Column-level grants `(schema.table, role, privilege letter, columns)`:
 /// exactly these columns, no table-level privilege of that kind.
 pub const COLUMN_GRANTS: &[(&str, &str, &str, &[&str])] = &[
+    // Worker key columns on content tables (DELETE ... WHERE needs SELECT on the named columns).
+    (
+        "core.case_record",
+        "candor_worker",
+        "S",
+        &["tenant_id", "record_id", "case_id"],
+    ),
+    (
+        "core.message",
+        "candor_worker",
+        "S",
+        &["tenant_id", "message_id", "case_id"],
+    ),
+    (
+        "core.attachment",
+        "candor_worker",
+        "S",
+        &["tenant_id", "message_id", "evidence_id"],
+    ),
+    (
+        "core.evidence_object",
+        "candor_worker",
+        "S",
+        &["tenant_id", "evidence_id", "case_id"],
+    ),
+    (
+        "core.evidence_derivative",
+        "candor_worker",
+        "S",
+        &["tenant_id", "derivative_id", "case_id"],
+    ),
+    (
+        "core.sealed_identity",
+        "candor_worker",
+        "S",
+        &["tenant_id", "identity_id", "case_id"],
+    ),
     (
         "core.tenant",
         "candor_admin",
