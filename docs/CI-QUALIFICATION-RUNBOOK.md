@@ -364,3 +364,30 @@ workspace fmt/Clippy/tests and cargo-deny/vet remain red. A new docs
 commit must be independently checked. The separate draft Wiki owner
 PR #9 still needs to correct stale user-facing audit claims; the live
 GitHub Wiki has not been published or verified.
+
+
+## Tenant-bound PostgreSQL `TenantTx` and RLS qualification (2026-11-11)
+
+**Source:** default `claude/tender-tesla-z8tfnl` at `9097f75f6529ed3dfa259de20d2fa9c78f434bda` (not the proposed, unmerged PR #16 grant changes). This is a test/acceptance trace, **not** a database qualification, Trust Path review or release approval.
+
+| Contract and threat boundary | Defined implementation | Existing test to run on actual PostgreSQL | Still required |
+| --- | --- | --- | --- |
+| Role-bound connection and effective session hardening | `crates/candor-case-db/src/db.rs::CaseDb::open`, `Role::serves`, `session_ok` | `tests/pg.rs::migrate_and_open_every_role`, `live_lint_passes` | Execute against ephemeral real database, verify restrictive grants, disabled RLS, unsafe role flags and session defaults are refused |
+| Per-transaction identity and isolation | `src/tx.rs::TenantTx::begin`, parameter-bound `set_config(..., true)` for tenant/user/kind; `src/db.rs::CaseDb::begin` | `tenant_tx_fail_closed`, `rls_isolation_every_table` | Verify cross-tenant read/write rejection, rollback/commit and pooled connection reuse in a qualified live cluster |
+| Deny unknown/suspended tenant; narrowly permit maintenance | `tx.rs::begin` state branch; `types.rs::PrincipalKind::serves_suspended` | `tenant_tx_fail_closed` | Test all role/state combinations and negative tokens against service authentication, not only constructed Principals |
+| Bootstrap without prior visible tenant row | `repo/tenant.rs::bootstrap` first requires `Role::Admin`; crate-private `TenantTx::begin_bootstrap` skips initial tenant visibility | `tenant_tx_fail_closed` | Verify no non-admin role can bootstrap and no duplicate/cross-tenant grant is possible |
+| Case membership and RLS | `src/repo/case.rs`, `db.rs` and live RLS migrations | `rls_case_acl_hides_non_member`, `rls_isolation_every_table` | Qualify the final integrated PR #16 schema/grant changes under real PostgreSQL and separately accepted access-control reviews |
+
+**A green ordinary Cargo test result can be vacuous for this package.** `crates/candor-case-db/tests/common/mod.rs::base()` returns `None` if `CANDOR_TEST_PG` is unset; `tests/pg.rs` tests then immediately return. `tests/pg.rs` refers to `scripts/pg-test.sh`, but **that script is absent** from the pinned default Git tree (1,226 entries inspected). Do not claim live RLS or database-transaction evidence until an actual cluster and explicit fixture/test invocation are provided and the executed test count, database connection, migration and role assertion are recorded. Provisioning/repairing the harness is independent work and must coordinate with PR #16's case-db owner.
+
+Illustrative package commands (not executed in this ChatGPT documentation pass):
+
+```sh
+cargo fmt -p candor-case-db -- --check
+cargo clippy -p candor-case-db --all-targets --all-features --locked -- -D warnings
+cargo test -p candor-case-db --test pg --locked  # NOT sufficient without CANDOR_TEST_PG and a live cluster
+```
+
+Record exactly which supported PostgreSQL version/socket, test database, role bootstrap, env variables, test names and results were used; use an isolated disposable cluster with **no production data**. A future harness should fail CI on missing fixtures rather than treat skip-on-unset as an execution success. Do not patch test gates just to turn workspace CI green. The distinction between a constructed `Principal` and an authenticated external identity must also be verified at the service boundary.
+
+**Evidence/ownership:** audit rotation 25 reviewed source/tests without runtime execution and found no new reproducible vulnerability. PR #16 independently owns related RM-3 implementation and database grants; PR #9 owns source Wiki Home/User/Developer pages; neither branch is touched here. The prior docs head `6b059e40509e98692a41dc4a930dcfba33d96562` [mandatory CI 43025465980](https://github.com/djshellshoxxx/leaks/actions/runs/43025465980) completed **failure (6 successful, 7 failed, 1 skipped)**. Those DCO, fmt, Clippy, test, unprivileged-test, cargo-deny and cargo-vet failures are not waived by this documentation update. Live GitHub Wiki publication remains unverified.
