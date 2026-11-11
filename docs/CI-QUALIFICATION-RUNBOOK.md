@@ -197,3 +197,18 @@ Requirement-to-test examples: R7 SI-E-02 role/grant isolation →
 `pg_durability_and_guards` and the deletion-list tests in `pg.rs`.
 These are **test definitions and traceability links**, not fresh test results
 or an independent security certification.
+
+
+## Case-zone PostgreSQL qualification (2026-11-11)
+
+The separate `candor-case-db` PostgreSQL test suite also **returns early without executing its assertions** when `CANDOR_TEST_PG` is absent. This is explicit in `crates/candor-case-db/tests/common/mod.rs:9-22` (`base()`) and in each integration-test entry point in `crates/candor-case-db/tests/pg.rs`. A green ordinary Rust workspace test is **not** proof that the case-zone RLS, authorization role/grant, transaction, schema-drift or state-history checks ran against PostgreSQL.
+
+The checked-in isolated PG16 harness is `crates/candor-case-db/scripts/pg-test.sh` (distinct from the intake-store script). On a suitably provisioned disposable test host, review its privileges and configuration first, then invoke:
+
+```sh
+crates/candor-case-db/scripts/pg-test.sh cargo test -p candor-case-db --test pg
+```
+
+The script uses a temporary Unix-socket-only database with peer authentication, exports `CANDOR_TEST_PG`, and cleans up after execution. When run as root it may create and later remove a system account; **do not run it on shared or production hosts**. Record the exact candidate SHA, PostgreSQL fixture startup evidence, command output, test counts and any skips before claiming case-zone acceptance. Existing relevant test definitions are `migrate_and_open_every_role`, `rls_isolation_every_table`, `rls_case_acl_hides_non_member`, `grant_matrix`, `tenant_tx_fail_closed`, and `tamper_and_drift_refused` (`crates/candor-case-db/tests/pg.rs`). Their presence is not a test result.
+
+The source-level `display_ref` retry-path inconsistency in `crates/candor-case-db/src/repo/case.rs:236-284` requires a deterministic, **database-backed** duplicate-display-reference regression before any remediation claim. That implementation remains owned by RM-3 PR #16. No PostgreSQL fixture was executed while adding this documentation, and no audit/release gate was changed.
