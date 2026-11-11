@@ -278,3 +278,46 @@ ChatGPT documentation phase**. Existing PR #11 owns worker lint/format changes;
 PR #16 owns current case/retention integration, and required security/human
 review is separate. Focused green tests would not satisfy failing whole-workspace
 DCO, dependency, supply-chain or independent security-release gates.
+
+
+## Source-UI route/method traceability (2026-11-11)
+
+Source snapshot: default/integration branch `claude/tender-tesla-z8tfnl`,
+`9097f75f6529ed3dfa259de20d2fa9c78f434bda`. This section documents
+defined contract tests and additional acceptance requirements; **no new test
+run is asserted**.
+
+| Contract | Source of truth | Existing test/evidence | Remaining qualification |
+| --- | --- | --- | --- |
+| Fixed, identifier-free Tier W route paths | `crates/candor-source-ui/src/routes.rs::Route::path` and `candor-intake-web/src/routes.rs::lookup` | `unknown_paths_are_not_routes` checks rejected paths and explicit landing aliases | Confirm full URL/template inventory and method-specific HTTP responses on exact integration head |
+| GET versus POST-only behavior | `Route::accepts_get` and intake-web `REGISTRY` | `registry_complete_and_consistent` compares all 22 declarations and their GET flag | Exercise every POST-only path with GET/HEAD and prove no state mutation |
+| Deny-by-default unknown paths and methods | `candor-intake-web/src/routes.rs` and `app.rs` | `route_registry_deny_by_default` tests 404/405 and fixed 404 response sizes on representative paths | Repeat across supported locales, signed-in and cookieless contexts; preserve anonymity-sensitive uniformity |
+| CSRF-bound form methods | `candor-intake-web/src/routes.rs::rule`, `app.rs`; templates under `candor-source-ui/templates/` | Registry test checks field allow-lists; inspected forms use `method="post"` for sensitive actions | Audit all templates against the typed route registry and validate token, origin and failure behavior without weakening authorization |
+
+The UI URL formatter `PageView::href` accepts any typed `Route`; it
+constructs a path but **does not authorize GET**, perform CSRF validation or
+prevent a caller from placing a POST-only path in a hyperlink. Actual method
+enforcement resides in the intake-web route registry/dispatcher. The sampled
+source templates inspected during read-only audit rotation 23 used POST form
+actions appropriately; a comprehensive template-link inventory remains
+outstanding. This is a test-coverage boundary, **not a demonstrated security
+vulnerability**.
+
+For an appropriately provisioned reviewer, focused tests to execute on the
+exact proposed integration commit include:
+
+```sh
+cargo test -p candor-intake-web --locked registry_complete_and_consistent
+cargo test -p candor-intake-web --locked unknown_paths_are_not_routes
+cargo test -p candor-intake-web --locked route_registry_deny_by_default
+cargo test -p candor-source-ui --test render --locked
+```
+
+These are reference commands only; they were **not executed in this
+documentation run**. A focused source-UI job on draft PR #13 at
+`860916e9411a1d3d17c541170a363e6c6099e5f8`
+[passed](https://github.com/djshellshoxxx/leaks/actions/runs/43008925170),
+but the same head's [mandatory workspace CI](https://github.com/djshellshoxxx/leaks/actions/runs/43008925105)
+failed (DCO, fmt, Clippy, ordinary/unprivileged tests, cargo-deny and
+cargo-vet). Neither result certifies the complete intake-web route matrix,
+anonymity controls, security audits or release readiness.
