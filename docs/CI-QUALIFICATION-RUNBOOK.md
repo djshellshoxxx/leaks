@@ -612,3 +612,41 @@ Home and Sidebar both link separate User Guide and Developer Guide, but the
 live Wiki is not verified as published. The User Guide's statements about
 historical safe-file/audit-log gates need owner correction using
 `process/STATUS.md`, which records FAIL outcomes.
+
+## Sealer Unix IPC admission/timeout trace (BE-003/006, ADR-052(4); 2026-11-11)
+
+**Source/test inventory only; no listener test was executed in this documentation
+pass.** Immutable default source `claude/tender-tesla-z8tfnl` at
+`9097f75f6529ed3dfa259de20d2fa9c78f434bda`. Listener:
+`crates/candor-sealer/src/server/listener.rs` (blob
+`904559224d4034e3b36c882c0a481b75efc801a5`). The listener is
+sealer Trust Path; any behavior change requires separate owned review,
+not a documentation update or this audit ledger.
+
+| Boundary / requirement | Existing source and test inventory | Acceptance still needed |
+| --- | --- | --- |
+| Only Unix IPC and correct peer UID before request body | `listener.rs::serve` checks `peer_cred().uid()`; `tests/ipc.rs::wrong_peer_uid_is_disconnected_without_a_byte` | Execute on isolated Linux host with real peer credentials and verify no alternate accept path; review the deployment unit and permitted socket ownership |
+| HELLO-first, canonical framing, malformed-input refusal (BE-006) | `proto::frame_len` bounds frames to 1..131,072; `listener.rs::connection` caps pre-HELLO frames at 256 and rejects bad sequencing; `tests/ipc.rs::socket_round_trip_and_bad_frames`; `tests/listener.rs::no_large_frame_before_hello` | Run protocol and negative corpus at exact head, plus dedicated fuzz tests; verify downstream handler and no sensitive error fields |
+| Connection quota / best-effort BUSY | `listener.rs::serve` uses semaphore permits; `refuse_busy` attempts one *nonblocking, best-effort* response; `tests/listener.rs::connection_cap_answers_busy_and_frees_slots` | Run concurrency/rapid-churn and FD-pressure tests; BUSY delivery is not guaranteed and must not be treated as a durable receipt |
+| Handshake, body, idle and write time budgets | `listener.rs::connection` uses `tokio::time::timeout`, `write_all_timed` gives a deadline; `tests/listener.rs::timeouts_close_stalled_and_idle_connections` | Run timing-interleaving and stall tests on Linux under constrained resources; verify the deployed `Limits` values and fail-closed behavior |
+| Recover from transient accept errors / fd exhaustion | `listener.rs::serve` counts errors and backs off 10 ms..1 s; `tests/listener_emfile.rs::accept_survives_emfile` | Run isolated RLIMIT_NOFILE/EMFILE regression safely, verify accept recovery and service monitoring rather than inferring production resilience |
+| Thread confinement, source-data handling | `server/hardening.rs::{guard,poisoned}` and `listener.rs:49–53,171–174`; `Zeroizing<Vec<u8>>` covers body buffer | Independently inspect thread/runtime hardening, error sinks, post-decode owned secrets and real deployment; buffer zeroization alone is not an anonymity proof |
+
+Reference-only commands, **not run** during the source review or docs maintenance:
+
+```sh
+cargo test -p candor-sealer --test listener --locked
+cargo test -p candor-sealer --test listener_emfile --locked
+cargo test -p candor-sealer --test ipc --locked
+cargo clippy -p candor-sealer --all-targets --all-features --locked -- -D warnings
+cargo fmt -p candor-sealer -- --check
+```
+
+Existing focused tests are *inventory*, not passing results for this run. The
+previous mandatory workspace CI remained red: DCO history, rustfmt, Clippy,
+ordinary/unprivileged tests, cargo-deny and cargo-vet. The historical sealer
+and IPC security-audit gates, production resource/timing characterization,
+full Tor-only source-to-sealer acceptance, independent crypto/security review
+and release authorization remain separate. Draft PR #16 owns sealer trust-path
+work, so no adjacent production source or tests were edited. The related
+read-only source inspection is recorded in audit draft PR #14, rotation 34.
