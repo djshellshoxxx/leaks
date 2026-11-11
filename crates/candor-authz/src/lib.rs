@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #![forbid(unsafe_code)]
 
+pub mod pdp;
 mod session;
+
+pub use pdp::{DenyCode, Obligation, WrapError};
 pub use session::{Audience, Session, SessionError, SessionToken, StaffClass};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -124,62 +127,69 @@ pub enum PolicyAction {
     ExportOriginal,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Obligation {
-    RequireStepUp,
-    RequireSecondApprover,
+/// The decision type of the C-22 decision point (`pdp::Decision`).
+pub type PolicyDecision = pdp::Decision;
+
+impl From<Role> for pdp::Role {
+    fn from(role: Role) -> Self {
+        match role {
+            Role::Investigator => pdp::Role::Investigator,
+            Role::Triage => pdp::Role::Triager,
+            Role::Auditor => pdp::Role::Auditor,
+            Role::SystemAdmin => pdp::Role::SysAdmin,
+        }
+    }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DenyCode {
-    Tenant,
-    Suspended,
-    NoRelation,
-    Role,
+impl From<PolicyAction> for pdp::Action {
+    fn from(action: PolicyAction) -> Self {
+        match action {
+            PolicyAction::ReadContent => pdp::Action::ReadContent,
+            PolicyAction::ExportOriginal => pdp::Action::ExportOriginal,
+        }
+    }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PolicyDecision {
-    Permit(Vec<Obligation>),
-    Deny(DenyCode),
-}
-
-/// Case-content policy path implementing the spec's mandatory evaluation order:
-/// authentication/tenant, explicit deny, role, relation, then obligations.
+/// Case-content policy path over the single-role principal model. It is a thin adapter onto
+/// the C-22 decision point in [`pdp`], which implements the spec's mandatory evaluation order
+/// (authentication/tenant, explicit deny, role, relation, then obligations). There is one
+/// decision procedure, not two.
 #[must_use]
 pub fn authorize_case(
     principal: AuthzPrincipal,
     action: PolicyAction,
     resource: CasePolicyResource,
 ) -> PolicyDecision {
-    if principal.tenant != resource.tenant {
-        return PolicyDecision::Deny(DenyCode::Tenant);
-    }
-    if principal.account_state != AccountState::Active {
-        return PolicyDecision::Deny(DenyCode::Suspended);
-    }
-    if resource.coi_excluded {
-        return PolicyDecision::Deny(DenyCode::NoRelation);
-    }
-
-    match principal.role {
-        Role::Investigator | Role::Triage => {}
-        Role::Auditor | Role::SystemAdmin => return PolicyDecision::Deny(DenyCode::Role),
-    }
-
-    if !resource.member {
-        return PolicyDecision::Deny(DenyCode::NoRelation);
-    }
-
-    match action {
-        PolicyAction::ReadContent => PolicyDecision::Permit(Vec::new()),
-        PolicyAction::ExportOriginal => PolicyDecision::Permit(vec![
-            Obligation::RequireStepUp,
-            Obligation::RequireSecondApprover,
-        ]),
-    }
+    let mut roles = std::collections::BTreeSet::new();
+    roles.insert(pdp::Role::from(principal.role));
+    let subject = pdp::Principal {
+        tenant_id: principal.tenant.0,
+        user_id: principal.user.0,
+        // This model carries no person binding; the user id stands in (it is never compared).
+        person_ref: principal.user.0,
+        roles,
+        suspended: principal.account_state != AccountState::Active,
+    };
+    let case = pdp::ResourceRef {
+        tenant_id: resource.tenant.0,
+        // This model carries no case id; the decision never reads it.
+        case_id: 0,
+        member: resource.member,
+        lead: false,
+        coi_excluded: resource.coi_excluded,
+        visible: true,
+    };
+    pdp::authorize(
+        &subject,
+        pdp::Action::from(action),
+        &case,
+        &pdp::AuthzContext::default(),
+    )
 }
 
+/// A candidate recipient key without a user binding (one key per user). Prefer
+/// [`pdp::WrapCandidate`], which carries the user id and lets the distinct-user rule
+/// (ADR-044(2)) be checked exactly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WrapCandidate {
     pub key_id: u128,
@@ -187,43 +197,22 @@ pub struct WrapCandidate {
     pub excluded: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WrapError {
-    TooFewRecipients,
-    DuplicateRecipient,
-    NotCandidate,
-    Excluded,
-    StaleKey,
-}
-
 /// Validate a client-supplied recipient set before the Case Service accepts case-key wraps.
-/// No server-side role may smuggle an extra recipient into the set.
+/// No server-side role may smuggle an extra recipient into the set. Adapter onto
+/// [`pdp::validate_key_wraps`] with each key standing for its own user.
 pub fn validate_wrap_recipients(
     key_ids: &[u128],
     candidates: &[WrapCandidate],
     minimum_distinct: usize,
 ) -> Result<(), WrapError> {
-    if key_ids.len() < minimum_distinct {
-        return Err(WrapError::TooFewRecipients);
-    }
-
-    for (index, key_id) in key_ids.iter().enumerate() {
-        if key_ids.iter().take(index).any(|prior| prior == key_id) {
-            return Err(WrapError::DuplicateRecipient);
-        }
-        let Some(candidate) = candidates
-            .iter()
-            .find(|candidate| candidate.key_id == *key_id)
-        else {
-            return Err(WrapError::NotCandidate);
-        };
-        if candidate.excluded {
-            return Err(WrapError::Excluded);
-        }
-        if !candidate.current {
-            return Err(WrapError::StaleKey);
-        }
-    }
-
-    Ok(())
+    let candidates: std::collections::BTreeSet<pdp::WrapCandidate> = candidates
+        .iter()
+        .map(|candidate| pdp::WrapCandidate {
+            key_id: candidate.key_id,
+            user_id: candidate.key_id,
+            current: candidate.current,
+            excluded: candidate.excluded,
+        })
+        .collect();
+    pdp::validate_key_wraps(key_ids, &candidates, minimum_distinct)
 }

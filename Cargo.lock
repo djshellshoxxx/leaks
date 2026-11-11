@@ -221,6 +221,9 @@ dependencies = [
 [[package]]
 name = "candor-authz"
 version = "0.1.0"
+dependencies = [
+ "proptest",
+]
 
 [[package]]
 name = "candor-case"
@@ -350,6 +353,11 @@ version = "0.1.0"
 [[package]]
 name = "candor-relay"
 version = "0.1.0"
+dependencies = [
+ "candor-core",
+ "ed25519-dalek",
+ "proptest",
+]
 
 [[package]]
 name = "candor-retention"
