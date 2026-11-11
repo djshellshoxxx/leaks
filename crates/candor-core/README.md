@@ -11,7 +11,13 @@
 
 `CANDOR-FIPS-1` is recognised and rejected with `Error::UnsupportedSuite`.
 
-Licence: Apache-2.0 OR MIT (ADR-031). No `unsafe`. Secrets zeroize on drop and are never printed. MAC and tag checks are constant-time. Parsers never panic on hostile input.
+Licence: Apache-2.0 OR MIT (ADR-031). The crate forbids `unsafe`, uses zeroizing secret wrappers and redacted `Debug` for key-bearing types, uses constant-time comparison primitives for MACs and tags, and checks untrusted lengths before decoding. These are scoped implementation controls, **not** a guarantee that every transient secret copy is erased, all callers behave safely or all inputs and build environments have been independently verified.
+
+## Assurance and integration limits
+
+The [independent core review](../../process/audits/AUDIT-RM1-candor-core.md) records a final **PASS for the audited core scope**, after documented fixes and lead dispositions. This is not a pass for Candor as a whole, and it is not an external cryptographic certification. The audit retains tracked limitations for optimized timing-test evidence (CORE-19), memory inspection/zeroization evidence (ST-027), normalization edge cases (CORE-17), and migration restrictions before enabling a second cipher suite (CORE-15). Recheck those conditions against the current source when changing dependencies, toolchains, callers or supported suites.
+
+The [project status and release holds](../../process/STATUS.md) still require independent cryptography review, supply-chain sign-off and operational validation. `CANDOR-FIPS-1` is recognized on the wire but not implemented or negotiable in this build; `Suite::from_id_supported` and cryptographic entry points reject it. Only `CANDOR-STD-1` is implemented. Do not treat package tests, static audit results, or a successful seal/open example as clearance for source-facing deployment or real submissions.
 
 ## Modules
 
