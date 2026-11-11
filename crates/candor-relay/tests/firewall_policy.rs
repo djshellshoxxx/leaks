@@ -17,8 +17,7 @@ fn only_relay_uid_can_open_new_intake_connection() {
 #[test]
 fn inbound_chain_has_no_new_connection_accept_rule() {
     let Some(input) = POLICY.split("chain input").nth(1) else {
-        assert!(false, "input chain must exist");
-        return;
+        panic!("input chain must exist");
     };
     assert!(!input.contains("ct state new accept"));
     assert!(input.contains("ct state established,related accept"));

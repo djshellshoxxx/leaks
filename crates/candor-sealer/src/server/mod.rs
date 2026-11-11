@@ -283,6 +283,9 @@ pub fn parse_memory_limits(
 pub const MAX_QUEUED_ACCOUNTS: usize = 4096;
 /// Dummy accounts remembered for synthetic rotations.
 const MAX_DUMMY_TAGS: usize = 1024;
+/// Passes of the shutdown flush: the batch, plus at most two more for writes
+/// that arrived while a pass was writing (AUD-RM2-IPC-16).
+const SHUTDOWN_PASSES: u8 = 3;
 
 /// Account writes waiting for the next batch (AUD-RM2-SEA-21).
 #[derive(Default)]
@@ -299,6 +302,35 @@ struct AccountQueue {
     inflight_replaced: Vec<[u8; 32]>,
     /// Current lookup tags of dummy accounts (synthetic rotations pick one).
     dummies: std::collections::VecDeque<[u8; 32]>,
+    /// Set by the shutdown flush (AUD-RM2-IPC-16): [`queue_has_room`] then
+    /// refuses every new account write *before* its envelope commits, so a
+    /// stopping sealer fails closed (`BUSY`) instead of accepting a write it
+    /// cannot attempt.
+    stopping: bool,
+    /// Set once the shutdown flush has taken its final count: a write that
+    /// still arrives (its room check passed before `stopping` was set) is
+    /// queued, counted in `late_arrivals` and reported, never silent.
+    closed: bool,
+    /// Writes enqueued since the queue was created (lets the shutdown flush
+    /// see whether anything arrived while a pass was writing).
+    arrivals: u64,
+    /// Writes that arrived after the shutdown flush's final count.
+    late_arrivals: u64,
+    /// The 1–4 shutdown dummies were queued (once per process: a retry adds
+    /// none, the requeued ones are still there).
+    shutdown_padded: bool,
+}
+
+/// The shape of one chaff event (ADR-057(5)): what the envelope looks like
+/// to the store and whether a dummy account is created.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChaffShape {
+    /// Like an initial submission: a new dummy account is queued with it.
+    Submission,
+    /// Like a follow-up message: no new account (a dummy may be rotated).
+    FollowUp,
+    /// Like a signal (empty bundle, signal offset, release-day epoch).
+    Signal,
 }
 
 /// Sealer configuration. Secrets are not part of it: K35 is passed separately
@@ -2174,6 +2206,34 @@ impl Sealer {
     /// account and every chaff group draws a delivery delay like real ones
     /// (ADR-052(2)).
     pub async fn chaff_event(&self, channel_id: [u8; 16]) -> Result<(), ErrorCode> {
+        let chaff = &self.st.cfg.chaff;
+        let followup = rand::bernoulli_permille(chaff.followup_share_permille)
+            .map_err(|_| ErrorCode::Internal)?;
+        let signal = rand::bernoulli_permille(chaff.signal_share_permille)
+            .map_err(|_| ErrorCode::Internal)?;
+        // ADR-057(5): a share of chaff is shaped like a signal envelope
+        // (mailbox-closed or C4 offset, MEK epoch of the release day), the
+        // rest like a submission or follow-up (delayed share, today's epoch).
+        let shape = if signal {
+            ChaffShape::Signal
+        } else if followup {
+            ChaffShape::FollowUp
+        } else {
+            ChaffShape::Submission
+        };
+        self.chaff_event_shaped(channel_id, shape).await
+    }
+
+    /// One chaff event of a fixed shape. The scheduler draws the shape
+    /// ([`Sealer::chaff_event`]); conformance tests fix it. Refused with
+    /// `BUSY` while the sealer is stopping or the account queue is full, so
+    /// chaff never queues what cannot be attempted and never grows the queue
+    /// past its bound (AUD-RM2-IPC-16).
+    pub async fn chaff_event_shaped(
+        &self,
+        channel_id: [u8; 16],
+        shape: ChaffShape,
+    ) -> Result<(), ErrorCode> {
         let (today, _) = self.slot_today().map_err(|_| ErrorCode::Unavailable)?;
         let snap = self.snapshot().ok_or(ErrorCode::Unavailable)?;
         let enabled = snap.channel(&channel_id).is_some_and(|c| c.enabled);
@@ -2186,17 +2246,9 @@ impl Sealer {
         let disposition = KemPublicKey::from_bytes(snap.suite, &snap.disposition_pk)
             .map_err(|_| ErrorCode::Unavailable)?;
         let chaff = &self.st.cfg.chaff;
-        let mut followup = rand::bernoulli_permille(chaff.followup_share_permille)
-            .map_err(|_| ErrorCode::Internal)?;
-        // ADR-057(5): a share of chaff is shaped like a signal envelope
-        // (mailbox-closed or C4 offset, MEK epoch of the release day), the
-        // rest like a submission or follow-up (delayed share, today's epoch).
-        let signal_shaped = rand::bernoulli_permille(chaff.signal_share_permille)
-            .map_err(|_| ErrorCode::Internal)?;
+        let signal_shaped = matches!(shape, ChaffShape::Signal);
         // A real signal is a SOURCE_MESSAGE with an empty bundle (IPC-12).
-        if signal_shaped {
-            followup = true;
-        }
+        let followup = !matches!(shape, ChaffShape::Submission);
         let forced_bundle = signal_shaped.then_some(seal::EMPTY_BUNDLE_LEN);
         let delay = if signal_shaped {
             if rand::bernoulli_permille(500).map_err(|_| ErrorCode::Internal)? {
@@ -2251,7 +2303,9 @@ impl Sealer {
             };
             // Same order and the same queue as a real initial submission:
             // the envelope now, the (dummy) account in the next shuffled batch.
-            if account.is_some() && !queue_has_room(&st) {
+            // Checked for every shape: a follow-up may rotate a dummy, which
+            // is a queued write too.
+            if !queue_has_room(&st) {
                 return Err(ErrorCode::Busy);
             }
             commit_group(st.sink.as_ref(), group, epoch, today, delay)?;
@@ -2301,9 +2355,11 @@ impl Sealer {
             q.inflight_replaced = b.iter().filter_map(|a| a.replaces).collect();
             b
         };
-        let r = self.write_batch(batch);
-        lock(&self.st.accounts).inflight_replaced.clear();
-        r
+        // Cleared on every exit, a failing flush thread included
+        // (AUD-RM2-IPC-18): an old passphrase is blocked only while its
+        // replacement is really in flight.
+        let _inflight = InflightGuard(&self.st);
+        self.write_batch(batch, shutdown)
     }
 
     /// Write one shuffled batch. A transport failure requeues the rest for
@@ -2312,7 +2368,11 @@ impl Sealer {
     /// restore) is dropped at once, any other refusal is retried at the next
     /// flushes up to [`MAX_UPSERT_REFUSALS`] times and then dead-lettered
     /// with a health event; a refused dummy rotation leaves the dummy set.
-    fn write_batch(&self, batch: Vec<AccountUpsert>) -> Result<usize, sink::SinkError> {
+    fn write_batch(
+        &self,
+        batch: Vec<AccountUpsert>,
+        shutdown: bool,
+    ) -> Result<usize, sink::SinkError> {
         let batch = match shuffle_batch(batch.clone()) {
             Ok(b) => b,
             Err(_) => {
@@ -2340,8 +2400,13 @@ impl Sealer {
                     requeue(&self.st, rest);
                     let queued = {
                         let mut q = lock(&self.st.accounts);
-                        q.backoff = q.backoff.saturating_mul(2).clamp(1, MAX_FLUSH_BACKOFF);
-                        q.skip_flushes = q.backoff;
+                        // A failed shutdown attempt re-arms no backoff: an
+                        // integrator retry must never be skipped
+                        // (AUD-RM2-IPC-17(d)).
+                        if !shutdown {
+                            q.backoff = q.backoff.saturating_mul(2).clamp(1, MAX_FLUSH_BACKOFF);
+                            q.skip_flushes = q.backoff;
+                        }
                         q.pending.len()
                     };
                     if let Some(h) = self.health() {
@@ -2374,11 +2439,7 @@ impl Sealer {
     }
 
     fn health(&self) -> Option<Arc<dyn HealthSink>> {
-        self.st
-            .health
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+        health_of(&self.st)
     }
 
     /// Drop a refused account write: count it, report it, and forget a dummy
@@ -2399,36 +2460,63 @@ impl Sealer {
         }
     }
 
-    /// Graceful-shutdown flush (SEA-28(c)): queue 1–4 dummy account creates
-    /// and write everything queued as one shuffled batch, so the last batch
-    /// before a restart looks like any other. Blocking.
+    /// Graceful-shutdown flush (SEA-28(c)): stop admitting account writes,
+    /// queue 1–4 dummy account creates and write everything queued as one
+    /// shuffled batch, so the last batch before a restart looks like any
+    /// other. Blocking.
     ///
-    /// The IPC-10 backoff is ignored and cleared (AUD-RM2-IPC-15): this is one
-    /// bounded attempt per queued write, with no retry loop. `Ok(n)` means the
-    /// queue is empty and `n` writes landed. `Err(ShutdownLoss(lost))` means
-    /// `lost` writes are still queued (or could not be attempted) and will be
-    /// lost at exit; a backlog health event carries that count.
+    /// The IPC-10 backoff is ignored and cleared (AUD-RM2-IPC-15): this is a
+    /// bounded attempt per queued write, with no retry loop against a store
+    /// that stops answering. From the first call on, every `SEAL_FINISH` /
+    /// `ROTATE_FINISH` that would queue a write is refused with `BUSY` before
+    /// its envelope commits (AUD-RM2-IPC-16); a write whose room check passed
+    /// just before is still written by a bounded extra pass, and the final
+    /// count is taken under the flush lock. `Ok(n)` means the queue is empty
+    /// and `n` writes landed. `Err(ShutdownLoss(lost))` means `lost` writes are
+    /// still queued (or could not be attempted) and will be lost at exit; a
+    /// backlog health event carries that count. Calling it again (an
+    /// integrator retry) adds no new dummies and never sees a backoff.
     pub fn shutdown_flush(&self) -> Result<usize, ShutdownLoss> {
-        // Dummies are best effort: a failed draw only means fewer of them.
-        let n = rand::uniform_below(4)
-            .map(|r| r.saturating_add(1))
-            .unwrap_or(0);
-        for _ in 0..n {
-            let Ok(a) = dummy_account(&self.st) else {
-                break;
-            };
-            let tag = a.account.lookup_tag;
-            enqueue_account(&self.st, a);
-            remember_dummy(&self.st, tag);
-        }
-        let (flushed, ok) = {
-            let _serial = lock(&self.st.flush_lock);
-            match self.flush_locked(true) {
-                Ok(w) => (w, true),
-                Err(_) => (0, false),
+        if self.begin_stopping() {
+            // Dummies are best effort: a failed draw only means fewer of them.
+            let n = rand::uniform_below(4)
+                .map(|r| r.saturating_add(1))
+                .unwrap_or(0);
+            for _ in 0..n {
+                let Ok(a) = dummy_account(&self.st) else {
+                    break;
+                };
+                let tag = a.account.lookup_tag;
+                enqueue_account(&self.st, a);
+                remember_dummy(&self.st, tag);
             }
+        }
+        // Held across every pass and the final count, so nothing queued
+        // between a pass and the count goes unseen (AUD-RM2-IPC-16).
+        let _serial = lock(&self.st.flush_lock);
+        let mut flushed = 0usize;
+        let mut ok = true;
+        for _ in 0..SHUTDOWN_PASSES {
+            let before = lock(&self.st.accounts).arrivals;
+            match self.flush_locked(true) {
+                Ok(w) => flushed = flushed.saturating_add(w),
+                Err(_) => {
+                    ok = false;
+                    break;
+                }
+            }
+            // Another pass only for writes that arrived while this one was
+            // writing; a refused write is retried at later flushes, not
+            // hammered now (ADR-057(4)).
+            if lock(&self.st.accounts).arrivals == before {
+                break;
+            }
+        }
+        let left = {
+            let mut q = lock(&self.st.accounts);
+            q.closed = true;
+            q.pending.len()
         };
-        let left = lock(&self.st.accounts).pending.len();
         if ok && left == 0 {
             return Ok(flushed);
         }
@@ -2441,10 +2529,44 @@ impl Sealer {
         Err(ShutdownLoss(lost))
     }
 
+    /// Stop admitting account writes (AUD-RM2-IPC-16) and reopen the late
+    /// count for this pass. Returns `true` when the shutdown dummies are still
+    /// to be queued (first flush); a retry adds none.
+    fn begin_stopping(&self) -> bool {
+        let mut q = lock(&self.st.accounts);
+        q.stopping = true;
+        q.closed = false;
+        let pad = !q.shutdown_padded;
+        q.shutdown_padded = true;
+        pad
+    }
+
+    /// Stop admitting account writes without starting a flush (the SIGTERM
+    /// handler, before its flush thread runs; AUD-RM2-IPC-16).
+    fn stop_admitting(&self) {
+        lock(&self.st.accounts).stopping = true;
+    }
+
+    /// Whether the shutdown flush has started: new account writes are refused.
+    #[must_use]
+    pub fn is_stopping(&self) -> bool {
+        lock(&self.st.accounts).stopping
+    }
+
+    /// Writes that arrived after the shutdown flush took its final count (each
+    /// was queued and reported through the health sink; the integrator's
+    /// retry writes them).
+    #[must_use]
+    pub fn late_arrivals(&self) -> u64 {
+        lock(&self.st.accounts).late_arrivals
+    }
+
     /// Install a SIGTERM handler (call inside the runtime, at start, so a
-    /// failure is a start-up error) and return a task that, on SIGTERM, runs
-    /// [`Sealer::shutdown_flush`] and then completes; the integrator awaits it
-    /// and exits (SEA-28(c)).
+    /// failure is a start-up error) and return a task that, on SIGTERM, stops
+    /// admitting account writes, runs [`Sealer::shutdown_flush`] (once more
+    /// if a write slipped in after its final count) and then completes; the
+    /// integrator awaits it, stops serving, and exits non-zero on
+    /// `Err` (SEA-28(c), AUD-RM2-IPC-16/17).
     pub fn spawn_sigterm_flush(
         &self,
     ) -> std::io::Result<tokio::task::JoinHandle<Result<usize, ShutdownLoss>>> {
@@ -2453,13 +2575,40 @@ impl Sealer {
         let me = self.clone();
         Ok(tokio::spawn(async move {
             term.recv().await;
+            // Refuse new writes from this instant, before the flush thread
+            // even starts (AUD-RM2-IPC-16).
+            me.stop_admitting();
+            // What a failing flush thread must report at least: the batch it
+            // took is gone from the queue (AUD-RM2-IPC-18).
+            let snapshot = me.queued_accounts();
             let m = me.clone();
-            match blocking(move || m.shutdown_flush()).await {
-                Ok(r) => r,
-                // The flush thread failed: report what is still queued.
-                Err(()) => Err(ShutdownLoss(me.queued_accounts().max(1))),
+            let first = blocking(move || m.shutdown_flush()).await;
+            match first {
+                Ok(Ok(n)) if me.queued_accounts() == 0 => Ok(n),
+                // A write arrived after the final count: one more bounded
+                // attempt (no new dummies, no backoff), then report.
+                Ok(Ok(n)) => {
+                    let m = me.clone();
+                    match blocking(move || m.shutdown_flush()).await {
+                        Ok(Ok(k)) => Ok(n.saturating_add(k)),
+                        Ok(Err(loss)) => Err(loss),
+                        Err(()) => Err(me.flush_thread_failed(1)),
+                    }
+                }
+                Ok(Err(loss)) => Err(loss),
+                Err(()) => Err(me.flush_thread_failed(snapshot)),
             }
         }))
+    }
+
+    /// The flush thread failed (refused by the hardening guard, or it
+    /// panicked in the test profile): report at least what it took.
+    fn flush_thread_failed(&self, snapshot: usize) -> ShutdownLoss {
+        let lost = self.queued_accounts().max(snapshot).max(1);
+        if let Some(h) = self.health() {
+            h.account_backlog(lost);
+        }
+        ShutdownLoss(lost)
     }
 
     /// Attachment memory reserved now (SEA-26; health reporting and tests).
@@ -2798,9 +2947,30 @@ fn attachment_need(parts: &[StagedPart], new_padded: u64, declared_total: u64) -
     sum.checked_add(bundle_ct)
 }
 
-/// Room for one more queued account write.
+/// The health sink, if one is set.
+fn health_of(st: &State) -> Option<Arc<dyn HealthSink>> {
+    st.health
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
+/// Clears `inflight_replaced` when a batch write ends, however it ends
+/// (AUD-RM2-IPC-18).
+struct InflightGuard<'a>(&'a State);
+
+impl Drop for InflightGuard<'_> {
+    fn drop(&mut self) {
+        lock(&self.0.accounts).inflight_replaced.clear();
+    }
+}
+
+/// Room for one more queued account write. `false` once the shutdown flush
+/// has started (AUD-RM2-IPC-16): the caller refuses with `BUSY` before any
+/// envelope is committed, so nothing is half done.
 fn queue_has_room(st: &State) -> bool {
-    lock(&st.accounts).pending.len() < MAX_QUEUED_ACCOUNTS
+    let q = lock(&st.accounts);
+    !q.stopping && q.pending.len() < MAX_QUEUED_ACCOUNTS
 }
 
 /// Queue an account write for the next batch. A replacement of an account
@@ -2808,6 +2978,18 @@ fn queue_has_room(st: &State) -> bool {
 /// entry, so causal order survives the shuffle of the batch.
 fn enqueue_account(st: &State, a: AccountUpsert) {
     let mut q = lock(&st.accounts);
+    q.arrivals = q.arrivals.saturating_add(1);
+    if q.closed {
+        // After the shutdown flush's final count (AUD-RM2-IPC-16): queued for
+        // the integrator's retry and reported, never dropped silently.
+        q.late_arrivals = q.late_arrivals.saturating_add(1);
+        let queued = q.pending.len().saturating_add(1);
+        drop(q);
+        if let Some(h) = health_of(st) {
+            h.account_backlog(queued);
+        }
+        q = lock(&st.accounts);
+    }
     if let Some(old) = a.replaces
         && let Some(prev) = q
             .pending

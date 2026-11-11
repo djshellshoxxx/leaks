@@ -333,6 +333,7 @@ unit|candor-sealer.service|Service|Group|=|candor-sealer
 unit|candor-sealer.service|Service|SupplementaryGroups|=|candor-istore-clients
 unit|candor-sealer.service|Service|Restart|=|on-failure
 unit|candor-sealer.service|Service|RestartSec|=|2s
+unit|candor-sealer.service|Service|TimeoutStopSec|=|300
 unit|candor-sealer.service|Service|AppArmorProfile|=|candor-sealer
 unit|candor-sealer.service|Service|LoadCredentialEncrypted|=|sealer_signing_key:/etc/credstore.encrypted/candor-intake.sealer_signing_key.cred
 unit|candor-sealer.service|Service|LoadCredentialEncrypted|=|argon2_salt:/etc/credstore.encrypted/candor-intake.argon2_salt.cred

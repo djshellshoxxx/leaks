@@ -58,12 +58,27 @@ sealer.set_high_water_mark(persisted_hwm);
 sealer.install_snapshot(bundle, |hwm| persist(hwm))?;     // derives the view from the signed log
 rt.block_on(async {
     sealer.spawn_background();                             // reaper, account batches, chaff
-    let term = sealer.spawn_sigterm_flush()?;              // SIGTERM: one last shuffled batch
-    tokio::select! {
-        r = sealer.serve(listener) => r,                   // refuses unless hardened, per thread
-        _ = term => Ok(()),                                // then exit
-    }
+    let term = sealer.spawn_sigterm_flush()?;              // SIGTERM: stop admitting writes, one last shuffled batch
+    let serve = sealer.serve(listener);                    // refuses unless hardened, per thread
+    tokio::pin!(serve);
+    let flushed: Result<usize, ShutdownLoss> = tokio::select! {
+        served = &mut serve => {                           // serving ended first (listener or hardening
+            let s = sealer.clone();                        // failure): flush BEFORE propagating the error,
+            let flushed = tokio::task::spawn_blocking(move || s.shutdown_flush()).await  // never exit with a queue
+                .unwrap_or_else(|_| Err(ShutdownLoss(sealer.queued_accounts().max(1))));
+            served?;
+            flushed
+        }
+        r = &mut term => {                                 // SIGTERM: `serve` is dropped here, so no new
+            r.unwrap_or_else(|_| Err(ShutdownLoss(sealer.queued_accounts().max(1))))  // session is accepted
+        }
+    };
+    // `Err(ShutdownLoss(n))` is a failed flush, not a clean stop: exit non-zero so
+    // `Restart=on-failure` and the operator see it (the health event already carries n).
+    flushed.map(|_| ()).map_err(|ShutdownLoss(n)| anyhow::anyhow!("{n} account writes lost at shutdown"))
 })?;
+// The unit sets TimeoutStopSec (300 s) so a long last batch after an outage is not
+// killed mid-pass; a queued write that cannot be written in that time is reported, not silent.
 // The unit sets CANDOR_SEALER_MEMORY_BUDGET_MIB (below MemoryMax) and
 // CANDOR_SEALER_SESSION_UPLOAD_MIB; Sealer::new refuses to start without them (SEA-29).
 ```

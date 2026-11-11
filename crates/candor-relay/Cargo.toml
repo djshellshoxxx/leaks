@@ -2,7 +2,7 @@
 [package]
 name = "candor-relay"
 version = "0.1.0"
-description = "Candor one-way relay pull state machine and transport policy"
+description = "Candor one-way relay pull state machine, request authentication and transport policy"
 license = "AGPL-3.0-or-later"
 edition.workspace = true
 rust-version.workspace = true
@@ -11,3 +11,12 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+# Strict Ed25519 verification and SHA-256 from the audited RM-1 crypto library (no second implementation).
+candor-core = { path = "../candor-core" }
+# Only for the pinned relay public-key type in the authenticator's constructor; verification goes through candor-core.
+ed25519-dalek = { version = "=3.0.0", default-features = false, features = ["fast"] }
+
+[dev-dependencies]
+proptest = { version = "=1.11.0", default-features = false, features = ["std"] }

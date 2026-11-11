@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 use candor_worker::{
-    Job, JobError, JobState, RetentionAction, RetentionCase, base_backoff_seconds, jittered_backoff_seconds,
+    Job, JobError, JobState, RetentionAction, RetentionCase, base_backoff_seconds,
+    jittered_backoff_seconds,
 };
 
 #[test]

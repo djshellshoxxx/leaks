@@ -1,5 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 #![forbid(unsafe_code)]
+//! Core-side relay (C-09) policy and state machines: request authentication, the monotonic
+//! request counter, hostile-metadata validation, backpressure, the fixed import schedule and
+//! the one-way transport policy (07 §5.4). No sockets, no TLS, no filesystem here: the transport
+//! adapter owns those and calls into this crate.
+
+mod auth;
+mod counter;
+
+pub use auth::{
+    MAX_METHOD_LEN, MAX_PATH_LEN, REQUEST_SIGNING_LABEL, RelayAuthError, RelayAuthenticator,
+    request_signing_message,
+};
+use counter::{CounterError, check_counter};
 
 /// Maximum pending imports before relay pull must stop.
 pub const DEFAULT_MAX_PENDING_IMPORTS: u64 = 50_000;
@@ -29,6 +42,12 @@ pub enum RelayError {
     InboundDenied,
 }
 
+/// The 07 §5.4 backpressure rule: stop claiming when C-13 free space is below 10 % or more than
+/// `max_pending` imports are pending.
+const fn over_threshold(pending_imports: u64, max_pending: u64, free_percent: u8) -> bool {
+    pending_imports > max_pending || free_percent < MIN_FREE_PERCENT
+}
+
 /// Enforces the non-cryptographic invariants around the authenticated relay protocol.
 #[derive(Debug)]
 pub struct RelayGuard {
@@ -52,12 +71,10 @@ impl RelayGuard {
     /// Once `u64::MAX` has been accepted the counter cannot advance and the session must be
     /// replaced rather than wrapping.
     pub fn accept_counter(&mut self, counter: u64) -> Result<(), RelayError> {
-        if self.last_counter == u64::MAX {
-            return Err(RelayError::CounterExhausted);
-        }
-        if counter == 0 || counter <= self.last_counter {
-            return Err(RelayError::Replay);
-        }
+        check_counter(self.last_counter, counter).map_err(|error| match error {
+            CounterError::Exhausted => RelayError::CounterExhausted,
+            CounterError::Replay => RelayError::Replay,
+        })?;
         self.last_counter = counter;
         Ok(())
     }
@@ -68,7 +85,7 @@ impl RelayGuard {
         pending_imports: u64,
         free_percent: u8,
     ) -> Result<(), RelayError> {
-        if pending_imports > self.max_pending_imports || free_percent < MIN_FREE_PERCENT {
+        if over_threshold(pending_imports, self.max_pending_imports, free_percent) {
             return Err(RelayError::Backpressure);
         }
         Ok(())
@@ -90,6 +107,34 @@ impl RelayGuard {
     #[must_use]
     pub const fn last_counter(&self) -> u64 {
         self.last_counter
+    }
+}
+
+/// A snapshot of the two backpressure inputs at the start of a slot (07 §5.4): C-13 free space
+/// and the `import_envelope` pending count, judged against the default thresholds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Backpressure {
+    free_percent: u8,
+    pending_imports: u64,
+}
+
+impl Backpressure {
+    #[must_use]
+    pub const fn new(free_percent: u8, pending_imports: u64) -> Self {
+        Self {
+            free_percent,
+            pending_imports,
+        }
+    }
+
+    /// `true` when the relay must stop claiming and raise `SYSTEM:relay_backpressure`.
+    #[must_use]
+    pub const fn must_stop(self) -> bool {
+        over_threshold(
+            self.pending_imports,
+            DEFAULT_MAX_PENDING_IMPORTS,
+            self.free_percent,
+        )
     }
 }
 

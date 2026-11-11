@@ -1416,6 +1416,15 @@ GRANT INSERT ON core.coi_excl_tag TO candor_case;
 GRANT DELETE ON core.coi_excl_tag TO candor_worker;
 GRANT SELECT, INSERT, UPDATE, DELETE ON core.case_record, core.message, core.attachment, core.evidence_object, core.evidence_derivative, core.sealed_identity, core.identity_unseal_request TO candor_case;
 GRANT DELETE ON core.case_record, core.message, core.attachment, core.evidence_object, core.evidence_derivative, core.sealed_identity TO candor_worker;
+-- The erasure and blob-GC jobs delete content rows by tenant and case; a DELETE whose WHERE
+-- clause names a column needs SELECT on that column. Key columns only: every *_ct column stays
+-- out of the worker's reach (09 §6.4).
+GRANT SELECT (tenant_id, record_id, case_id) ON core.case_record TO candor_worker;
+GRANT SELECT (tenant_id, message_id, case_id) ON core.message TO candor_worker;
+GRANT SELECT (tenant_id, message_id, evidence_id) ON core.attachment TO candor_worker;
+GRANT SELECT (tenant_id, evidence_id, case_id) ON core.evidence_object TO candor_worker;
+GRANT SELECT (tenant_id, derivative_id, case_id) ON core.evidence_derivative TO candor_worker;
+GRANT SELECT (tenant_id, identity_id, case_id) ON core.sealed_identity TO candor_worker;
 -- 5.2.5 holds and requests.
 GRANT SELECT, INSERT, UPDATE ON core.legal_hold, core.deletion_request, core.wrap_deletion_request TO candor_case;
 GRANT SELECT (tenant_id, hold_id, case_id, placed_by, released_by, release_approved_by, placed_day, released_day, version) ON core.legal_hold TO candor_worker;

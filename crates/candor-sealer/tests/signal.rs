@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use candor_sealer::proto::*;
-use candor_sealer::server::{ChaffConfig, Limits};
+use candor_sealer::server::{ChaffConfig, ChaffShape, Limits};
 use common::kdlog::MemberEpochKey;
 use common::*;
 
@@ -636,48 +636,145 @@ async fn refused_account_write_never_blocks_the_queue() {
     assert_eq!(health.0.load(Ordering::SeqCst), 1);
 }
 
+/// AUD-RM2-IPC round 4 (auditor's P2; covers the `ok && left == 0` branch):
+/// a write the store refuses at shutdown is neither claimed written nor
+/// dead-lettered on the spot (a refusal is retried at later flushes,
+/// ADR-057(4)); the shutdown reports it as lost with one backlog event.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn refused_write_at_shutdown_is_reported_not_claimed() {
+    let f = fixture_epochs();
+    f.sink.model_store.store(true, Ordering::SeqCst);
+    let health = Arc::new(BacklogHealth::default());
+    f.sealer.set_health_sink(health.clone());
+    let (s1, l1) = (sess(1), sess(2));
+    submit_and_login(&f, s1, l1).await;
+    let (_w1, bad_tag) = rotate(&f, l1).await;
+    f.sink.refuse_tags.lock().unwrap().push(bad_tag);
+    assert_eq!(f.sealer.queued_accounts(), 1);
+    let Err(candor_sealer::server::ShutdownLoss(lost)) = f.sealer.shutdown_flush() else {
+        panic!("a refused write is never a clean stop")
+    };
+    assert_eq!(lost, 1, "the refused replacement; the dummies were written");
+    assert_eq!(lost, f.sealer.queued_accounts(), "lost = still queued");
+    assert_eq!(f.sealer.dead_letters(), 0, "not dead-lettered at shutdown");
+    assert_eq!(health.backlog.load(Ordering::SeqCst), 1);
+    assert_eq!(health.last.load(Ordering::SeqCst), 1);
+    assert_eq!(health.dropped.load(Ordering::SeqCst), 0);
+    assert!(
+        !f.sink.known_tags.lock().unwrap().contains(&bad_tag),
+        "the refused tag never reached the store"
+    );
+}
+
+/// Health sink recording backlog reports and dead letters.
+#[derive(Default)]
+struct BacklogHealth {
+    backlog: std::sync::atomic::AtomicUsize,
+    last: std::sync::atomic::AtomicUsize,
+    dropped: std::sync::atomic::AtomicUsize,
+}
+
+impl candor_sealer::server::HealthSink for BacklogHealth {
+    fn account_write_dropped(&self) {
+        self.dropped.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn account_backlog(&self, queued: usize) {
+        self.backlog.fetch_add(1, Ordering::SeqCst);
+        self.last.store(queued, Ordering::SeqCst);
+    }
+}
+
 /// IPC-02 trigger (b): after an intake restore from a backup that predates
 /// the dummy accounts, their synthetic rotations are `NotFound` at the store:
 /// each is stale, dropped at once (dead letter), the dummy leaves the set,
 /// chaff keeps running and the queue keeps flowing for real sources.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stale_dummy_rotation_after_restore_is_dropped() {
+    const DUMMIES: usize = 3;
     let f = fixture_with(
         ChaffConfig {
             enabled: false,
-            // Follow-up-shaped chaff: no new dummies; every event rotates one.
-            followup_share_permille: 1000,
+            // Every chaff event also rotates one dummy.
             dummy_rotation_permille: 1000,
-            signal_share_permille: 0,
             ..ChaffConfig::default()
         },
         Limits::default(),
     );
     f.sink.model_store.store(true, Ordering::SeqCst);
-    // 1–4 dummies written (the shutdown batch), then "restored away".
-    let n = f.sealer.shutdown_flush().unwrap();
-    assert!((1..=4).contains(&n));
+    // Submission-shaped chaff mints the dummies through the regular batches
+    // (the rotation drawn with each event merges into its own pending create
+    // or replaces an older, already written dummy: either way the store ends
+    // up holding exactly the sealer's current dummy tags).
+    for i in 1..=DUMMIES {
+        f.sealer
+            .chaff_event_shaped(CHANNEL, ChaffShape::Submission)
+            .await
+            .unwrap();
+        assert!(f.sealer.flush_accounts().unwrap() >= 1);
+        assert_eq!(f.sealer.queued_accounts(), 0);
+        assert_eq!(f.sink.known_tags.lock().unwrap().len(), i);
+    }
+    // "Restored away": the store no longer knows any of them.
     f.sink.known_tags.lock().unwrap().clear();
-    for _ in 0..n {
-        f.sealer.chaff_event(CHANNEL).await.unwrap();
+    for _ in 0..DUMMIES {
+        f.sealer
+            .chaff_event_shaped(CHANNEL, ChaffShape::FollowUp)
+            .await
+            .unwrap();
         assert_eq!(f.sealer.flush_accounts(), Ok(0));
         assert_eq!(f.sealer.queued_accounts(), 0, "queue never wedges");
     }
     assert_eq!(
         f.sealer.dead_letters(),
-        n as u64,
+        DUMMIES as u64,
         "every stale rotation dropped"
     );
     // The dummy set is empty now: further events rotate nothing and nothing
     // is dead-lettered any more.
-    f.sealer.chaff_event(CHANNEL).await.unwrap();
+    f.sealer
+        .chaff_event_shaped(CHANNEL, ChaffShape::FollowUp)
+        .await
+        .unwrap();
     assert_eq!(f.sealer.flush_accounts(), Ok(0));
-    assert_eq!(f.sealer.dead_letters(), n as u64);
+    assert_eq!(f.sealer.dead_letters(), DUMMIES as u64);
+    assert!(f.sink.known_tags.lock().unwrap().is_empty());
     // A real source is unaffected.
     let (s, l) = (sess(1), sess(2));
     submit_and_login(&f, s, l).await;
     rotate(&f, l).await;
     assert_eq!(f.sealer.flush_accounts(), Ok(1));
+}
+
+/// AUD-RM2-IPC-16: once the shutdown flush has run, chaff of every shape is
+/// refused with `BUSY` (nothing is queued that cannot be attempted) and the
+/// queue stays empty.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stopping_sealer_refuses_chaff() {
+    let f = fixture_with(
+        ChaffConfig {
+            enabled: false,
+            dummy_rotation_permille: 1000,
+            ..ChaffConfig::default()
+        },
+        Limits::default(),
+    );
+    let n = f.sealer.shutdown_flush().unwrap();
+    assert!((1..=4).contains(&n));
+    assert!(f.sealer.is_stopping());
+    for shape in [
+        ChaffShape::Submission,
+        ChaffShape::FollowUp,
+        ChaffShape::Signal,
+    ] {
+        assert_eq!(
+            f.sealer.chaff_event_shaped(CHANNEL, shape).await,
+            Err(ErrorCode::Busy),
+            "{shape:?}"
+        );
+    }
+    assert_eq!(f.sealer.queued_accounts(), 0);
+    assert_eq!(f.sink.accounts().len(), n, "nothing written after the stop");
 }
 
 /// IPC-06 / IPC-12 (ADR-057(5)): under the production shares (follow-up

@@ -394,3 +394,45 @@ All 25 sealer test binaries green after the round-2 changes (`tests/chaff.rs::ch
 | IPC-15 (High) SIGTERM flush under backoff | backoff cleared before the shutdown attempt | `istore.rs::shutdown_flush_under_backoff_writes_the_queue` (PoC: outage, failed flush, store back, shutdown inside the old window; create lands, passphrase logs in); `shutdown_after_outage_flushes_every_queued_create` (two creates at the backoff cap all land); `shutdown_with_store_down_reports_the_lost_count` (`ShutdownLoss(lost)`, lost = still queued, health event carries the count) |
 
 Callers updated: `tests/signal.rs`, `tests/chaff.rs` and `tests/shutdown.rs` use `.unwrap()` on the success path and are unchanged in meaning.
+
+## Fixes for AUD-RM2-IPC round 4 (independent re-audit of the IPC-15 fix; 2026-11-11)
+
+- **IPC-16 (Medium): no drain around the shutdown pass.** `shutdown_flush` now sets a `stopping`
+  state at entry (and `spawn_sigterm_flush` sets it the instant SIGTERM arrives, before the flush
+  thread starts). `queue_has_room` is `false` while stopping, and every enqueue site checks it
+  *before* `commit_group`, so a `SEAL_FINISH` / `ROTATE_FINISH` / chaff event that would queue a
+  write is refused with `BUSY` and nothing is committed (for `SEAL_FINISH` the staged parts were already taken before the room check, so the source restarts the submission, as for any `BUSY`; nothing reached the store). A write
+  whose room check passed just before the flag is still attempted: the flush lock is held across
+  the pass, a bounded extra pass (at most two) runs only when a write arrived while a pass was
+  writing (`arrivals` counter; a refused write is not hammered, ADR-057(4)), and the final count
+  is taken under the same lock. A write that arrives after that count (its room check predates
+  `stopping`) is queued, counted (`late_arrivals`) and raises a backlog health event, never
+  silent; `spawn_sigterm_flush` re-checks the queue after the flush and runs one more
+  `shutdown_flush` (no new dummies, no backoff) before reporting. Residual: a write that arrives
+  after that second count is reported through the health sink and `late_arrivals()` but is lost at
+  exit; the window is the latency of one `commit_group` that started before SIGTERM.
+- **IPC-17 (Low): integrator contract.** README pattern rewritten: `serve` is dropped before the
+  flush result is awaited (no new sessions), the serve-error path flushes too, `ShutdownLoss` exits
+  non-zero. A failed shutdown attempt no longer re-arms the IPC-10 backoff, so an integrator retry
+  through `flush_accounts` or `shutdown_flush` is never skipped; a repeated `shutdown_flush` adds
+  no dummies (the requeued ones are still there). `deploy/intake/systemd/candor-sealer.service`
+  sets `TimeoutStopSec=300` (deploy delta for the deploy audit).
+- **IPC-18 (Low): thread-failure count.** `spawn_sigterm_flush` snapshots the queue before the
+  flush thread starts and reports at least that on a thread failure, with the backlog event;
+  `inflight_replaced` is cleared by a drop guard on every exit of the batch write.
+- **Info (coverage):** the `ok && left == 0` condition is now covered by a shipped test (a refused
+  write at shutdown is reported as `ShutdownLoss`, not dead-lettered or claimed written). The
+  `shutdown_after_outage…` test loop has an iteration cap.
+
+| Finding | Mechanism | Test |
+|---|---|---|
+| IPC-16 (Med) writes accepted during the shutdown pass | `stopping` refuses before commit; extra pass on arrivals; count under the flush lock; late arrivals counted and reported | `istore.rs::stopping_sealer_refuses_new_writes_and_writes_what_it_took` (auditor's P1 adapted: a seal finishing while the pass is blocked inside the store gets `BUSY` and commits nothing; the taken create lands and logs in) |
+| IPC-17(d) (Low) retry skipped by the re-armed backoff | no backoff on a shutdown attempt | `istore.rs::shutdown_with_store_down_reports_the_lost_count` (then the store returns: the next `flush_accounts` writes the queue, `Ok(0)` never) |
+| IPC-18 (Low) undercount on thread failure | snapshot before the pass; drop guard | `shutdown_failure.rs::flush_thread_failure_reports_at_least_the_taken_batch` (auditor's P3, own binary: a sink that panics; `ShutdownLoss(n)` with `n` ≥ the batch size, backlog event raised) |
+| Info: `ok && left == 0` uncovered | — | `signal.rs::refused_write_at_shutdown_is_reported_not_claimed` (auditor's P2) |
+| IPC-16 (chaff) a stopping sealer still took dummy rotations; a full queue took them past its bound | every chaff shape is gated on `queue_has_room` (create and rotation); `chaff_event_shaped` makes the shape explicit for conformance tests (production still draws it) | `signal.rs::stopping_sealer_refuses_chaff`; `stale_dummy_rotation_after_restore_is_dropped` rewritten to mint dummies through regular batches (it used `shutdown_flush` as a shortcut, which now stops the sealer for good) |
+
+### Round-4 re-test result (independent, 2026-11-11, `52eb19a`): Gate PASS
+- IPC-16 Fixed, IPC-18 Fixed, IPC-17 (a)(c)(d) fixed; (b) fixed in the README after the re-test (the serve-error branch now flushes before propagating the error).
+- **IPC-19 (Low, open):** in-flight commits are not awaited before the final count: a seal admitted before SIGTERM whose commit lands after the SIGTERM retry's count is reported (`late_arrivals`, backlog event) but lost at exit; three or more staggered arrivals exhaust the bounded passes and end in `Err` with the store up (reported, not retried further). Accepted as the documented residual of a RAM queue without a durable spool; a drain that awaits in-flight `commit_group`s is the follow-up.
+- Info: the extra-pass, `closed`-branch and SIGTERM-retry paths have no shipped test (the auditor's Q1/Q2/Q3 PoCs cover them; to be added as regression tests in the follow-up); the refusal count advances once per shutdown pass.
