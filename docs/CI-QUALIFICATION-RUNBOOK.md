@@ -469,3 +469,35 @@ Persistent default-branch blockers include contributor-authentic DCO history, wo
 spec-ahead ordinary and unprivileged test compilation, pinned dependency advisories and Security Lead
 cargo-vet approvals. Draft improvements are not merged qualifications. This is source/CI-traceability
 documentation, not a change to `process/STATUS.md` or to any normative security policy.
+
+
+## Tor-circuit rate-limit acceptance evidence (ST-079, NET-013; 2026-11-11)
+
+This is a **requirement-to-test map**, not a completed test report. The
+pinned default source is `9097f75f6529ed3dfa259de20d2fa9c78f434bda`.
+Historical source-side rate-limit audit findings and their recorded follow-up
+are in [AUDIT-RM2-intake-web](../process/audits/AUDIT-RM2-intake-web.md);
+its historical verdict does **not** independently qualify later commits.
+
+| Boundary / expectation | Source / existing regression | What a future acceptance run must establish |
+| --- | --- | --- |
+| Raw Tor circuit ID is immediately replaced with a per-process opaque HMAC token | `crates/candor-intake-web/src/proxy.rs`, `src/server.rs`, `src/ratelimit.rs::Limiter::token`; `tokens_are_keyed` | Inspect source-side logging/response surfaces and verify redaction and restart unlinkability under approved test instrumentation. |
+| Per-circuit login budget is independent between circuits | `src/ratelimit.rs::login_limit_per_circuit`, `tests/http_security.rs::login_rate_limit_per_circuit` | Five accepted attempts, sixth busy/429, unaffected second circuit; preserve uniform login response timing and size constraints. |
+| Request/global-session tokens refill and are atomically spent | `request_burst_and_rate`, `global_request_bucket`, `trickle_does_not_starve_refill`, `refusal_spends_nothing_globally` | Preserve correct nominal refill under frequent rejected attempts; no partial spend when a per-circuit/global check refuses. |
+| Circuit map remains bounded with idle eviction | `src/limits.rs::{MAX_CIRCUITS,CIRCUIT_IDLE}`, `src/ratelimit.rs::idle_eviction` | Confirm entry cap and ten-minute idle eviction, including denied/near-capacity cases in a bounded-memory test environment. |
+| Upload-specific throttle composes with request throttle and service/session concurrency | `src/app.rs::dispatch`, `src/flows.rs::upload`, `src/ratelimit.rs::Class::Upload` | Focused upload/abuse-path tests; separate test of global slots and per-session upload flag, with no assumptions about Tor production throughput. |
+
+Reference-only commands for a qualified runner at the **exact** PR source SHA:
+
+```sh
+cargo test -p candor-intake-web --lib ratelimit::tests --locked
+cargo test -p candor-intake-web --test http_security login_rate_limit_per_circuit --locked
+cargo clippy -p candor-intake-web --all-targets --all-features --locked -- -D warnings
+```
+
+Do not label these commands as executed by the documentation or ChatGPT
+source-audit lane. Full Tor-only intake validation, cross-circuit resource
+abuse testing, source privacy/timing review, independent security audit and
+whole-workspace CI remain separate acceptance gates. Any test that requires a
+real Tor circuit or production-equivalent environment must identify its
+environment rather than reclassifying a unit test as live network evidence.
