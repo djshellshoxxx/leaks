@@ -212,3 +212,22 @@ crates/candor-case-db/scripts/pg-test.sh cargo test -p candor-case-db --test pg
 The script uses a temporary Unix-socket-only database with peer authentication, exports `CANDOR_TEST_PG`, and cleans up after execution. When run as root it may create and later remove a system account; **do not run it on shared or production hosts**. Record the exact candidate SHA, PostgreSQL fixture startup evidence, command output, test counts and any skips before claiming case-zone acceptance. Existing relevant test definitions are `migrate_and_open_every_role`, `rls_isolation_every_table`, `rls_case_acl_hides_non_member`, `grant_matrix`, `tenant_tx_fail_closed`, and `tamper_and_drift_refused` (`crates/candor-case-db/tests/pg.rs`). Their presence is not a test result.
 
 The source-level `display_ref` retry-path inconsistency in `crates/candor-case-db/src/repo/case.rs:236-284` requires a deterministic, **database-backed** duplicate-display-reference regression before any remediation claim. That implementation remains owned by RM-3 PR #16. No PostgreSQL fixture was executed while adding this documentation, and no audit/release gate was changed.
+
+
+## Latest CI reconciliation — 2026-11-11 (checkpoint 021)
+
+These checks were read from the **exact SHA's GitHub Actions jobs**, not inferred from a previous workflow or local test. They supersede older queued/running status notes **for the particular heads below**, but do not supersede security gates or the ownership map.
+
+| Draft PR / exact head | Workflow | Result (latest attempt) |
+| --- | --- | --- |
+| #13 `32eaeeaaa0f916d8417d20203d1a7eb79ca1ab3a` | [source-UI focused #42991517529](https://github.com/djshellshoxxx/leaks/actions/runs/42991517529) | **Success**, one scoped fmt/test/Clippy job. Does not requalify the workspace or independent review. |
+| #13, same exact head | [mandatory workspace #42991517547](https://github.com/djshellshoxxx/leaks/actions/runs/42991517547) | **Failure**, 6 successful, 7 failed, 1 skipped. |
+| #14 `1962940a009ef514b4986149bab08088891bfc65` | [mandatory workspace #42991237530](https://github.com/djshellshoxxx/leaks/actions/runs/42991237530) | **Failure**, 6 successful, 7 failed, 1 skipped. Audit review is not security clearance. |
+| #15 `4876fb89631b85eb2c1306d238b0d4b1d1af5a1a` | [mandatory workspace #42991335452](https://github.com/djshellshoxxx/leaks/actions/runs/42991335452) | **Failure**, 6 successful, 7 failed, 1 skipped. Documentation-only checks are not full CI qualification. |
+| #16 `bd33ef9e530969016fefd709a1177d1d4f6c40e2` | [mandatory workspace #42941692742](https://github.com/djshellshoxxx/leaks/actions/runs/42941692742) | **Failure**, 10 successful, 3 failed (DCO, cargo-deny, cargo-vet), 1 skipped. Remains draft/unmerged. |
+
+For #13–#15, the seven failed jobs are **DCO, workspace fmt, workspace Clippy, regular and unprivileged workspace tests, cargo-deny and cargo-vet**. Successful jobs are docs-lint, workflow-lint, repo-lints, secret-scan, SBOM and reproducibility. The scheduled-only supply-chain job is skipped on these PR triggers. DCO failures now include historical commit attestations on the ChatGPT-owned branches; a later appended commit **cannot** retroactively fix those historical trailers. Do not invent contributor sign-offs or force-rewrite unowned commits. A contributor-authorized DCO repair with fresh exact-head checks is required. PR #11 owns the unrelated worker formatting/Clippy fixes; #7 and #16 carry separate RM-3 integration; owner/Security Lead approvals remain necessary for supply-chain changes.
+
+The source-UI focused workflow success at #13 is consistent with earlier explicitly logged **87 passing/0 failing** package tests, but this inspection verified its latest **job result**, not new test-count output. No Rust toolchain, PostgreSQL fixture, Tor socket, local browser or release gate was executed by this documentation review.
+
+The draft Wiki Home and Sidebar on separately owned PR #9 continue to link **User Guide** and **Developer Guide**. Their content remains incomplete, and the User Guide's broad “implemented and audited” claim conflicts with open audit-FAIL gates in `process/STATUS.md`. This is already tracked with PR #9's owner; do not edit that owner's files. **The live GitHub Wiki was not published or verified.**
