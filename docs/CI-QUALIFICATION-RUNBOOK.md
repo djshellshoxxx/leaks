@@ -449,3 +449,23 @@ cargo clippy -p candor-safefs --all-targets --all-features --locked -- -D warnin
 ```
 
 The fuzz targets `fuzz_archive_zip`, `fuzz_archive_tar` and `fuzz_archive_tar_gz` and their seed directories exist in the repository, but this does not establish a present-day fuzz execution result. The application-level viewer, isolation, cleanup and Tor/privacy constraints need separate end-to-end evidence and authorized review. Source audit rotation 28 is recorded on draft PR #14; this documentation belongs only to docs draft PR #15. Wiki pages remain owned by draft PR #9, with separate User Guide / Developer Guide navigation in its source; the **live wiki has not been verified as published**.
+
+## RM-3 draft PR #16 candidate evidence versus integration acceptance (2026-11-11)
+
+Default branch `claude/tender-tesla-z8tfnl` is pinned at `9097f75f6529ed3dfa259de20d2fa9c78f434bda`.
+[Draft PR #16](https://github.com/djshellshoxxx/leaks/pull/16) is an **unmerged** implementation candidate at
+`bd33ef9e530969016fefd709a1177d1d4f6c40e2` that changes authorization, relay, staff sessions,
+case DB and sealer shutdown. Do not attribute its behavior or test outcomes to the default branch.
+
+| Candidate evidence | Verified scope / limitation | Acceptance remaining |
+| --- | --- | --- |
+| PR #16 / PR #17 description | **Author-reported local** 83 passing tests across RM-3 candidate crates, not rerun by this ChatGPT documentation pass | Source-pinned independent test/reviewer acceptance |
+| PR #16 case DB | **Author-reported local** 8/8 PostgreSQL 16 suite passing; `crates/candor-case-db/scripts/pg-test.sh` exists on default | Independent real-DB test with `CANDOR_TEST_PG` confirmed; default Cargo may otherwise skip assertions |
+| PR #16 fmt/Clippy/trust-path changes | Author-reported scoped checks; no independent security or cryptography clearance inferred | Exact-head mandatory CI, contributor-authentic DCO and required reviewer approvals |
+| [PR #16 hosted CI #42941692742](https://github.com/djshellshoxxx/leaks/actions/runs/42941692742) | **Completed failure** | Triage failed jobs, preserve all red security and supply-chain gates |
+| PR #13 `9b36c71c955418b474f0b4bb556388b6ffc02347` | [Focused CI #43064425213](https://github.com/djshellshoxxx/leaks/actions/runs/43064425213) passed; [mandatory #43064425540](https://github.com/djshellshoxxx/leaks/actions/runs/43064425540) failed (6 pass, 7 fail, 1 skip) | Independent review, DCO-history correction, mandatory gate clearance |
+
+Persistent default-branch blockers include contributor-authentic DCO history, worker rustfmt/Clippy,
+spec-ahead ordinary and unprivileged test compilation, pinned dependency advisories and Security Lead
+cargo-vet approvals. Draft improvements are not merged qualifications. This is source/CI-traceability
+documentation, not a change to `process/STATUS.md` or to any normative security policy.
