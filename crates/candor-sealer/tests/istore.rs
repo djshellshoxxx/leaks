@@ -193,10 +193,15 @@ impl Env {
     }
 }
 
+fn istore_sink(env: &Env) -> Arc<IstoreSink> {
+    Arc::new(IstoreSink::new(env.connector(), T).with_handover_deadlines(T, Duration::from_secs(5)))
+}
+
 fn fixture_for(env: &Env) -> Fixture {
-    let sink = Arc::new(
-        IstoreSink::new(env.connector(), T).with_handover_deadlines(T, Duration::from_secs(5)),
-    );
+    fixture_for_sink(istore_sink(env))
+}
+
+fn fixture_for_sink(sink: Arc<dyn EnvelopeSink>) -> Fixture {
     fixture_with_sink(
         ChaffConfig {
             enabled: false,
@@ -745,10 +750,13 @@ async fn shutdown_after_outage_flushes_every_queued_create() {
     // Three real failures (skipped flushes in between) raise the backoff to
     // its cap, MAX_FLUSH_BACKOFF.
     let mut fails = 0;
+    let mut rounds = 0;
     while fails < 3 {
         if f.sealer.flush_accounts().is_err() {
             fails += 1;
         }
+        rounds += 1;
+        assert!(rounds < 64, "backoff never produced a third failure");
     }
     assert_eq!(f.sealer.queued_accounts(), 2, "both still queued");
     assert_eq!(f.sealer.dead_letters(), 0);
@@ -769,7 +777,7 @@ async fn shutdown_with_store_down_reports_the_lost_count() {
     let f = fixture_for(&env);
     let health = Arc::new(LastBacklog::default());
     f.sealer.set_health_sink(health.clone());
-    let _phrase = queue_create(&f, sess(1)).await;
+    let phrase = queue_create(&f, sess(1)).await;
     assert_eq!(f.sealer.queued_accounts(), 1);
     env.store().mark_restore_pending().await.unwrap();
     let Err(candor_sealer::server::ShutdownLoss(lost)) = f.sealer.shutdown_flush() else {
@@ -784,4 +792,155 @@ async fn shutdown_with_store_down_reports_the_lost_count() {
         "backlog reported"
     );
     assert_eq!(health.last.load(Ordering::SeqCst), lost, "count only");
+    // AUD-RM2-IPC-17(d) (auditor's P5): the failed shutdown attempt re-arms no
+    // backoff, so an integrator retry once the store is back is never skipped
+    // and writes the whole queue; a repeated shutdown flush adds no dummies.
+    clear_restore(env.store()).await;
+    let written = f.sealer.flush_accounts().expect("the retry is not skipped");
+    assert_eq!(written, lost, "every queued write landed on the retry");
+    assert_eq!(f.sealer.queued_accounts(), 0);
+    assert_eq!(
+        f.sealer.shutdown_flush(),
+        Ok(0),
+        "a repeated shutdown flush adds nothing"
+    );
+    account_logs_in(&env, &f, &phrase, 2).await;
+}
+
+/// Wraps the real `IstoreSink`: the first `upsert_account` can be held at a
+/// gate, so a shutdown pass blocks inside the store with its batch taken.
+struct HookedSink {
+    inner: Arc<IstoreSink>,
+    hold_first: AtomicBool,
+    entered: AtomicUsize,
+    commits: AtomicUsize,
+    gate: (std::sync::Mutex<bool>, std::sync::Condvar),
+}
+
+impl HookedSink {
+    fn new(env: &Env, hold_first: bool) -> Self {
+        Self {
+            inner: istore_sink(env),
+            hold_first: AtomicBool::new(hold_first),
+            entered: AtomicUsize::new(0),
+            commits: AtomicUsize::new(0),
+            gate: (std::sync::Mutex::new(false), std::sync::Condvar::new()),
+        }
+    }
+
+    fn open_gate(&self) {
+        let (open, cv) = &self.gate;
+        *open.lock().unwrap() = true;
+        cv.notify_all();
+    }
+}
+
+impl EnvelopeSink for HookedSink {
+    fn commit_envelope_group(
+        &self,
+        group: candor_sealer::server::sink::EnvelopeGroup,
+        epoch_id: u32,
+        received_day: u32,
+        release_offset_days: u8,
+    ) -> Result<(), SinkError> {
+        self.commits.fetch_add(1, Ordering::SeqCst);
+        self.inner
+            .commit_envelope_group(group, epoch_id, received_day, release_offset_days)
+    }
+
+    fn is_available(&self) -> bool {
+        self.inner.is_available()
+    }
+
+    fn upsert_account(
+        &self,
+        op: candor_sealer::server::sink::AccountUpsert,
+    ) -> Result<(), candor_sealer::server::sink::UpsertError> {
+        self.entered.fetch_add(1, Ordering::SeqCst);
+        if self.hold_first.swap(false, Ordering::SeqCst) {
+            let (open, cv) = &self.gate;
+            let mut guard = open.lock().unwrap();
+            while !*guard {
+                guard = cv.wait(guard).unwrap();
+            }
+        }
+        self.inner.upsert_account(op)
+    }
+
+    fn delete_replies(&self, lookup_tag: [u8; 32], replies: &[[u8; 16]]) -> Result<u32, SinkError> {
+        self.inner.delete_replies(lookup_tag, replies)
+    }
+
+    fn delete_account(&self, lookup_tags: &[[u8; 32]]) -> Result<DeleteOutcome, SinkError> {
+        self.inner.delete_account(lookup_tags)
+    }
+}
+
+/// AUD-RM2-IPC-16 (auditor's P1 adapted, red → green): the shutdown pass has
+/// taken its batch and is blocked inside the store. A second source finishing
+/// its seal meanwhile is refused with `BUSY` before anything is committed
+/// (the sealer is stopping; nothing is half done), the taken create lands
+/// when the store answers, the flush reports a clean stop, and the passphrase
+/// logs in. Nothing is accepted that cannot be attempted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stopping_sealer_refuses_new_writes_and_writes_what_it_took() {
+    let env = Env::new().await;
+    let hooked = Arc::new(HookedSink::new(&env, true));
+    let f = fixture_for_sink(hooked.clone());
+    let phrase = queue_create(&f, sess(1)).await;
+    assert_eq!(f.sealer.queued_accounts(), 1);
+    assert_eq!(hooked.commits.load(Ordering::SeqCst), 1);
+    assert!(!f.sealer.is_stopping());
+
+    let sealer = f.sealer.clone();
+    let pass = std::thread::spawn(move || sealer.shutdown_flush());
+    let mut waited = 0;
+    while hooked.entered.load(Ordering::SeqCst) == 0 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        waited += 1;
+        assert!(waited < 1_000, "the shutdown pass never reached the store");
+    }
+    assert!(f.sealer.is_stopping());
+    assert_eq!(f.sealer.queued_accounts(), 0, "the batch was taken");
+
+    // The late seal: refused before its envelope commits.
+    let _late = confirmed_phrase(&f, sess(3)).await;
+    let r = f
+        .sealer
+        .handle(Request::SealFinish {
+            sess: sess(3),
+            delayed_delivery: false,
+        })
+        .await;
+    assert!(
+        matches!(
+            r,
+            Response::Error {
+                code: ErrorCode::Busy,
+                ..
+            }
+        ),
+        "a stopping sealer refuses, got {r:?}"
+    );
+    assert_eq!(
+        hooked.commits.load(Ordering::SeqCst),
+        1,
+        "nothing committed for the refused seal"
+    );
+    assert_eq!(
+        f.sealer.queued_accounts(),
+        0,
+        "nothing queued that cannot be attempted"
+    );
+
+    hooked.open_gate();
+    let n = pass
+        .join()
+        .unwrap()
+        .expect("the taken batch is written: a clean stop");
+    assert!(n >= 1, "the create and the dummies, got {n}");
+    assert_eq!(f.sealer.queued_accounts(), 0);
+    assert_eq!(f.sealer.late_arrivals(), 0);
+    assert_eq!(f.sealer.dead_letters(), 0);
+    account_logs_in(&env, &f, &phrase, 2).await;
 }

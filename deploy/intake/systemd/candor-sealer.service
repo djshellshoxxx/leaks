@@ -26,6 +26,11 @@ Group=candor-sealer
 SupplementaryGroups=candor-istore-clients
 Restart=on-failure
 RestartSec=2s
+# The SIGTERM flush writes every queued account write as one last batch; after a
+# store outage that can be up to MAX_QUEUED_ACCOUNTS sequential store round trips.
+# systemd's default 90 s would kill it mid-pass and turn a reported loss into a
+# silent one (AUD-RM2-IPC-17). Same bound as the store unit.
+TimeoutStopSec=300
 AppArmorProfile=candor-sealer
 LoadCredentialEncrypted=sealer_signing_key:/etc/credstore.encrypted/candor-intake.sealer_signing_key.cred
 LoadCredentialEncrypted=argon2_salt:/etc/credstore.encrypted/candor-intake.argon2_salt.cred
