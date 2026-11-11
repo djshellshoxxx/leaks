@@ -501,3 +501,36 @@ abuse testing, source privacy/timing review, independent security audit and
 whole-workspace CI remain separate acceptance gates. Any test that requires a
 real Tor circuit or production-equivalent environment must identify its
 environment rather than reclassifying a unit test as live network evidence.
+
+## Record-AEAD verification trace (CRYPTO-010/011/054/057; 2026-11-11)
+
+**Inventory only, not a cryptographic approval or an executed test report.**
+Source pin: default `9097f75f6529ed3dfa259de20d2fa9c78f434bda`.
+The format and AAD contracts are in `specs/04-CRYPTOGRAPHY.md` §§9.9/13.8;
+implementation is `crates/candor-core/src/record.rs`. The source-preferences
+caller is `crates/candor-sealer/src/server/mod.rs`. These are security-sensitive
+Trust Path boundaries, so only qualified reviewers may approve changes.
+
+| Boundary | Existing test or source evidence | Still required for acceptance |
+| --- | --- | --- |
+| Case row and tenant binding; stale ciphertext replay refusal | `record.rs::tests::roundtrip_and_binding` verifies tenant/case relocation and mismatched row version rejection | Verify caller obtains the authoritative case-event-chain row version, then run a genuine stale-row replay integration test |
+| Record header format, supported suite and AEAD tag | `record.rs::tests::roundtrip_and_binding`; `record.rs::parse`; `src/suite.rs::Suite::from_id_supported` | Validate key selection and unsupported-suite handling in the real consumer; a parsed header alone is not authenticated |
+| Distinct context domains (keystore slots and source preferences) | `record.rs::tests::other_aad_forms_are_distinct`; §9.9 AAD labels | Expand negative tests across every AAD variant and tenant, identity, slot, version and header mutation; do not change a protocol label without ADR/crypto review |
+| Identifier/secret redaction | `record.rs::tests::aad_debug_is_redacted`; `src/secret.rs::tests::debug_is_redacted` | Inspect real error/log/crash sinks; no proof of system-wide non-disclosure from unit tests |
+| Malformed short inputs and crypto vectors | `record.rs::tests::open_arbitrary_never_panics`; `src/aead.rs` RFC/draft vector tests | Dedicated length/property/fuzz tests, exact-head Clippy/format, independent cryptography review |
+
+Reference-only focused qualification commands (not executed in this maintenance pass):
+
+```sh
+cargo test -p candor-core --lib record::tests --locked
+cargo test -p candor-core --lib aead::tests --locked
+cargo clippy -p candor-core --all-targets --all-features --locked -- -D warnings
+cargo fmt -p candor-core -- --check
+```
+
+The source's previous independent candor-core audit file has a recorded
+lead-disposition PASS, but that historical verdict is not a release gate for
+newer integration work. Current mandatory workspace CI and required human
+approvals remain separate and unresolved. Never treat a successful focused
+record unit test as proof of production key lifecycle, Tor-only source intake,
+case-zone authorization, backup erasure, or recipient acceptance.
