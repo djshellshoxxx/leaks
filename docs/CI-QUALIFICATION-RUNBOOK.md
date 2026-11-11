@@ -231,3 +231,50 @@ For #13–#15, the seven failed jobs are **DCO, workspace fmt, workspace Clippy,
 The source-UI focused workflow success at #13 is consistent with earlier explicitly logged **87 passing/0 failing** package tests, but this inspection verified its latest **job result**, not new test-count output. No Rust toolchain, PostgreSQL fixture, Tor socket, local browser or release gate was executed by this documentation review.
 
 The draft Wiki Home and Sidebar on separately owned PR #9 continue to link **User Guide** and **Developer Guide**. Their content remains incomplete, and the User Guide's broad “implemented and audited” claim conflicts with open audit-FAIL gates in `process/STATUS.md`. This is already tracked with PR #9's owner; do not edit that owner's files. **The live GitHub Wiki was not published or verified.**
+
+
+## Retention decision-model qualification boundary (2026-11-11)
+
+The default-branch `candor-worker` crate exposes a *pure decision model*, not
+an implemented production erasure service. At source
+`9097f75f6529ed3dfa259de20d2fa9c78f434bda`,
+`crates/candor-worker/src/retention.rs` defines `RetentionCase::evaluate`:
+
+| State supplied by caller | Expected decision |
+| --- | --- |
+| `legal_hold=true` or `due=false` | `Noop` |
+| Due, no legal hold, proposal absent | `ProposeDisposal` |
+| Due, no legal hold, proposal present, option disabled or grace not elapsed | `Noop` |
+| Due, no legal hold, proposal present, auto-dispose enabled and grace elapsed | `DisposeApprovedByPolicy` |
+
+The corresponding existing unit assertions are
+`st_rm3_retention_due_case_creates_proposal_never_silent_delete`,
+`st_rm3_legal_hold_always_blocks_retention_disposal`, and
+`st_rm3_auto_dispose_requires_explicit_option_and_grace` in
+`crates/candor-worker/tests/job_retention.rs`. These are *defined tests*,
+not evidence they executed during this documentation inspection.
+
+The Rust return value does **not** mean that the current tenant settings,
+legal hold or grace deadline were looked up and authenticated, persisted,
+revalidated atomically, or that data, backups or keys were erased. The separate
+`candor-retention` state-machine crate has additional transitions; its
+presence is not proof of integration. Any eventual RM-3 acceptance must
+add independently reviewed integration/regression evidence for durable holds,
+tenant policy, concurrency, bounded grace, authorized proposal/approval,
+retention lifecycle, key-destruction guarantees and recoverability limits.
+Never classify source-level `DisposeApprovedByPolicy` as completion of
+irreversible disposal or compliance with retention policy.
+
+To qualify the *pure worker model* on the exact branch under review:
+
+```sh
+cargo fmt -p candor-worker -- --check
+cargo test -p candor-worker --all-targets --locked
+cargo clippy -p candor-worker --all-targets --all-features --locked -- -D warnings
+```
+
+These commands are **reference commands; they were not executed by the
+ChatGPT documentation phase**. Existing PR #11 owns worker lint/format changes;
+PR #16 owns current case/retention integration, and required security/human
+review is separate. Focused green tests would not satisfy failing whole-workspace
+DCO, dependency, supply-chain or independent security-release gates.
