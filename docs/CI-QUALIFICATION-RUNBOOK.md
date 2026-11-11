@@ -321,3 +321,46 @@ but the same head's [mandatory workspace CI](https://github.com/djshellshoxxx/le
 failed (DCO, fmt, Clippy, ordinary/unprivileged tests, cargo-deny and
 cargo-vet). Neither result certifies the complete intake-web route matrix,
 anonymity controls, security audits or release readiness.
+
+## Source passphrase / key-derivation qualification boundary (2026-11-11)
+
+Source-pinned to default `claude/tender-tesla-z8tfnl` at
+`9097f75f6529ed3dfa259de20d2fa9c78f434bda`.
+This is a **test inventory and review checklist**, not a claim that any
+cryptographic security requirement has been independently verified.
+
+| Requirement / boundary | Implementation source | Existing defined tests | Still required |
+| --- | --- | --- | --- |
+| Official EFF list integrity and 10-word generation | `candor-core/src/passphrase.rs::Wordlist::eff_large`, `generate_with` | `eff_list_loads_and_hash_matches`, `generation_uniform_shape`, `stuck_rng_fails_closed` | Verify wordlist provenance externally and RNG behavior on qualified platform; do not claim entropy certification |
+| Bounded passphrase input and Unicode normalization | `passphrase.rs::normalize`, `lowercase_fixed` (maximum 1,024 input bytes) | `normalization_rules`, `normalize_rejects_overlong`, `normalize_matches_reference`, `normalize_idempotent` | Review cross-platform Unicode compatibility and **existing low-severity AUD-RM1-CORE-17** before enabling localized wordlists |
+| Tenant-bound deterministic source keys and fixed production KDF parameters | `passphrase.rs::source_salt`, `SourceKeys::derive_in`, `from_seed`; `kdf.rs` | `derivation_tree_small_params`, `derivation_full_params`, `argon2id_rfc9106` | Cross-implementation vectors and independent cryptographic review; distinguish reduced-parameter unit fixtures from full production Argon2id |
+| Secret lifetimes and memory locking | `passphrase.rs::Argon2Arena::wipe`, `secret.rs`; caller `candor-sealer/src/server/mod.rs` | `argon2_arena_is_wiped`, `lowercase_fixed_never_reallocates` | Qualify whole-process locking, swap/coredump controls, ST-027 zeroization checks and actual sealer/deployment integration separately |
+
+The independent core audit at `process/audits/AUDIT-RM1-candor-core.md`
+ends with a historical lead **PASS** after test-only Clippy repair, but
+explicitly tracks CORE-17, timing/zeroization evidence and future-suite
+conditions. This verdict applies only to that audit's pinned scope and
+is **not** a present-day release approval or external cryptographic audit.
+Changing normalization semantics, allowed Unicode, key derivation or
+wordlist eligibility would change a security-sensitive contract and
+requires the relevant spec/owner approvals, cross-implementation tests
+and independent review; **this guide changes none of them**.
+
+Reference commands for a provisioned independent reviewer on the
+*exact* source revision being considered:
+
+```sh
+cargo test -p candor-core --lib passphrase::tests --locked
+cargo clippy -p candor-core --all-targets --all-features --locked -- -D warnings
+cargo fmt -p candor-core -- --check
+```
+
+These were **not run in this documentation pass**. The prior documents
+and suites were inspected statically. Preceding docs head
+`605ab71d7736afb1b82335c4871e95db7d779fe7` had
+[mandatory CI #43016301967](https://github.com/djshellshoxxx/leaks/actions/runs/43016301967)
+complete with six successful, seven failed and one skipped job; DCO,
+workspace fmt/Clippy/tests and cargo-deny/vet remain red. A new docs
+commit must be independently checked. The separate draft Wiki owner
+PR #9 still needs to correct stale user-facing audit claims; the live
+GitHub Wiki has not been published or verified.
