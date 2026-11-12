@@ -82,6 +82,14 @@ must not add `Date`, `Server`, `ETag`, `Last-Modified` or `Content-Encoding`. Ev
   (`Screen::tips()`, `Tip`), each with a short NORMAL text and a higher-risk `<details>`. S02
   shows NORMAL text only and links to S02b (`/safety/tips`), which lists every tip.
 
+## Locale admission and release limitations (2026-11-10 source check)
+
+The runtime catalog currently bundles English plus three **testing-only** pseudo-locales. `Locale::PRODUCTION` contains `En` alone, and `Locale::from_tag` admits only production tags; the C-06 router uses that exact-match parser. The pseudo-locales (`en-XA`, `ar-XB`, `en-XL`) exercise expansion, directionality and wrapping in preview/tests; they **do not** count as reviewed human translations or production language support. The rendering view falls back to `Locale::PRODUCTION` when no offered-language list is supplied. See [locale implementation](src/locale.rs), [route admission](../candor-intake-web/src/routes.rs) and [view language links](src/view.rs).
+
+Before enabling a genuine additional locale, complete the requirements in [accessibility/localization §12](../../specs/26-ACCESSIBILITY.md), including Tier-0/critical string review, placeholder parity, RTL and no-script testing, real assistive-technology acceptance and approval recorded in release provenance. These checks cannot be inferred from pseudo-localization alone. C-06 remains Tor-only, with locale selected from the URL prefix rather than request-header negotiation.
+
+**Verified draft-only test evidence:** the isolated `source-ui-qualification` workflow on [PR #13](https://github.com/djshellshoxxx/leaks/pull/13) passed at exact head `184e5b662ddbb4d95b697dce8eb65c2f3b9245e2` ([run 42911069808](https://github.com/djshellshoxxx/leaks/actions/runs/42911069808)); earlier hosted logs explicitly recorded **87 passing source-UI tests**, including the three moved padding tests. This does not merge PR #13, substitute for independent review, or qualify the full workspace. Its [mandatory CI at the same head](https://github.com/djshellshoxxx/leaks/actions/runs/42911069805) still failed seven jobs (DCO, workspace fmt/Clippy/tests/unprivileged tests, cargo-deny and cargo-vet). Further gate details are in the [draft CI qualification runbook](../../docs/CI-QUALIFICATION-RUNBOOK.md); its existence here does not mean it is merged or published.
+
 ## Previews
 
 ```

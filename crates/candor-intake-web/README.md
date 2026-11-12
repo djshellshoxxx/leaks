@@ -3,7 +3,7 @@
 
 The Candor **Source Web Service** (component C-06; `candor-web` in 07 §4.1). Licence: AGPL-3.0-or-later.
 
-It serves the server-rendered, JavaScript-free Tier W source interface (11 §5–§7, 08 §4) behind the Tor v3 onion service. tor connects to a Unix stream socket and writes its PROXY line first; the service never opens a TCP socket. Drafts, passphrases and keys live only in the Intake Sealer (C-07). The web holds a RAM session table and nothing else.
+It serves the server-rendered, JavaScript-free Tier W source interface (11 §5–§7, 08 §4) behind the Tor v3 onion service. tor connects to a Unix stream socket and writes its PROXY line first; the service never opens a TCP socket. Report drafts, passphrases, and report-content encryption keys are handled by the Intake Sealer (C-07), not stored in the web session table. The web does maintain bounded RAM session state: a CSRF token, a piece-binding key, flow status, and limited channel/account lookup values. It also temporarily handles rendered view data while producing responses. These web-held session values are not the sealer's report-content keys; consult `src/session.rs`, `src/flows.rs`, and ADR-034 for the memory boundary.
 
 Read `SPEC-NOTES.md` first. It covers the design, the implementation decisions (some need the lead), the dependency justifications, the test map, the required privileges and the security self-review.
 
