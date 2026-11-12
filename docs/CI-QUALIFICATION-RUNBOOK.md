@@ -737,3 +737,22 @@ cargo clippy -p candor-intake-store --all-targets --all-features --locked -- -D 
 | Independent crypto/release gate | `candor-core/SPEC-NOTES.md`, `process/STATUS.md`, and the separate crypto audit notes | Require authorized tests and independent review; documentation and draft PR CI do not clear Trust Path or release. |
 
 Reference-only authorized checks: `cargo test -p candor-core --locked --lib secret::tests`; `cargo test -p candor-core --locked --all-targets`; `cargo fmt -p candor-core -- --check`; `cargo clippy -p candor-core --all-targets --all-features --locked -- -D warnings`. **These commands were not run here.** No core source/tests were changed and no speculative bug report or release assurance is implied.
+
+## AUD-004 chain tampering: test-only module separation (draft PR #18, unmerged)
+
+Source pin: default `claude/tender-tesla-z8tfnl` `9097f75f6529ed3dfa259de20d2fa9c78f434bda`. The [draft log-chain extraction PR #18](https://github.com/djshellshoxxx/leaks/pull/18) originates from that exact source; its new files do **not** exist on default until accepted. It is separate from the source-UI test extraction on PR #13. The `candor-log` audit area is **not cleared**: default `process/STATUS.md` records `candor-log` gate **FAIL**, and the historical [AUDIT-RM1-safefs-log](../process/audits/AUDIT-RM1-safefs-log.md) describes open findings. A test reorganization cannot change the audit verdict.
+
+| Requirement and negative case | Source before PR #18 | Proposed private module on PR #18 |
+| --- | --- | --- |
+| AUD-004 deletion and order detection | `tests/chain.rs::deletion_of_middle_event_detected`, `reordering_detected`, `deleting_head_detected` | `tests/chain/tamper.rs`, unchanged assertions |
+| AUD-004 payload integrity | `modification_detected`, `modification_of_last_record_detected_by_checkpoint` | same tests under private `tamper::` |
+| AUD-004 truncated attestations | `truncation_below_checkpoint_detected` | same test under `tamper::` |
+| AUD-004 signed checkpoint integrity | `forged_checkpoint_rejected` | same test under `tamper::`, using parent `VkForTest` fixture |
+| AUD-004 randomized tampering | `tests/props.rs::chain_verification_detects_random_tampering` | not moved; retained property test |
+| AUD-001 canonical record bytes | `src/cbor.rs` unit tests and `tests/props.rs::{canonical_encoding_is_deterministic,decoder_accepts_only_canonical}` | not moved; unaffected |
+
+**Evidence and limits:** a connector-side static inventory check found identical sorted `#[test]` names **35 before and 35 after**, with exactly seven moved test bodies copied byte-for-byte. This is not proof of discovery/compilation. PR #18 adds a read-only, pinned-action `log-chain-qualification` job for `cargo fmt -p candor-log -- --check`, `cargo test -p candor-log --test chain --locked` and package all-targets warning-deny Clippy; all three outcomes **await exact-head CI**. The existing workspace DCO/fmt/Clippy/tests/deny/vet and independent review are still mandatory and may fail independently. The focused workflow itself requires Release/Supply-chain review.
+
+**Previous-head CI reconciliation:** PR #13 at `7d61f130e4009138eb5eb22522896b5fc494b8f0` [focused #43145343606](https://github.com/djshellshoxxx/leaks/actions/runs/43145343606) completed success but [workspace #43145343574](https://github.com/djshellshoxxx/leaks/actions/runs/43145343574) completed failure (six success, seven failure, one skipped). Audit PR #14 previous head [#43145115993](https://github.com/djshellshoxxx/leaks/actions/runs/43145115993) and this docs PR's previous head [#43145232364](https://github.com/djshellshoxxx/leaks/actions/runs/43145232364) also completed workspace failure. These **do not qualify** new PR #18.
+
+**Wiki drift note (for PR #9 owner, not a change to that branch):** the unmerged User Guide currently calls `candor-safefs` and `candor-log` audited, but `process/STATUS.md` identifies their historical audit gates as FAIL at the default source pin. Separate User/Developer Guide links exist on both draft Wiki Home and Sidebar; actual live Wiki publication remains unverified. Resolve status language in PR #9 before publication, without changing security claims or taking over its active files.
