@@ -674,3 +674,28 @@ cargo clippy -p candor-core --all-targets --all-features --locked -- -D warnings
 ```
 
 These commands were **not executed** for this documentation maintenance. Existing historical security-audit gates, pinned dependency advisories, DCO corrections, whole-workspace CI and qualified external crypto review remain mandatory. A passing focused suite is not evidence for OS RNG quality, unique distributed randomness, resumption/reseed guarantees, start-up invocation in every service, or production security clearance.
+
+
+## Sealed-object CoreHeader parsing and key-commitment checks (2026-11-12)
+
+**Source-pinned scope:** default \`claude/tender-tesla-z8tfnl\` commit \`9097f75f6529ed3dfa259de20d2fa9c78f434bda\`. This adds **requirement-to-existing-test traceability only**, without changing the cryptographic trust path, approved wire format or source files. Audit rotation 36 reviewed \`crates/candor-core/src/header.rs\` plus callers. The section above on file-content ceilings versus padded buckets still applies.
+
+| Requirement / trust boundary | Existing implementation and defined tests | Additional acceptance still required |
+| --- | --- | --- |
+| CRYPTO-018/047: exact 128-byte canonical header and fail-closed parsing | \`header.rs::CoreHeader::{decode,encode,validate}\` with \`bytes.rs::Reader\`; \`header::tests::{roundtrip,rejects_bad_fields,decode_arbitrary}\`; \`bytes::tests::reader_bounds\` | Execute exact-head property/malformed-frame tests and check decoder rejects truncation, trailing bytes, wrong magic/version/flags/reserved and wrong chunk-size field. |
+| CRYPTO-003/056: supported suite and no silent negotiation | \`suite::Suite::{from_id,require_supported}\`; \`suite::tests::{ids_roundtrip_and_reject_unknown,fips_is_unsupported}\`; header negative vectors | Ensure FIPS is recognized but **rejected** in the shipped build; unsupported/unknown IDs must not fall back to STD. |
+| CRYPTO-016/018: object-type semantics, bucket and recipient metadata consistency | \`header::CoreHeader::validate\` checks source/reply day stamp, slot-hash presence, member epoch restrictions, zero-channel types and \`padding::is_legal_bucket\`; \`header::tests::semantic_rules\` | Prove each supported type's negative vectors and cross-check profile/content-size admission separately; a legal padded bucket does not prove the input was within a profile limit. |
+| CRYPTO-008 and §13.1: CK-bound header MAC before payload decrypt | \`header::CoreHeader::{header_mac,verify_header_mac}\`, \`object::ParsedObject::{verify,open,open_stream}\`; \`header::tests::mac_verifies_and_binds\`; \`tests/vectors.rs\` sealed-object vectors | Verify tampering with each context-bearing header field fails under the expected key; static header parsing is **not authentication** until MAC verification. Obtain independently reviewed crypto evidence. |
+| CRYPTO-018 and resource limits: exact ciphertext length and bounded opening | \`header::expected_payload_len\`, \`object::parse\` and \`ParsedObject::open_bounded/open_stream\`; STREAM final-tag contract | Execute hostile-length and preallocation-limit tests; confirm all externally reachable file-opening callers enforce appropriate memory ceilings, process the final STREAM tag, and discard partial output. \`open()\` can allocate a whole file-sized plaintext and is not a substitute for bounded policy. |
+
+Reference-only commands for an authorized build environment:
+
+\`\`\`sh
+cargo test -p candor-core --locked --lib header::tests
+cargo test -p candor-core --locked --test vectors
+cargo test -p candor-core --locked --all-targets
+cargo fmt -p candor-core -- --check
+cargo clippy -p candor-core --all-targets --all-features --locked -- -D warnings
+\`\`\`
+
+**Not executed in this documentation pass.** CI on documentation/audit heads is not a substitute for core package runtime tests. Static read-only inspection did not establish a new reproducible vulnerability, independent crypto review, Tor-safe operation, full memory-bound caller coverage or release qualification. PR #16 owns adjacent RM-3 and IPC source, and the core Trust Path remains subject to independent approval.
