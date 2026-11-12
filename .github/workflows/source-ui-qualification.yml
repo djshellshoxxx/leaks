@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Additive, read-only, package-scoped qualification for the C-06 source UI.
+# This does not replace or relax any required workspace, supply-chain, or release gate.
+name: source-ui-qualification
+
+on:
+  pull_request:
+    paths:
+      - "crates/candor-source-ui/**"
+      - ".github/workflows/source-ui-qualification.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+
+permissions: {}
+
+concurrency:
+  group: source-ui-qualification-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  source-ui:
+    name: source-ui (focused fmt, tests, clippy)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt,clippy
+      - name: Package-scoped rustfmt
+        run: cargo fmt -p candor-source-ui -- --check
+      - name: Compile and run source-UI tests (including extracted padding tests)
+        run: cargo test -p candor-source-ui --all-targets --locked
+      - name: Package-scoped Clippy (all targets, all features, warning-deny)
+        run: cargo clippy -p candor-source-ui --all-targets --all-features --locked -- -D warnings
