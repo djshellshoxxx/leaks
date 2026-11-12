@@ -650,3 +650,27 @@ full Tor-only source-to-sealer acceptance, independent crypto/security review
 and release authorization remain separate. Draft PR #16 owns sealer trust-path
 work, so no adjacent production source or tests were edited. The related
 read-only source inspection is recorded in audit draft PR #14, rotation 34.
+
+## OS randomness, health checks and HPKE adapter qualification (CRYPTO-033/034, ST-028)
+
+**Pinned evidence:** default integration source `9097f75f6529ed3dfa259de20d2fa9c78f434bda` (2026-11-11); `crates/candor-core/src/rand.rs`, `src/selftest.rs`, `src/kem.rs`, `src/slots.rs`, `src/stream.rs`, `src/secret.rs`, `SPEC-NOTES.md`, `specs/04-CRYPTOGRAPHY.md` §23.4. These references describe *implemented source and existing test definitions* on that pinned commit; they do not claim runtime acceptance or independent cryptographic review.
+
+| Requirement / boundary | Source-level implementation | Existing test definition | Remaining evidence |
+| --- | --- | --- | --- |
+| CRYPTO-033 OS CSPRNG only for production entropy | `rand::fill` calls `getrandom::fill`; `RandomSource` and `TestRng` are crate-private, with `TestRng` behind `cfg(test)` | `rand::tests::os_fill_works`, `rng_failure_propagates` | Verify CI `rng-ban` source inventory/allow-list on exact head and inspect any non-Rust consumers; OS entropy and VM-resume assumptions require deployment review |
+| CRYPTO-034 / ST-028 start-up health | `rand::fill` rejects an all-zero draw of at least 16 bytes; `selftest::self_test` draws two 32-byte buffers and rejects equality | `selftest::tests::self_test_passes` | Demonstrate each production C-11 consumer *invokes* and fails closed on `self_test`; supply controlled RNG failure injection and VM snapshot/resume acceptance separately |
+| AUD-RM1-CORE-12 unbiased bounded sampling | `uniform_below` uses a checked 2^32 rejection threshold and 128-attempt cap; `permutation` uses Fisher–Yates | `uniform_below_in_range_and_covers`, `permutation_is_permutation`, `rng_failure_propagates`, `stuck_high_rng_fails_closed` | Focused test execution and independent negative/boundary review for `n=0` and high bounds; not a statistical entropy audit |
+| HPKE X-Wing randomness consumption | `ExactBytesRng` holds a pre-drawn 64-byte buffer, refuses under/over-consumption in `check()`, zeroizes its copy at drop; `kem` checks after seal/KAT/pairwise use | `exact_bytes_rng_detects_overrun`, existing `kem` tests | Run exact-head KEM/PCT/KAT tests and fault injection; ensure every new HPKE caller retains `check()` and zeroization; independent cryptographic review required |
+| Deterministic dummy-slot expansion must not be mistaken for another entropy source | `slots::dummy_slot` uses seeded ChaCha20 as a **specified deterministic expansion** from derived bytes; `rand::TestRng` is test-only | `slots::tests::chacha_expansion_matches_raw_chacha20` and dummy-slot equivalence tests | Check normative ADR/spec alignment and source privacy requirements in independent review; do not alter format or randomization policy in a documentation change |
+
+Suggested **reference-only commands** on the exact candidate head:
+
+```sh
+cargo test -p candor-core --locked --lib rand::tests
+cargo test -p candor-core --locked --lib selftest::tests::self_test_passes
+cargo test -p candor-core --locked --all-targets
+cargo fmt --all -- --check
+cargo clippy -p candor-core --all-targets --all-features --locked -- -D warnings
+```
+
+These commands were **not executed** for this documentation maintenance. Existing historical security-audit gates, pinned dependency advisories, DCO corrections, whole-workspace CI and qualified external crypto review remain mandatory. A passing focused suite is not evidence for OS RNG quality, unique distributed randomness, resumption/reseed guarantees, start-up invocation in every service, or production security clearance.
