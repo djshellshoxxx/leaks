@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Additive, read-only package qualification for AUD-004 test-only extraction.
+# This does not relax required workspace/security/release checks.
+name: log-chain-qualification
+on:
+  pull_request:
+    paths:
+      - "crates/candor-log/**"
+      - ".github/workflows/log-chain-qualification.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+permissions: {}
+concurrency:
+  group: log-chain-qualification-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+jobs:
+  log-chain:
+    name: candor-log (focused fmt, chain tests, clippy)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt,clippy
+      - name: Package-scoped rustfmt
+        run: cargo fmt -p candor-log -- --check
+      - name: Compile and run the full candor-log chain test target
+        run: cargo test -p candor-log --test chain --locked
+      - name: Package-scoped Clippy (all targets, all features, warning-deny)
+        run: cargo clippy -p candor-log --all-targets --all-features --locked -- -D warnings
