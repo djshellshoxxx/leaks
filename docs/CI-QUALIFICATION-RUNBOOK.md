@@ -699,3 +699,28 @@ cargo clippy -p candor-core --all-targets --all-features --locked -- -D warnings
 \`\`\`
 
 **Not executed in this documentation pass.** CI on documentation/audit heads is not a substitute for core package runtime tests. Static read-only inspection did not establish a new reproducible vulnerability, independent crypto review, Tor-safe operation, full memory-bound caller coverage or release qualification. PR #16 owns adjacent RM-3 and IPC source, and the core Trust Path remains subject to independent approval.
+
+
+## istore positional IPC framing, authentication and failure-path trace (2026-11-12)
+
+**Evidence scope:** default `claude/tender-tesla-z8tfnl`, commit `9097f75f6529ed3dfa259de20d2fa9c78f434bda`. Audit rotation 37 on [draft PR #14](https://github.com/djshellshoxxx/leaks/pull/14) read `crates/candor-intake-store/src/proto/mod.rs`, `src/{server,client,sockio}.rs` and existing `tests/{istore,staged}.rs`. The following is *traceability of source and defined regressions*, **not** executed test evidence, approval of the IPC Trust Path or a claim that draft PR #16's changes are merged.
+
+| Requirement / IPC boundary | Existing pinned source and test definitions | Additional qualification required |
+| --- | --- | --- |
+| 07 §5.3 canonical versioned datagrams, maximum size and fail-closed decoding | `proto::{encode_request,decode_request,encode_response,decode_response,max_request_len,max_response_len}`; `MAX_FRAME_LEN=200000`; `Reader::{take,var16,var32,count8,finish}`; `proto::tests::{requests_round_trip_within_limits,responses_round_trip,field_limits_are_enforced,decode_total}` | Run full boundary and property tests on an exact head, including lengths near 200k, truncation, trailing bytes, wrong op/version, minimum/maximum fields and malformed count prefixes. The existing arbitrary-bytes property-test generator covers 0..512 bytes, not the full frame range. |
+| SO_PEERCRED peer identity, per-role restrictions and reserved relay operations | `proto::Op::{role,is_relay}`; `server::IstoreServer::{admit,connection}` checks configured uid, per-role connection limits and reserved op refusal; `tests/istore.rs::{wrong_role_reserved_and_malformed_requests_close,unknown_uid_is_dropped_without_a_reply,connection_cap_answers_busy_and_distinct_uids_are_required}` | Execute Linux/production-identity integration, role cap under load, explicit UID separation, retry/timeout and role-op matrix on candidate deployment; a source-level UID check is not proof of systemd socket-policy configuration. |
+| Record-boundary and descriptor-smuggling controls | `sockio::recv_datagram` rejects `TRUNC|CTRUNC`, ancillary messages and excessive size, dropping passed FDs; `tests/istore.rs::wrong_role_reserved_and_malformed_requests_close` and `tests/staged.rs::{staged_surplus_descriptors_closed,staged_bundle_hostile_variants_refused}` | Verify hostile ancillary/truncated datagrams, fd-pressure, socket type and resource-lifetime behavior in an isolated Linux test environment. |
+| Request/response correspondence and bounded mailbox access | `client::Conn::call_inner` checks response request ID and closes on transport errors; `server::IstoreServer::connection` budgets mailbox reads; `tests/istore.rs::{idle_timeout_closes_and_client_reconnects,mailbox_read_is_budgeted_by_the_list}` | Exercise stale response, timeout/interleaving and retry under load; verify error-code uniformity and source-identifier privacy externally. |
+| Staged hand-over, ambiguous failures, idempotency and deletion | `proto::Request::{CommitGroup,AccountUpsert,Delete}`, `server::IstoreServer::handle`; `tests/istore.rs::{commit_group_hand_over_and_idempotent_replay,late_commit_is_reported_by_the_retry_without_a_double_commit,deletions_append_k31_entries_and_are_idempotent}`; additional `tests/staged.rs` crash, sweep, duplicate and definite-rejection cases | Test actual persistent-store outcomes and crash/restart boundaries, with qualified independent IPC-15 and deletion safety review; avoid treating a synthetic or in-memory test as PostgreSQL-backed retention acceptance. |
+
+Reference-only commands for an authorized and correctly configured Linux environment:
+
+```sh
+cargo test -p candor-intake-store --locked --lib proto::tests
+cargo test -p candor-intake-store --locked --test istore
+cargo test -p candor-intake-store --locked --test staged
+cargo fmt -p candor-intake-store -- --check
+cargo clippy -p candor-intake-store --all-targets --all-features --locked -- -D warnings
+```
+
+**None of these commands was run in this documentation pass.** The current default-branch implementation is distinct from draft PR #16 (RM-3/IPC ownership), which requires exact-head tests and separate independent review. Draft PR #13's [focused source-UI checks](https://github.com/djshellshoxxx/leaks/actions/runs/43131165402) passed, but its [mandatory workspace run](https://github.com/djshellshoxxx/leaks/actions/runs/43131165664) failed (six passes, seven failures, one skipped). Audit and docs exact-head mandatory runs [#43130944469](https://github.com/djshellshoxxx/leaks/actions/runs/43130944469) and [#43131066266](https://github.com/djshellshoxxx/leaks/actions/runs/43131066266) likewise failed. The DCO job explicitly identified several unsigned *historical commits on the ChatGPT handoff branch*: do not treat adding a signed later commit as retroactively fixing those. Human/contributor-authorized DCO correction, workspace rustfmt/Clippy/test fixes, supply-chain advisory remediation and Security Lead cargo-vet sign-off remain distinct mandatory gates.
