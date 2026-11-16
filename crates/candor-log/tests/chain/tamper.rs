@@ -95,4 +95,3 @@ fn forged_checkpoint_rejected() {
         VerifyFailureCode::CheckpointChain
     );
 }
-
